@@ -132,8 +132,13 @@ export class NavigationProgressTracker {
 
   accept(fix: NavigationFix, receivedAtMs: number): NavigationProgressState {
     const policy = this.route.policy;
-    if (!Number.isFinite(fix.accuracy) || (fix.accuracy as number) < 0
-      || (fix.accuracy as number) > policy.maxAccuracyM) {
+    // A host that reports no accuracy figure is not reporting a BAD fix. The
+    // Even SDK's `accuracy` is optional, and treating its absence as "worse
+    // than the limit" left the guidance page on "Finding your position" for
+    // the whole walk. Such a fix is trusted at the policy's limit: it gets
+    // the widest corridor the policy allows, and nothing more.
+    const accuracyM = Number.isFinite(fix.accuracy) ? (fix.accuracy as number) : policy.maxAccuracyM;
+    if (accuracyM < 0 || accuracyM > policy.maxAccuracyM) {
       this.resetTransientEvidence();
       return { kind: 'uncertain', reason: 'accuracy' };
     }
@@ -162,7 +167,7 @@ export class NavigationProgressTracker {
       return { kind: 'uncertain', reason: 'ambiguous' };
     }
 
-    const corridor = policy.corridorRadiusM + Math.min(fix.accuracy as number, policy.maxAccuracyM);
+    const corridor = policy.corridorRadiusM + Math.min(accuracyM, policy.maxAccuracyM);
     if (best.crossTrackM > corridor) {
       this.offRouteCount += 1;
       this.wrongWayCount = 0;

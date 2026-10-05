@@ -41,12 +41,15 @@ import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
 import { PhoneControlPanel } from './PhoneControlPanel';
 import { PhoneControlScreen } from './PhoneControlScreen';
+import { Places, placesToWire } from './Places';
+import { PlacesPanel } from './PlacesPanel';
 import { CapabilityMenu } from './CapabilityMenu';
 import {
   CAPABILITIES,
   ContainerId,
   VOICE_REQUEST_PREFIX,
   type BrainstormHudModel,
+  type CapabilityName,
   type DownlinkMessage,
   type ProductivityHudModel,
 } from './types';
@@ -78,7 +81,7 @@ import { NavigationController } from './NavigationController';
 import { BrainstormController } from './BrainstormController';
 import { reminderDueAckFor } from './ReminderDueReceipt';
 import { productivityViewAckFor } from './ProductivityViewReceipt';
-import { deliverAfterConfirmationDismissal } from './ConfirmationCommit';
+import { confirmationDecisionWindowMs, deliverAfterConfirmationDismissal } from './ConfirmationCommit';
 import {
   replaySyntheticAudioFixture,
   syntheticAudioFixtureUrl,
@@ -187,10 +190,39 @@ const BROWSER_VISUAL_PREVIEW = import.meta.env.DEV
  * normal authenticated Mac link alive and merely opens the same sidebar a
  * left-temple double press would open. It lets the official simulator prove
  * a live capability request even though it hardcodes right-temple input. */
-const LIVE_MENU_ACCEPTANCE = import.meta.env.DEV
-  && new URLSearchParams(window.location.search).get('joatTestOpenMenu') === '1';
+const LIVE_MENU_ACCEPTANCE = ((): CapabilityName | undefined => {
+  if (!import.meta.env.DEV) return undefined;
+  const requested = new URLSearchParams(window.location.search).get('joatTestOpenMenu');
+  // `1` keeps the historical Planning entry; a capability name opens that
+  // row, so an acceptance run can start on Messages without a sidebar.
+  if (requested === '1') return 'Planning';
+  return CAPABILITIES.find((name) => name === requested);
+})();
+
+/** DEV acceptance only: `?joatTestPromptMic=1` answers a question's
+ * microphone as ready without opening one, so the official simulator (which
+ * has no audio device) can show the question page long enough to be
+ * photographed. The question still arrives, is acknowledged and is cancelled
+ * over the real wire; only the capture it would arm is skipped. */
+const LIVE_PROMPT_WITHOUT_MIC = import.meta.env.DEV
+  && new URLSearchParams(window.location.search).get('joatTestPromptMic') === '1';
 
 /** Webview status panel (index.html). Absent ids are a no-op by design. */
+/** The phone page's two tabs: Connection (the existing form) and Places. */
+function installPhoneTabs(): void {
+  const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('nav.tabs [role="tab"]'));
+  for (const tab of tabs) {
+    tab.addEventListener('click', () => {
+      for (const other of tabs) {
+        const selected = other === tab;
+        other.setAttribute('aria-selected', String(selected));
+        const panel = document.getElementById(other.getAttribute('aria-controls') ?? '');
+        if (panel) panel.hidden = !selected;
+      }
+    });
+  }
+}
+
 function setPanel(id: string, text: string): void {
   const el = document.getElementById(id);
   if (el) el.textContent = text;
@@ -436,8 +468,15 @@ async function boot(): Promise<void> {
     console.warn('[joat] rich HUD layouts unavailable; using live minimal recovery surface');
   }
   const audio = new AudioStreamer(client, link);
+  const promptAudio: Pick<AudioStreamer, 'openPromptMicrophone' | 'activatePromptEpoch' | 'clearPromptEpoch'> = LIVE_PROMPT_WITHOUT_MIC
+    ? {
+      openPromptMicrophone: () => ({ ready: Promise.resolve(true), release: () => undefined }),
+      activatePromptEpoch: (_epoch, acknowledge) => acknowledge(),
+      clearPromptEpoch: () => undefined,
+    }
+    : audio;
   const promptedInput = new PromptedInputController({
-    presenter: hud, audio, link,
+    presenter: hud, audio: promptAudio, link,
     isOwnerCurrent: (message) => menuRef?.isMessagePromptCurrent(message) ?? false,
     onCancel: (message, reason) => {
       if (reason === 'back' && message.ownerKind === 'messages') {
@@ -457,6 +496,16 @@ async function boot(): Promise<void> {
     setPanel('p-policy', policy);
     phonePanel?.updatePolicy(policy);
   });
+  // The wearer's saved places: edited on the phone page, mirrored to the
+  // Even host's storage, and sent whole to the Mac on every change and on
+  // every connect, so "navigate home" resolves there.
+  const places = new Places();
+  places.load();
+  places.onChange((list) => {
+    link.send({ kind: 'places', places: placesToWire(list) });
+  });
+  new PlacesPanel({ places, currentLocation: () => location.requestNavigationOrigin() });
+  installPhoneTabs();
   phonePanel = new PhoneControlPanel({
     link,
     urls: MAC_WS_URLS,
@@ -499,6 +548,10 @@ async function boot(): Promise<void> {
   // kills and is shared across the dev/packed origins, unlike the browser
   // localStorage mirror. Best-effort and async — boot never waits on it.
   void settings.attachHostStorage({
+    get: (key) => client.require().getLocalStorage(key),
+    set: (key, value) => client.require().setLocalStorage(key, value),
+  });
+  void places.attachHostStorage({
     get: (key) => client.require().getLocalStorage(key),
     set: (key, value) => client.require().setLocalStorage(key, value),
   });
@@ -853,6 +906,7 @@ async function boot(): Promise<void> {
           msg.quickNotesPage,
           msg.readerPage,
           msg.planningNavigation,
+          msg.pageControls,
         ))) {
           break;
         }
@@ -940,7 +994,7 @@ async function boot(): Promise<void> {
           // Content-free acceptance synchronization for the official desktop
           // simulator. Vite removes this branch from packed builds.
           if (import.meta.env.DEV) console.info('[joat] acceptance confirmation-visible');
-          imu.activate(msg.actionId, 8000);
+          imu.activate(msg.actionId, confirmationDecisionWindowMs(msg.expiresAtMs));
         } else {
           imu.cancel(msg.actionId);
           if (msg.messageUIActionId !== undefined) await hud.dismissConfirmation(msg.actionId);
@@ -1004,8 +1058,10 @@ async function boot(): Promise<void> {
       // corrected by the reconnect itself.
       ...(phoneTimeZone() ? { timeZone: phoneTimeZone() } : {}),
     });
-    // Announce the persisted policy so the Mac's session logic starts in sync.
+    // Announce the persisted policy so the Mac's session logic starts in sync,
+    // and the saved places so a route to "home" resolves on this Mac.
     link.send({ kind: 'policy', resume: settings.resumePolicy });
+    link.send({ kind: 'places', places: placesToWire(places.list()) });
     link.send({ kind: 'device', connect: 'connected', mic: audio.isOpen,
       micSource: audio.lastSource === AudioInputSource.Phone ? 'phone' : 'glasses' });
   };
@@ -1105,7 +1161,7 @@ async function boot(): Promise<void> {
   // strips this bounded acceptance-only delay from a package.
   if (LIVE_MENU_ACCEPTANCE) {
     await new Promise<void>((resolve) => setTimeout(resolve, 750));
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Planning'));
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf(LIVE_MENU_ACCEPTANCE));
     console.info(`[joat] live menu acceptance opened=${menu.isOpen()}`);
   }
 
@@ -1405,7 +1461,7 @@ function productivityLifecycleFixture(
       return {
         domain, phase: 'due', title,
         primary: 'Due now', secondary: 'This reminder is still incomplete.',
-        hint: 'say complete reminder title · left x2 Planning',
+        hint: 'tap: complete · left x2 Planning',
       };
   }
 }

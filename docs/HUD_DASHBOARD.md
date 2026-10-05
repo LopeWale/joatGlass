@@ -96,7 +96,7 @@ same ownership boundaries.
 ```
  123456789|123456789|123456789|123456789|123456   <- 46 char columns
 +----------------------------------------------+  y=0   id1 STATUS  z1  bright2  capture0
-|09:41   JOAT listening                 bat 87%|
+|09:41 · JOAT · ● · ▇                          |
 +----------------------------------------------+  y=32  id2 MAIN    z2  bright4  capture1 <-- EVENT
 |Dele . Messages                               |
 |On my way, 10 min out                         |
@@ -114,7 +114,7 @@ same ownership boundaries.
 
 | id | name | x,y,w,h | z | capture | textColor | owner | source |
 |---|---|---|---|---|---|---|---|
-| 1 | `status` | 0,0,576,32 | 1 | 0 | 2 | **plugin** | clock + `MacLink` state (`MacLink.ts:4`) + `audio.isOpen` (`main.ts:85`) + `DeviceMonitor` battery (`DeviceMonitor.ts:46-49`) |
+| 1 | `status` | 0,0,576,35 | 1 | 0 | 2 | **plugin** | `HudStatusModel` (`HudStatus.ts`): clock + `MacLink` state + `audio` mic + `DeviceMonitor` battery/charging, composed as `9:41 · PAGE · ● · ▇` by `nativeStatusLine` and fitted by `HudPageBuilder.fitHeader` |
 | 2 | `main` | 0,32,576,128 | 2 | **1** | 4 | Mac | `last_reply` / card summary / debate stream (`status.py:42-44`) |
 | 5 | `context` | 0,160,576,64 | 3 | 0 | 3 | Mac | `last_transcript` (`status.py:42`), verifier verdicts (`session.py:283-286`) |
 | 6 | `tray` | 0,224,576,32 | 4 | 0 | 2 | Mac | `_pending_cards` depth (`session.py:47`), `counts` (`status.py:45`) |
@@ -151,7 +151,7 @@ utterance, including empty or unaddressed speech.
 
 ```
 +----------------------------------------------+  y=0   id1 STATUS  bright2
-|09:41   JOAT answering                 bat 87%|
+|09:41 · JOAT · ANSWERING · ● · ▇              |
 +----------------------------------------------+  y=32  id2 MAIN    bright4   <- streamed by append
 |Standup is at 10:00. You have 19 minutes      |
 |and the room is Ada.                          |
@@ -409,8 +409,8 @@ Corrections, verified against the source and `node_modules/@evenrealities/even_h
 | **Ring** single | `sysEvent` t0 s2 | **confirm only** | confirm only | confirm only | select row |
 | Long press → release | `sysEvent` t9 → t10 | open INBOX (rebuild) | open full card | stop stream | back to DASH |
 | Swipe up / down | `textEvent` t1 / t2 | scroll `MAIN` | scroll `MAIN` | scroll the log | SDK-internal, no event |
-| Left temple double | `sysEvent` t3 s3 | settings | settings | settings | settings |
-| Right temple double | `sysEvent` t3 s1 | `shutDownPageContainer(1)` | same | same | same |
+| Left temple double | `sysEvent` t3 s3 | Back (menu toggle) | Back | Back | Back |
+| Right temple double | `sysEvent` t3 s1 | same Back (no exit dialog; exit is the Mac's `shutdown`) | same | same | same |
 | OS contextual menu | `menuItemClickEvent` | Mic on/off · Inbox · Repeat · Settings | — | — | — |
 
 Sources per `protocol.py:34-40` (LEFT is 3, RING is 2). Long-press 9/10 exists in the enum (`index.d.ts:880-883`) and is CONSUMED for the microphone control — it does not relay. Note `eventSource` exists only on `sysEvent` (`index.d.ts:989`): swipes and list events are source-blind by SDK design, so no left/right distinction is possible for them. Menu items: ≤10, 32-byte labels, non-zero unique ids (`index.d.ts:514-532`).

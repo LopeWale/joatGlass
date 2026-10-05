@@ -340,12 +340,22 @@ def bridge_response(*, calendar="full_access", reminders="full_access", result=N
     )
 
 
-async def wait_until(predicate, *, attempts: int = 100) -> None:  # type: ignore[no-untyped-def]
-    for _ in range(attempts):
+async def wait_until(predicate, *, timeout_s: float = 2.0) -> None:  # type: ignore[no-untyped-def]
+    """Poll until ``predicate`` holds, bounded by wall-clock time.
+
+    The router hands SQLite reads to worker threads (``asyncio.to_thread``),
+    so a fixed count of ``sleep(0)`` loop turns can be exhausted in
+    microseconds before the thread has returned. A deadline is the only
+    bound that survives scheduler jitter; the fast path still returns on
+    the first turn that satisfies the predicate.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
         if predicate():
             return
-        await asyncio.sleep(0)
-    raise AssertionError("condition did not become true")
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition did not become true")
+        await asyncio.sleep(0.001)
 
 
 async def collect_note_reader(router, transport, *, request_id, trace_id):  # type: ignore[no-untyped-def]
@@ -504,6 +514,61 @@ class FakeVoiceCapture:
         self._active = False
         return "Saved Voice Note: fixture."
 
+    def control_start(self) -> str:
+        self.calls.append("start")
+        self._active = True
+        self._state = "recording"
+        return "Recording Voice Note."
+
+
+class FakeMessageUI:
+    """Duck-typed MessageUIController: the conversation page's reply control."""
+
+    def __init__(self) -> None:
+        #: Reply-flow calls only; `retired` counts the visit resets that
+        #: opening or leaving Messages performs regardless of the page.
+        self.calls: list[str] = []
+        self.selections: list[tuple[str | None, str]] = []
+        self.retired = 0
+
+    def matches(self, request_id: str | None, selection_id: str | None) -> bool:
+        return False
+
+    @property
+    def has_visit(self) -> bool:
+        return False
+
+    def select(self, request_id: str | None, selection_id: str, current) -> None:  # type: ignore[no-untyped-def]
+        self.selections.append((request_id, selection_id))
+
+    def conversation_ready(self) -> None:
+        self.calls.append("conversation_ready")
+
+    def retire(self) -> None:
+        self.retired += 1
+
+    def cancel(self, action_id: str) -> None:
+        self.calls.append(f"cancel:{action_id}")
+
+    async def begin_new(self) -> str:
+        self.calls.append("begin_new")
+        return "new"
+
+    async def begin_reply(self) -> str:
+        self.calls.append("begin_reply")
+        return "reply"
+
+
+def receipts(transport: FakeTransport) -> list[str]:
+    """Every receipt band the router put over the page, in order."""
+    return [
+        m.text for m in transport.sent
+        if isinstance(m, AssistantOverlay) and m.presentation == "receipt"
+    ]
+
+
+NOTE_CONTROL_ROWS = ["● Record a voice note", "✎ Dictate a note"]
+
 
 def _urgent_card() -> Card:
     """Renders as "!! Adaeze · Messages\\nCall me now" — the prefix and the
@@ -528,11 +593,16 @@ def make_router(
     brainstorm_replay=None,
     brainstorm_sessions=None,
     brainstorm_continue=None,
+    brainstorm_unavailable=None,
     terminal_rows=None,
     terminal_focus=None,
     terminal_view=None,
     terminal_busy=None,
     terminal_open=None,
+    message_ui=None,
+    ask=None,
+    navigate=None,
+    places=None,
 ):  # type: ignore[no-untyped-def]
     transport = FakeTransport()
     status = StatusPublisher(path=tmp_path / "status.json")
@@ -556,16 +626,88 @@ def make_router(
         brainstorm_replay=brainstorm_replay,
         brainstorm_sessions=brainstorm_sessions,
         brainstorm_continue=brainstorm_continue,
+        brainstorm_unavailable=brainstorm_unavailable,
         terminal_rows=terminal_rows,
         terminal_focus=terminal_focus,
         terminal_view=terminal_view,
         terminal_busy=terminal_busy,
         terminal_open=terminal_open,
+        message_ui=message_ui,
+        ask=ask,
+        navigate=navigate,
+        places=places,
     )
     return router, transport, status
 
 
 class TestCapabilityViews:
+    async def test_note_list_pages_through_tappable_rows(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """The firmware list reports taps, never scrolls: each archive page
+        names its neighbours as rows and says which rows they are."""
+        with DurableStore(tmp_path / "paged-notes.sqlite3") as durable:
+            notes = NoteStore(durable)
+            for index in range(1, 24):
+                notes.create(
+                    note_id=f"note-{index:02d}", idempotency_key=f"key-{index:02d}",
+                    text=f"Fixture note {index}", source=NoteSource(kind="dictation"),
+                    now_us=1_000_000 * index,
+                )
+            router, transport, _ = make_router(tmp_path, notes=notes)
+            await router.open("QuickNotes")
+            first = [m for m in transport.sent if isinstance(m, HudList)][-1]
+            assert first.title == "QUICKNOTES"
+            # Every page is a control surface: record and dictate lead,
+            # then sixteen notes, then the paging row — twenty rows at most.
+            assert first.items[:2] == NOTE_CONTROL_ROWS
+            assert first.items[2].endswith("Fixture note 23")
+            assert first.items[17].endswith("Fixture note 8")
+            assert first.items[-1] == "▼ Older notes"
+            assert len(first.items) == 19
+            assert first.selectable is True
+            assert first.page_controls == (None, 18)
+            assert first.quick_notes_page == (0, 2)
+
+            router.on_input(InputEvent(
+                container_name="cappage", selected_name="QUICKNOTES · LIST", selected_index=0,
+                event_type=EventType.SCROLL_BOTTOM,
+            ))
+            await wait_until(lambda: router._note_list is not None and router._note_list.index == 1)
+            await wait_until(lambda: any(
+                isinstance(m, HudList) and m.title == "QUICKNOTES" and m.items[-1] == "▲ Newer notes"
+                for m in transport.sent
+            ))
+            older = [m for m in transport.sent if isinstance(m, HudList)][-1]
+            assert older.items[:2] == NOTE_CONTROL_ROWS
+            assert older.items[2].endswith("Fixture note 7")
+            assert older.items[8].endswith("Fixture note 1")
+            assert len(older.items) == 10
+            assert older.page_controls == (9, None)
+            assert older.quick_notes_page == (1, 2)
+
+            # A tap on the paging row never opens a note: it is past the rows.
+            router.on_input(InputEvent(
+                container_name="capdata", selected_name="QUICKNOTES", selected_index=9,
+                quick_notes_page_index=1,
+            ))
+            await asyncio.sleep(0)
+            assert router._note_reader is None
+
+    async def test_brainstorm_row_shows_the_missing_seat_instead_of_a_promise(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """A missing CLI seat used to surface only after the tap: the row opened
+        on "Ready for a question" and the tap went nowhere useful."""
+        gone = BrainstormHudView(
+            state="unavailable", topic="Brainstorm", collaborators=["Claude"],
+            activity="codex CLI missing on the Mac — install to enable.",
+        )
+        router, transport, _ = make_router(
+            tmp_path, brainstorm_unavailable=lambda: gone,
+            brainstorm_sessions=lambda: [],
+        )
+        await router.open("Brainstorm")
+        frames = [item for item in transport.sent if isinstance(item, BrainstormHudView)]
+        assert frames[-1].state == "unavailable"
+        assert "codex CLI missing" in frames[-1].activity
+
     async def test_brainstorm_and_agent_terminal_open_real_hud_views(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, status = make_router(tmp_path)
         status.set_openclaw(
@@ -589,6 +731,10 @@ class TestCapabilityViews:
         # acceptance_armed is a BRAINSTORM field; the terminal frame has no
         # such concept, which is the point of the split.
         assert frames[0].acceptance_armed is False
+        # The idle frame invites a tap; voice works from anywhere and the
+        # frame no longer tells the wearer what to say.
+        assert frames[0].state == "ready"
+        assert frames[0].activity == "Tap to speak a topic."
 
     @pytest.mark.parametrize(
         ("state", "reason", "expected"),
@@ -722,11 +868,53 @@ class TestCapabilityViews:
         assert len(lists) == 1
         assert lists[0].title == "NAVIGATION"
         assert lists[0].items == [
-            'Say “JOAT, navigate to …”',
+            "➤ Navigate to a place",
             "I’ll confirm the place. Then choose Walk or Cycle.",
         ]
-        assert lists[0].hint == "say destination · left x2: back"
+        assert lists[0].hint == "tap: choose · left x2: back"
+        assert lists[0].selectable is True
         assert lists[0].request_id == "navigation-entry"
+        assert not any("JOAT" in item for item in lists[0].items)
+
+    async def test_navigation_page_lists_saved_places_first_and_a_tap_starts_their_route(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        from joat.core.protocol import SavedPlace
+
+        started: list[str] = []
+
+        async def navigate(destination: str) -> str | None:
+            started.append(destination)
+            return None
+
+        saved = [
+            SavedPlace(place_id="p1", name="Home", address="12 Oak St"),
+            SavedPlace(place_id="p2", name="Work", latitude=35.2, longitude=-97.4),
+        ]
+        router, transport, _ = make_router(tmp_path, navigate=navigate, places=lambda: saved)
+
+        await router.open("Navigation", request_id="navigation-places")
+        page = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert page.items == [
+            "➤ Home",
+            "➤ Work",
+            "➤ Navigate to a place",
+            "Add places on the phone page.",
+        ]
+        assert page.selectable is True
+
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="NAVIGATION", selected_index=1,
+            request_id="navigation-places",
+        ))
+        await wait_until(lambda: started == ["Work"])
+        # The open question still sits after the places.
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="NAVIGATION", selected_index=3,
+            request_id="navigation-places",
+        ))
+        await asyncio.sleep(0.01)
+        assert started == ["Work"]
 
     async def test_navigation_entry_opens_from_the_real_capability_menu_input(
         self, tmp_path
@@ -749,11 +937,78 @@ class TestCapabilityViews:
             if isinstance(message, HudList) and message.title == "NAVIGATION"
         ][-1]
         assert frame.items == [
-            'Say “JOAT, navigate to …”',
+            "➤ Navigate to a place",
             "I’ll confirm the place. Then choose Walk or Cycle.",
         ]
-        assert frame.selectable is False
+        assert frame.selectable is True
+        assert frame.hint == "tap: choose · left x2: back"
         assert frame.request_id == "navigation-menu-entry"
+
+    async def test_navigation_row_asks_where_to_then_starts_the_route(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        """The tapped control row asks on the lens; the answer is the route."""
+        asked: list[tuple[str, str]] = []
+        routed: list[str] = []
+
+        async def ask(question: str, field: str, consume) -> bool:  # type: ignore[no-untyped-def]
+            asked.append((question, field))
+            await consume("the library")
+            return True
+
+        async def navigate(destination: str) -> str | None:
+            routed.append(destination)
+            return "Heading to The Library — Walk or Cycle?"
+
+        router, transport, _ = make_router(tmp_path, ask=ask, navigate=navigate)
+        await router.open("Navigation", request_id="navigation-tap")
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="NAVIGATION",
+            selected_index=0, request_id="navigation-tap",
+        ))
+        await wait_until(lambda: bool(routed))
+        assert asked == [("Where to?", "destination")]
+        assert routed == ["the library"]
+        assert receipts(transport) == ["Heading to The Library — Walk or Cycle?"]
+
+        # The second row is copy, not a control: it asks nothing.
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="NAVIGATION",
+            selected_index=1, request_id="navigation-tap",
+        ))
+        await asyncio.sleep(0.01)
+        assert asked == [("Where to?", "destination")]
+        assert routed == ["the library"]
+
+    async def test_navigation_row_without_a_route_starter_says_so(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path)
+        await router.open("Navigation", request_id="navigation-inert")
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="NAVIGATION",
+            selected_index=0, request_id="navigation-inert",
+        ))
+        await wait_until(lambda: bool(receipts(transport)))
+        assert receipts(transport) == ["Navigation cannot be started from this Mac."]
+
+    async def test_navigation_row_reports_a_question_that_never_reached_the_lens(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        routed: list[str] = []
+
+        async def ask(question: str, field: str, consume) -> bool:  # type: ignore[no-untyped-def]
+            return False
+
+        async def navigate(destination: str) -> str | None:
+            routed.append(destination)
+            return None
+
+        router, transport, _ = make_router(tmp_path, ask=ask, navigate=navigate)
+        await router.open("Navigation", request_id="navigation-unpublished")
+        await router._select_capability_row("NAVIGATION", 0, "hud", "navigation-unpublished")
+        assert routed == []
+        assert receipts(transport) == ["The question did not reach the glasses — try again."]
 
     async def test_newest_same_capability_generation_owns_render_and_selection(
         self, tmp_path
@@ -821,7 +1076,15 @@ class TestCapabilityViews:
         )]
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.title == "MESSAGES · CONVERSATION"
-        assert any("JOAT, reply" in item for item in detail.items)
+        # The page carries the conversation only: no spoken-grammar rows,
+        # and no reply row either, since no message UI can take the tap.
+        assert detail.items == [
+            "Complete conversation on this Mac",
+            "Adaeze · Call me",
+        ]
+        assert detail.hint == "tap read · left x2: back"
+        assert router._message_history is not None
+        assert router._message_history.reply_index is None
 
     async def test_selecting_a_message_opens_complete_conversation_context(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
@@ -850,11 +1113,100 @@ class TestCapabilityViews:
             "Dele · Great",
             "You · On my way",
             "Dele · Are you coming?",
-            'Say “JOAT, reply saying …”',
-            "Mic off? Long press to enable.",
         ]
-        assert detail.hint == "tap read · say reply · left x2: back"
+        assert detail.hint == "tap read · left x2: back"
         assert detail.selectable is True
+
+    async def test_the_reply_row_tap_begins_the_prepared_reply(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """A replyable thread with a message UI ends in "✎ Reply"; tapping
+        that row starts the same prepared reply the spoken grammar would."""
+        replies = FakeReplies()
+        message_ui = FakeMessageUI()
+        router, transport, _ = make_router(tmp_path, replies=replies, message_ui=message_ui)
+        router._messages = HistoryMessages([  # type: ignore[assignment]
+            ("Dele", "Great", time.time()),
+        ])
+        await router.open("Messages", request_id="messages-reply")
+
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="MESSAGES",
+            selected_index=message_row_index(transport, "] Dele ·"),
+            trace_id="hud-reply",
+            request_id="messages-reply",
+        ))
+        await wait_until(lambda: any(
+            isinstance(item, HudList) and item.title == "MESSAGES · CONVERSATION"
+            for item in transport.sent
+        ))
+        assert message_ui.selections == [("messages-reply", "hud-reply")]
+        assert message_ui.retired == 1  # opening Messages resets any old visit
+        assert message_ui.calls == ["conversation_ready"]
+        detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert detail.items == [
+            "Complete conversation on this Mac",
+            "Dele · Great",
+            "You · On my way",
+            "Dele · Are you coming?",
+            "✎ Reply",
+        ]
+        assert detail.hint == "tap read · left x2: back"
+        assert detail.selectable is True
+        assert router._message_history is not None
+        assert router._message_history.reply_index == 4
+
+        # A message row opens the reader; only the reply row begins a reply.
+        router.on_input(InputEvent(
+            container_name="capmessage", selected_index=1,
+            trace_id="hud-reply", request_id="messages-reply",
+        ))
+        await wait_until(lambda: router._message_detail is not None)
+        assert message_ui.calls == ["conversation_ready"]
+
+        router.on_input(InputEvent(
+            container_name="capmessage", selected_index=4,
+            trace_id="hud-reply", request_id="messages-reply",
+        ))
+        await wait_until(lambda: "begin_reply" in message_ui.calls)
+        assert message_ui.calls == ["conversation_ready", "begin_reply"]
+        assert router._message_selection_active is True
+
+        # A stale request cannot reach the reply row.
+        router.on_input(InputEvent(
+            container_name="capmessage", selected_index=4,
+            trace_id="hud-reply", request_id="messages-stale",
+        ))
+        await asyncio.sleep(0.01)
+        assert message_ui.calls == ["conversation_ready", "begin_reply"]
+
+    async def test_a_read_only_thread_has_no_reply_row_even_with_a_message_ui(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        message_ui = FakeMessageUI()
+        router, transport, _ = make_router(
+            tmp_path, rows=[("Dele", "Great", time.time())], message_ui=message_ui,
+        )
+        await router.open("Messages", request_id="messages-read-only")
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="MESSAGES",
+            selected_index=message_row_index(transport, "] Dele ·"),
+            trace_id="hud-read-only", request_id="messages-read-only",
+        ))
+        await wait_until(lambda: any(
+            isinstance(item, HudList) and item.title == "MESSAGES · CONVERSATION"
+            for item in transport.sent
+        ))
+        detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert detail.items == ["Complete conversation on this Mac", "Dele · Great"]
+        assert detail.hint == "tap read · read-only · left x2: back"
+        assert router._message_history is not None
+        assert router._message_history.reply_index is None
+        router.on_input(InputEvent(
+            container_name="capmessage", selected_index=2,
+            trace_id="hud-read-only", request_id="messages-read-only",
+        ))
+        await asyncio.sleep(0.01)
+        assert "begin_reply" not in message_ui.calls
 
     async def test_selecting_a_transcript_entry_opens_the_paged_full_text_reader(
         self, tmp_path,
@@ -897,7 +1249,7 @@ class TestCapabilityViews:
         assert len(first_page.items) > 2
         assert all(len(line) <= 62 for line in first_page.items[1:])
         assert " ".join(first_page.items[1:]).startswith("Opening words")
-        assert first_page.hint == "down more · say reply · left x2: back"
+        assert first_page.hint == "down more · left x2: back"
         assert first_page.selectable is False
         assert len(replies.selected) == 1
 
@@ -917,7 +1269,7 @@ class TestCapabilityViews:
             if isinstance(item, HudList) and item.title == "MESSAGES · MESSAGE"
         ][-1]
         assert second_page.items[0] == "2/2 · From Dele · unread"
-        assert second_page.hint == "up previous · say reply · left x2: back"
+        assert second_page.hint == "up previous · left x2: back"
         assert first_page.items[1] != second_page.items[1]
         assert len(replies.selected) == 1
 
@@ -1040,14 +1392,15 @@ class TestCapabilityViews:
 
         latest = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert latest.items == [
-            "Latest messages — down for older",
+            "Latest messages",
             "Dele · Unread · Attachment",
             "You · Read · On my way",
             "Dele · Are you coming?",
-            'Say “JOAT, reply saying …”',
-            "Mic off? Long press to enable.",
+            "▼ Older messages",
         ]
-        assert latest.hint == "down older · tap read · say reply · left x2: back"
+        assert latest.hint == "tap read · left x2: back"
+        # The paging rows are addressed by index, never by their copy.
+        assert latest.page_controls == (None, 4)
 
         router.on_input(InputEvent(
             container_name="cappage",
@@ -1059,18 +1412,18 @@ class TestCapabilityViews:
         await wait_until(lambda: any(
             isinstance(item, HudList)
             and item.items
-            and item.items[0] == "Older messages — up for newer"
+            and item.items[0] == "Older messages"
             for item in transport.sent
         ))
         older = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert messages.page_calls == [None, 10]
         assert older.items == [
-            "Older messages — up for newer",
+            "Older messages",
             "Dele · Earlier",
-            'Say “JOAT, reply saying …”',
-            "Mic off? Long press to enable.",
+            "▲ Newer messages",
         ]
-        assert older.hint == "up newer · tap read · say reply · left x2: back"
+        assert older.hint == "tap read · left x2: back"
+        assert older.page_controls == (2, None)
         # The async page task clears its duplicate-input guard after its
         # replacement frame is committed, as the production bridge does.
         await asyncio.sleep(0)
@@ -1085,7 +1438,7 @@ class TestCapabilityViews:
         await wait_until(lambda: any(
             isinstance(item, HudList)
             and item.items
-            and item.items[0] == "Latest messages — down for older"
+            and item.items[0] == "Latest messages"
             for item in transport.sent[2:]
         ))
         assert messages.page_calls == [None, 10]
@@ -1346,14 +1699,16 @@ class TestCapabilityViews:
             release_confirmation.set()
             await replies.aclose()
 
-    async def test_group_message_cannot_be_misrouted_to_one_participant(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        now = time.time()
+    async def test_group_message_cannot_be_misrouted_to_one_participant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Group identity is independent of reply support: a group with no
+        # chat GUID has no send target, so it reads as "Participant" and
+        # never arms a reply to whichever member happened to write last.
+        thread = MessageThread("Project team", "handle-0", "Ship it", time.time(), is_group=True)
+        monkeypatch.setattr(FakeMessages, "recent_threads", lambda _self, limit=5: [thread])
         replies = FakeReplies()
-        router, transport, _ = make_router(
-            tmp_path,
-            rows=[("Project team", "Ship it", now, False)],
-            replies=replies,
-        )
+        router, transport, _ = make_router(tmp_path, rows=[], replies=replies)
         await router.open("Messages")
 
         router.on_input(InputEvent(
@@ -1397,7 +1752,7 @@ class TestCapabilityViews:
 
         assert replies.selected == [(thread, "group-guid")]
         frame = [message for message in transport.sent if isinstance(message, HudList)][-1]
-        assert "say reply" in frame.hint
+        assert frame.hint == "tap read · left x2: back"
         assert "read-only" not in frame.hint
         assert "Participant · Ship it" in frame.items
         wire_frames = repr(transport.sent)
@@ -1622,10 +1977,11 @@ class TestCapabilityViews:
         await asyncio.sleep(0)
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.title == "PLANNING · EVENT"
+        # One footer: the Back copy lives in the hint, not duplicated as a row
+        # (Changelog 2026-09-11, "duplicated Back copy on event details").
         assert detail.items == [
             "Design review",
             "09:30 · Event",
-            "Read-only native item · left x2 Planning",
         ]
         assert detail.hint == "left x2 Planning"
 
@@ -1714,11 +2070,13 @@ class TestCapabilityViews:
         await router.open("QuickNotes")
         note_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert note_list.title == "QUICKNOTES"
-        assert "Ask Adaeze" in note_list.items[0]
+        assert note_list.items[:2] == NOTE_CONTROL_ROWS
+        assert "Ask Adaeze" in note_list.items[2]
+        assert len(note_list.items) == 3
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="QUICKNOTES",
-            selected_index=0,
+            selected_index=2,
         ))
         await asyncio.sleep(0)
         note_detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
@@ -1768,7 +2126,7 @@ class TestCapabilityViews:
             router, transport, _ = make_router(tmp_path, notes=notes)
             await router.open("QuickNotes", request_id="wide-note-reader")
             await router._select_capability_row(
-                "QUICKNOTES", 0, "reader-wide", "wide-note-reader",
+                "QUICKNOTES", 2, "reader-wide", "wide-note-reader",
             )
             pages = await collect_note_reader(
                 router, transport, request_id="wide-note-reader", trace_id="reader-wide",
@@ -1796,7 +2154,7 @@ class TestCapabilityViews:
                              source=NoteSource(kind="synthetic"), now_us=at)
             router, transport, _ = make_router(tmp_path, notes=notes)
             await router.open("QuickNotes", request_id="note-reader")
-            await router._select_capability_row("QUICKNOTES", 1, "reader-long", "note-reader")
+            await router._select_capability_row("QUICKNOTES", 3, "reader-long", "note-reader")
             pages = await collect_note_reader(router, transport, request_id="note-reader", trace_id="reader-long")
             assert len(pages) > 2
             assert "".join(row for page in pages for row in page["items"][1:]) == body
@@ -1822,7 +2180,7 @@ class TestCapabilityViews:
                 selected_name="quicknotes-list", request_id="note-reader"))
             await asyncio.sleep(0)
             assert len(transport.sent) == before, "Back must retire an already queued page"
-            await router._select_capability_row("QUICKNOTES", 0, "reader-second", "note-reader")
+            await router._select_capability_row("QUICKNOTES", 2, "reader-second", "note-reader")
             second = [m for m in transport.sent if isinstance(m, HudList)][-1].to_wire()
             assert "".join(second["items"][1:]).startswith("Second note")
             assert "down more" in second["hint"]
@@ -1859,7 +2217,7 @@ class TestCapabilityViews:
                     key_points=("One point",), todos=("One action",), now_us=21)
             router, transport, _ = make_router(tmp_path, voice_notes=notes)
             await router.open("QuickNotes", request_id="recording-reader")
-            await router._select_capability_row("QUICKNOTES", 0, "reader-recording", "recording-reader")
+            await router._select_capability_row("QUICKNOTES", 2, "reader-recording", "recording-reader")
             pages = await collect_note_reader(router, transport, request_id="recording-reader", trace_id="reader-recording")
             body = "".join(row for page in pages for row in page["items"][1:])
             assert first in body and last in body
@@ -1895,16 +2253,18 @@ class TestCapabilityViews:
         await router.open("QuickNotes")
         note_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert note_list.title == "QUICKNOTES"
-        # Recordings first (marked with the ● record glyph), then exact
-        # dictated text notes.
-        assert "● Standup notes" in note_list.items[0]
-        assert "Ask Adaeze" in note_list.items[1]
+        # The two control rows lead; then recordings (marked with the ●
+        # record glyph), then exact dictated text notes.
+        assert note_list.items[:2] == NOTE_CONTROL_ROWS
+        assert "● Standup notes" in note_list.items[2]
+        assert "Ask Adaeze" in note_list.items[3]
+        assert len(note_list.items) == 4
         assert note_list.selectable is True
 
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="QUICKNOTES",
-            selected_index=0,
+            selected_index=2,
         ))
         await asyncio.sleep(0)
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
@@ -1923,7 +2283,7 @@ class TestCapabilityViews:
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="QUICKNOTES",
-            selected_index=1,
+            selected_index=3,
         ))
         await asyncio.sleep(0)
         text_detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
@@ -1968,7 +2328,134 @@ class TestCapabilityViews:
             for m in transport.sent
         )
         after = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert "● Standup notes" in after.items[0]
+        assert after.items[:2] == NOTE_CONTROL_ROWS
+        assert "● Standup notes" in after.items[2]
+
+    async def test_quicknotes_empty_and_setup_pages_still_offer_the_controls(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """No notes yet is a page with two things to tap; no store is a fact."""
+        with DurableStore(tmp_path / "empty-notes.sqlite3") as durable:
+            router, transport, _ = make_router(tmp_path, notes=NoteStore(durable))
+            await router.open("QuickNotes", request_id="notes-empty")
+            empty = [m for m in transport.sent if isinstance(m, HudList)][-1]
+            assert empty.title == "QUICKNOTES · EMPTY"
+            assert empty.items == NOTE_CONTROL_ROWS
+            assert empty.hint == "tap: choose · left x2: back"
+            assert empty.selectable is True
+            assert empty.quick_notes_page == (0, 1)
+            assert empty.page_controls == (None, None)
+
+        router, transport, _ = make_router(tmp_path)
+        await router.open("QuickNotes", request_id="notes-setup")
+        setup = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert setup.title == "QUICKNOTES · SETUP"
+        assert setup.items == ["Notes storage is unavailable on this Mac."]
+        assert setup.selectable is False
+
+    async def test_the_record_row_starts_a_recording_and_shows_its_controls(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        store = DurableStore(tmp_path / "durable.sqlite3")
+        voice_notes = VoiceNoteStore(store)
+        _retained_voice_note(voice_notes, "capture-0", base_us=5)
+        capture = FakeVoiceCapture(state="idle", title="Client call", active=False)
+        router, transport, _ = make_router(
+            tmp_path, voice_notes=voice_notes, voice_capture=capture,
+        )
+        await router.open("QuickNotes", request_id="notes-record")
+        listing = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert listing.title == "QUICKNOTES"
+        assert listing.items[:2] == NOTE_CONTROL_ROWS
+        assert "● Standup notes" in listing.items[2]
+
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="QUICKNOTES",
+            selected_index=0, request_id="notes-record",
+        ))
+        await wait_until(lambda: capture.calls == ["start"])
+        await wait_until(lambda: any(
+            isinstance(m, HudList) and m.title == "QUICKNOTES · RECORDING"
+            for m in transport.sent
+        ))
+        assert receipts(transport) == ["Recording Voice Note."]
+        # The re-render tells the new truth: the capture owns the page now.
+        controls = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert controls.title == "QUICKNOTES · RECORDING"
+        assert controls.items == ["Save and finish", "Pause recording", "Discard recording"]
+        assert controls.hint is not None and "Client call" in controls.hint
+        store.close()
+
+    async def test_the_record_row_without_a_capture_controller_says_so(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        with DurableStore(tmp_path / "notes.sqlite3") as durable:
+            router, transport, _ = make_router(tmp_path, notes=NoteStore(durable))
+            await router.open("QuickNotes", request_id="notes-no-capture")
+            await router._select_capability_row("QUICKNOTES", 0, "hud", "notes-no-capture")
+            assert receipts(transport) == ["Recording is unavailable on this Mac."]
+
+    async def test_the_dictate_row_asks_then_saves_the_exact_text(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        asked: list[tuple[str, str]] = []
+
+        async def ask(question: str, field: str, consume) -> bool:  # type: ignore[no-untyped-def]
+            asked.append((question, field))
+            await consume("  buy   filters ")
+            return True
+
+        with DurableStore(tmp_path / "dictated.sqlite3") as durable:
+            notes = NoteStore(durable)
+            router, transport, _ = make_router(tmp_path, notes=notes, ask=ask)
+            await router.open("QuickNotes", request_id="notes-dictate")
+            assert [m for m in transport.sent if isinstance(m, HudList)][-1].title == "QUICKNOTES · EMPTY"
+
+            router.on_input(InputEvent(
+                container_name="capdata", selected_name="QUICKNOTES",
+                selected_index=1, request_id="notes-dictate",
+            ))
+            await wait_until(lambda: any(
+                isinstance(m, HudList) and m.title == "QUICKNOTES" for m in transport.sent
+            ))
+            assert asked == [("What should I note?", "note")]
+            saved = notes.active()
+            assert len(saved) == 1
+            assert saved[0].text == "buy filters"
+            assert saved[0].source.kind == "hud.quick-note"
+            assert receipts(transport) == ["Saved QuickNote: buy filters"]
+            # The list re-renders with the new note under the controls.
+            listing = [m for m in transport.sent if isinstance(m, HudList)][-1]
+            assert listing.title == "QUICKNOTES"
+            assert listing.items[:2] == NOTE_CONTROL_ROWS
+            assert listing.items[2].endswith("] buy filters")
+            assert len(listing.items) == 3
+
+    async def test_the_dictate_row_ignores_an_empty_answer(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        async def ask(question: str, field: str, consume) -> bool:  # type: ignore[no-untyped-def]
+            await consume("   ")
+            return True
+
+        with DurableStore(tmp_path / "blank.sqlite3") as durable:
+            notes = NoteStore(durable)
+            router, transport, _ = make_router(tmp_path, notes=notes, ask=ask)
+            await router.open("QuickNotes", request_id="notes-blank")
+            await router._select_capability_row("QUICKNOTES", 1, "hud", "notes-blank")
+            assert notes.active() == ()
+            assert receipts(transport) == []
+
+    async def test_the_dictate_row_without_a_prompt_says_so(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        with DurableStore(tmp_path / "mute.sqlite3") as durable:
+            notes = NoteStore(durable)
+            router, transport, _ = make_router(tmp_path, notes=notes)
+            await router.open("QuickNotes", request_id="notes-mute")
+            await router._select_capability_row("QUICKNOTES", 1, "hud", "notes-mute")
+            assert receipts(transport) == ["Dictation is unavailable on this Mac."]
+            assert notes.active() == ()
+
+    async def test_the_dictate_row_reports_a_question_that_never_reached_the_lens(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        async def ask(question: str, field: str, consume) -> bool:  # type: ignore[no-untyped-def]
+            return False
+
+        with DurableStore(tmp_path / "unpublished.sqlite3") as durable:
+            notes = NoteStore(durable)
+            router, transport, _ = make_router(tmp_path, notes=notes, ask=ask)
+            await router.open("QuickNotes", request_id="notes-unpublished")
+            await router._select_capability_row("QUICKNOTES", 1, "hud", "notes-unpublished")
+            assert receipts(transport) == ["The question did not reach the glasses — try again."]
+            assert notes.active() == ()
 
     async def test_discard_needs_its_own_confirm_row(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         capture = FakeVoiceCapture(
@@ -2203,6 +2690,33 @@ class TestTheSessionPicker:
         assert "cold-start latency" in items[1]
         assert "2 turns" in items[2]
         assert lists[-1].to_wire()["selectable"] is True
+        # A hand-opened picker is tapped, not spoken to.
+        assert lists[-1].hint == "tap: open · left x2: back"
+
+    async def test_a_session_that_cannot_reopen_points_at_the_new_row(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        """The failure page names the row to tap, not a phrase to say."""
+        rows = [self.Past("ccc", "no transcript kept", ())]
+        attempted: list[str] = []
+
+        async def continue_it(session_id: str) -> bool:
+            attempted.append(session_id)
+            return False
+
+        router, transport, _ = make_router(
+            tmp_path, brainstorm_sessions=lambda: rows, brainstorm_continue=continue_it,
+        )
+        await router.open("Brainstorm")
+        await router._select_brainstorm(1)
+        assert attempted == ["ccc"]
+        failed = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert failed.title == "BRAINSTORM"
+        assert failed.items == [
+            "That session could not be reopened.",
+            "Tap “+ New brainstorm” to start another.",
+        ]
+        assert failed.selectable is False
 
     async def test_the_picker_survives_a_session_closing_in_process(
         self, tmp_path,

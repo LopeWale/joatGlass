@@ -68,8 +68,8 @@ export const TYPE = {
    * calendar markers, week counters). */
   microMono: mono(9),
   /** Status spine clock. */
-  statusClock: mono(12),
-  /** Status spine label, mic and battery words. */
+  statusClock: mono(11),
+  /** Status spine label (and the low-battery number). */
   statusMeta: mono(10),
   /** Reader body: draws the Mac's prepared 62-mono-column rows verbatim;
    * stays monospace until core/protocol.py's column model changes with it

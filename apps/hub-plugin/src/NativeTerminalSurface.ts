@@ -2,7 +2,8 @@ import {
   TextContainerUpgrade,
   type RebuildPageContainer,
 } from '@evenrealities/even_hub_sdk';
-import { getTextWidth, pxTruncate } from '@evenrealities/pretext';
+import { pxTruncate } from '@evenrealities/pretext';
+import { firmwareLineWidth } from './FirmwareText';
 import type { BridgeClient } from './BridgeClient';
 import { TerminalConversationViewport } from './TerminalConversation';
 import { TEXT_CONTAINER_MAX_BYTES, fitUtf8 } from './FirmwareLimits';
@@ -35,10 +36,50 @@ const MAX_PROMPT_ROWS = NATIVE_TERMINAL_GEOMETRY.bodyLineCapacity - BODY_FIXED_R
 const MAX_LINE_UNITS = 190;
 const MAX_UPGRADE_UNITS = 2_000;
 const HEAD_TEXT = 'JOAT · AGENT TERMINAL';
-const BRAINSTORM_HEAD = 'JOAT · BRAINSTORM';
+const BRAINSTORM_HEAD_TEXT = 'JOAT · BRAINSTORM';
 /** HudSink's silence marker (core sinks.py THINKING_MARKER): the row a seat
  * shows before its first token. The elapsed counter is drawn locally. */
 const THINKING_MARKER = 'Thinking…';
+
+/** Brainstorm (Codex proposes, Claude critiques) shares this page with the
+ * Agent Terminal: one head line, a status row, the transcript, a footer
+ * naming the gestures the BrainstormController accepts. */
+function isBrainstorm(model: Pick<BrainstormHudModel, 'screen'>): boolean {
+  return model.screen === 'brainstorm';
+}
+
+function headTextFor(model: Pick<BrainstormHudModel, 'screen'>): string {
+  return isBrainstorm(model) ? BRAINSTORM_HEAD_TEXT : HEAD_TEXT;
+}
+
+/** The gestures BrainstormController accepts in each state, in the raster
+ * footer's words but measured for the firmware font: the raster running
+ * hint also named the spoken "send that to hermes" verb and does not fit
+ * one firmware line. Scrolled up, the row says how far from the live tail
+ * the wearer is and what the double-press does there. */
+function brainstormFooter(model: BrainstormHudModel, newer: number): string {
+  if (newer > 0) {
+    return `▼ ${newer} newer · swipe down · double-click: ${model.state === 'running' ? 'cancel' : 'menu'}`;
+  }
+  switch (model.state) {
+    case 'running': return 'swipe: scroll · tap: terminal · double-click: cancel';
+    case 'acceptance_ready': return 'tap: start test · double-click: menu';
+    case 'topic_capture': return 'speak your question · double-click: cancel';
+    case 'ready': return 'tap: speak · double-click: menu';
+    // The phone page's Brainstorm tab resets the room and switches accounts.
+    case 'unavailable': return 'fix on phone: JOAT › Brainstorm · double-click: menu';
+    default: return 'swipe: scroll · double-click: menu';
+  }
+}
+
+/** The Brainstorm status row: its state, then who is speaking and the round
+ * cost while it runs, else the question it is about. */
+function brainstormStatusRow(model: BrainstormHudModel): string {
+  const live = model.state === 'running' && model.activeSpeaker?.trim()
+    ? model.activeSpeaker.trim()
+    : model.topic.replace(/\s+/gu, ' ').trim();
+  return live ? `${stateName(model)} · ${live}` : stateName(model);
+}
 
 export interface NativeTerminalPage {
   headText: string;
@@ -101,7 +142,6 @@ function focusName(topic: string): string {
 }
 
 function stateName(model: BrainstormHudModel): string {
-  if (model.screen === 'brainstorm') return brainstormStateName(model);
   if (model.taskRecovery) return 'CHECK TASK';
   if (model.inputRequired) return 'REPLY NEEDED';
   switch (model.state) {
@@ -116,39 +156,6 @@ function stateName(model: BrainstormHudModel): string {
     case 'failed': return 'FAILED';
     case 'blocked': return 'BLOCKED';
   }
-}
-
-function brainstormStateName(model: BrainstormHudModel): string {
-  switch (model.state) {
-    case 'unavailable': return 'UNAVAILABLE';
-    case 'ready': return 'READY';
-    case 'topic_capture': return 'LISTENING';
-    case 'acceptance_ready': return 'READY TO START';
-    case 'running': return 'DISCUSSING';
-    case 'settled': return 'COMPLETE';
-    case 'cancelled': return 'STOPPED';
-    case 'failed': return 'FAILED';
-    case 'blocked': return 'BLOCKED';
-    case 'approval_required': return 'WAITING';
-  }
-}
-
-/** The fixed head line. A Brainstorm names its question there, so the
- * topic stays in view however far the transcript scrolls; it changes once
- * per session, which costs one page rebuild, never a per-token write. */
-export function nativeHeadText(
-  model: BrainstormHudModel,
-  measureTextWidth: (text: string) => number = getTextWidth,
-): string {
-  if (model.screen !== 'brainstorm') return HEAD_TEXT;
-  const topic = model.topic.replace(/\s+/gu, ' ').trim();
-  if (!topic || model.state === 'ready' || model.state === 'topic_capture'
-    || model.state === 'unavailable' || model.state === 'acceptance_ready') return BRAINSTORM_HEAD;
-  const line = `BRAINSTORM · ${topic}`;
-  const bounded = Array.from(line).slice(0, MAX_LINE_UNITS).join('');
-  return measureTextWidth(bounded) <= NATIVE_TERMINAL_GEOMETRY.bodyTextWidth
-    ? bounded
-    : pxTruncate(bounded, NATIVE_TERMINAL_GEOMETRY.bodyTextWidth);
 }
 
 /** The Brainstorm transcript as ONE status message: rows are already
@@ -238,29 +245,6 @@ function scrollHint(older: number, newer: number): string[] {
   ];
 }
 
-/** Brainstorm hints, each one a gesture BrainstormController accepts in
- * that state (handleClick / handleSwipe / handleCancel). */
-export function nativeBrainstormFooter(
-  model: BrainstormHudModel,
-  older: number,
-  newer: number,
-  promptVisible = false,
-): string {
-  if (promptVisible || model.state === 'topic_capture') {
-    return 'Listening · speak your question · double-click: cancel';
-  }
-  let action: string | undefined;
-  if (model.state === 'ready') action = 'tap: ask a question';
-  else if (model.state === 'running') action = 'double-click: stop';
-  else if (model.state === 'unavailable') action = 'fix it on your phone: JOAT › Brainstorm';
-  const parts = [
-    ...(action ? [action] : []),
-    ...scrollHint(older, newer),
-    ...(model.state === 'running' || model.state === 'unavailable' ? [] : ['double-click: back']),
-  ];
-  return oneMeasuredLine(parts.join(' · '), getTextWidth);
-}
-
 /** Every hint corresponds to an action the current EventRouter and
  * BrainstormController can actually accept. Scroll directions are included
  * only when TerminalConversationViewport can move that way. */
@@ -270,7 +254,6 @@ export function nativeTerminalFooter(
   newer: number,
   promptVisible = false,
 ): string {
-  if (model.screen === 'brainstorm') return nativeBrainstormFooter(model, older, newer, promptVisible);
   if (promptVisible) return 'Listening · speak your answer · double-click: cancel';
   if ((model.approvals ?? 0) > 0) {
     return 'tap: approve · swipe: deny · double-click: back';
@@ -289,7 +272,7 @@ export function nativeTerminalFooter(
     ...scrollHint(older, newer),
     'double-click: back',
   ];
-  return oneMeasuredLine(parts.join(' · '), getTextWidth);
+  return oneMeasuredLine(parts.join(' · '), firmwareLineWidth);
 }
 
 function validLayout(layout: RebuildPageContainer, page: NativeTerminalPage): boolean {
@@ -330,7 +313,7 @@ export class NativeTerminalSurface {
   /** Last body acknowledged by the bridge, including a superseded write. It
    * remains the overwrite-length authority so stale tail text is cleared. */
   private physicalBodyText = '';
-  /** The head line on the glass; a different head needs a page rebuild. */
+  /** Last head line acknowledged by the bridge, for the same reason. */
   private physicalHeadText = '';
   /** When the live Brainstorm row started showing the silence marker. */
   private thinkingSince?: number;
@@ -343,7 +326,9 @@ export class NativeTerminalSurface {
     private readonly replacePage: (page: RebuildPageContainer) => Promise<boolean>,
     options: NativeTerminalSurfaceOptions = {},
   ) {
-    this.measureTextWidth = options.measureTextWidth ?? getTextWidth;
+    // A row is one firmware line when the firmware's own measurement
+    // (leading spaces dropped, glyphs rounded one by one) fits the width.
+    this.measureTextWidth = options.measureTextWidth ?? firmwareLineWidth;
   }
 
   async present(
@@ -351,7 +336,7 @@ export class NativeTerminalSurface {
     status?: string,
     isCurrent: () => boolean = () => true,
   ): Promise<boolean> {
-    if ((model.screen !== 'agent_terminal' && model.screen !== 'brainstorm')
+    if ((model.screen !== 'agent_terminal' && !isBrainstorm(model))
       || !current(isCurrent) || this.paused) return false;
     const copy = copyModel(model);
     const key = this.conversationKey(copy);
@@ -360,11 +345,15 @@ export class NativeTerminalSurface {
       && this.desired !== undefined
       && this.conversationKey(this.desired.model) !== key;
     if (entering) this.visit += 1;
+    // The head line is the status header; a revision presented without one
+    // keeps the line it has rather than reverting to the bare page name.
+    const retainedStatus = !entering ? this.desired?.status : undefined;
+    const nextStatus = status?.trim() ? status.replace(/\s+/gu, ' ').trim() : retainedStatus;
     const desired: DesiredTerminal = {
       visit: this.visit,
       token: ++this.nextToken,
       model: copy,
-      ...(status?.trim() ? { status: status.replace(/\s+/gu, ' ').trim() } : {}),
+      ...(nextStatus ? { status: nextStatus } : {}),
       isCurrent,
     };
     this.desired = desired;
@@ -408,6 +397,19 @@ export class NativeTerminalSurface {
     await this.ensureDrain();
     return this.prompt === candidate && this.renderedPromptId === id
       && this.lastPaintSucceeded && current(isCurrent);
+  }
+
+  /** The head line is the page's status header (clock · page · mic ·
+   * battery). A changed line is one head upgrade in the same serialized
+   * lane as the body, so the clock keeps moving on a long terminal visit. */
+  async setStatus(status: string): Promise<boolean> {
+    if (!this.canInteract() || !this.desired) return false;
+    const clean = status.replace(/\s+/gu, ' ').trim();
+    if (!clean || clean === this.desired.status) return true;
+    this.desired = { ...this.desired, status: clean, token: ++this.nextToken };
+    this.dirty = true;
+    await this.ensureDrain();
+    return this.desired?.status === clean && this.lastPaintSucceeded;
   }
 
   async dismissPrompt(id: string): Promise<boolean> {
@@ -540,9 +542,7 @@ export class NativeTerminalSurface {
   }
 
   private conversationKey(model: BrainstormHudModel): string {
-    if (model.screen === 'brainstorm') {
-      return `brainstorm:${model.topic.replace(/\s+/gu, ' ').trim()}`;
-    }
+    if (isBrainstorm(model)) return `brainstorm:${model.topic.replace(/\s+/gu, ' ').trim()}`;
     return model.conversationId?.trim() || `agent:${focusName(model.topic)}`;
   }
 
@@ -565,34 +565,34 @@ export class NativeTerminalSurface {
       desired.model.historyTruncated,
       `${NATIVE_TERMINAL_GEOMETRY.bodyTextWidth}|${MAX_LINE_UNITS}`,
     );
-    const brainstorm = desired.model.screen === 'brainstorm';
-    const empty = brainstorm
-      ? (desired.model.activity.trim() ? [] : ['Tap, then speak the question for Codex and Claude.'])
-      : ['Tap to speak to this agent.'];
-    const visible = page.lines.length > 0 ? page.lines : empty;
+    const brainstorm = isBrainstorm(desired.model);
+    const visible = page.lines.length > 0 ? page.lines
+      : [brainstorm ? 'Say “JOAT, brainstorm …” or tap to speak.' : 'Tap to speak to this agent.'];
     const bodyRows = [...visible, ...question];
     while (bodyRows.length < contentRows) bodyRows.push(' ');
+    // The page's head line IS the status header (clock · page · mic ·
+    // battery, composed by the presenter), so the body's state row no
+    // longer repeats it. A Brainstorm seat that has not spoken yet shows
+    // how long it has been thinking (one in-place upgrade a second).
     const elapsed = brainstorm && this.thinkingSince !== undefined
       ? `${Math.max(0, Math.floor((Date.now() - this.thinkingSince) / 1000))}s`
       : undefined;
-    const status = oneMeasuredLine((brainstorm
-      ? [
-        stateName(desired.model),
-        desired.model.activeSpeaker?.replace(/\s+/gu, ' ').trim(),
-        elapsed,
-      ]
-      : [
-        `${focusName(desired.model.topic)} > ${stateName(desired.model)}`,
-        desired.status,
-      ]).filter(Boolean).join(' · '), this.measureTextWidth);
+    const status = oneMeasuredLine(
+      brainstorm
+        ? [brainstormStatusRow(desired.model), elapsed].filter(Boolean).join(' · ')
+        : `${focusName(desired.model.topic)} > ${stateName(desired.model)}`,
+      this.measureTextWidth,
+    );
     const footer = oneMeasuredLine(
-      nativeTerminalFooter(desired.model, page.older, page.newer, prompt !== undefined),
+      brainstorm && prompt === undefined
+        ? brainstormFooter(desired.model, page.newer)
+        : nativeTerminalFooter(desired.model, page.older, page.newer, prompt !== undefined),
       this.measureTextWidth,
     );
     const bodyText = [status, ...bodyRows.slice(0, contentRows), footer].join('\n');
     if (bodyText.length > MAX_UPGRADE_UNITS) return;
     return {
-      headText: nativeHeadText(desired.model, this.measureTextWidth),
+      headText: desired.status ?? headTextFor(desired.model),
       bodyText,
       conversationKey: this.conversationKey(desired.model),
       older: page.older,
@@ -627,12 +627,6 @@ export class NativeTerminalSurface {
         continue;
       }
       const snapshot: RenderSnapshot = { desired, prompt, page };
-      // The head is fixed per page; a new Brainstorm question changes it,
-      // which is the one case a mounted page is rebuilt rather than upgraded.
-      if (this.pageMounted && page.headText !== this.physicalHeadText) {
-        this.pageMounted = false;
-        this.physicalBodyText = '';
-      }
       let painted = this.pageMounted
         ? await this.upgradeBody(snapshot)
         : await this.rebuild(snapshot);
@@ -680,6 +674,8 @@ export class NativeTerminalSurface {
 
   private async upgradeBody(snapshot: RenderSnapshot): Promise<boolean> {
     if (!this.snapshotCurrent(snapshot)) return false;
+    if (!await this.upgradeHead(snapshot)) return false;
+    if (!this.snapshotCurrent(snapshot)) return false;
     const previous = this.physicalBodyText;
     if (previous === snapshot.page.bodyText) return true;
     try {
@@ -694,6 +690,26 @@ export class NativeTerminalSurface {
       );
       if (accepted && this.active && this.desired?.visit === snapshot.desired.visit) {
         this.physicalBodyText = snapshot.page.bodyText;
+      }
+      return accepted;
+    } catch { return false; }
+  }
+
+  private async upgradeHead(snapshot: RenderSnapshot): Promise<boolean> {
+    const previous = this.physicalHeadText;
+    if (previous === snapshot.page.headText) return true;
+    try {
+      const accepted = await this.client.require().textContainerUpgrade(
+        new TextContainerUpgrade({
+          containerID: NativeTerminalContainer.Head.id,
+          containerName: NativeTerminalContainer.Head.name,
+          contentOffset: 0,
+          contentLength: Math.max(previous.length, snapshot.page.headText.length),
+          content: snapshot.page.headText || ' ',
+        }),
+      );
+      if (accepted && this.active && this.desired?.visit === snapshot.desired.visit) {
+        this.physicalHeadText = snapshot.page.headText;
       }
       return accepted;
     } catch { return false; }

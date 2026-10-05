@@ -270,18 +270,19 @@ class HudSink:
     THINKING_MARKER = "Thinking…"
     """What a seat shows while it has produced nothing yet.
 
-    HudCanvasRenderer keys its local elapsed counter off this exact
-    string (`endsWith('Thinking…')`), so it is a contract across two
-    repositories, not a label. test_sinks pins both spellings together;
-    without that, renaming it here would stop the clock on the glasses
-    with every test in both repositories still green."""
+    The glass shows it as written: the Agent Terminal and Brainstorm are
+    the firmware's own text page (`NativeTerminalSurface` in the plugin),
+    which keeps no spelling of its own. The raster transcript used to key
+    a local elapsed counter off this exact string; test_sinks pins that
+    the plugin does not interpret the word again without re-pinning both
+    spellings together."""
 
-    # The silent-wait counter is animated ON DEVICE now. It used to be
-    # computed here and re-shipped as a whole frame over BLE every three
-    # seconds — the wearer noticed: "it's only changing every three
-    # seconds … we're doing it the difficult way." The engine paints the
-    # "Thinking…" marker once; the plugin appends live elapsed seconds
-    # locally — smooth at one second, free on the link.
+    # The engine paints the marker once per turn; a silent turn costs the
+    # link one frame, not one every three seconds (the wearer noticed:
+    # "it's only changing every three seconds … we're doing it the
+    # difficult way"). The native page shows no elapsed counter beside it
+    # — an in-place upgrade of the terminal's status row once a second
+    # would be the native version (recorded in the Changelog, 2026-10-05).
 
     async def turn(self, label: str) -> None:
         self._retire_live_turn()

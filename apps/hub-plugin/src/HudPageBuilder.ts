@@ -10,7 +10,8 @@ import {
   MenuItemProperty,
 } from '@evenrealities/even_hub_sdk';
 import { pxTruncate } from '@evenrealities/pretext';
-import { LIST_ITEM_MAX_BYTES, TEXT_CONTAINER_MAX_BYTES, fitListItems, fitUtf8 } from './FirmwareLimits';
+import { TEXT_CONTAINER_MAX_BYTES, fitUtf8 } from './FirmwareLimits';
+import { FIRMWARE_LINE_HEIGHT, containerLineCapacity, fitLines } from './FirmwareText';
 import {
   CANVAS,
   CAPABILITIES,
@@ -31,7 +32,7 @@ import {
  * 2026-09-05 audit found the previous 32px strips could not render a single
  * line, and the confirmation body clipped its own 120-char maximum.
  */
-const FIRMWARE_LINE = 27;
+const FIRMWARE_LINE = FIRMWARE_LINE_HEIGHT;
 const LIST_ROW = 40;
 const REGION_PAD = 4;
 
@@ -51,13 +52,82 @@ export const ASSISTANT_ANSWER_GEOMETRY = {
   /** Inner box handed to `paginate` — padding already subtracted. */
   inner: { width: CANVAS.width - 2 * REGION_PAD, height: 210 - 2 * REGION_PAD },
 } as const;
+/** One firmware line inside the region padding: the header of every
+ * firmware page (status container) and where the page below it starts. */
+export const NATIVE_HEADER_HEIGHT = FIRMWARE_LINE + 2 * REGION_PAD; // 35
+/** Whole 40px rows between the header and the hint line. */
+export const NATIVE_LIST_ROWS = 5;
+
+/**
+ * Fit the header to its line by shortening the page's WORD, never its tail:
+ * a plain pixel cut would take the microphone and battery glyphs off the
+ * glass first, and those are the facts the line exists to show. The word is
+ * the second " · " segment ("9:41 · MESSAGES · CONVERSATION · ● · ▇" has
+ * the title's own separator inside it, so the cut walks the whole middle).
+ */
+export function fitHeader(line: string, width = REGION_TEXT_WIDTH): string {
+  const compact = line.replace(/\s+/g, ' ').trim();
+  if (pxTruncate(compact, width) === compact) return compact;
+  const parts = compact.split(' · ');
+  if (parts.length < 3) return pxTruncate(compact, width);
+  const head = parts[0]!;
+  // Everything between the clock and the trailing glyphs is the word.
+  const tailCount = parts.slice(1).filter((part) => /^[●○]$|^[▁▂▃▄▅▆▇█]\+?( \d{1,3}%)?$/.test(part)).length;
+  const tail = tailCount > 0 ? parts.slice(parts.length - tailCount) : [];
+  let word = parts.slice(1, parts.length - tail.length).join(' · ');
+  while (word.length > 1) {
+    word = `${word.slice(0, -2).trimEnd()}…`;
+    const candidate = [head, word, ...tail].join(' · ');
+    if (pxTruncate(candidate, width) === candidate) return candidate;
+    if (word.length <= 2) break;
+    word = word.slice(0, -1);
+  }
+  return pxTruncate([head, ...tail].join(' · '), width);
+}
 /** Inner text width of a full-width region (576 − 2×REGION_PAD). */
 const REGION_TEXT_WIDTH = CANVAS.width - 2 * REGION_PAD;
 /** A list row's text width: container pad (8) + firmware row pad (12/side). */
 const LIST_ROW_TEXT_WIDTH = CANVAS.width - 2 * 8 - 2 * 12;
+/**
+ * The host's real per-row limit, measured in the official simulator on
+ * 2026-10-05: a row of 64 UTF-8 bytes or more makes `rebuildPageContainer`
+ * return false for the WHOLE page (a 64-byte buffer with its terminator), and
+ * the SDK validates nothing. The skill's "64 chars" is 63 bytes, and a
+ * middle dot is two of them. A Messages thread row at the Mac's 64-unit cap
+ * reproduced it: the thread never appeared and the menu fell back Home.
+ */
+export const LIST_ROW_MAX_UTF8_BYTES = 63;
+
+/** The raster prompt's footer, kept word for word on the text page. */
+export const PROMPT_QUESTION_HINT = 'speak your answer · double-click: cancel';
+
+/** Cut on a code-point boundary so the row stays under the host's byte cap. */
+export function clampUtf8Bytes(text: string, maxBytes: number): string {
+  let bytes = 0;
+  let out = '';
+  for (const point of text) {
+    const size = new TextEncoder().encode(point).length;
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    out += point;
+  }
+  return out;
+}
 
 /** Native conversation geometry. The card is anchored at the same optical
  * bottom while its top moves upward through bounded line-count stages. */
+/** The firmware answer page: one status line, one tall body, one hint
+ * line. The body holds seven firmware lines; longer answers page. */
+/** Firmware lines the confirmation page's body holds (its main is 144 px). */
+export const CONFIRMATION_BODY_LINES = 5;
+
+export const ASSISTANT_ANSWER_PAGE = {
+  bodyY: NATIVE_HEADER_HEIGHT,
+  bodyHeight: 253 - NATIVE_HEADER_HEIGHT, // 218: down to the hint line
+  lineCapacity: containerLineCapacity(253 - NATIVE_HEADER_HEIGHT, REGION_PAD), // 7, measured as the firmware wraps
+  textWidth: REGION_TEXT_WIDTH,
+} as const;
+
 export const ASSISTANT_CONVERSATION_GEOMETRY = {
   cardLeft: 36,
   cardWidth: 504,
@@ -116,20 +186,24 @@ export class HudPageBuilder {
     return new HudPageBuilder(enabled);
   }
 
-  private statusBar(): TextContainerProperty {
+  /** The one-line header of every firmware page: clock · page · mic ·
+   * battery (HudStatus.nativeStatusLine), composed by the presenter. It
+   * replaced a status line in words plus a separate title line, so each
+   * page below it starts 42 px higher than it did — a fifth list row. */
+  private statusBar(content = ''): TextContainerProperty {
     return new TextContainerProperty({
       containerID: ContainerId.StatusBar,
       containerName: 'status',
       xPosition: 0,
       yPosition: 0,
       width: CANVAS.width,
-      height: FIRMWARE_LINE + 12, // 39: one firmware line inside 6px padding
-      paddingLength: 6,
+      height: NATIVE_HEADER_HEIGHT, // 35: one firmware line inside 4px padding
+      paddingLength: REGION_PAD,
       borderWidth: 0,
       isEventCapture: 0,
       zOrderIndex: 1,
       textColor: 2,
-      content: '',
+      content: fitHeader(content),
     });
   }
 
@@ -151,7 +225,7 @@ export class HudPageBuilder {
       containerID: ContainerId.Main,
       containerName: 'main',
       xPosition: geometry.x ?? 0,
-      yPosition: geometry.y ?? 39,
+      yPosition: geometry.y ?? NATIVE_HEADER_HEIGHT,
       width: geometry.width ?? CANVAS.width,
       height,
       paddingLength: REGION_PAD,
@@ -196,8 +270,8 @@ export class HudPageBuilder {
    * erased the reply. Regions also let the PLUGIN paint chrome (status,
    * hints) with no Mac attached, instead of a frozen screen.
    *
-   *   0   status  39   plugin: clock, mic, battery   (1 line)
-   *   39  main   117   Mac: reply / card / debate  <-- capture (4 lines)
+   *   0   status  35   plugin: clock, mic, battery   (1 line)
+   *   35  main   121   Mac: reply / card / debate  <-- capture (4 lines)
    *   156 context 62   Mac: what the wearer last said        (2 lines)
    *   218 tray    35   Mac: what is waiting                  (1 line)
    *   253 hint    35   plugin: gesture hints, blank at rest  (1 line)
@@ -205,7 +279,7 @@ export class HudPageBuilder {
   private dashboard(): TextContainerProperty[] {
     return [
       this.statusBar(),
-      this.main(117),
+      this.main(156 - NATIVE_HEADER_HEIGHT),
       this.region(ContainerId.Context, 'context', 156, 62, 3, 3),
       this.region(ContainerId.Tray, 'tray', 218, 35, 4, 2),
       this.region(ContainerId.Hint, 'hint', 253, 35, 5, 1),
@@ -220,7 +294,8 @@ export class HudPageBuilder {
    */
   static readonly MENU_REPEAT = 1;
   static readonly MENU_MUTE = 2;
-  /** Universal recovery: tap, then long-press, then choose Refresh. */
+  /** Retired row id, still answered for a host showing a cached menu: it
+   * opens the Settings guidance (connection settings live on the phone). */
   static readonly MENU_REFRESH = 3;
   static readonly MENU_SETTINGS = 4;
   /** A non-destructive escape from any visual or text focus surface. */
@@ -639,33 +714,34 @@ export class HudPageBuilder {
   }
 
   /**
-   * The full-width firmware list page: status, one-line title, four visible
-   * 40px rows (the firmware scrolls the rest), one-line hint. Text is
-   * truncated by MEASURED pixels (@evenrealities/pretext), not characters —
-   * the audit showed a 64-char row spans 705-1024px against a 536px row.
+   * The full-width firmware list page: one header line (clock · page name ·
+   * mic · battery), FIVE visible 40px rows (the firmware scrolls the rest),
+   * one-line hint. Until 2026-10-05 the page spent two lines up top — a
+   * status line in words and a separate title line — and showed four rows;
+   * folding the name into the header is where the fifth row comes from.
+   * Text is truncated by MEASURED pixels (@evenrealities/pretext), not
+   * characters — the audit showed a 64-char row spans 705-1024px against a
+   * 536px row.
    */
   listLayout(
     items: string[],
-    chrome: { title?: string; hint?: string; nativeReaderPage?: boolean } = {},
+    chrome: { title?: string; hint?: string; status?: string } = {},
   ): RebuildPageContainer {
-    if (chrome.nativeReaderPage) return this.readerLayout(items, chrome);
-    // Firmware caps: 20 rows, 63 UTF-8 BYTES per row (FirmwareLimits). The
-    // old 64-CHAR pre-cut let a 67-byte headline through and the whole page
-    // was rejected — News expanded to nothing (2026-09-22).
-    const capped = fitListItems(items)
-      .map((s) => fitUtf8(pxTruncate(s, LIST_ROW_TEXT_WIDTH), LIST_ITEM_MAX_BYTES));
-    const title = pxTruncate((chrome.title?.trim() || 'JOAT').slice(0, 46), REGION_TEXT_WIDTH);
+    const capped = items.slice(0, 20)
+      .map((s) => pxTruncate(clampUtf8Bytes(s, LIST_ROW_MAX_UTF8_BYTES), LIST_ROW_TEXT_WIDTH));
+    // The presenter composes the header with the page's name in it; a bare
+    // title here is the no-status fallback, so the page is never nameless.
+    const header = (chrome.status?.trim() || chrome.title?.trim() || 'JOAT').slice(0, 64);
     // 96 mirrors HudPresenter.MAX_FOCUS_HINT_CHARS — the pixel truncation
     // below is the real bound; a tighter char pre-cut here silently dropped
     // half the presenter's copy (2026-09-05 audit).
     const hint = pxTruncate(GesturePolicy.formatHint(chrome.hint?.trim() || 'double-click: overview').slice(0, 96), REGION_TEXT_WIDTH);
     return new RebuildPageContainer({
-      containerTotalNum: 4,
+      containerTotalNum: 3,
       ...this.menuConfig(),
-      // Capture moves OFF main and ONTO the list — see main()'s note.
+      // Capture is ON the list — see main()'s note.
       textObject: [
-        this.statusBar(),
-        this.main(FIRMWARE_LINE + 2 * REGION_PAD + 3, 0, 4, title), // 38: one line
+        this.statusBar(header),
         this.region(ContainerId.Hint, 'hint', 253, 35, 4, 1, hint),
       ],
       listObject: [
@@ -673,9 +749,9 @@ export class HudPageBuilder {
           containerID: ContainerId.List,
           containerName: 'list',
           xPosition: 0,
-          yPosition: 77,
+          yPosition: NATIVE_HEADER_HEIGHT,
           width: CANVAS.width,
-          height: 4 * LIST_ROW + 16, // 176: four whole rows inside 8px padding
+          height: NATIVE_LIST_ROWS * LIST_ROW + 16, // 216: five whole rows inside 8px padding
           paddingLength: 8,
           // The capturing container for this layout: firmware scrolls the
           // highlight on swipe and reports the pick as `listEvent`.
@@ -692,88 +768,63 @@ export class HudPageBuilder {
     });
   }
 
-  /**
-   * An opened article or note, on the firmware's own text containers —
-   * the same shape as the reply page (Even's text-heavy pattern): status,
-   * one head line (page position · source), a body that captures input so
-   * the firmware scrolls its overflow and reports SCROLL_TOP/BOTTOM at the
-   * ends (those relay to the Mac, which turns the page), and one hint line.
-   *
-   * The Mac sends each page as rows whose concatenation is the exact
-   * source slice (reader.py: "concatenation is lossless"), so the rows are
-   * rejoined here and the firmware wraps them for its own face — re-sending
-   * the Mac's 62-column mono rows would wrap twice and read ragged.
-   *
-   * This replaces the four-tile canvas reader, the last image page in the
-   * News/Search/Notifications flow (open cost 1 rebuild + 6 tile uploads,
-   * measured 2026-09-22).
-   */
-  readerLayout(
-    items: string[],
-    chrome: { title?: string; hint?: string } = {},
+  /** A JOAT answer as Even's own text page: a command result, an error, a
+   * capability answer. One rebuild in, in-place upgrades for paging and
+   * streaming, and the four image containers return on dismissal. */
+  assistantAnswerLayout(
+    body: string,
+    chrome: { status?: string; hint?: string } = {},
   ): RebuildPageContainer {
-    const [label = '', ...rows] = items;
-    const tab = (chrome.title?.trim() || 'JOAT').split(' · ')[0] ?? 'JOAT';
-    const head = pxTruncate(`${tab} · ${label}`.trim(), REGION_TEXT_WIDTH);
-    const body = rows.join('').trim() || ' ';
-    const hint = pxTruncate(GesturePolicy.formatHint(chrome.hint?.trim() || 'double-click: back').slice(0, 96), REGION_TEXT_WIDTH);
-    const HEAD_Y = FIRMWARE_LINE + 12;               // 39: below the status bar
-    const HEAD_H = FIRMWARE_LINE + 2 * REGION_PAD;   // 35: one line
-    const HINT_H = FIRMWARE_LINE + 2 * REGION_PAD;   // 35: one line
-    const BODY_Y = HEAD_Y + HEAD_H;                  // 74
-    const BODY_H = 6 * FIRMWARE_LINE + 2 * REGION_PAD; // 170: six whole lines
-    return new RebuildPageContainer({
-      containerTotalNum: 4,
-      ...this.menuConfig(),
-      textObject: [
-        this.statusBar(),
-        this.region(ContainerId.List, 'reader-head', HEAD_Y, HEAD_H, 3, 2, head),
-        this.main(BODY_H, 1, 4, body, { y: BODY_Y }),
-        this.region(ContainerId.Hint, 'hint', CANVAS.height - HINT_H, HINT_H, 4, 1, hint),
-      ],
-    });
-  }
-
-  /**
-   * A reply, on the firmware's own text containers.
-   *
-   * Three containers, sized so every inner box is a whole number of 27px
-   * firmware lines: the spine, a seven-line reading area, and one footer
-   * line that carries the page position. Turning a page rewrites the body
-   * and the footer with `textContainerUpgrade` — two in-place writes, no
-   * rebuild, no image pacing floor. The body captures input so a tap
-   * dismisses and a swipe pages without the wearer leaving the answer.
-   */
-  assistantAnswerLayout(body: string, footer: string): RebuildPageContainer {
     return new RebuildPageContainer({
       containerTotalNum: 3,
       ...this.menuConfig(),
       textObject: [
-        this.statusBar(),
-        this.main(
-          ASSISTANT_ANSWER_GEOMETRY.bodyHeight, 1, 4, body,
-          { y: ASSISTANT_ANSWER_GEOMETRY.bodyY },
-        ),
+        this.statusBar(chrome.status ?? ''),
+        this.main(ASSISTANT_ANSWER_PAGE.bodyHeight, 1, 4, (body || ' ').slice(0, 1000)),
         this.region(
-          ContainerId.Hint, 'answer-pager',
-          ASSISTANT_ANSWER_GEOMETRY.footerY, ASSISTANT_ANSWER_GEOMETRY.footerHeight,
-          3, 2, footer,
+          ContainerId.Hint, 'hint', 253, 35, 3, 1,
+          pxTruncate((chrome.hint ?? 'tap: dismiss').slice(0, 96), REGION_TEXT_WIDTH),
         ),
       ],
     });
   }
 
+  /** A Mac-paged reader (a Messages message, a note) as Even's own text
+   * page: the same three containers as an answer, so the presenter can page
+   * it in place with `textContainerUpgrade`. */
+  textPageLayout(
+    body: string,
+    chrome: { status?: string; hint?: string } = {},
+  ): RebuildPageContainer {
+    return this.assistantAnswerLayout(body, chrome);
+  }
+
+  /** One complete application question ("What should I say?") as a text
+   * page. The wearer answers by voice, so the only chrome is the cancel. */
+  promptQuestionLayout(question: string, status?: string): RebuildPageContainer {
+    return this.assistantAnswerLayout(question, {
+      status, hint: PROMPT_QUESTION_HINT,
+    });
+  }
+
   /** Dedicated decision surface: one bright question, one horizontal CTA row.
-   * The body holds FIVE firmware lines because its own 120-char maximum
-   * measures five ("CONFIRM ACTION" + blank + up to three wrapped lines). */
-  confirmationLayout(prompt: string): RebuildPageContainer {
-    const safePrompt = (prompt.trim() || 'Confirm requested action.').slice(0, 120);
+   * The body holds CONFIRMATION_BODY_LINES firmware lines: "CONFIRM ACTION",
+   * a blank, then the prompt on the three that remain, fitted by
+   * `measureTextWrap` (whole words, an ellipsis when cut) rather than by a
+   * character count — a prompt of wide glyphs never overflows, one of
+   * narrow glyphs is not cut short. */
+  confirmationLayout(prompt: string, status?: string): RebuildPageContainer {
+    const question = fitLines(
+      prompt.trim() || 'Confirm requested action.', REGION_TEXT_WIDTH, CONFIRMATION_BODY_LINES - 2,
+    );
     return new RebuildPageContainer({
       containerTotalNum: 5,
       ...this.menuConfig(),
       textObject: [
-        this.statusBar(),
-        this.main(5 * FIRMWARE_LINE + 2 * REGION_PAD + 1, 1, 4, `CONFIRM ACTION\n\n${safePrompt}`), // 144
+        // Over the visual HUD this page is firmware-owned and the presenter
+        // cannot upgrade its containers, so the live top line rides along.
+        this.statusBar(status ?? ''),
+        this.main(CONFIRMATION_BODY_LINES * FIRMWARE_LINE + 2 * REGION_PAD + 1, 1, 4, `CONFIRM ACTION\n\n${question}`), // 144
         this.region(
           ContainerId.Context, 'context', 183, 35, 3, 3,
           'TAP · confirm   SWIPE · cancel',

@@ -49,6 +49,10 @@ def test_empty_load_has_no_write_and_checkpoint_is_immutable(api: Any, tmp_path:
     {"phase": "idle", "completed": 0, "running": False, "ends_at_unix_ms": None},
     {"remaining_ms": 0, "ends_at_unix_ms": 99_000},
     {"remaining_ms": 86_400_000, "length_ms": 86_400_000},
+    {"focus_ms": 1_800_000, "short_break_ms": 600_000, "long_break_ms": 1_200_000},
+    {"phase": "idle", "completed": 0, "running": False, "ends_at_unix_ms": None,
+     "remaining_ms": 900_000, "length_ms": 900_000, "focus_ms": 900_000},
+    {"focus_ms": 1, "short_break_ms": 86_400_000, "long_break_ms": 86_400_000},
 ])
 def test_checkpoint_survives_store_reconstruction_exactly(
     api: Any, tmp_path: Path, changes: dict[str, Any],
@@ -91,8 +95,9 @@ def test_save_uses_existing_owned_transaction_and_rolls_back_failure(
 
         monkeypatch.setattr(db, "transaction", rejected_commit)
         with pytest.raises(sqlite3.OperationalError, match="synthetic commit failure"):
-            repository.save(checkpoint(api, running=False, ends_at_unix_ms=None))
-        assert repository.load() == prior
+            repository.save(checkpoint(api, running=False, ends_at_unix_ms=None, focus_ms=1_800_000))
+        assert repository.load() == prior, "checkpoint and lengths roll back together"
+        assert db.execute("SELECT focus_ms FROM pomodoro_lengths").fetchone() == (60_000 * 25,)
 
 
 def test_repository_never_opens_an_additional_connection(
@@ -124,6 +129,11 @@ def test_repository_never_opens_an_additional_connection(
     {"saved_at_unix_ms": 100_000.0}, {"saved_at_unix_ms": float("inf")},
     {"saved_at_unix_ms": float("nan")}, {"saved_at_unix_ms": 2**63},
     {"ends_at_unix_ms": 2**63}, {"length_ms": 2**63}, {"length_ms": 86_400_001},
+    {"focus_ms": 0}, {"focus_ms": -1}, {"focus_ms": True}, {"focus_ms": 86_400_001},
+    {"focus_ms": 1_500_000.0}, {"focus_ms": 2**63}, {"focus_ms": None},
+    {"short_break_ms": 0}, {"short_break_ms": 86_400_001}, {"short_break_ms": 1.5},
+    {"short_break_ms": False}, {"long_break_ms": 0}, {"long_break_ms": 86_400_001},
+    {"long_break_ms": "15"}, {"long_break_ms": float("nan")},
 ])
 def test_invalid_save_preserves_previous_checkpoint(
     api: Any, tmp_path: Path, changes: dict[str, Any],
@@ -174,4 +184,71 @@ def test_database_constraints_reject_invalid_direct_writes(api: Any, tmp_path: P
         ):
             with pytest.raises(sqlite3.IntegrityError):
                 db.execute(f"UPDATE pomodoro_checkpoint SET {assignment}")
+        assert repository.load() == value
+
+
+def test_lengths_default_to_the_classic_cycle_and_a_pre_lengths_database_loads(
+    api: Any, tmp_path: Path,
+) -> None:
+    value = checkpoint(api)
+    assert (value.focus_ms, value.short_break_ms, value.long_break_ms) == (
+        api.DEFAULT_FOCUS_MS, api.DEFAULT_SHORT_BREAK_MS, api.DEFAULT_LONG_BREAK_MS,
+    ) == (1_500_000, 300_000, 900_000)
+    # Positional construction from before the lengths existed still works.
+    assert api.PomodoroCheckpoint("focus", True, 50, 50, 0, 999_000, 998_950) == checkpoint(
+        api, remaining_ms=50, length_ms=50, ends_at_unix_ms=999_000, saved_at_unix_ms=998_950,
+    )
+    with DurableStore(tmp_path / "timer.sqlite3") as db:
+        repository = api.PomodoroStore(db)
+        configured = checkpoint(api, focus_ms=1_800_000, short_break_ms=600_000, long_break_ms=1_200_000)
+        repository.save(configured)
+        assert repository.load() == configured
+        # A database migrated from before migration 13 has a checkpoint row
+        # and no lengths row: the checkpoint loads with the classic cycle.
+        db.execute("DELETE FROM pomodoro_lengths")
+        before = db.execute("SELECT total_changes()").fetchone()
+        assert repository.load() == checkpoint(api)
+        assert db.execute("SELECT total_changes()").fetchone() == before
+        assert db.execute("SELECT count(*) FROM pomodoro_lengths").fetchone() == (0,)
+        # The next save writes both rows again.
+        repository.save(configured)
+        assert repository.load() == configured
+        assert db.execute("SELECT count(*) FROM pomodoro_lengths").fetchone() == (1,)
+
+
+@pytest.mark.parametrize(("column", "value"), [
+    ("focus_ms", 0), ("short_break_ms", 86_400_001), ("long_break_ms", -1), ("id", 2),
+])
+def test_invalid_stored_lengths_raise_without_resetting_or_rewriting(
+    api: Any, tmp_path: Path, column: str, value: Any,
+) -> None:
+    with DurableStore(tmp_path / "timer.sqlite3") as db:
+        repository = api.PomodoroStore(db)
+        repository.save(checkpoint(api))
+        db.execute("PRAGMA ignore_check_constraints=ON")
+        try:
+            # Column names are the fixed test cases above, never external data.
+            db.execute(f"UPDATE pomodoro_lengths SET {column}=?", (value,))
+        finally:
+            db.execute("PRAGMA ignore_check_constraints=OFF")
+        before = (db.execute("SELECT * FROM pomodoro_checkpoint").fetchone(),
+                  db.execute("SELECT * FROM pomodoro_lengths").fetchone())
+        with pytest.raises(api.PomodoroStateError):
+            repository.load()
+        assert (db.execute("SELECT * FROM pomodoro_checkpoint").fetchone(),
+                db.execute("SELECT * FROM pomodoro_lengths").fetchone()) == before
+
+
+def test_database_constraints_reject_invalid_direct_length_writes(api: Any, tmp_path: Path) -> None:
+    with DurableStore(tmp_path / "timer.sqlite3") as db:
+        value = checkpoint(api, focus_ms=1_800_000)
+        repository = api.PomodoroStore(db)
+        repository.save(value)
+        for assignment in (
+            "focus_ms=0", "focus_ms=86400001", "short_break_ms=0", "long_break_ms=86400001", "id=2",
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                db.execute(f"UPDATE pomodoro_lengths SET {assignment}")
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("INSERT INTO pomodoro_lengths VALUES (2, 1, 1, 1)")
         assert repository.load() == value

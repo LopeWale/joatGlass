@@ -624,3 +624,35 @@ async def test_the_switch_says_so_when_no_seat_can_speak() -> None:
 
 def test_failed_notice_is_generic_text() -> None:
     assert "again" in FAILED_NOTICE
+
+
+class TestCodexDiscovery:
+    """A brain started by launchd has a minimal PATH; `codex` ships inside the
+    ChatGPT app bundle with a user-level symlink. PATH-only discovery read a
+    working CLI as "codex CLI missing" on the glass."""
+
+    # Discovery lives in cli_locate (re-exported by cli_reply_engine); the
+    # install directories and app roots are parameters, so the test does not
+    # depend on what this Mac has installed.
+    def test_falls_back_to_the_user_symlink_when_not_on_path(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from joat.agents import cli_locate, cli_reply_engine
+
+        monkeypatch.setattr(cli_locate.shutil, "which", lambda _name: None)
+        monkeypatch.delenv(cli_locate.CODEX_ENV_OVERRIDE, raising=False)
+        user_bin = tmp_path / ".local" / "bin"
+        assert cli_reply_engine.find_codex_binary(app_roots=(), extra_dirs=(user_bin,)) is None
+        binary = user_bin / "codex"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        assert cli_reply_engine.find_codex_binary(app_roots=(), extra_dirs=(user_bin,)) == str(binary)
+
+    def test_path_still_wins(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from joat.agents import cli_locate, cli_reply_engine
+
+        on_path = tmp_path / "codex"
+        on_path.write_text("#!/bin/sh\n")
+        on_path.chmod(0o755)
+        monkeypatch.setattr(cli_locate.shutil, "which", lambda _name: str(on_path))
+        monkeypatch.delenv(cli_locate.CODEX_ENV_OVERRIDE, raising=False)
+        assert cli_reply_engine.find_codex_binary() == str(on_path)

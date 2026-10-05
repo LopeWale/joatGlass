@@ -5,12 +5,7 @@ import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
 import type { AssistantConversationSnapshot } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
-import { setNativeOverviewForTest } from './HudPresenter';
 
-// Pins the CANVAS overview (the VITE_NATIVE_OVERVIEW=0 fallback): leaving a
-// native conversation now lands on the text overview by default, which is
-// covered in HudPresenter.textOverview.test.ts.
-setNativeOverviewForTest(false);
 
 
 function snapshot(revision: number, answer?: string): AssistantConversationSnapshot {

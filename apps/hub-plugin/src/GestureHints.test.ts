@@ -3,9 +3,6 @@ import { GesturePolicy } from './GesturePolicy';
 import {
   NOTIFICATION_DISMISS_HINT,
   PANEL_OVERVIEW_HINT,
-  ASSISTANT_OVERLAY_DISMISS_HINT,
-  ASSISTANT_OVERLAY_PAGE_HINT,
-  brainstormActionHint,
 } from './HudCanvasRenderer';
 
 /**
@@ -63,8 +60,6 @@ describe('wearer-facing hints never name a device or a side', () => {
     for (const hint of [
       NOTIFICATION_DISMISS_HINT,
       PANEL_OVERVIEW_HINT,
-      ASSISTANT_OVERLAY_DISMISS_HINT,
-      ASSISTANT_OVERLAY_PAGE_HINT,
       'left x2: back',
       'tap: retry · left x2: back',
       'left x2 overview',
@@ -75,19 +70,4 @@ describe('wearer-facing hints never name a device or a side', () => {
     }
   });
 
-  it('every brainstorm action hint is already device-neutral', () => {
-    const screens = ['brainstorm', 'agent_terminal'] as const;
-    const states = [
-      'running', 'acceptance_ready', 'topic_capture', 'ready', 'idle',
-    ] as const;
-    for (const screen of screens) {
-      for (const state of states) {
-        const hint = brainstormActionHint({
-          screen, state, noToolsChecked: false, acceptanceArmed: false,
-          approvals: [], inputRequired: false, taskRecovery: undefined,
-        } as unknown as Parameters<typeof brainstormActionHint>[0]);
-        expect(GesturePolicy.formatHint(hint)).not.toMatch(NAMES_HARDWARE);
-      }
-    }
-  });
 });

@@ -68,17 +68,34 @@ function replayHarness(mode: NavigationMode) {
         events.push(`tile:${update.containerID ?? -1}`);
         return ImageRawDataUpdateResult.success;
       },
-      rebuildPageContainer: async () => true,
+      // A page with image containers is the four-tile map page; a page of
+      // text containers is a frame before the live map (confirm the place,
+      // a warning, arrival), Even's own text page.
+      rebuildPageContainer: async (page: { imageObject?: unknown[] }) => {
+        events.push(page.imageObject?.length ? 'page:image' : 'page:text');
+        return true;
+      },
+      // A cursor move or a new step on the same text page upgrades it in place.
+      textContainerUpgrade: async (update: { containerName?: string }) => {
+        events.push(`upgrade:${update.containerName ?? '?'}`);
+        return true;
+      },
     }),
   } as unknown as BridgeClient;
   const renderer: HudFrameRenderer = {
     render: async (frame: HudVisualFrame) => {
       if (frame.kind === 'navigation') views.push(frame.navigation.view);
+      // Every view draws different pixels in every region, as the real
+      // renderer does for a changing state word, header and footer. The
+      // visual surface skips a region whose delivered pixels are unchanged
+      // on the same page, so identical tiles would hide the ordering this
+      // replay exists to prove: a state is reported only after its frame.
+      const revision = views.length;
       return [
-        { containerId: ContainerId.Image, pixels: new Uint8Array(4) },
-        { containerId: ContainerId.VisualTopRight, pixels: new Uint8Array(4) },
-        { containerId: ContainerId.VisualBottomLeft, pixels: new Uint8Array(4) },
-        { containerId: ContainerId.VisualBottomRight, pixels: new Uint8Array(4) },
+        { containerId: ContainerId.Image, pixels: Uint8Array.of(revision, 1, 0, 0) },
+        { containerId: ContainerId.VisualTopRight, pixels: Uint8Array.of(revision, 2, 0, 0) },
+        { containerId: ContainerId.VisualBottomLeft, pixels: Uint8Array.of(revision, 3, 0, 0) },
+        { containerId: ContainerId.VisualBottomRight, pixels: Uint8Array.of(revision, 4, 0, 0) },
       ];
     },
   };
@@ -129,15 +146,28 @@ function replayHarness(mode: NavigationMode) {
   };
 }
 
+/** The live map is the one navigation frame drawn as pixels: a guidance
+ * state follows its four tiles. Every other frame (uncertain, off-route,
+ * arrival) is Even's own text page, so its state follows no tile at all. */
 function expectEveryStateAfterFourTiles(events: readonly string[]): void {
   events.forEach((event, index) => {
     if (!event.startsWith('state:')) return;
-    expect(events.slice(index - 4, index)).toEqual([
-      `tile:${ContainerId.Image}`,
-      `tile:${ContainerId.VisualTopRight}`,
-      `tile:${ContainerId.VisualBottomLeft}`,
-      `tile:${ContainerId.VisualBottomRight}`,
-    ]);
+    if (event === 'state:guidance') {
+      expect(events.slice(index - 4, index)).toEqual([
+        `tile:${ContainerId.Image}`,
+        `tile:${ContainerId.VisualTopRight}`,
+        `tile:${ContainerId.VisualBottomLeft}`,
+        `tile:${ContainerId.VisualBottomRight}`,
+      ]);
+      return;
+    }
+    let previousState = -1;
+    for (let at = index - 1; at >= 0; at -= 1) {
+      if (events[at]?.startsWith('state:')) { previousState = at; break; }
+    }
+    const sinceLastState = events.slice(previousState + 1, index);
+    expect(sinceLastState.filter((entry) => entry.startsWith('tile:'))).toEqual([]);
+    expect(sinceLastState.some((entry) => entry === 'page:text' || entry === 'upgrade:main')).toBe(true);
   });
 }
 
@@ -158,7 +188,8 @@ describe('navigation production-path replay', () => {
     ]);
     expect(replay.sent.filter((message) => message.kind === 'navigation.reroute.request'))
       .toHaveLength(1);
-    expect(replay.views).toEqual(['uncertain', 'guidance', 'uncertain', 'off_route']);
+    // The renderer draws only the live map; the warnings are text pages.
+    expect(replay.views).toEqual(['guidance']);
     expectEveryStateAfterFourTiles(replay.events);
   });
 
@@ -182,8 +213,9 @@ describe('navigation production-path replay', () => {
     expect(states).toContain('wrong_way');
     expect(states.slice(states.indexOf('wrong_way') + 1)).toContain('guidance');
     expect(states[states.length - 1]).toBe('arrived');
-    expect(replay.views).toContain('wrong_way');
-    expect(replay.views[replay.views.length - 1]).toBe('arrived');
+    expect(replay.views).not.toContain('wrong_way');
+    expect(replay.views.every((view) => view === 'guidance')).toBe(true);
+    expect(replay.events[replay.events.length - 1]).toBe('state:arrived');
     expect(replay.locationActive()).toBe(false);
     expectEveryStateAfterFourTiles(replay.events);
   });

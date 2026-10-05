@@ -467,11 +467,12 @@ not a new renderer and not physical-lens evidence.
   falls back to `rebuildPageContainer` and adopts the existing page. If you see
   `boot failed: startup page failed: invalid`, you are on a plugin bundle older than that
   fallback.
-- **Double Click blanks the canvas — it is the system-exit gesture.** The simulator's
+- **Double Click blanked the canvas on bundles before 2026-09-11.** The simulator's
   Double Click button (and `POST /api/input {"action":"double_click"}`) injects a
-  right-temple double-press, which is the host's app-exit path: the page is cleared and
-  the canvas goes blank with a clean console. (Hardware shows an exit dialog; the
-  simulator just clears.) Verified deterministic: greeting on screen → one double_click
+  right-temple double-press, which those bundles treated as the host's app-exit path:
+  the page was cleared and the canvas went blank with a clean console. (Hardware
+  showed an exit dialog; the simulator just cleared.) Since `GesturePolicy` made a
+  double press Back on every source, the same button is Back in the simulator too. Verified deterministic: greeting on screen → one double_click
   → blank. Use Click when poking around; recover with a vite reload. This masqueraded
   as two earlier false diagnoses (full disk, orphaned callbacks) — check the console
   tail for `eventType:3, eventSource:1` before believing anything else.
@@ -489,8 +490,9 @@ that deliver the capturing-container event shape described by the SDK; unknown
 
 What still needs hardware confirmation is narrower: that a single press from
 each built-in temple reaches the same active confirmation gate, and that both
-swipe directions refuse exactly once. Outside confirmation, the double-press
-source split still matters for the JOAT Sidebar versus the system exit dialog.
+swipe directions refuse exactly once. Outside confirmation, a double press
+means Back from every source; the one named press is the right-temple or
+ring double press that starts an ARMED Brainstorm acceptance run.
 
 Run the probe to check:
 
@@ -502,8 +504,8 @@ It accepts the plugin's WebSocket and logs every uplink message, including `inpu
 
 1. Press the **right** temple once → expect `input` with `eventSource: 1`. Confirms.
 2. Press the **left** temple once → expect `eventSource: 3`. Relays, must **not** confirm.
-3. Double-press the **left** temple → settings menu opens, nothing relays.
-4. Double-press the **right** temple → system exit dialog appears. Cancel it; the app must still be listening afterwards.
+3. Double-press the **left** temple → Back (the capability menu toggles), nothing relays.
+4. Double-press the **right** temple → the same Back, no exit dialog; the app must still be listening afterwards. (The exit dialog is reachable only through the Mac's `shutdown` downlink.)
 
 If 1 and 2 are swapped, flip the two `EventSourceType` constants in `EventRouter.handleSys`.
 

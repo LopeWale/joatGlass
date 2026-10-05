@@ -31,8 +31,8 @@
       header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; gap: 16px; }
       h1 { font-size: 24px; font-weight: 600; letter-spacing: -.02em; margin: 0; }
       #p-link { color: var(--dim); font-size: 13px; text-align: right; }
-      .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; background: var(--input); border-radius: 12px; margin-bottom: 16px; }
-      .tabs button { min-height: 40px; border-radius: 8px; font-size: 15px; font-weight: 500; color: var(--dim); padding: 8px; }
+      .tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 4px; background: var(--input); border-radius: 12px; margin-bottom: 16px; }
+      .tabs button { min-height: 40px; border-radius: 8px; font-size: 14px; font-weight: 500; color: var(--dim); padding: 8px; }
       .tabs button.selected { background: var(--bg); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
       h2 { font-size: 11px; font-weight: 500; color: var(--dim); margin: 24px 4px 8px; text-transform: uppercase; letter-spacing: .04em; }
       h3 { font-size: 18px; font-weight: 500; letter-spacing: -.01em; margin: 0 0 8px; }
@@ -85,6 +85,17 @@
       dt { color: var(--dim); } dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
       details .support { padding: 0 12px 12px; }
       [hidden] { display: none !important; }
+      /* Places tab (saved navigation places), on the same tokens. */
+      ul.places { list-style: none; margin: 0; padding: 0; }
+      .place { gap: 10px; }
+      .place-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+      .place-text span { color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
+      .place button { padding: 6px 10px; min-height: 36px; font-size: 14px; background: var(--input); border-radius: 8px; }
+      form .row { flex-direction: column; align-items: stretch; gap: 6px; }
+      input[type="text"] { font: inherit; color: inherit; background: var(--input); border: 0; border-radius: 8px; padding: 10px 12px; min-height: 44px; }
+      .form-actions { display: flex; gap: 8px; padding: 12px 16px; }
+      .form-actions button { flex: 1; border-radius: 10px; background: var(--input); }
+      .form-actions button[type="submit"] { background: var(--accent); color: var(--on-accent); font-weight: 600; }
     </style>
   </head>
   <body>
@@ -93,6 +104,7 @@
       <nav class="tabs" role="tablist" aria-label="JOAT settings">
         <button id="tab-brainstorm" role="tab" type="button" aria-controls="view-brainstorm" aria-selected="true">Brainstorm</button>
         <button id="tab-accounts" role="tab" type="button" aria-controls="view-accounts" aria-selected="false">Accounts</button>
+        <button id="tab-places" role="tab" type="button" aria-controls="view-places" aria-selected="false">Places</button>
         <button id="tab-connection" role="tab" type="button" aria-controls="view-connection" aria-selected="false">Connection</button>
       </nav>
       <p id="c-notice" class="notice" role="status"></p>
@@ -113,6 +125,23 @@
       <section id="view-accounts" role="tabpanel" aria-labelledby="tab-accounts" hidden>
         <div id="c-login"></div>
         <div id="c-accounts"></div>
+      </section>
+
+      <section id="view-places" role="tabpanel" aria-labelledby="tab-places" hidden>
+          <h2 id="places-title">Saved places</h2>
+          <div class="group">
+            <ul id="p-places" class="places"></ul>
+            <p id="p-places-empty" class="support" style="padding: 12px 14px; margin: 0;">No places yet. Save Home, Work and the places you walk to; they appear on the glasses’ Navigation page, and “JOAT, navigate home” works from anywhere.</p>
+            <button id="p-place-add" class="action" type="button">Add a place</button>
+            <form id="p-place-form" hidden>
+              <div class="row"><label for="p-place-name">Name</label><input id="p-place-name" type="text" autocomplete="off" placeholder="Home" /></div>
+              <div class="row"><label for="p-place-address">Address</label><input id="p-place-address" type="text" autocomplete="street-address" placeholder="Street, city" /></div>
+              <div class="row"><span id="p-place-coords" class="support" style="margin: 0;">No pin yet.</span><button id="p-place-locate" class="action" type="button" style="border-top: 0; padding-left: 0;">Use my location</button></div>
+              <div class="form-actions"><button id="p-place-cancel" type="button">Cancel</button><button id="p-place-save" type="submit">Save</button></div>
+            </form>
+          </div>
+          <p id="p-place-feedback" class="feedback" role="status"></p>
+          <p class="support">An address is looked up by the Mac’s routing provider when you navigate; a pinned location is routed to directly.</p>
       </section>
 
       <section id="view-connection" role="tabpanel" aria-labelledby="tab-connection" hidden>

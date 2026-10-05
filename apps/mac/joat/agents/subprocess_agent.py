@@ -46,6 +46,13 @@ def find_claude_binary() -> str | None:
     on_path = shutil.which("claude")
     if on_path:
         return on_path
+    # A launchd-started brain has a minimal PATH; the native installer and
+    # the package managers put the binary in these fixed places.
+    for candidate in ("~/.local/bin/claude", "~/.claude/local/claude",
+                      "/opt/homebrew/bin/claude", "/usr/local/bin/claude"):
+        path = os.path.expanduser(candidate)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
     bundles = sorted(
         glob.glob(
             os.path.expanduser(

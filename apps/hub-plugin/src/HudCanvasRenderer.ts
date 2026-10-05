@@ -1,5 +1,3 @@
-import { wrapTerminalParagraph } from './TerminalText';
-import { TerminalConversationViewport } from './TerminalConversation';
 import { GesturePolicy } from './GesturePolicy';
 import chatCircleSvg from '@phosphor-icons/core/regular/chat-circle-dots.svg?raw';
 import bellSvg from '@phosphor-icons/core/regular/bell.svg?raw';
@@ -16,13 +14,17 @@ import batteryHighSvg from '@phosphor-icons/core/regular/battery-high.svg?raw';
 import batteryFullSvg from '@phosphor-icons/core/regular/battery-full.svg?raw';
 import batteryMediumSvg from '@phosphor-icons/core/regular/battery-medium.svg?raw';
 import batteryLowSvg from '@phosphor-icons/core/regular/battery-low.svg?raw';
-import batteryWarningSvg from '@phosphor-icons/core/regular/battery-warning.svg?raw';
+import batteryEmptySvg from '@phosphor-icons/core/regular/battery-empty.svg?raw';
+import batteryChargingSvg from '@phosphor-icons/core/regular/battery-charging.svg?raw';
+import microphoneSlashSvg from '@phosphor-icons/core/regular/microphone-slash.svg?raw';
+import {
+  HUD_LOW_BATTERY_PCT, type HudStatusModel, hudStatusLabel, statusModelFromText,
+} from './HudStatus';
 import weatherSvg from '@phosphor-icons/core/regular/cloud-sun.svg?raw';
 import newspaperSvg from '@phosphor-icons/core/regular/newspaper.svg?raw';
 import timerSvg from '@phosphor-icons/core/regular/timer.svg?raw';
 import magnifyingGlassSvg from '@phosphor-icons/core/regular/magnifying-glass.svg?raw';
 import {
-  formatCountdown,
   formatMinutesLeft,
   freshnessLabel,
   pomodoroBlockLabel,
@@ -33,7 +35,7 @@ import {
 import {
   CANVAS,
   PANEL_TABS,
-  type BrainstormHudModel,
+  SPINE_LABEL_BOX,
   type HudContentKind,
   type PanelTab,
   type PlanningGridCell,
@@ -43,7 +45,6 @@ import {
   ASSISTANT_CONVERSATION_VISUAL_GEOMETRY,
   splitGrayscaleTiles,
   type AssistantConversationVisual,
-  type AssistantOverlayPresentation,
   type AssistantOverlayVisual,
   type HudFrameRenderer,
   type HudImageTile,
@@ -51,7 +52,6 @@ import {
 } from './HudVisualSurface';
 import {
   formatNavigationDistance,
-  isNavigationSetupStatus,
   type NavigationHudModel,
   type NavigationMapModel,
   type NavigationMapPanelModel,
@@ -62,8 +62,6 @@ import {
   TYPE,
   LEAD,
   mono,
-  prose,
-  assistantProse,
   HINT_BASELINE_Y,
   RAIL_HEIGHT,
   upper,
@@ -86,12 +84,6 @@ const HAIRLINE = 51;
  * Fourteen, not zero: the outermost pixels of a waveguide are where the
  * image is least reliable, and a glyph clipped by the lens edge is worse
  * than one that never reached it. Everything between is content. */
-const HUD_EDGE = 14;
-/** Navigation's fact row (distance remaining), one meta line above the
- * gesture hint. It used to share HINT_BASELINE_Y and win, which is why the
- * hint moved on exactly the screens a wearer is least able to hunt for it. */
-const NAVIGATION_FOOTER_BASELINE_Y = 243;
-const HUD_CONTENT_WIDTH = 576 - HUD_EDGE * 2;   // 548
 /** Measured mean advance of the prose face (TYPE.transcript, 11px) — a
  * 63-character row rendered by the REAL simulator spans 326px → 5.18 px per character.
  * Exported as code, not prose, because the wire's column budget
@@ -99,58 +91,8 @@ const HUD_CONTENT_WIDTH = 576 - HUD_EDGE * 2;   // 548
  * cross-language test re-derives the equality — a number living only in a
  * comment cannot fail a build when the font changes. */
 export const HUD_TEXT_MEAN_ADVANCE_PX = 5.18;
-const HUD_CONTENT_RIGHT = 576 - HUD_EDGE;       // 562
-export const ASSISTANT_OVERLAY_DISMISS_HINT = 'TAP TO DISMISS';
-export const ASSISTANT_OVERLAY_PAGE_HINT = 'UP / DOWN TO READ · TAP TO DISMISS';
-/** A notification must say both things it can do. Dropping the menu half
- * left the wearer looking at a card with no stated way off it except the
- * exit gesture, which is reserved and must never be advertised as
- * navigation. Authored in `left x2` form; GesturePolicy.formatHint renders
- * it as the current Back wording. */
-export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss · left x2: menu';
+export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss';
 
-/** Error recovery copy belongs in its warning card; repeating it in the
- * decision header makes the action harder to scan at a glance. */
-export function showNavigationSecondaryInHeader(
-  view: NavigationHudModel['view'],
-): boolean {
-  return view !== 'error';
-}
-
-/** Geometry for choice rows on the G2 lens. Decisions speak the one dense
- * flat-list language: 12px rows on a 20px pitch with the 3px selection rail.
- * No separators, no per-count roomy variant — pitch divides rows (the
- * wearer's ruling: the chrome was the waste, not any single line). */
-export interface NavigationDecisionRow {
-  baselineY: number;
-  boxTopY: number;
-  boxHeight: number;
-  fontSize: number;
-}
-
-/** The selection box: one outline around the CHOSEN row, never one per row.
- * This is the affordance the platform's own control surfaces use, and it is
- * not the retired per-row card — unchosen rows stay flat and unboxed. */
-export const NAVIGATION_DECISION_BOX = {
-  x: 30,
-  width: 516,
-  radius: 8,
-  textX: 46,
-} as const;
-
-export function navigationDecisionRows(optionCount: number): readonly NavigationDecisionRow[] {
-  const count = Math.min(3, Math.max(0, Math.floor(optionCount)));
-  return Array.from({ length: count }, (_, index) => {
-    // A route choice is read in motion, so it gets the legible face rather
-    // than the dense reading size a stationary list can use.
-    const baselineY = 128 + index * PITCH.boxed;
-    return { baselineY, boxTopY: baselineY - 15, boxHeight: 30, fontSize: 15 };
-  });
-}
-
-/** The card's header, body, and footer are separate optical regions. Keeping
- * these anchors together prevents a long reply from sharing the divider row. */
-export const ASSISTANT_OVERLAY_FONT_PX = 14;
 /** One size for an answer, always.
  *
  * The card was the last draw site in the HUD still choosing its own
@@ -163,45 +105,6 @@ export const ASSISTANT_OVERLAY_FONT_PX = 14;
  * draw site invents its own number any more".
  */
 
-
-const ASSISTANT_OVERLAY_GEOMETRY = {
-  dividerY: 92,
-  bodyTopY: 108,
-  bodyBottomY: 184,
-  footerBaselineY: 214,
-} as const;
-
-export interface AssistantOverlayTextLayout {
-  dividerY: number;
-  firstBaselineY: number;
-  firstGlyphTopY: number;
-  lastGlyphBottomY: number;
-  footerBaselineY: number;
-  lineHeight: number;
-}
-
-/** Calculate a centered body block strictly inside the assistant card's
- * text-safe region. The renderer and regression test share this contract. */
-export function assistantOverlayTextLayout(
-  lineCount: number,
-  fontSize: number,
-): AssistantOverlayTextLayout {
-  const safeLineCount = Math.max(1, Math.min(4, Math.floor(lineCount)));
-  const lineHeight = Math.max(LEAD.body, fontSize + 4);
-  const bodyCenterY = (
-    ASSISTANT_OVERLAY_GEOMETRY.bodyTopY + ASSISTANT_OVERLAY_GEOMETRY.bodyBottomY
-  ) / 2;
-  const firstBaselineY = bodyCenterY - ((safeLineCount - 1) * lineHeight) / 2;
-  const lastBaselineY = firstBaselineY + (safeLineCount - 1) * lineHeight;
-  return {
-    dividerY: ASSISTANT_OVERLAY_GEOMETRY.dividerY,
-    firstBaselineY,
-    firstGlyphTopY: firstBaselineY - fontSize / 2,
-    lastGlyphBottomY: lastBaselineY + fontSize / 2,
-    footerBaselineY: ASSISTANT_OVERLAY_GEOMETRY.footerBaselineY,
-    lineHeight,
-  };
-}
 
 /**
  * The resting screen is a DASHBOARD, not a sentence.
@@ -238,7 +141,7 @@ export const OVERVIEW_DASHBOARD = {
   // repaints those two and leaves the clock's tiles untouched — the same
   // economy the retired sidebar bought by leaving the right half alone.
   dividerX: 308.5,
-  dividerTopY: 46,
+  dividerTopY: 34,
   dividerBottomY: 252,
   paneX: 318,
   paneWidth: 230,
@@ -279,84 +182,9 @@ export const PANEL_RAIL = {
  * affordance from the footer while it kept working. The pomodoro page
  * names it too: that tab is excluded from the refresh carve-out
  * (CapabilityMenu.isPanelRefreshable), so a hold there opens the mic. */
-export const PANEL_OVERVIEW_HINT = 'tap: open · swipe: tabs · long-press: mic';
-export const PANEL_EXPANDED_HINT = 'tap: open · long-press: refresh · double-click: back';
-export const POMODORO_EXPANDED_HINT = 'tap: choose · long-press: mic · double-click: back';
-
-/** Only the two long-text pages read through the shared reader: an opened
- * headline and an opened search result. Their families stay 'NEWS' and
- * 'SEARCH' so CapabilityMenu's two-deep Back knows the parent list. */
-export function usesPanelReaderLayout(title: string): boolean {
-  const normalized = title.trim().toUpperCase();
-  return normalized === 'NEWS · ARTICLE' || normalized === 'SEARCH · RESULT';
-}
-
-/** New Mac readers send exact prepared rows after a counter-first metadata
- * row. Recognize only full-reader pages so ordinary numbered lists keep
- * their own layout, and older Mac text pages retain their compatibility path. */
-function usesPreparedReaderLayout(title: string, items: readonly string[]): boolean {
-  const normalized = title.trim().toUpperCase();
-  return (normalized === 'MESSAGES · MESSAGE' || usesPanelReaderLayout(normalized)
-    || normalized === 'QUICKNOTES · DETAIL' || normalized === 'QUICKNOTES · NOTE')
-    && /^\d+\/\d+ · /.test(items[0] ?? '');
-}
-
-/** The counter distinguishes prepared Notes from older Mac detail lists. */
-export function usesQuickNotesReaderLayout(title: string, items: readonly string[]): boolean {
-  const normalized = title.trim().toUpperCase();
-  return (normalized === 'QUICKNOTES · DETAIL' || normalized === 'QUICKNOTES · NOTE')
-    && usesPreparedReaderLayout(title, items);
-}
-
-export function usesMessagesPreparedReaderLayout(title: string, items: readonly string[]): boolean {
-  const normalized = title.trim().toUpperCase();
-  return (normalized === 'MESSAGES · MESSAGE' || normalized === 'MESSAGES · REVIEW'
-    || /^MESSAGES · (SENT|FAILED|CANCELLED|UNCERTAIN)$/.test(normalized))
-    && /^\d+\/\d+ · /.test(items[0] ?? '');
-}
-
-/** Transport rows are exact source slices, not paragraph boundaries. Wrap
- * their lossless concatenation against JOAT's regular prose face. */
-export function quickNotesProsePages(items: readonly string[]): string[][] {
-  const context = document.createElement('canvas').getContext('2d');
-  if (!context) throw new Error('QuickNotes text measurement unavailable');
-  context.font = TYPE.body;
-  const width = HUD_CONTENT_RIGHT - HUD_EDGE;
-  const rows: string[] = [];
-  const source = items.slice(1).join('');
-  for (const paragraph of source.match(/[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$/g) ?? ['']) {
-    const ending = paragraph.match(/\r\n$|[\r\n]$/)?.[0] ?? '';
-    const body = paragraph.slice(0, paragraph.length - ending.length);
-    const Segmenter = (Intl as typeof Intl & {
-      Segmenter?: new (locale: undefined, options: { granularity: 'grapheme' }) => {
-        segment(value: string): Iterable<{ segment: string }>;
-      };
-    }).Segmenter;
-    const glyphs = Segmenter
-      ? Array.from(new Segmenter(undefined, { granularity: 'grapheme' }).segment(body), part => part.segment)
-      : Array.from(body);
-    let start = 0;
-    if (!glyphs.length) rows.push(ending);
-    while (start < glyphs.length) {
-      let end = start;
-      let boundary = start;
-      while (end < glyphs.length) {
-        const next = glyphs.slice(start, end + 1).join('').replace(/\t/g, '        ');
-        if (end > start && context.measureText(next).width > width) break;
-        end += 1;
-        if (/\s/u.test(glyphs[end - 1]!)) boundary = end;
-      }
-      if (end < glyphs.length && boundary > start) end = boundary;
-      rows.push(glyphs.slice(start, end).join('') + (end === glyphs.length ? ending : ''));
-      start = end;
-    }
-  }
-  const pages: string[][] = [];
-  for (let index = 0; index < rows.length; index += MESSAGES_READER_BODY_LINE_CAPACITY) {
-    pages.push(rows.slice(index, index + MESSAGES_READER_BODY_LINE_CAPACITY));
-  }
-  return pages.length ? pages : [['']];
-}
+export const PANEL_OVERVIEW_HINT = 'tap: open · swipe: tabs · hold: mic';
+export const PANEL_EXPANDED_HINT = 'tap: open · hold: refresh · double-click: back';
+export const POMODORO_EXPANDED_HINT = 'tap: choose · hold: mic · double-click: back';
 
 export interface HudNotificationRow {
   source: string;
@@ -412,50 +240,51 @@ export function hudDateLabel(now: Date): string {
 /** Measured from the selected 576×288 reference panels. Keeping the major
  * anchors together makes visual drift obvious in review and in tests. */
 export const HUD_VISUAL_GEOMETRY = {
-  statusBaselineY: 20,
-  statusDividerY: 35.5,
+  /** The spine is 24 px tall since 2026-10-05 (it was 36): the clock and
+   * the page's word at a middle baseline of 12, the mic and battery as
+   * icons alone. Everything below it moved up by the same 12 px. */
+  spineHeight: 24,
+  statusBaselineY: 12,
+  statusDividerY: 23.5,
   overviewMainX: 176,
   overviewTrayY: 168,
   overviewContextY: 214,
   listContentX: 93,
 } as const;
 
-/** Safe-write gestures share one static footer with the other dense HUDs.
- * Omitting the changing seconds counter prevents needless image transfers
- * while the wearer reads an otherwise unchanged review. */
-export function confirmationActionHint(): string {
-  return 'tap: confirm · swipe: cancel · double-click: back · auto-cancel';
+/** Where the spine's right-tile icons sit. Both stay east of the tile
+ * seam (x=288) so a mic or battery change dirties one tile. The mic is a
+ * 14 px glyph; the battery is Phosphor's wide 18 px cell. From the
+ * low-battery threshold down the number returns to the left of the cell. */
+export const SPINE_ICONS = {
+  micX: 486,
+  micY: 5,
+  micSize: 14,
+  batteryX: 536,
+  batteryY: 3,
+  batterySize: 18,
+  lowBatteryTextRightX: 530,
+} as const;
+
+/** The battery cell that matches the level: five Phosphor cells, and the
+ * charging cell whatever the level — the charge mark used to be stripped
+ * by the string parser before the spine ever saw it. */
+export function batteryIconFor(
+  status: Pick<HudStatusModel, 'battery' | 'charging'>,
+): Extract<HudIconName, `battery${string}`> {
+  if (status.charging) return 'batteryCharging';
+  const level = status.battery ?? 0;
+  if (level >= 90) return 'batteryFull';
+  if (level >= 60) return 'batteryHigh';
+  if (level >= 30) return 'batteryMedium';
+  if (level > HUD_LOW_BATTERY_PCT) return 'batteryLow';
+  return 'batteryEmpty';
 }
 
-/** Calendar/Reminder review follows the same compact reading axis as
- * Planning, Messages, and Navigation: one left-aligned content column with
- * no centered poster treatment. */
-export function confirmationReviewLayout(): {
-  headerIconX: number;
-  headerTextX: number;
-  headerBaselineY: number;
-  dividerY: number;
-  contentX: number;
-  contentWidth: number;
-  promptTopBaselineY: number;
-  promptFontSize: number;
-  promptLineHeight: number;
-  promptMaxLines: number;
-  footerBaselineY: number;
-} {
-  return {
-    headerIconX: 36,
-    headerTextX: 62,
-    headerBaselineY: 60,
-    dividerY: 78.5,
-    contentX: 36,
-    contentWidth: 504,
-    promptTopBaselineY: 104,
-    promptFontSize: 16,
-    promptLineHeight: LEAD.primary,
-    promptMaxLines: 4,
-    footerBaselineY: 267,
-  };
+/** The raster lists draw flat: every pixel the rounded frame occupied was
+ * a pixel of content. The dashboard and the live map keep the shell. */
+export function usesFlatHudShell(kind: HudVisualFrame['kind']): boolean {
+  return kind === 'list';
 }
 
 export type HudIconName =
@@ -470,11 +299,13 @@ export type HudIconName =
   | 'navigation'
   | 'settings'
   | 'microphone'
-  | 'battery'
+  | 'microphoneSlash'
   | 'batteryFull'
+  | 'batteryHigh'
   | 'batteryMedium'
   | 'batteryLow'
-  | 'batteryWarning'
+  | 'batteryEmpty'
+  | 'batteryCharging'
   | 'weather'
   | 'news'
   | 'pomodoro'
@@ -492,35 +323,18 @@ const ICON_SOURCES: Readonly<Record<HudIconName, string>> = {
   navigation: navigationSvg,
   settings: gearSvg,
   microphone: microphoneSvg,
-  battery: batteryHighSvg,
+  microphoneSlash: microphoneSlashSvg,
   batteryFull: batteryFullSvg,
+  batteryHigh: batteryHighSvg,
   batteryMedium: batteryMediumSvg,
   batteryLow: batteryLowSvg,
-  batteryWarning: batteryWarningSvg,
+  batteryEmpty: batteryEmptySvg,
+  batteryCharging: batteryChargingSvg,
   weather: weatherSvg,
   news: newspaperSvg,
   pomodoro: timerSvg,
   search: magnifyingGlassSvg,
 };
-
-/**
- * Pick the battery glyph that matches the reading.
- *
- * Thresholds follow the phosphor set's own five steps so the cell count the
- * wearer sees tracks the number printed beside it. Below 10% the warning
- * face replaces the cells outright: at that point "how much is left" has
- * stopped being the question.
- */
-function batteryIcon(
-  icons: Record<HudIconName, HTMLImageElement>, level: number,
-): HTMLImageElement {
-  if (!Number.isFinite(level)) return icons.battery;
-  if (level <= 10) return icons.batteryWarning;
-  if (level <= 35) return icons.batteryLow;
-  if (level <= 60) return icons.batteryMedium;
-  if (level <= 85) return icons.battery;      // 'high'
-  return icons.batteryFull;
-}
 
 /** A month is intentionally a real six-row grid on the lens, rather than a
  * web-calendar imitation. The Mac still owns the selected week/action row;
@@ -554,159 +368,6 @@ export function parsePlanningMonthTitle(title: string): PlanningMonth | undefine
   // different century.
   if (month < 0 || !Number.isInteger(year) || year < 100 || year > 9999) return undefined;
   return { year, month, label };
-}
-
-/**
- * Keep the wearable footer aligned with every action the physical G2 router
- * accepts. This is presentation only: input ownership stays in EventRouter.
- */
-export function brainstormActionHint(
-  model: Pick<BrainstormHudModel, 'screen' | 'state' | 'noToolsChecked' | 'acceptanceArmed' | 'approvals' | 'inputRequired' | 'taskRecovery'>
-    // The lane chips, used only to decide whether the switch gesture has
-    // anywhere to go. Optional so every existing caller stays valid.
-    & { collaborators?: readonly string[] },
-): string {
-  if (model.screen === 'brainstorm') {
-    if (model.state === 'running') {
-      // "tap: Hermes" described a different feature, and a downward swipe
-      // used to CANCEL — the wearer asked to scroll, so swipes scroll and
-      // cancel is the deliberate double-press.
-      // Names the verb layer, because an open-ended capability nobody
-      // knows about is not a capability. A menu screen would have been the
-      // obvious place and the wrong one: it replaces the transcript the
-      // wearer is reading to make the choice. The footer had 378 of its
-      // 548 pixels unused — measured — so this costs no row.
-      return 'swipe: scroll · tap: terminal · say “send that to hermes” · double-click: cancel';
-    }
-    if (model.state === 'acceptance_ready') {
-      return 'tap: start test · double-click: menu';
-    }
-    if (model.state === 'topic_capture') {
-      return 'speak your question · double-click: cancel';
-    }
-    // Brainstorm facts only. This also required terminalState === 'ready'
-    // and noToolsChecked — fields a Brainstorm frame no longer carries
-    // (docs/SESSION_MODEL.md:74-75) — so after the split it fell through
-    // to the generic hint and stopped telling the wearer they can TAP TO
-    // SPEAK, on the ready screen whose only purpose is starting one. The
-    // armed diagnostic went invisible the same way. Caught by the
-    // acceptance flow, which noticed three captures were pixel-identical.
-    if (model.state === 'ready') {
-      return 'tap: speak · double-click: menu';
-    }
-    return 'swipe: scroll · double-click: menu · long-press: mic';
-  }
-  // Match the terminal controller: approval wins, busy taps stay here,
-  // and double-click returns to the agent choices through navigation.
-  if ((model.approvals ?? 0) > 0) {
-    return 'tap: approve · swipe: deny · double-click: back';
-  }
-  if (model.state === 'approval_required') {
-    return 'approve in OpenClaw · tap: retry · double-click: back';
-  }
-  if (model.state === 'running') {
-    return 'swipe: scroll · say "terminal cancel" · double-click: back';
-  }
-  if (model.state === 'ready') {
-    return model.inputRequired
-      ? 'tap: reply · swipe: scroll · double-click: back'
-      : 'tap: speak · swipe: scroll · double-click: back';
-  }
-  if (model.taskRecovery) return 'tap: check task status · double-click: back';
-  if (model.state === 'blocked' || model.state === 'unavailable') {
-    return 'tap: retry connection · double-click: back';
-  }
-  return 'swipe: scroll · double-click: back';
-}
-
-/** The terminal's policy row must distinguish a pending device approval or
- * offline brain from an actual tool-policy failure. It is a status row, not
- * a decorative card: the transcript needs the space. */
-export function agentTerminalSafetyLabel(
-  model: Pick<BrainstormHudModel, 'state' | 'noToolsChecked'>,
-): string {
-  if (model.state === 'approval_required') return 'APPROVAL REQUIRED';
-  if (model.state === 'unavailable') return 'CONNECTION UNAVAILABLE';
-  if (model.state === 'blocked') return 'TERMINAL BLOCKED';
-  // A missing no-tools attestation is not a connection or policy failure.
-  return '';
-}
-
-/** A live terminal is a transcript, not a connection-status dashboard.
- * Preserve the recovery detail only when the wearer needs it to act; once
- * Hermes is running, collapse it into one truthful status spine and give the
- * conversation the remaining lens area. */
-export interface AgentTerminalTranscriptLayout {
-  summary: string;
-  dividerY: number;
-  transcriptBaselineY: number;
-  transcriptLineCapacity: number;
-  showRecoveryDetails: boolean;
-}
-
-/** Which lane the terminal is focused on, for the summary spine.
- *
- * The engine sends "<lane> · <state>[ · N waiting]" as the topic. This
- * header said HERMES whatever was focused, so a wearer running a calendar
- * lane or a gateway session read someone else's name above their own
- * output. Falls back to the feature name when no agent is named. */
-export function agentTerminalFocusLabel(topic: string | undefined): string {
-  const named = ((topic ?? '').split(' · ')[0] ?? '').trim();
-  const cut = named.length > 24 ? `${named.slice(0, 23)}…` : named;
-  return upper(cut || 'AGENT TERMINAL');
-}
-
-export function agentTerminalTranscriptLayout(
-  model: Pick<BrainstormHudModel, 'state' | 'noToolsChecked' | 'topic' | 'inputRequired' | 'taskRecovery'>,
-): AgentTerminalTranscriptLayout {
-  const state = model.taskRecovery ? 'CHECK TASK' : model.inputRequired ? 'REPLY NEEDED'
-    : model.state === 'running' ? 'WORKING' : brainstormStateLabel(model.state);
-  const focus = agentTerminalFocusLabel(model.topic);
-  // Recovery chrome exists to be ACTED ON — a blocked terminal names the
-  // host and policy the wearer must go fix. A READY terminal was printing
-  // the same four rows (HOST, POLICY, SESSION, and a title) over a mostly
-  // empty lens, and the wearer asked whether "the mac mini tailscale and
-  // shit" was needed there. It is not: when nothing is wrong, one summary
-  // row carries the connection state, and the rest of the
-  // glass belongs to the transcript.
-  const needsRecovery = !model.taskRecovery && (model.state === 'blocked'
-    || model.state === 'approval_required'
-    || model.state === 'unavailable');
-  if (!needsRecovery) {
-    return {
-      summary: `${focus} > ${state}`,
-      // Dense by demand: the wearer's words were "stop wasting so much
-      // place on things that do not affect functionality". Header and
-      // LANES are two tight rows; everything else is transcript.
-      dividerY: 78.5,
-      transcriptBaselineY: 92,
-      transcriptLineCapacity: 12,
-      showRecoveryDetails: false,
-    };
-  }
-  return {
-    summary: `${focus} > ${state}`,
-    dividerY: 118.5,
-    transcriptBaselineY: 132,
-    transcriptLineCapacity: 9,
-    showRecoveryDetails: true,
-  };
-}
-
-export function brainstormStateLabel(state: BrainstormHudModel['state']): string {
-  // Wearer words, not wire states. "SETTLED" and "ACCEPTANCE READY" are
-  // this codebase's internal vocabulary, and the wearer read them off the
-  // lens and asked, verbatim, what the fuck they mean. The wire keeps its
-  // names; the glass speaks plainly.
-  switch (state) {
-    case 'topic_capture': return 'SPEAK NOW';
-    case 'acceptance_ready': return 'TEST READY';
-    case 'running': return 'LIVE';
-    case 'settled': return 'DONE';
-    case 'approval_required': return 'NEEDS APPROVAL';
-    case 'unavailable': return 'OFFLINE';
-    default: return upper(state.replace(/_/g, ' '));
-  }
 }
 
 export interface PlanningMonthDay {
@@ -772,7 +433,7 @@ export function planningMonthSelectionRail(selectedWeek: number): {
   height: number;
 } {
   const week = Math.min(5, Math.max(0, Math.floor(selectedWeek)));
-  return { x: 28, y: 87 + week * PITCH.week, width: 3, height: PITCH.week };
+  return { x: 28, y: 75 + week * PITCH.week, width: 3, height: PITCH.week };
 }
 
 /** The graphical calendar owns only the six week action rows. Month controls
@@ -797,14 +458,14 @@ export function canRenderPlanningMonthGrid(
 export const PLANNING_DASHBOARD = {
   gridLeft: 10,
   gridRight: 262,
-  headerBaselineY: 58,
-  firstRowCenterY: 82,
+  headerBaselineY: 46,
+  firstRowCenterY: 70,
   rowPitch: PITCH.monthBand,
   dividerX: 276.5,
   paneLeft: 292,
   paneRight: 556,
-  paneHeadingY: 58,
-  paneFirstRowY: 84,
+  paneHeadingY: 46,
+  paneFirstRowY: 72,
   paneRowPitch: PITCH.paneRow,
   paneRowCapacity: 6,
 } as const;
@@ -856,20 +517,6 @@ export const ACTION_PILL = {
   detailY: 229,
 } as const;
 
-/** A compact strip is an explicit receipt, never a guess based on length.
- * The recorded `Paris.` answer is six characters too, yet putting it in the
- * low receipt strip stamped it across the dashboard clock. */
-export function usesAssistantPillLayout(
-  text: string,
-  presentation: AssistantOverlayPresentation,
-): boolean {
-  const trimmed = text.trim();
-  return presentation === 'receipt'
-    && trimmed.length > 0
-    && trimmed.length <= 48
-    && !trimmed.includes('\n');
-}
-
 export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): string {
   const labels: Readonly<Record<ProductivityHudModel['phase'], string>> = {
     verifying: 'VERIFYING',
@@ -888,12 +535,6 @@ export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): st
   return labels[phase];
 }
 
-export function productivityPhaseProgress(phase: ProductivityHudModel['phase']): number {
-  if (phase === 'saved' || phase === 'monitoring' || phase === 'completed' || phase === 'due') return 1;
-  if (phase === 'verifying') return 0.45;
-  return 0.18;
-}
-
 /** The wearable owns the escape wording for a live productivity surface.
  *
  * Native status text may describe a write or a due reminder, but it must not
@@ -902,7 +543,7 @@ export function productivityPhaseProgress(phase: ProductivityHudModel['phase']):
  * cancels an in-flight native write nor claims an unavailable post-save undo.
  */
 export function productivityActionHint(model: Pick<ProductivityHudModel, 'phase' | 'monitoringArmed'>): string {
-  if (model.phase === 'due') return 'say: complete reminder · Back: double-click to Planning';
+  if (model.phase === 'due') return 'tap: complete · Back: double-click to Planning';
   if (model.phase === 'saved' && model.monitoringArmed) {
     return 'Back: double-click to Planning · monitoring next';
   }
@@ -918,12 +559,6 @@ export function productivityActionHint(model: Pick<ProductivityHudModel, 'phase'
     return 'Back: double-click to Planning · auto in 5s';
   }
   return 'Back: double-click to Planning';
-}
-
-interface StatusParts {
-  time: string;
-  state: string;
-  battery?: string;
 }
 
 function gray(level: number): string {
@@ -966,22 +601,6 @@ function planningScopeForDisplay(period: string): 'Month' | 'Week' | 'Day' | und
 
 function titleCaseHudWords(value: string): string {
   return value.toLowerCase().replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
-}
-
-function parseStatus(status: string): StatusParts {
-  const compact = status.replace(/\s+/g, ' ').trim();
-  const time = compact.match(/^\d{1,2}:\d{2}/)?.[0] ?? '';
-  const battery = compact.match(/bat\s*(\d+)%/i)?.[1];
-  let state = compact
-    .replace(/^\d{1,2}:\d{2}\s*/, '')
-    .replace(/\s*bat\s*\d+%\+?$/i, '')
-    .trim();
-  state = state.replace(/^JOAT\s*[·-]?\s*/i, '').trim();
-  return {
-    time,
-    state: `JOAT · ${upper(state || 'READY')}`,
-    ...(battery ? { battery } : {}),
-  };
 }
 
 function loadSvg(source: string): Promise<HTMLImageElement> {
@@ -1105,7 +724,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       kind: 'empty',
       title: 'Ready',
       primary: 'Ask JOAT anything.',
-      recovery: 'Say “JOAT …” · tap then long-press for menu.',
+      recovery: 'Say “JOAT …” · tap then hold for menu.',
       hint: 'double-click: menu · long-press: mic',
     };
   }
@@ -1147,242 +766,6 @@ export function parseHudListItem(value: string, preservePreview = false): HudLis
   const content = ageMatch ? value.slice(ageMatch[0].length) : value;
   const [primary, secondary] = preservePreview ? [content, ''] : splitMessage(content);
   return { primary, secondary, age: ageMatch?.[1]?.trim() ?? '' };
-}
-
-export interface MessagesConversationRow {
-  kind: 'incoming' | 'outgoing' | 'instruction';
-  label: string;
-  body: string;
-}
-
-export interface MessagesConversationTranscript {
-  /** Mac-owned history position, for example “Latest messages — down for older”. */
-  heading: string;
-  /** Speaker rows only. Voice and microphone guidance belongs in the HUD hint. */
-  rows: MessagesConversationRow[];
-}
-
-/** Seven transcript rows use the vertical budget between the Mac-owned
- * heading (y58) and the footer hint: 84 + 22·7 = 238. */
-export const MESSAGES_CONVERSATION_ROW_CAPACITY = 7;
-
-/** Conversation frames are deliberately not rendered as notification rows.
- * The Mac owns the text; this parser only distinguishes the already-labeled
- * speaker rows from truthful voice/microphone instructions. */
-export function parseMessagesConversationRow(value: string): MessagesConversationRow {
-  const [label, body] = splitMessage(value);
-  if (!body) return { kind: 'instruction', label: '', body: label };
-  return {
-    kind: label.trim().toLowerCase() === 'you' ? 'outgoing' : 'incoming',
-    label,
-    body,
-  };
-}
-
-/**
- * A Messages conversation is a compact transcript, not a stack of selectable
- * cards. Keep the Mac's history heading above it and leave the voice controls
- * in the existing truthful HUD hint below it. The raw list index remains the
- * selection contract, so paging keeps the selected speaker row in view
- * without inventing a second local selection model.
- */
-export function messagesConversationTranscript(
-  items: readonly string[],
-  selectedIndex: number,
-  capacity = MESSAGES_CONVERSATION_ROW_CAPACITY,
-): MessagesConversationTranscript {
-  const parsed = items.map((item, index) => ({ index, row: parseMessagesConversationRow(item) }));
-  const heading = parsed.find(({ row }) => row.kind === 'instruction')?.row.body ?? 'Conversation';
-  const speakerRows = parsed.filter(({ row }) => row.kind !== 'instruction');
-  if (speakerRows.length === 0) return { heading, rows: [] };
-
-  const count = Math.max(1, capacity);
-  const selectedSpeaker = Math.max(
-    0,
-    speakerRows.filter(({ index }) => index <= selectedIndex).length - 1,
-  );
-  const start = Math.min(
-    Math.max(0, selectedSpeaker - count + 1),
-    Math.max(0, speakerRows.length - count),
-  );
-  return {
-    heading,
-    rows: speakerRows.slice(start, start + count).map(({ row }) => row),
-  };
-}
-
-/** Keep the reader wire shape deliberately small: the Mac supplies one
- * bounded page, while the renderer preserves that page's opening words. */
-export function messagesFullTextContent(items: readonly string[]): {
-  metadata: string;
-  body: string;
-} {
-  return {
-    metadata: items[0]?.trim() || 'Message',
-    body: items.slice(1).map((item) => item.trim()).filter(Boolean).join(' ')
-      || 'No text is available for this message.',
-  };
-}
-
-/** Keep every truthful Messages action label visible on the fixed G2 footer.
-/** A full message uses the lens body, while preserving its status footer. */
-export const MESSAGES_READER_BODY_LINE_CAPACITY = 10;
-
-/** 62 mono columns fit BOTH reader widths: TYPE.readerBody is 14px SF Mono
- * (0.6em advance = 8.4px), so 62 x 8.4 = 520.8px — under the 526px
- * rail-cleared panel reader and the 548px full-width one. Two UTF-16 units
- * remain available for CRLF in exact Note wire rows (SDK item limit: 64).
- * The char-count wrap below is CORRECT only because the role is monospace;
- * services/reader.py pins the same 62 on the Mac side. */
-export const MESSAGES_READER_VISIBLE_COLUMNS = 62;
-
-export function messagesReaderBodyLines(text: string): string[] {
-  return wrapHudText(
-    text,
-    MESSAGES_READER_VISIBLE_COLUMNS,
-    (value) => value.length,
-  );
-}
-
-/** The heading and spoken-reply instruction are informational. Only a real
- * speaker row earns the thin selection rail that opens the full-text reader. */
-export function selectedMessagesConversationRow(
-  items: readonly string[],
-  selectedIndex: number,
-  capacity = MESSAGES_CONVERSATION_ROW_CAPACITY,
-): number | undefined {
-  const speakerRows = items
-    .map((item, index) => ({ index, row: parseMessagesConversationRow(item) }))
-    .filter(({ row }) => row.kind !== 'instruction');
-  const selectedSpeaker = speakerRows.findIndex(({ index }) => index === selectedIndex);
-  if (selectedSpeaker < 0) return undefined;
-  const count = Math.max(1, capacity);
-  const start = Math.min(
-    Math.max(0, selectedSpeaker - count + 1),
-    Math.max(0, speakerRows.length - count),
-  );
-  return selectedSpeaker - start;
-}
-
-/** Every Mac-authored Messages screen is dense lens text, never a generic
- * browser-like list card. */
-/** Only the two genuinely bespoke Messages screens keep a dedicated layout:
- * the two-column conversation transcript and the full-text reader. Every
- * other Messages page — the thread picker, compose, access/retry states —
- * speaks the one dense focus-list language like the rest of the HUD. */
-export function usesMessagesCompactLayout(title: string): boolean {
-  const normalized = title.trim().toUpperCase();
-  return normalized === 'MESSAGES · CONVERSATION' || normalized === 'MESSAGES · MESSAGE';
-}
-
-/** Navigation starts by voice, so its non-selectable capability entry is a
- * compact instruction—not a generic list of card-like rows. */
-export function usesNavigationSetupLayout(title: string, selectable: boolean): boolean {
-  return title.trim().toUpperCase() === 'NAVIGATION' && !selectable;
-}
-
-export interface PlanningFocusRow {
-  primaryBaselineY: number;
-  secondaryBaselineY?: number;
-  railTopY: number;
-  railHeight: number;
-}
-
-export interface FocusListMarker {
-  glyph: string;
-  /** 'content' markers brighten with the row (● record); 'annotation'
-   * markers stay quiet chrome (□ todo box, – key point). */
-  emphasis: 'content' | 'annotation';
-}
-
-/** The semantic marker vocabulary for dense rows. Deliberately tiny and
- * firmware-font-safe (design-guidelines Unicode set) so the same strings
- * mean the same thing on the text-fallback surface: a marker indicates the
- * KIND of row, it never decorates. */
-const FOCUS_LIST_MARKERS: Readonly<Record<string, FocusListMarker>> = {
-  '●': { glyph: '●', emphasis: 'content' },     // a recording
-  '□': { glyph: '□', emphasis: 'annotation' },  // an open todo
-  '–': { glyph: '–', emphasis: 'annotation' },  // a key point
-};
-
-export function focusListMarker(text: string): FocusListMarker | undefined {
-  return text.length > 2 && text[1] === ' '
-    ? FOCUS_LIST_MARKERS[text[0] ?? '']
-    : undefined;
-}
-
-/** A selectable list that mixes marked and unmarked rows reserves the marker
- * column for every row, so all titles share one left edge instead of a
- * ragged one. Non-selectable detail pages keep their hanging-indent bullets
- * under section labels, where the indent IS the structure. */
-export function listReservesMarkerColumn(items: readonly string[]): boolean {
-  return items.some((item) => {
-    const { primary } = parseHudListItem(item);
-    return focusListMarker(primary || item) !== undefined;
-  });
-}
-
-/** THE list language for every focus page: dense reading rows with a
- * selection rail and hairline separators — never a card per row. The old
- * roomy layout spent 56 optical pixels, an icon badge, and a rounded outline
- * on each line; on a 288-pixel-tall lens that left three rows per glance
- * (wearer's ruling: wasteful). Planning day agendas keep a second line for
- * their time/kind pair; everything else shows six rows per screen. */
-/** With the page name in the spine, rows begin directly under it. The
- * reclaimed 24px is a whole extra row of the wearer's actual content. */
-export function planningFocusRows(
-  title: string,
-  itemCount: number,
-  hasContext = false,
-): readonly PlanningFocusRow[] {
-  void title;
-  // ONE dense row language for every focus list. The two-line agenda variant
-  // existed because a Planning day row spelled out "16:30 · EVENT · Title"
-  // and needed a second line to fit. Those rows now read "[16:30] □ Title" —
-  // quiet time chip, marker, title — so they fit one line like every other
-  // list, and a day shows nine entries per glance instead of six.
-  // The page name lives in the status spine now (the wearer's ruling), so
-  // rows start directly beneath it instead of under a second title bar.
-  // That reclaimed band is a whole extra row of real content: ten per page.
-  const firstBaselineY = hasContext ? 80 : 60;
-  const pitch = PITCH.row;
-  const lastBaselineY = 246;
-  const capacity = Math.floor((lastBaselineY - firstBaselineY) / pitch) + 1;
-  const count = Math.min(capacity, Math.max(0, Math.floor(itemCount)));
-  return Array.from({ length: count }, (_, index) => {
-    const primaryBaselineY = firstBaselineY + index * pitch;
-    return {
-      primaryBaselineY,
-      railTopY: primaryBaselineY - 10,
-      railHeight: 19,
-    };
-  });
-}
-
-export interface ProductivityOutcomeLayout {
-  titleBaselineY: number;
-  dividerY: number;
-  primaryBaselineY: number;
-  secondaryBaselineY: number;
-  footerBaselineY: number;
-}
-
-/** The lifecycle surface carries a single result, so it earns hierarchy—not a
- * 504-pixel card. A title, hairline, compact evidence rows, and progress mark
- * leave the lens calm while retaining the return gesture in the footer. */
-export function productivityOutcomeLayout(): ProductivityOutcomeLayout {
-  return {
-    titleBaselineY: 98,
-    dividerY: 136.5,
-    primaryBaselineY: 158,
-    secondaryBaselineY: 181,
-    footerBaselineY: 267,
-  };
-}
-
-export interface HudVisibleListItem {
-  item: string;
-  index: number;
 }
 
 /** Wrap every character into measured lines. Long unbroken values are split
@@ -1443,226 +826,24 @@ export function wrapHudText(
   return lines;
 }
 
-/**
- * Preserve explicit speaker-line boundaries inside the small wearable
- * transcript, then retain the newest complete visual lines. The producer
- * caps the transcript too; this is only the final optical fit, never storage.
- */
-export function brainstormTranscriptLines(
-  transcript: string,
-  maxWidth: number,
-  maximumLines: number,
-  measure: (value: string) => number,
-  scrollFromTail = 0,
-): string[] {
-  const lines = transcript
-    .split(/\r?\n/)
-    .flatMap((entry) => wrapHudText(entry, maxWidth, measure));
-  return windowHudTailLines(lines, maximumLines, scrollFromTail);
-}
-
-/** Total wrapped rows — the scroll clamp needs the real extent. */
-export function brainstormTranscriptRowCount(
-  transcript: string,
-  maxWidth: number,
-  measure: (value: string) => number,
-): number {
-  return transcript
-    .split(/\r?\n/)
-    .flatMap((entry) => wrapHudText(entry, maxWidth, measure))
-    .length;
-}
-
-/** Streaming replies show the newest complete lines. The opening words have
- * already been read; pinning them would make every later token invisible. */
-export function visibleHudTailLines(
-  lines: readonly string[],
-  maximumLines: number,
-): string[] {
-  return windowHudTailLines(lines, maximumLines, 0);
-}
-
-/** The tail window, moved `scrollFromTail` rows toward the beginning.
- *
- * Scrollback is the wearer's ask, verbatim: "can i scroll up and down to
- * see the replies?" — the settled synthesis is the whole point of a
- * session, and a tail-only view threw away every earlier turn the moment
- * it left the bottom. `…` marks hidden older rows; the caller announces
- * hidden NEWER rows in the hint, where the eye already is. */
-export function windowHudTailLines(
-  lines: readonly string[],
-  maximumLines: number,
-  scrollFromTail: number,
-): string[] {
-  const count = Math.max(1, maximumLines);
-  const back = Math.max(0, Math.min(scrollFromTail, lines.length - count));
-  const end = lines.length - back;
-  const visible = lines.slice(Math.max(0, end - count), end);
-  if (end - count > 0 && visible.length > 0) visible[0] = `…${visible[0]}`;
-  return visible;
-}
-
-/** Incoming notifications are previews, not a live stream. Keep the sender
- * and opening sentence visible; the final ellipsis makes omitted tail copy
- * explicit instead of silently showing only the last words. */
-export function visibleHudLeadingLines(
-  lines: readonly string[],
-  maximumLines: number,
-): string[] {
-  const count = Math.max(1, maximumLines);
-  const visible = lines.slice(0, count);
-  if (lines.length > count && visible.length > 0) {
-    const last = visible.length - 1;
-    visible[last] = `${visible[last]}…`;
-  }
-  return visible;
-}
-
-/** Split one bounded answer into measured pages without inventing ellipses or
- * dropping either end. Joining every returned line with spaces reconstructs
- * the whitespace-normalized input, which is the completeness invariant the
- * recorded four-sentence answer previously violated. */
-export function assistantOverlayPages(
-  text: string,
-  maxWidth: number,
-  maximumLines: number,
-  measure: (value: string) => number,
-): string[][] {
-  const pageSize = Math.max(1, Math.floor(maximumLines));
-  const normalized = text.trim().replace(/\s+/g, ' ');
-  if (!normalized) return [[]];
-  const sentences: string[] = [];
-  let start = 0;
-  for (let index = 0; index < normalized.length; index += 1) {
-    if (!'.!?'.includes(normalized[index] ?? '')) continue;
-    let end = index + 1;
-    if ('"\'’”'.includes(normalized[end] ?? '')) end += 1;
-    if (end < normalized.length && !/\s/.test(normalized[end] ?? '')) continue;
-    sentences.push(normalized.slice(start, end).trim());
-    while (end < normalized.length && /\s/.test(normalized[end] ?? '')) end += 1;
-    start = end;
-    index = end - 1;
-  }
-  if (start < normalized.length) sentences.push(normalized.slice(start).trim());
-
-  const pages: string[][] = [];
-  let page: string[] = [];
-  for (const sentence of sentences) {
-    const lines = wrapHudText(sentence, maxWidth, measure);
-    if (page.length > 0 && page.length + lines.length > pageSize) {
-      pages.push(page);
-      page = [];
-    }
-    for (const line of lines) {
-      if (page.length === pageSize) {
-        pages.push(page);
-        page = [];
-      }
-      page.push(line);
-    }
-  }
-  if (page.length > 0) pages.push(page);
-  return pages;
-}
-
-export interface FittedHudText {
-  fontSize: number;
-  lines: string[];
-}
-
-/** Fit bounded HUD copy without ever drawing outside its optical region.
- * When even the minimum readable size overflows, retain the newest lines so
- * a streamed reply still exposes its conclusion. */
-export function fitHudWrappedText(
-  text: string,
-  maxWidth: number,
-  maximumLines: number,
-  measureAtSize: (value: string, fontSize: number) => number,
-): FittedHudText {
-  const lineLimit = Math.max(1, maximumLines);
-  let minimumLines: string[] = [];
-  for (let fontSize = 21; fontSize >= 12; fontSize -= 1) {
-    const lines = wrapHudText(
-      text,
-      maxWidth,
-      (value) => measureAtSize(value, fontSize),
-    );
-    if (lines.length <= lineLimit) return { fontSize, lines };
-    minimumLines = lines;
-  }
-  return { fontSize: 12, lines: visibleHudTailLines(minimumLines, lineLimit) };
-}
-
-/** Questions cannot discard their beginning or split a UTF-16 surrogate pair
- * when a contact label contains a long unbroken value. */
-function wrapPromptQuestion(text: string, width: number, measure: (value: string) => number): string[] {
-  const lines: string[] = [];
-  let line = '';
-  for (const word of text.trim().split(/\s+/)) {
-    const candidate = line ? `${line} ${word}` : word;
-    if (measure(candidate) <= width) {
-      line = candidate;
-      continue;
-    }
-    if (line) lines.push(line);
-    line = '';
-    for (const character of word) {
-      if (measure(character) > width) throw new Error('Question exceeds readable HUD width');
-      if (line && measure(line + character) > width) {
-        lines.push(line);
-        line = '';
-      }
-      line += character;
-    }
-  }
-  if (line) lines.push(line);
-  return lines;
-}
-
-/** Keep the selected row visible on the three-row optical page without
- * throwing away rows four and five from the Mac's capability results. */
-export function visibleHudListItems(
-  items: readonly string[],
-  selectedIndex: number,
-  capacity = 3,
-): HudVisibleListItem[] {
-  const count = Math.max(1, capacity);
-  const maximumStart = Math.max(0, items.length - count);
-  const start = Math.min(Math.max(0, selectedIndex - count + 1), maximumStart);
-  return items.slice(start, start + count).map((item, offset) => ({
-    item,
-    index: start + offset,
-  }));
-}
-
-/** Retained for callers that query the old banner slot. That slot is now
- * deliberately empty; activity is shown within the conversation itself. */
-export function hudSpineLabel(_frame: HudVisualFrame): string {
-  return '';
+/** The compact banner names the current page, or the Mac's live state word
+ * when it is not resting ("hearing you…", "reconnecting"). The native
+ * conversation page carries its own in-card indicator, but it only opens
+ * once speech-to-text has finished; this word is the sole lens-visible
+ * acknowledgement during that window, and the Mac sends it first precisely
+ * so an unchanged HUD never reads as "the assistant is dead". The box sits
+ * inside the top-left tile, so a state change dirties one tile, not two. */
+export function hudSpineLabel(frame: HudVisualFrame): string {
+  const status = frame.statusModel ?? statusModelFromText(frame.status, frame.micOn);
+  return hudStatusLabel(status, hudSpinePageTitle(frame) || undefined);
 }
 
 export function hudSpinePageTitle(frame: HudVisualFrame): string {
   switch (frame.kind) {
-    case 'prompt_question':
-      return 'Question';
     case 'list':
       return hudDisplayTitle(frame.title);
     case 'navigation':
       return 'Navigation';
-    case 'productivity':
-      return 'Planning';
-    case 'brainstorm':
-      // These are two features, not one screen with two moods, and the
-      // spine is where the wearer reads which one they are standing in.
-      // It used to fall through to the empty default, so the spine showed
-      // the link status instead — and the Agent Terminal was captured
-      // reading "JOAT · BRAINSTORM" across its top, which is precisely
-      // the confusion the two surfaces are specified apart to prevent:
-      // Codex and Claude collaborate in Brainstorm, Hermes and OpenClaw
-      // work in the Terminal, and neither belongs in the other.
-      return frame.brainstorm.screen === 'agent_terminal'
-        ? 'Agent Terminal'
-        : 'Brainstorm';
     default:
       return '';
   }
@@ -1682,9 +863,9 @@ export function hudSpinePageTitle(frame: HudVisualFrame): string {
  */
 export const NAVIGATION_MAP_PANEL = {
   x: 292,
-  y: 40,
+  y: 28,
   width: 284,
-  height: 208,
+  height: 220,
   padding: 0,
 } as const;
 
@@ -1694,9 +875,48 @@ export interface NavigationMapProjection {
 }
 
 /** Project the route onto the Mac-rendered panel, so line meets road. */
+/** What a projection needs from a tile: where it is centred and how far in. */
+export type NavigationMapCentre = Pick<NavigationMapPanelModel, 'latitude' | 'longitude' | 'zoom'>;
+
+/** The map's own zoom: the Mac's tiles are rendered at it (map_image.py). */
+const NAVIGATION_MAP_ZOOM = 16;
+
+/**
+ * Where to centre the pane when no street tile has arrived: on the wearer
+ * at the tiles' own zoom, so the frame does not jump when a tile does
+ * arrive; before the first fix, on the whole route, zoomed to fit it.
+ * Until 2026-10-05 the pane simply disappeared without a tile — the
+ * "bare route shape" the comments promised was never reachable — so any
+ * Mapbox failure took the map away entirely.
+ */
+export function navigationMapFallbackCentre(map: NavigationMapModel): NavigationMapCentre | undefined {
+  if (map.geometry.length < 2) return undefined;
+  if (map.position) {
+    return { latitude: map.position.latitude, longitude: map.position.longitude, zoom: NAVIGATION_MAP_ZOOM };
+  }
+  const latitudes = map.geometry.map((point) => point.latitude);
+  const longitudes = map.geometry.map((point) => point.longitude);
+  const centre = {
+    latitude: (Math.min(...latitudes) + Math.max(...latitudes)) / 2,
+    longitude: (Math.min(...longitudes) + Math.max(...longitudes)) / 2,
+  };
+  // Zoom out until the route's bounding box fits the pane, at most to a
+  // district-scale 12; the fit is checked by projecting, not estimated.
+  for (let zoom = NAVIGATION_MAP_ZOOM; zoom > 12; zoom -= 1) {
+    const probe = { ...centre, zoom };
+    const fits = map.geometry.every((point) => {
+      const [x, y] = projectMercatorPanel(point, probe, NAVIGATION_MAP_PANEL);
+      return x >= NAVIGATION_MAP_PANEL.x + 8 && x <= NAVIGATION_MAP_PANEL.x + NAVIGATION_MAP_PANEL.width - 8
+        && y >= NAVIGATION_MAP_PANEL.y + 8 && y <= NAVIGATION_MAP_PANEL.y + NAVIGATION_MAP_PANEL.height - 8;
+    });
+    if (fits) return probe;
+  }
+  return { ...centre, zoom: 12 };
+}
+
 export function projectNavigationMapToPanel(
   map: NavigationMapModel,
-  panel: NavigationMapPanelModel,
+  panel: NavigationMapCentre,
 ): NavigationMapProjection | undefined {
   if (map.geometry.length < 2) return undefined;
   const bounds = NAVIGATION_MAP_PANEL;
@@ -1716,7 +936,7 @@ export function projectNavigationMapToPanel(
  */
 export function projectMercatorPanel(
   point: { latitude: number; longitude: number },
-  panel: NavigationMapPanelModel,
+  panel: NavigationMapCentre,
   bounds: { x: number; y: number; width: number; height: number },
 ): readonly [number, number] {
   const worldPixels = 512 * Math.pow(2, panel.zoom);
@@ -1736,63 +956,10 @@ export function projectMercatorPanel(
   ];
 }
 
-/**
- * Project a lat/lon polyline into the map panel.
- *
- * Equirectangular with a cos(latitude) correction on longitude: over a
- * walking or cycling route the error is far below one HUD pixel, and it
- * costs no projection library on a battery-bound phone. The route is scaled
- * to fit the panel with its aspect ratio intact, so the shape a wearer sees
- * is the shape of the road, not a stretched one.
- */
-export function projectNavigationMap(
-  map: NavigationMapModel,
-  panel: { x: number; y: number; width: number; height: number; padding: number }
-    = NAVIGATION_MAP_PANEL,
-): NavigationMapProjection | undefined {
-  const geometry = map.geometry;
-  if (geometry.length < 2) return undefined;
-  const midLatitude = (geometry[0]?.latitude ?? 0) * Math.PI / 180;
-  const scaleX = Math.max(0.01, Math.cos(midLatitude));
-  const raw: ReadonlyArray<readonly [number, number]> = geometry.map(
-    (point) => [point.longitude * scaleX, point.latitude] as const,
-  );
-  const xs = raw.map(([x]: readonly [number, number]) => x);
-  const ys = raw.map(([, y]: readonly [number, number]) => y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const spanX = Math.max(maxX - minX, 1e-9);
-  const spanY = Math.max(maxY - minY, 1e-9);
-  const usableWidth = panel.width - panel.padding * 2;
-  const usableHeight = panel.height - panel.padding * 2;
-  const scale = Math.min(usableWidth / spanX, usableHeight / spanY);
-  // Centre the drawn route inside the panel rather than pinning it to a
-  // corner: a route is a picture, and a picture is centred.
-  const offsetX = panel.x + panel.padding + (usableWidth - spanX * scale) / 2;
-  const offsetY = panel.y + panel.padding + (usableHeight - spanY * scale) / 2;
-  const place = (longitude: number, latitude: number): readonly [number, number] => [
-    offsetX + (longitude * scaleX - minX) * scale,
-    // Screen y grows downward; latitude grows north, so it is inverted.
-    offsetY + (maxY - latitude) * scale,
-  ];
-  return {
-    points: raw.map((_entry: readonly [number, number], index: number) => place(
-      geometry[index]?.longitude ?? 0, geometry[index]?.latitude ?? 0,
-    )),
-    ...(map.position
-      ? { position: place(map.position.longitude, map.position.latitude) }
-      : {}),
-  };
-}
 
 export class HudCanvasRenderer implements HudFrameRenderer {
   private readonly icons: Promise<Record<HudIconName, HTMLImageElement>>;
   private assistantMeasureContext?: CanvasRenderingContext2D;
-  private assistantPageKey = '';
-  private assistantPages: string[][] = [];
-  private assistantPageIndex = 0;
 
   constructor() {
     this.icons = Promise.all(
@@ -1814,29 +981,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     return context.measureText(text).width;
   }
 
-  scrollAssistantOverlay(direction: 'up' | 'down'): boolean {
-    const pages = this.assistantPages ?? [];
-    if (pages.length < 2) return false;
-    const current = this.assistantPageIndex ?? 0;
-    const next = Math.max(0, Math.min(
-      pages.length - 1,
-      current + (direction === 'down' ? 1 : -1),
-    ));
-    if (next === current) return false;
-    this.assistantPageIndex = next;
-    return true;
-  }
-
-  assistantOverlayPageCount(): number {
-    return Math.max(1, this.assistantPages?.length ?? 0);
-  }
-
-  private clearAssistantOverlayPages(): void {
-    this.assistantPageKey = '';
-    this.assistantPages = [];
-    this.assistantPageIndex = 0;
-  }
-
   async render(frame: HudVisualFrame): Promise<readonly HudImageTile[]> {
     // Normalize only gesture guidance, never the wearer's content.
     if ('hint' in frame) frame = { ...frame, hint: GesturePolicy.formatHint(frame.hint) };
@@ -1856,51 +1000,37 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.imageSmoothingEnabled = true;
 
     switch (frame.kind) {
-      case 'prompt_question':
-        this.drawPromptQuestion(context, frame.question);
-        break;
       case 'overview':
         this.drawOverview(context, frame, icons);
         break;
       case 'list':
-        this.drawList(context, frame, icons);
-        break;
-      case 'confirmation':
-        this.drawConfirmation(context, frame, icons);
+        this.drawList(context, frame);
         break;
       case 'navigation':
         this.drawNavigation(context, frame.navigation);
-        break;
-      case 'brainstorm':
-        this.drawBrainstorm(context, frame.brainstorm, icons);
-        break;
-      case 'productivity':
-        this.drawProductivity(context, frame.productivity, icons);
         break;
     }
     // Chrome is the final compositing layer. Besides making ownership
     // explicit, this prevents state-specific paths from ever obscuring the
     // clock/privacy/battery spine on host canvas implementations.
-    this.drawStatusSpine(
+    this.drawShell(
       context,
-      frame.status,
-      frame.micOn,
+      frame.statusModel ?? statusModelFromText(frame.status, frame.micOn),
       icons,
+      usesFlatHudShell(frame.kind),
       frame.kind !== 'overview',
+      hudSpineLabel(frame),
     );
-    if (frame.kind !== 'prompt_question' && frame.actionOverlay) {
+    if (frame.actionOverlay) {
       this.drawActionPill(context, frame.actionOverlay.productivity, icons);
     }
     // The assistant is not a page. It is painted last into the same four G2
     // image tiles, so it can speak over any feature without allocating an
     // impossible fifth image container or replacing the feature underneath.
-    if (frame.kind !== 'prompt_question' && frame.assistantConversation) {
-      this.clearAssistantOverlayPages();
+    if (frame.assistantConversation) {
       this.drawAssistantConversation(context, frame.assistantConversation);
-    } else if (frame.kind !== 'prompt_question' && frame.assistantOverlay) {
-      this.drawAssistantOverlay(context, frame.assistantOverlay, icons);
-    } else {
-      this.clearAssistantOverlayPages();
+    } else if (frame.assistantOverlay) {
+      this.drawAssistantOverlay(context, frame.assistantOverlay);
     }
 
     const rgba = context.getImageData(0, 0, CANVAS.width, CANVAS.height).data;
@@ -1911,45 +1041,62 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     return splitGrayscaleTiles(pixels);
   }
 
-  private drawStatusSpine(
+  private drawShell(
     context: CanvasRenderingContext2D,
-    statusText: string,
-    micOn: boolean,
+    status: HudStatusModel,
     icons: Record<HudIconName, HTMLImageElement>,
+    flat: boolean,
     /** The dashboard prints the time at full size; a designer never sets
      * the same fact twice on one screen, so the spine yields its clock —
      * and carries the DATE in that slot instead, where a banner normally
      * puts it, rather than stacking it on top of the big clock. */
     showTime = true,
+    label = hudStatusLabel(status),
   ): void {
-    const status = parseStatus(statusText);
+    if (!flat) {
+      context.strokeStyle = gray(HAIRLINE);
+      context.lineWidth = 1;
+      roundedRect(context, 1.5, 1.5, 573, 285, 20);
+      context.stroke();
+    }
+
+    // One 24 px band. Left tile: the clock and the page's word. Right tile:
+    // the microphone and the battery as icons alone — the words ON/OFF and
+    // the percentage are gone (wearer's ask, 2026-10-05: "simple icons and
+    // smaller"); the cell's fill carries the level, the slash carries the
+    // closed mic, and the number comes back only when the battery is low.
+    const baseline = HUD_VISUAL_GEOMETRY.statusBaselineY;
     context.textBaseline = 'middle';
     context.fillStyle = gray(SUPPORT);
     context.font = TYPE.statusClock;
     context.textAlign = 'left';
     context.fillText(
-      showTime ? (status.time || '--:--') : hudDateLabel(new Date()),
+      showTime ? (status.clock || '--:--') : hudDateLabel(new Date()),
       30,
-      HUD_VISUAL_GEOMETRY.statusBaselineY,
+      baseline,
     );
-    // The top line carries only time, microphone privacy, and battery.
-    // Conversation activity belongs to its retained in-card indicator.
-    this.drawIcon(context, icons.microphone, 410, 12, 15, micOn ? SUPPORT : QUIET);
+    // Same compact face as the clock. The label box is measured
+    // (types.ts SPINE_LABEL_BOX) and ends on the tile seam, so the changing
+    // word stays inside the top-left tile.
     context.font = TYPE.statusMeta;
-    context.textAlign = 'left';
-    context.fillText(micOn ? 'ON' : 'OFF', 428, HUD_VISUAL_GEOMETRY.statusBaselineY);
-    if (status.battery) {
-      context.font = TYPE.statusMeta;
-      context.textAlign = 'right';
-      context.fillText(`${status.battery}%`, 531, HUD_VISUAL_GEOMETRY.statusBaselineY);
-      // The glyph has to agree with the number beside it. It used to be
-      // `icons.battery` unconditionally — one full-looking cell drawn at 5%
-      // exactly as at 87% — so the only honest part of the indicator was
-      // the digits, and the picture contradicted them at a glance, which is
-      // the one moment a status icon is supposed to do its whole job.
-      const level = Number(status.battery);
-      this.drawIcon(context, batteryIcon(icons, level), 538, 12, 20,
-        Number.isFinite(level) && level <= 10 ? BRIGHT : SUPPORT);
+    this.fitText(context, label, SPINE_LABEL_BOX.x, baseline, SPINE_LABEL_BOX.width);
+    this.drawIcon(
+      context,
+      status.mic ? icons.microphone : icons.microphoneSlash,
+      SPINE_ICONS.micX, SPINE_ICONS.micY, SPINE_ICONS.micSize,
+      status.mic ? SUPPORT : QUIET,
+    );
+    if (status.battery !== undefined) {
+      this.drawIcon(
+        context, icons[batteryIconFor(status)],
+        SPINE_ICONS.batteryX, SPINE_ICONS.batteryY, SPINE_ICONS.batterySize, SUPPORT,
+      );
+      if (!status.charging && status.battery <= HUD_LOW_BATTERY_PCT) {
+        context.font = TYPE.statusMeta;
+        context.textAlign = 'right';
+        context.fillText(`${Math.round(status.battery)}%`, SPINE_ICONS.lowBatteryTextRightX, baseline);
+        context.textAlign = 'left';
+      }
     }
 
     // No rule under the spine. It separated nothing that the gap below it
@@ -1957,105 +1104,15 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // wearer's ruling: another waste).
   }
 
-  private drawPromptQuestion(context: CanvasRenderingContext2D, question: string): void {
-    let fitted: { lines: string[]; fontSize: number; lineHeight: number } | undefined;
-    for (let fontSize = 14; fontSize >= 12; fontSize -= 1) {
-      context.font = prose(fontSize);
-      const lines = wrapPromptQuestion(question, HUD_CONTENT_WIDTH, (value) => context.measureText(value).width);
-      const lineHeight = LEAD.body;
-      if (lines.length && 80 + (lines.length - 1) * lineHeight <= 237) {
-        fitted = { lines, fontSize, lineHeight };
-        break;
-      }
-    }
-    if (!fitted) throw new Error('Complete question does not fit the readable HUD region');
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.label;
-    context.fillText('QUESTION', HUD_EDGE, 55);
-    context.fillStyle = gray(BRIGHT);
-    context.font = prose(fitted.fontSize);
-    fitted.lines.forEach((line, index) => {
-      context.fillText(line, HUD_EDGE, 80 + index * fitted.lineHeight);
-    });
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.hint;
-    context.textAlign = 'center';
-    context.fillText('speak your answer · double-click: cancel', 288, 267);
-  }
-
+  /** A receipt strip over an image page (the dashboard, the month, the live
+   * map): two tiles, cheaper than a page swap and its four-tile return. An
+   * answer is never pixels — it is Even's own text page
+   * (HudPresenter.usesNativeAnswerPage), paged in place. */
   private drawAssistantOverlay(
     context: CanvasRenderingContext2D,
     overlay: AssistantOverlayVisual,
-    icons: Record<HudIconName, HTMLImageElement>,
   ): void {
-    const { text, presentation } = overlay;
-    if (usesAssistantPillLayout(text, presentation)) {
-      this.assistantPageKey = `${overlay.revision ?? 0}\u0000${presentation}\u0000${text}`;
-      this.assistantPages = [[text.trim()]];
-      this.assistantPageIndex = 0;
-      this.drawAssistantPill(context, text);
-      return;
-    }
-    context.font = prose(ASSISTANT_OVERLAY_FONT_PX);
-    const key = `${overlay.revision ?? 0}\u0000${presentation}\u0000${text}`;
-    if (this.assistantPageKey !== key) {
-      this.assistantPageKey = key;
-      this.assistantPages = assistantOverlayPages(
-        text,
-        386,
-        4,
-        (value) => context.measureText(value).width,
-      );
-      this.assistantPageIndex = 0;
-    }
-    const pageCount = Math.max(1, this.assistantPages.length);
-    this.assistantPageIndex = Math.max(0, Math.min(this.assistantPageIndex, pageCount - 1));
-    const lines = this.assistantPages[this.assistantPageIndex] ?? [];
-    context.save();
-    // The assistant preserves the feature *state*, but temporarily owns the
-    // complete content field beneath the status spine. A smaller card leaves
-    // recognisable rows around its edges, which still reads as two entangled
-    // screens on a monochrome HUD.
-    context.fillStyle = gray(0);
-    context.fillRect(2, 37, CANVAS.width - 4, CANVAS.height - 39);
-    roundedRect(context, 58, 51, 460, 183, 12);
-    context.fill();
-    context.strokeStyle = gray(SUPPORT);
-    context.lineWidth = 1;
-    context.stroke();
-
-    this.drawIcon(context, icons.microphone, 82, 70, 15, BRIGHT);
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.label;
-    context.fillText('JOAT', 105, 78);
-    context.fillStyle = gray(CHROME);
-    context.font = TYPE.label;
-    context.fillText('ANSWER', 150, 78);
-    context.strokeStyle = gray(HAIRLINE);
-    context.beginPath();
-    context.moveTo(82, ASSISTANT_OVERLAY_GEOMETRY.dividerY);
-    context.lineTo(494, ASSISTANT_OVERLAY_GEOMETRY.dividerY);
-    context.stroke();
-
-    context.fillStyle = gray(BRIGHT);
-    context.textAlign = 'center';
-    this.drawAssistantOverlayText(context, lines);
-
-    context.fillStyle = gray(QUIET);
-    context.font = TYPE.hint;
-    context.textAlign = 'center';
-    context.fillText(
-      pageCount > 1
-        ? `${this.assistantPageIndex + 1}/${pageCount} · ${ASSISTANT_OVERLAY_PAGE_HINT}`
-        : ASSISTANT_OVERLAY_DISMISS_HINT,
-      288,
-      ASSISTANT_OVERLAY_GEOMETRY.footerBaselineY,
-    );
-    context.restore();
+    this.drawAssistantPill(context, overlay.text);
   }
 
   /** One retained conversation card, composited into the page JOAT already
@@ -2088,7 +1145,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // interfaces. Presenter state remains intact and is restored exactly when
     // conversation ownership ends.
     context.fillStyle = gray(0);
-    context.fillRect(3, 37, CANVAS.width - 6, CANVAS.height - 40);
+    context.fillRect(3, 25, CANVAS.width - 6, CANVAS.height - 28);
     context.fillStyle = gray(0);
     roundedRect(context, geometry.x, top, geometry.width, height, 6);
     context.fill();
@@ -2206,6 +1263,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context: CanvasRenderingContext2D,
     frame: {
       status: string;
+      micOn?: boolean;
+      statusModel?: HudStatusModel;
       main: string;
       mainBrightness: number;
       mainKind?: HudContentKind;
@@ -2220,7 +1279,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.save();
     const overview = resolveHudOverview(frame);
     const layout = OVERVIEW_DASHBOARD;
-    const status = parseStatus(frame.status);
+    const status = frame.statusModel ?? statusModelFromText(frame.status, frame.micOn ?? false);
 
     // ── Left pane: the clock anchor ──────────────────────────────────────
     // Phone-clock truth, so this half stays alive and useful even when the
@@ -2236,7 +1295,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // banner chrome, not as a headline fact, so it moved to the spine's
     // left slot — which this screen leaves empty anyway, having yielded its
     // small clock to the big one below.
-    const clock = hudClockParts(status.time);
+    const clock = hudClockParts(status.clock);
     context.fillStyle = gray(BRIGHT);
     context.font = mono(layout.clockFontSize);
     context.fillText(clock.hours, columnX, layout.hoursBaselineY);
@@ -2410,17 +1469,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // seam, so a footer that differed between the notifications tab and
     // the other three made a swipe repaint the bottom-left tile as well —
     // three image writes where the rail and the pane need two.
-    // formatHint here, not just in render(). render() normalises frame.hint
-    // and frame.navigation.hint, but this footer can substitute a constant
-    // AFTER that gate — so the notifications tab drew its authored
-    // "left x2: menu" verbatim. A wearer using the R1 ring has no left
-    // temple to press, so that hint named a gesture they cannot perform.
     context.fillText(
-      GesturePolicy.formatHint(
-        frame.mainKind === 'notification'
-          ? NOTIFICATION_DISMISS_HINT
-          : frame.rail ? PANEL_OVERVIEW_HINT : frame.hint,
-      ),
+      frame.mainKind === 'notification'
+        ? NOTIFICATION_DISMISS_HINT
+        : frame.rail ? PANEL_OVERVIEW_HINT : frame.hint,
       288,
       267,
     );
@@ -2499,7 +1551,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       }
       const pomodoro = content?.pomodoro;
       if (!pomodoro) {
-        quiet(['Say “JOAT, start a pomodoro”'], layout.mainTopBaselineY);
+        quiet(['Focus timer · open the tab to start'], layout.mainTopBaselineY);
         return;
       }
       const now = Date.now();
@@ -2566,7 +1618,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
     if (content.rows.length === 0) {
-      quiet([content.empty ?? 'No headlines yet.', 'Tap to open, then long-press to refresh.'], layout.mainTopBaselineY);
+      quiet([content.empty ?? 'No headlines yet.', 'Tap to open, then hold to refresh.'], layout.mainTopBaselineY);
       return;
     }
     let y = layout.labelBaselineY + 22;
@@ -2588,565 +1640,29 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     }
   }
 
-  /**
-   * The expanded pomodoro. The countdown sits entirely inside the top-right
-   * tile — east of x=288, above y=144 — so a one-second tick uploads ONE
-   * tile. The bar is quantised to whole minutes for the same reason: it
-   * crosses into the top-left tile, and must not dirty it every second.
-   */
-  private drawPomodoroPage(
-    context: CanvasRenderingContext2D,
-    frame: Extract<HudVisualFrame, { kind: 'list' }>,
-  ): void {
-    const content = frame.rail?.content;
-    const pomodoro = content?.pomodoro;
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    if (content?.empty) {
-      context.fillStyle = gray(SUPPORT);
-      context.font = TYPE.primary;
-      this.fitText(context, content.headline ?? 'Timer unavailable', 52, 80, 496);
-      context.fillStyle = gray(CHROME);
-      context.font = TYPE.body;
-      this.drawWrappedText(context, content.empty, 52, 106, 496, LEAD.body, 3, 'leading');
-    } else if (!pomodoro) {
-      context.fillStyle = gray(SUPPORT);
-      context.font = TYPE.primary;
-      context.fillText('Say “JOAT, start a pomodoro”', 52, 96);
-      context.fillStyle = gray(CHROME);
-      context.font = TYPE.secondary;
-      context.fillText('25 min focus, 5 min break, a long one after four.', 52, 120);
-    } else {
-      const now = Date.now();
-      const remaining = pomodoroRemainingMs(pomodoro, now);
-      context.fillStyle = gray(CHROME);
-      context.font = TYPE.label;
-      context.fillText(upper(pomodoroBlockLabel(pomodoro)), 52, 66);
-      context.fillStyle = gray(pomodoro.phase === 'idle' || !pomodoro.running ? SUPPORT : BRIGHT);
-      context.font = mono(56);
-      context.textAlign = 'right';
-      context.fillText(formatCountdown(remaining), 548, 108);
-      context.textAlign = 'left';
-      // Whole minutes only: the bar crosses the seam into the left tile.
-      const wholeMinutesLeft = Math.ceil(remaining / 60_000) * 60_000;
-      const fraction = pomodoro.lengthMs > 0
-        ? 1 - Math.min(1, wholeMinutesLeft / pomodoro.lengthMs)
-        : 0;
-      context.fillStyle = gray(QUIET);
-      context.fillRect(52, 135, 496, 2);
-      context.fillStyle = gray(CHROME);
-      context.fillRect(52, 135, Math.round(496 * fraction), 2);
-      context.fillStyle = gray(CHROME);
-      context.font = TYPE.secondary;
-      context.fillText(pomodoroCycleDots(pomodoro.completed), 52, 156);
-    }
-    // The controls are the list rows the Mac sent — Start, Pause, Reset —
-    // in the one dense row language, under the timer.
-    frame.items.forEach((item, index) => {
-      const baselineY = 184 + index * PITCH.row;
-      const selected = frame.selectable && index === frame.selectedIndex;
-      if (selected) {
-        context.fillStyle = gray(BRIGHT);
-        context.fillRect(36, baselineY - 10, 3, 19);
-      }
-      this.drawFocusListLine(context, item, baselineY, selected);
-    });
-    context.fillStyle = gray(QUIET);
-    context.font = TYPE.hint;
-    context.textAlign = 'center';
-    context.fillText(frame.hint, 288, 267);
-    context.textAlign = 'left';
-  }
-
-  /** The full-text reader every long page shares: quiet metadata line, the
-   * body as the one bright thing, the footer naming the paging gestures. */
-  private drawTextReader(
-    context: CanvasRenderingContext2D,
-    metadata: string,
-    body: string,
-    hint: string,
-    preparedLines?: readonly string[],
-    left = HUD_EDGE,
-    contextLabel?: string,
-    regularProse = false,
-  ): void {
-    if (preparedLines && preparedLines.length > MESSAGES_READER_BODY_LINE_CAPACITY) {
-      throw new Error('Prepared reader page exceeds 10 display rows');
-    }
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    context.fillStyle = gray(CHROME);
-    context.font = TYPE.meta;
-    this.drawReadingContext(context, contextLabel, metadata, left);
-    context.fillStyle = gray(regularProse ? CHROME : BRIGHT);
-    context.font = regularProse ? TYPE.body : TYPE.readerBody;
-    const lines = preparedLines ?? visibleHudLeadingLines(
-      messagesReaderBodyLines(body), MESSAGES_READER_BODY_LINE_CAPACITY,
-    );
-    lines.forEach((line, index) => {
-      if (preparedLines) {
-        // Mac pages already respect the wire and display budgets. Only
-        // interpret their line terminator and fixed-width tab for painting;
-        // never trim, join, rewrap or replace body text with an ellipsis.
-        const displayLine = line.replace(/\r\n$|[\r\n]$/u, '').replace(/\t/g, '        ');
-        context.fillText(displayLine, left, 84 + index * LEAD.reader);
-      } else {
-        this.fitText(context, line, left, 84 + index * LEAD.reader, HUD_CONTENT_RIGHT - left);
-      }
-    });
-    context.fillStyle = gray(QUIET);
-    context.font = TYPE.hint;
-    context.textAlign = 'center';
-    context.fillText(hint, 288, 267);
-    context.textAlign = 'left';
-  }
-
-  private drawReadingContext(
-    context: CanvasRenderingContext2D,
-    identity: string | undefined,
-    metadata: string,
-    left = HUD_EDGE,
-  ): void {
-    if (!identity) {
-      this.fitText(context, metadata, left, 58, HUD_CONTENT_RIGHT - left);
-      return;
-    }
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.body;
-    this.fitText(context, identity, left, 58, 248);
-    context.fillStyle = gray(CHROME);
-    context.font = TYPE.meta;
-    context.textAlign = 'right';
-    this.fitText(context, metadata, HUD_CONTENT_RIGHT, 58, 236);
-    context.textAlign = 'left';
-  }
-
+  /** The Planning month is the one list that is pixels: a calendar grid has
+   * no firmware template. Alone it is the month grid; with the hovered day's
+   * items beside it, the split dashboard. Every other list is a firmware
+   * list (CapabilityMenu), so a frame without the month's grid draws only
+   * the shell. */
   private drawList(
     context: CanvasRenderingContext2D,
     frame: Extract<HudVisualFrame, { kind: 'list' }>,
-    icons: Record<HudIconName, HTMLImageElement>,
   ): void {
-    // An expanded panel tab: the rail stays lit on the left, and two of the
-    // tabs have pages of their own — the timer, and the shared reader.
-    if (frame.rail) {
-      if (frame.title.trim().toUpperCase() === 'POMODORO') {
-        this.drawPomodoroPage(context, frame);
-      } else if (usesPanelReaderLayout(frame.title)) {
-        const detail = messagesFullTextContent(frame.items);
-        this.drawTextReader(context, detail.metadata, detail.body, frame.hint,
-          usesPreparedReaderLayout(frame.title, frame.items) ? frame.items.slice(1) : undefined, 36);
-        // 36, not HUD_EDGE: panel readers indent to clear the tab rail. The
-        // Mac's 62-column rows were measured for 548px; at 526px they rely on
-        // fitText — the durable fix is a per-width column budget on the wire.
-      } else {
-        this.drawPlanningFocusList(context, frame);
-      }
-      this.drawTabRail(context, frame.rail.activeTab, icons, 'expanded');
-      return;
-    }
     const planningMonth = parsePlanningMonthTitle(frame.title);
-    const planningGrid = planningMonth && planningGridMatchesMonth(
-      planningMonth,
-      frame.planningGrid,
-    )
+    const planningGrid = planningMonth && planningGridMatchesMonth(planningMonth, frame.planningGrid)
       ? frame.planningGrid
       : undefined;
-    // Rows 0…5 are the source-backed weekly drill-down actions. Once the
-    // wearer scrolls to prior/next/view controls, use the normal list so the
-    // selected control remains explicit and reachable instead of hiding it
-    // beneath a decorative month grid.
-    // The split dashboard: month grid left, hovered day's items right
-    // (wearer's ask, 2026-09-01, pointing at the platform's own dashboard).
-    // The pane state is plugin-local hover, so this branch replaces the
-    // month -> week -> day page chain with one screen.
-    if (planningMonth && planningGrid && frame.planningPane) {
-      this.drawPlanningDashboard(
-        context, frame, planningMonth, planningGrid, frame.planningPane,
-      );
+    if (!planningMonth || !planningGrid) return;
+    if (frame.planningPane) {
+      this.drawPlanningDashboard(context, frame, planningMonth, planningGrid, frame.planningPane);
       return;
     }
-    if (planningMonth && planningGrid && canRenderPlanningMonthGrid(
-      planningMonth,
-      planningGrid,
-      frame.selectable,
-      frame.selectedIndex,
-      frame.items.length,
+    if (canRenderPlanningMonthGrid(
+      planningMonth, planningGrid, frame.selectable, frame.selectedIndex, frame.items.length,
     )) {
       this.drawPlanningMonth(context, frame, planningMonth, planningGrid);
-      return;
     }
-
-    if (usesMessagesPreparedReaderLayout(frame.title, frame.items)) {
-      this.drawTextReader(context, frame.items[0] ?? 'Message', '', frame.hint,
-        frame.items.slice(1), HUD_EDGE, frame.contextLabel, true);
-      return;
-    }
-
-    if (usesMessagesCompactLayout(frame.title)) {
-      this.drawMessagesConversation(context, frame);
-      return;
-    }
-
-    if (usesQuickNotesReaderLayout(frame.title, frame.items)) {
-      this.drawTextReader(context, frame.items[0] ?? 'QuickNote', '', frame.hint,
-        frame.items.slice(1), HUD_EDGE, frame.contextLabel, true);
-      return;
-    }
-
-    if (usesNavigationSetupLayout(frame.title, frame.selectable)) {
-      this.drawNavigationSetup(context, frame);
-      return;
-    }
-
-    if (!frame.selectable && frame.title.trim().toUpperCase() === 'PLANNING · EVENT') {
-      this.drawPlanningEventDetail(context, frame);
-      return;
-    }
-
-    // Every remaining list renders in the one dense row language. The old
-    // roomy per-row card (icon badge, 56px pitch, rounded selection outline)
-    // is deliberately gone — it fit three rows where six belong.
-    this.drawPlanningFocusList(context, frame);
-  }
-
-  private drawPlanningEventDetail(
-    context: CanvasRenderingContext2D,
-    frame: Extract<HudVisualFrame, { kind: 'list' }>,
-  ): void {
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.assistant;
-    const titleLines = this.drawWrappedText(
-      context, frame.items[0] ?? '', 36, 64, 504, LEAD.body, 6, 'leading');
-
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.secondary;
-    this.fitText(context, frame.items[1] ?? '', 36, 64 + titleLines * LEAD.body + 8, 504);
-
-    context.fillStyle = gray(QUIET);
-    context.font = TYPE.hint;
-    context.textAlign = 'center';
-    this.fitText(context, frame.hint, 288, HINT_BASELINE_Y, 500);
-  }
-
-  private drawPlanningFocusList(
-    context: CanvasRenderingContext2D,
-    frame: Extract<HudVisualFrame, { kind: 'list' }>,
-  ): void {
-    if (frame.title.toUpperCase().startsWith('PLANNING')
-      && frame.contextLabel && frame.controlStartIndex !== undefined
-      && frame.items.length - frame.controlStartIndex === 5
-      && frame.items[frame.items.length - 1]?.startsWith('●')) {
-      this.drawAgenda(context, frame, frame.controlStartIndex);
-      return;
-    }
-    const hasControls = frame.controlStartIndex !== undefined;
-    const rows = planningFocusRows(frame.title, frame.items.length, Boolean(frame.contextLabel))
-      .filter((row) => !hasControls || row.primaryBaselineY <= 232)
-      .filter((row) => !frame.actionOverlay || row.primaryBaselineY < 190);
-    const notePreview = frame.title.trim().toUpperCase() === 'QUICKNOTES';
-    const reserveMarker = !notePreview && frame.selectable && listReservesMarkerColumn(frame.items);
-
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-
-    if (frame.contextLabel) {
-      context.fillStyle = gray(SUPPORT);
-      context.font = TYPE.label;
-      this.fitText(context, frame.contextLabel, 36, 58, 504);
-    }
-    const visible = visibleHudListItems(frame.items, frame.selectedIndex, rows.length);
-    const controlsInWindow = visible.findIndex((entry) => entry.index === frame.controlStartIndex);
-    visible.forEach((entry, index) => {
-      const row = rows[index];
-      if (!row) return;
-      const isControl = hasControls && entry.index >= frame.controlStartIndex!;
-      const groupOffset = controlsInWindow > 0 && index >= controlsInWindow ? 10 : 0;
-      const baseline = row.primaryBaselineY + groupOffset;
-      const selected = frame.selectable && entry.index === frame.selectedIndex;
-      if (index === controlsInWindow && index > 0) {
-        context.fillStyle = gray(HAIRLINE);
-        context.fillRect(52, baseline - 15, 488, 1);
-      }
-      if (selected) {
-        context.fillStyle = gray(BRIGHT);
-        context.fillRect(36, row.railTopY + groupOffset, 3, row.railHeight);
-      }
-      if (row.secondaryBaselineY !== undefined) {
-        const { primary, secondary } = parseHudListItem(entry.item);
-        context.fillStyle = gray(selected ? BRIGHT : SUPPORT);
-        context.font = TYPE.row;
-        this.fitText(context, primary || entry.item, 52, row.primaryBaselineY, 488);
-        context.fillStyle = gray(selected ? SUPPORT : CHROME);
-        context.font = TYPE.meta;
-        this.fitText(context, secondary, 52, row.secondaryBaselineY, 488);
-        return;
-      }
-      this.drawFocusListLine(context, entry.item, baseline, selected, reserveMarker, notePreview, isControl, hasControls);
-    });
-
-    // Content longer than one window gets a hairline scrollbar at the right
-    // edge — position and proportion, no words. Without it a section label
-    // stranded on the last row reads as an amputated page, not "scroll on".
-    if (frame.items.length > rows.length && visible.length > 0) {
-      const trackTop = 74;
-      const trackHeight = frame.actionOverlay ? 112 : 178;
-      const start = visible[0]?.index ?? 0;
-      const thumbHeight = Math.max(
-        12,
-        Math.round((rows.length / frame.items.length) * trackHeight),
-      );
-      const travel = trackHeight - thumbHeight;
-      const range = Math.max(1, frame.items.length - rows.length);
-      const thumbTop = trackTop + Math.round((start / range) * travel);
-      context.fillStyle = gray(QUIET);
-      context.fillRect(556, trackTop, 2, trackHeight);
-      context.fillStyle = gray(CHROME);
-      context.fillRect(556, thumbTop, 2, thumbHeight);
-    }
-
-    context.fillStyle = gray(QUIET);
-    context.font = TYPE.hint;
-    context.textAlign = 'center';
-    this.fitText(context, frame.hint, 288, 267, 504);
-    context.textAlign = 'left';
-  }
-
-  /** The Mac owns row identities and actions. This reading surface uses the
-   * same prose roles as the retained JOAT conversation, with task metadata
-   * below the title and navigation on its own selected-control page. */
-  private drawAgenda(
-    context: CanvasRenderingContext2D,
-    frame: Extract<HudVisualFrame, { kind: 'list' }>,
-    contentCount: number,
-  ): void {
-    context.textAlign = 'left';
-    context.textBaseline = 'top';
-    if (frame.selectedIndex >= contentCount) {
-      context.font = TYPE.secondary;
-      context.fillStyle = gray(CHROME);
-      this.fitText(context, frame.contextLabel ?? 'Planning', 36, 52, 500);
-      for (let offset = 0; offset < 5; offset += 1) {
-        const index = contentCount + offset;
-        const focused = frame.selectable && frame.selectedIndex === index;
-        const label = offset < 2
-          ? `${offset === 0 ? 'Previous' : 'Next'} day · ${(frame.items[index] ?? '').replace(/[‹›]/g, '').trim()}`
-          : ['Month', 'Week', 'Day'][offset - 2]!;
-        const pitch = frame.actionOverlay ? 23 : 32;
-        const top = (frame.actionOverlay ? 68 : 78) + offset * pitch;
-        context.font = focused ? TYPE.assistant : TYPE.body;
-        context.fillStyle = gray(focused ? BRIGHT : CHROME);
-        this.fitText(context, label, 48, top + (frame.actionOverlay ? 3 : 6), 480);
-        if (focused) {
-          context.strokeStyle = gray(BRIGHT);
-          context.lineWidth = 1;
-          context.strokeRect(36.5, top + .5, 503, pitch - 3);
-        }
-      }
-      return;
-    }
-    context.font = TYPE.assistant; // Measure the wider selected role for every row.
-    const rows = frame.items.slice(0, contentCount).map((fallback, index) => {
-      const metadata = frame.planningEntries?.[index];
-      const parsed = parseHudListItem(fallback);
-      const marker = focusListMarker(parsed.primary);
-      const title = metadata?.title ?? (marker ? parsed.primary.slice(2) : parsed.primary);
-      const wrapped = wrapHudText(title || fallback, 472, value => context.measureText(value).width);
-      const lines = wrapped.slice(0, 3);
-      if (wrapped.length > 3) lines[2] = `${lines[2]}…`;
-      const due = metadata?.time ?? parsed.age;
-      return { index, lines, due, reminder: metadata?.kind === 'reminder' || Boolean(marker),
-        height: 16 + lines.length * LEAD.body + (due ? 18 : 0) };
-    });
-    if (!rows.length) return;
-    let start = Math.min(frame.selectedIndex, rows.length - 1);
-    let end = start + 1;
-    let height = rows[start]!.height;
-    const available = (frame.actionOverlay ? 184 : 252) - 48;
-    const fits = (index: number): boolean => height + 6 + rows[index]!.height <= available;
-    if (start > 0 && fits(start - 1)) {
-      start -= 1;
-      height += 6 + rows[start]!.height;
-    }
-    while (end < rows.length && fits(end)) {
-      height += 6 + rows[end]!.height;
-      end += 1;
-    }
-    let top = 48;
-    for (const row of rows.slice(start, end)) {
-      const selected = frame.selectable && row.index === frame.selectedIndex;
-      if (selected) {
-        context.strokeStyle = gray(BRIGHT);
-        context.lineWidth = 1;
-        context.beginPath();
-        context.roundRect(28.5, top + .5, 519, row.height - 1, 4);
-        context.stroke();
-      }
-      if (row.reminder) {
-        context.strokeStyle = gray(selected ? BRIGHT : CHROME);
-        context.lineWidth = 1;
-        context.beginPath();
-        context.arc(39, top + 15, 3, 0, Math.PI * 2);
-        context.stroke();
-      }
-      context.font = selected ? TYPE.assistant : TYPE.body;
-      context.fillStyle = gray(selected ? BRIGHT : CHROME);
-      row.lines.forEach((line, lineIndex) => this.fitText(context, line, 50, top + 8 + lineIndex * LEAD.body, 472));
-      if (row.due) {
-        context.font = TYPE.secondary;
-        context.fillStyle = gray(CHROME);
-        this.fitText(context, row.due, 50, top + 9 + row.lines.length * LEAD.body, 472);
-      }
-      top += row.height + 6;
-    }
-    if (rows.length > end - start) {
-      const thumb = Math.max(12, available * (end - start) / rows.length);
-      context.fillStyle = gray(QUIET);
-      context.fillRect(557, 48, 1, available);
-      context.fillStyle = gray(CHROME);
-      context.fillRect(557, 48 + (available - thumb) * start / Math.max(1, rows.length - (end - start)), 1, thumb);
-    }
-  }
-
-  /** One primary text edge; optional age is a separate trailing column.
-   * All supporting text shares the banner/footer face and size. */
-  private drawFocusListLine(
-    context: CanvasRenderingContext2D,
-    item: string,
-    baselineY: number,
-    selected: boolean,
-    reserveMarker = false,
-    preservePreview = false,
-    control = false,
-    emphasizeSelection = false,
-  ): void {
-    const trimmed = item.trim();
-    if (!preservePreview && /^[A-Z][A-Z ]{1,18}$/.test(trimmed)) {
-      context.fillStyle = gray(CHROME);
-      context.font = TYPE.label;
-      context.fillText(trimmed, 52, baselineY);
-      return;
-    }
-    const { age, primary, secondary } = parseHudListItem(item, preservePreview);
-    let x = 52;
-    let right = 540;
-    if (age) {
-      context.fillStyle = gray(CHROME);
-      context.font = TYPE.meta;
-      context.textAlign = 'right';
-      context.fillText(age, right, baselineY);
-      right -= context.measureText(age).width + 12;
-      context.textAlign = 'left';
-    }
-    let text = primary || item;
-    const marker = preservePreview ? undefined : focusListMarker(text);
-    if (marker) {
-      text = text.slice(2);
-      context.fillStyle = gray(
-        marker.emphasis === 'content' ? (selected ? BRIGHT : SUPPORT) : CHROME,
-      );
-      context.font = control ? TYPE.secondary : TYPE.row;
-      context.fillText(marker.glyph, x, baselineY);
-      x += 18;
-    } else if (reserveMarker) {
-      x += 18; // keep one shared title edge in lists that mix marked rows
-    }
-    context.fillStyle = gray(selected ? BRIGHT : control || preservePreview ? CHROME : SUPPORT);
-    context.font = control
-      ? (selected ? assistantProse(11) : TYPE.secondary)
-      : (selected && (emphasizeSelection || preservePreview) ? TYPE.assistant : TYPE.row);
-    if (!secondary) {
-      this.fitText(context, text, x, baselineY, right - x);
-      return;
-    }
-    const primaryWidth = Math.min(context.measureText(text).width, 320, right - x);
-    this.fitText(context, text, x, baselineY, primaryWidth);
-    context.fillStyle = gray(selected ? SUPPORT : CHROME);
-    context.font = TYPE.meta;
-    this.fitText(context, secondary, x + primaryWidth + 12, baselineY,
-      Math.max(0, right - x - primaryWidth - 12));
-  }
-
-  private drawNavigationSetup(
-    context: CanvasRenderingContext2D,
-    frame: Extract<HudVisualFrame, { kind: 'list' }>,
-  ): void {
-    const [spokenStart = 'Say “JOAT, navigate to …”', expectation = 'I’ll confirm the place.'] = frame.items;
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.title;
-    context.fillText('Navigation', 36, 64);
-
-    context.font = TYPE.primary;
-    this.fitText(context, spokenStart, 36, 104, 504);
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.secondary;
-    this.fitText(context, expectation, 36, 130, 504);
-
-    context.fillStyle = gray(QUIET);
-    context.font = TYPE.hint;
-    context.textAlign = 'center';
-    this.fitText(context, frame.hint, 288, 267, 500);
-  }
-
-  private drawMessagesConversation(
-    context: CanvasRenderingContext2D,
-    frame: Extract<HudVisualFrame, { kind: 'list' }>,
-  ): void {
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-
-    if (frame.title.trim().toUpperCase() === 'MESSAGES · CONVERSATION') {
-      const transcript = messagesConversationTranscript(
-        frame.items,
-        frame.selectedIndex,
-        MESSAGES_CONVERSATION_ROW_CAPACITY,
-      );
-      const selectedRow = frame.selectable
-        ? selectedMessagesConversationRow(
-          frame.items,
-          frame.selectedIndex,
-          MESSAGES_CONVERSATION_ROW_CAPACITY,
-        )
-        : undefined;
-      context.fillStyle = gray(CHROME);
-      context.font = TYPE.label;
-      this.drawReadingContext(context, frame.contextLabel, transcript.heading, 36);
-
-      transcript.rows.forEach((parsed, row) => {
-        const y = 84 + row * PITCH.labelled;
-        const outgoing = parsed.kind === 'outgoing';
-        const selected = row === selectedRow;
-        if (selected) {
-          context.fillStyle = gray(BRIGHT);
-          context.fillRect(36, y - 10, 3, RAIL_HEIGHT);
-        }
-        // The wearer reads what the OTHER person wrote; their own words are
-        // context. Incoming carries the weight, outgoing recedes — never one
-        // uniform brightness across the transcript.
-        context.fillStyle = gray(outgoing ? CHROME : SUPPORT);
-        context.font = TYPE.micro;
-        this.fitText(context, parsed.label, selected ? 48 : 36, y, selected ? 42 : 54);
-        context.fillStyle = gray(outgoing ? CHROME : selected ? BRIGHT : SUPPORT);
-        context.font = TYPE.row;
-        this.fitText(context, parsed.body, 104, y, 436);
-      });
-
-      context.fillStyle = gray(QUIET);
-      context.font = TYPE.hint;
-      context.textAlign = 'center';
-      this.fitText(context, frame.hint, 288, 267, 504);
-      return;
-    }
-
-    // MESSAGES · MESSAGE — the full-text reader. Metadata is quiet chrome;
-    // the message body is the one bright thing on the page.
-    const detail = messagesFullTextContent(frame.items);
-    this.drawTextReader(context, detail.metadata, detail.body, frame.hint,
-      usesPreparedReaderLayout(frame.title, frame.items) ? frame.items.slice(1) : undefined,
-      HUD_EDGE, frame.contextLabel);
   }
 
   /**
@@ -3164,7 +1680,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const gridLeft = 37;
     const gridRight = 539;
     const cellWidth = (gridRight - gridLeft) / 7;
-    const gridTop = 96;
+    const gridTop = 84;
     const rowHeight = PITCH.week;
     const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
     const selectedWeek = frame.selectedIndex;
@@ -3173,23 +1689,23 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
     context.fillStyle = gray(BRIGHT);
     context.font = TYPE.title;
-    context.fillText('Planning', 36, 60);
+    context.fillText('Planning', 36, 48);
     context.textAlign = 'right';
     context.fillStyle = gray(SUPPORT);
     context.font = TYPE.meta;
-    context.fillText(`${month.label.slice(0, 3)} ${month.year} · E EVENT · R REMINDER`, 540, 60);
+    context.fillText(`${month.label.slice(0, 3)} ${month.year} · E EVENT · R REMINDER`, 540, 48);
 
     context.textAlign = 'center';
     context.fillStyle = gray(CHROME);
     context.font = TYPE.meta;
     weekdays.forEach((weekday, column) => {
-      context.fillText(weekday, gridLeft + cellWidth * (column + 0.5), 80);
+      context.fillText(weekday, gridLeft + cellWidth * (column + 0.5), 68);
     });
     context.strokeStyle = gray(HAIRLINE);
     context.lineWidth = 1;
     context.beginPath();
-    context.moveTo(gridLeft, 87.5);
-    context.lineTo(gridRight, 87.5);
+    context.moveTo(gridLeft, 75.5);
+    context.lineTo(gridRight, 75.5);
     context.stroke();
 
     const days = planningMonthDays(month);
@@ -3313,7 +1829,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.strokeStyle = gray(HAIRLINE);
     context.lineWidth = 1;
     context.beginPath();
-    context.moveTo(geometry.dividerX, 48);
+    context.moveTo(geometry.dividerX, 36);
     context.lineTo(geometry.dividerX, 250);
     context.stroke();
 
@@ -3387,81 +1903,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'center';
     this.fitText(context, frame.hint, 288, 267, 500);
     void paneWidth;
-  }
-
-  private drawConfirmation(
-    context: CanvasRenderingContext2D,
-    frame: Extract<HudVisualFrame, { kind: 'confirmation' }>,
-    icons: Record<HudIconName, HTMLImageElement>,
-  ): void {
-    const reviewLayout = confirmationReviewLayout();
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.title;
-    if (frame.reviewDomain) {
-      const isCalendar = frame.reviewDomain === 'calendar';
-      this.drawIcon(
-        context,
-        icons[isCalendar ? 'calendar' : 'tasks'],
-        reviewLayout.headerIconX,
-        51,
-        18,
-        SUPPORT,
-      );
-      context.fillText(
-        isCalendar ? 'Calendar review' : 'Reminder review',
-        reviewLayout.headerTextX,
-        reviewLayout.headerBaselineY,
-      );
-    } else {
-      context.fillText(
-        'Confirm action',
-        reviewLayout.contentX,
-        reviewLayout.headerBaselineY,
-      );
-    }
-    context.strokeStyle = gray(CHROME);
-    context.beginPath();
-    context.moveTo(reviewLayout.contentX, reviewLayout.dividerY);
-    context.lineTo(
-      reviewLayout.contentX + reviewLayout.contentWidth,
-      reviewLayout.dividerY,
-    );
-    context.stroke();
-
-    context.fillStyle = gray(BRIGHT);
-    context.font = prose(reviewLayout.promptFontSize);
-    this.drawWrappedText(
-      context,
-      frame.prompt,
-      reviewLayout.contentX,
-      reviewLayout.promptTopBaselineY,
-      reviewLayout.contentWidth,
-      reviewLayout.promptLineHeight,
-      reviewLayout.promptMaxLines,
-      'leading',
-    );
-
-    context.textAlign = 'center';
-    context.fillStyle = gray(QUIET);
-    context.font = TYPE.hint;
-    this.fitText(
-      context,
-      confirmationActionHint(),
-      288,
-      reviewLayout.footerBaselineY,
-      500,
-    );
-  }
-
-  private drawProductivity(
-    context: CanvasRenderingContext2D,
-    model: ProductivityHudModel,
-    icons: Record<HudIconName, HTMLImageElement>,
-  ): void {
-    // Transient phases route to actionOverlay; a productivity frame is always a truth page.
-    this.drawProductivityPage(context, model, icons);
   }
 
   /** Strip over the live page; black-fills its own rect so rows beneath can't bleed through. */
@@ -3547,380 +1988,17 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.restore();
   }
 
-  private drawProductivityPage(
-    context: CanvasRenderingContext2D,
-    model: ProductivityHudModel,
-    icons: Record<HudIconName, HTMLImageElement>,
-  ): void {
-    const isCalendar = model.domain === 'calendar';
-    const label = isCalendar ? 'Calendar' : 'Reminders';
-    const phase = productivityPhaseLabel(model.phase);
-    const icon = icons[isCalendar ? 'calendar' : 'tasks'];
-
-    context.textBaseline = 'middle';
-    context.textAlign = 'left';
-    this.drawIcon(context, icon, 36, 49, 20, BRIGHT);
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.title;
-    context.fillText(label, 66, 60);
-    context.textAlign = 'right';
-    context.fillStyle = gray(model.phase === 'due' ? BRIGHT : SUPPORT);
-    context.font = TYPE.meta;
-    context.fillText(phase, 540, 60);
-    context.strokeStyle = gray(HAIRLINE);
-    context.beginPath();
-    context.moveTo(36, 76.5);
-    context.lineTo(540, 76.5);
-    context.stroke();
-
-    context.textAlign = 'left';
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.primary;
-    const layout = productivityOutcomeLayout();
-    this.drawWrappedText(context, model.title, 36, layout.titleBaselineY, 504, LEAD.primary, 2);
-
-    context.fillStyle = gray(model.phase === 'due' ? SUPPORT : HAIRLINE);
-    context.fillRect(36, layout.dividerY, 504, 1);
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.body;
-    this.fitText(context, model.primary, 36, layout.primaryBaselineY, 504);
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.meta;
-    this.drawWrappedText(context, model.secondary, 36, layout.secondaryBaselineY, 504, LEAD.meta, 2);
-
-    context.fillStyle = gray(QUIET);
-    context.font = TYPE.hint;
-    context.textAlign = 'center';
-    this.fitText(context, productivityActionHint(model), 288, layout.footerBaselineY, 500);
-  }
-
-  private drawBrainstorm(
-    context: CanvasRenderingContext2D,
-    model: BrainstormHudModel,
-    icons: Record<HudIconName, HTMLImageElement>,
-  ): void {
-    // Dense on purpose. The wearer, watching this render live: "why are we
-    // not able to use the full screen? … stop wasting so much place on
-    // things that do not affect functionality." The old layout spent four
-    // rows and two rules on a title, TOPIC, SEATS and LIVE before the
-    // first word of content; the transcript got six rows of a 288px lens.
-    // Now: one header row, one rule, and everything else is transcript —
-    // SEATS live in the speaker prefixes, LIVE is whoever's row is
-    // growing, and the surface's name is its content.
-    const state = brainstormStateLabel(model.state);
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    const scroll = this.transcriptScrollFor(model);
-    this.terminalViewportActive = model.screen === 'agent_terminal' && model.messages !== undefined;
-    let terminalNewer = 0;
-    if (model.screen === 'agent_terminal') {
-      const layout = agentTerminalTranscriptLayout(model);
-      this.drawIcon(context, icons.brainstorm, HUD_EDGE, 52, 14, BRIGHT);
-      context.fillStyle = gray(BRIGHT);
-      context.font = TYPE.secondary;
-      this.fitText(context, layout.summary, HUD_EDGE + 20, 58, HUD_CONTENT_WIDTH - 190);
-      context.textAlign = 'right';
-      context.fillStyle = gray(SUPPORT);
-      context.font = TYPE.micro;
-      context.textAlign = 'left';
-      if (!layout.showRecoveryDetails) {
-        // The selected agent is already named above; internal work sessions
-        // belong outside this conversation surface.
-        context.fillStyle = gray(SUPPORT);
-        context.font = TYPE.micro;
-        this.fitText(
-          context,
-          'AGENT TERMINAL',
-          HUD_EDGE,
-          72,
-          HUD_CONTENT_WIDTH,
-        );
-      } else {
-        context.fillStyle = gray(SUPPORT);
-        context.font = TYPE.micro;
-        this.fitText(context, `HOST > ${model.endpointHost || 'Dedicated JOAT session'}`, HUD_EDGE, 72, HUD_CONTENT_WIDTH);
-        context.fillStyle = gray(SUPPORT);
-        context.font = TYPE.micro;
-        this.fitText(context, `POLICY > ${agentTerminalSafetyLabel(model)}`, HUD_EDGE, 88, HUD_CONTENT_WIDTH);
-        context.fillStyle = gray(CHROME);
-        context.font = TYPE.micro;
-        this.fitText(context, `SESSION > ${model.terminalReason || 'Your Hermes and OpenClaw work sessions.'}`, HUD_EDGE, 104, HUD_CONTENT_WIDTH);
-      }
-      context.strokeStyle = gray(HAIRLINE);
-      context.beginPath();
-      context.moveTo(HUD_EDGE, layout.dividerY);
-      context.lineTo(HUD_CONTENT_RIGHT, layout.dividerY);
-      context.stroke();
-      context.fillStyle = gray(BRIGHT);
-      context.font = TYPE.transcript;
-      const question = model.terminalPrompt?.question;
-      const questionLines = question === undefined ? [] : question.split(/\r?\n/)
-        .flatMap(line => wrapTerminalParagraph(line, HUD_CONTENT_WIDTH, text => context.measureText(text).width));
-      // Publication may only acknowledge a complete visible question.
-      if (questionLines.length > 6) throw new Error('Terminal prompt exceeds composer capacity');
-      const composerRows = question === undefined ? 0 : questionLines.length + 1;
-      const visible = Math.max(1, layout.transcriptLineCapacity - composerRows);
-      if (model.messages !== undefined) {
-        this.terminalViewport ??= new TerminalConversationViewport();
-        const page = this.terminalViewport.view(
-          model.conversationId || `legacy:${agentTerminalFocusLabel(model.topic)}`,
-          model.messages, visible,
-          text => wrapTerminalParagraph(text, HUD_CONTENT_WIDTH, value => context.measureText(value).width),
-          model.historyTruncated, `${HUD_CONTENT_WIDTH}|${TYPE.transcript}`,
-        );
-        terminalNewer = page.newer;
-        const lines = page.lines.length ? page.lines : ['Tap to speak to this agent.'];
-        lines.forEach((line, index) => context.fillText(line, HUD_EDGE,
-          layout.transcriptBaselineY + index * LEAD.transcript));
-      } else {
-        this.drawBrainstormTranscript(context,
-          model.activity || 'JOAT > Terminal is ready. Speak after a tap.',
-          HUD_EDGE, layout.transcriptBaselineY, visible, scroll);
-      }
-      if (question !== undefined) {
-        const composerY = layout.transcriptBaselineY + visible * LEAD.transcript;
-        context.fillStyle = gray(SUPPORT);
-        context.fillRect(HUD_EDGE, composerY - 5, HUD_CONTENT_WIDTH, 1);
-        context.fillStyle = gray(BRIGHT);
-        questionLines.forEach((line, index) => context.fillText(line, HUD_EDGE,
-          composerY + (index + 1) * LEAD.transcript));
-      }
-    } else {
-      this.drawIcon(context, icons.brainstorm, HUD_EDGE, 52, 14, BRIGHT);
-      context.fillStyle = gray(BRIGHT);
-      context.font = TYPE.secondary;
-      this.fitText(
-        context,
-        model.topic || 'Brainstorm — say “JOAT, brainstorm …” to begin.',
-        HUD_EDGE + 20,
-        58,
-        HUD_CONTENT_WIDTH - 210,
-      );
-      context.textAlign = 'right';
-      context.fillStyle = gray(SUPPORT);
-      context.font = TYPE.micro;
-      const liveNow = model.state === 'running' && model.activeSpeaker
-        ? `${model.activeSpeaker} · ${state}`
-        : state;
-      this.fitText(context, liveNow, HUD_CONTENT_RIGHT, 58, 190);
-      context.textAlign = 'left';
-      context.strokeStyle = gray(HAIRLINE);
-      context.beginPath();
-      context.moveTo(HUD_EDGE, 66.5);
-      context.lineTo(HUD_CONTENT_RIGHT, 66.5);
-      context.stroke();
-      context.fillStyle = gray(BRIGHT);
-      context.font = TYPE.transcript;
-      this.drawBrainstormTranscript(
-        context,
-        model.activity
-          || `SEATS > ${model.collaborators.join(' · ') || 'waiting for collaborators'}`,
-        HUD_EDGE,
-        82,
-        13,
-        scroll,
-      );
-    }
-    const actionHint = model.terminalPrompt
-      ? 'Listening · speak your answer · double-click: cancel'
-      : this.terminalViewportActive && terminalNewer > 0
-        ? `▼ ${terminalNewer} newer rows · swipe down · double-click: back`
-      : !this.terminalViewportActive && scroll.offset > 0
-      // Scrolling changes the transcript position, not the destination of Back.
-      ? `▼ ${scroll.offset} newer — swipe down · double-click: ${
-        model.screen === 'agent_terminal' ? 'back'
-          : model.state === 'running' ? 'cancel' : 'menu'
-      }`
-      : brainstormActionHint(model);
-    context.fillStyle = gray(QUIET);
-    context.font = TYPE.hint;
-    context.textAlign = 'center';
-    this.fitText(context, actionHint, 288, 267, HUD_CONTENT_WIDTH);
-  }
-
   /** Scrollback state for the brainstorm/terminal transcript.
 
-   * Lives on the renderer because the renderer is what knows how prose
-   * wraps into rows. Keyed by screen+topic so a new session starts back
-   * at the live tail; while the wearer is scrolled up, freshly arriving
-   * rows must not drag the view — the offset grows with the content so
-   * the words under the wearer's eyes stay put. */
-  private terminalViewport?: TerminalConversationViewport;
-  private terminalViewportActive = false;
-
-  private transcriptScroll = { key: '', offset: 0, rows: 0, visible: 13 };
-
-  private transcriptScrollFor(
-    model: BrainstormHudModel,
-  ): { offset: number; rows: number; visible: number } {
-    const key = model.screen === 'agent_terminal'
-      ? `agent_terminal|${model.conversationId || agentTerminalFocusLabel(model.topic)}`
-      : `${model.screen}|${model.topic}`;
-    if (key !== this.transcriptScroll.key) {
-      this.transcriptScroll = { key, offset: 0, rows: 0, visible: this.transcriptScroll.visible };
-    }
-    return this.transcriptScroll;
-  }
-
-  scrollTranscript(direction: 'up' | 'down'): boolean {
-    if (this.terminalViewportActive) return this.terminalViewport?.scroll(direction) ?? false;
-    const step = 6; // half a screen per swipe — enough to move, easy to track
-    const state = this.transcriptScroll;
-    const maximum = Math.max(0, state.rows - state.visible);
-    const next = direction === 'up'
-      ? Math.min(state.offset + step, maximum)
-      : Math.max(0, state.offset - step);
-    if (next === state.offset) return false;
-    state.offset = next;
-    return true;
-  }
-
-
+  /** The one navigation frame that is pixels: live guidance with its map.
+   * Every frame before and around it (confirm the place, the mode, the
+   * preview, the warnings, arrival, an error) is a firmware text page
+   * (NavigationHud.navigationNativeBody). */
   private drawNavigation(
     context: CanvasRenderingContext2D,
     navigation: NavigationHudModel,
   ): void {
-    if (isNavigationSetupStatus(navigation)) {
-      this.drawNavigationSetupStatus(context, navigation);
-      return;
-    }
-    if (navigation.view === 'guidance') {
-      this.drawActiveNavigation(context, navigation);
-      return;
-    }
-    if (
-      navigation.view === 'uncertain'
-      || navigation.view === 'wrong_way'
-      || navigation.view === 'off_route'
-      || navigation.view === 'rerouting'
-    ) {
-      this.drawNavigationWarning(context, navigation);
-      return;
-    }
-    if (navigation.view === 'preview') {
-      this.drawNavigationPreview(context, navigation);
-      return;
-    }
-    if (navigation.view === 'arrived') {
-      this.drawNavigationArrival(context, navigation);
-      return;
-    }
-    this.drawNavigationDecision(context, navigation);
-  }
-
-  private drawNavigationSetupStatus(
-    context: CanvasRenderingContext2D,
-    navigation: NavigationHudModel,
-  ): void {
-    // A pre-route wait is not a warning about an installed route. Keep its
-    // outcome in the same top-left image container: serial tile delivery can
-    // replace the complete explanation without leaving an old instruction
-    // in the lower half of the display.
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    context.fillStyle = gray(CHROME);
-    context.font = TYPE.label;
-    context.fillText('NAVIGATION', 36, 54);
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.primary;
-    this.drawWrappedText(context, navigation.primary, 36, 76, 240, 18, 2);
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.secondary;
-    this.drawWrappedText(context, navigation.secondary, 36, 106, 240, 12, 2);
-    context.fillStyle = gray(QUIET);
-    context.font = TYPE.hint;
-    this.fitText(context, navigation.hint, 36, 134, 240);
-  }
-
-  private drawNavigationDecision(
-    context: CanvasRenderingContext2D,
-    navigation: NavigationHudModel,
-  ): void {
-    const labels: Readonly<Record<string, string>> = {
-      destination: 'Confirm destination',
-      repair: 'Repair destination',
-      mode: 'Travel mode',
-      error: 'Navigation',
-    };
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    context.fillStyle = gray(CHROME);
-    context.font = TYPE.label;
-    context.fillText(upper(labels[navigation.view] ?? 'Navigation'), 36, 59);
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.primary;
-    this.fitText(context, navigation.primary, 36, 84, 504);
-    if (showNavigationSecondaryInHeader(navigation.view)) {
-      context.fillStyle = gray(SUPPORT);
-      context.font = TYPE.secondary;
-      this.fitText(context, navigation.secondary, 36, 106, 504);
-    }
-
-    if (navigation.options.length > 0) {
-      const rows = navigationDecisionRows(navigation.options.length);
-      navigation.options.slice(0, rows.length).forEach((option, index) => {
-        const row = rows[index]!;
-        const selected = index === navigation.selectedIndex;
-        if (selected) {
-          // Outline the CHOSEN row and let the rest recede. On transparent
-          // glass an outline survives a busy background far better than a
-          // 3px edge, and the unchosen rows dropping to chrome is what makes
-          // the choice readable at a glance while walking.
-          context.strokeStyle = gray(BRIGHT);
-          context.lineWidth = 1;
-          roundedRect(
-            context,
-            NAVIGATION_DECISION_BOX.x,
-            row.boxTopY,
-            NAVIGATION_DECISION_BOX.width,
-            row.boxHeight,
-            NAVIGATION_DECISION_BOX.radius,
-          );
-          context.stroke();
-        }
-        context.fillStyle = gray(selected ? BRIGHT : CHROME);
-        context.font = TYPE.row;
-        this.fitText(
-          context,
-          option,
-          NAVIGATION_DECISION_BOX.textX,
-          row.baselineY,
-          NAVIGATION_DECISION_BOX.width - 32,
-        );
-      });
-    } else if (navigation.view === 'error') {
-      // A recovery state keeps a small unmistakable mark and its plain
-      // instruction. The mark indicates; it is not a poster centerpiece.
-      this.drawWarningMark(context, 54, 130, SUPPORT);
-      context.fillStyle = gray(SUPPORT);
-      context.font = TYPE.secondary;
-      this.drawWrappedText(context, navigation.secondary, 94, 122, 446, LEAD.tight, 2);
-    }
-    // 'destination' with no options ends at the header: the primary and
-    // address ARE the page. The former pin + "CANONICAL PLACE" block only
-    // restated them (wearer's ruling: decoration on a text page is waste).
-    this.drawNavigationFooter(context, navigation.hint);
-  }
-
-  private drawNavigationPreview(
-    context: CanvasRenderingContext2D,
-    navigation: NavigationHudModel,
-  ): void {
-    context.textBaseline = 'middle';
-    context.textAlign = 'left';
-    context.fillStyle = gray(CHROME);
-    context.font = TYPE.label;
-    context.fillText(`${navigation.mode === 'cycling' ? 'CYCLE' : 'WALK'} · ROUTE PREVIEW`, 36, 59);
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.primary;
-    this.fitText(context, navigation.primary, 36, 84, 504);
-    // The Mac-authored secondary already carries distance · time · via. The
-    // former fake route sketch and DISTANCE/ETA tiles drew the same numbers
-    // again around a decorative polyline that never matched the real route.
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.secondary;
-    this.fitText(context, navigation.secondary, 36, 106, 504);
-    this.drawNavigationFooter(context, navigation.hint);
+    this.drawActiveNavigation(context, navigation);
   }
 
   private drawActiveNavigation(
@@ -3928,36 +2006,40 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     navigation: NavigationHudModel,
   ): void {
     const panel = navigation.map?.panel;
-    const projection = navigation.map && panel
-      ? projectNavigationMapToPanel(navigation.map, panel)
+    const centre = navigation.map
+      ? (panel ?? navigationMapFallbackCentre(navigation.map))
+      : undefined;
+    const projection = navigation.map && centre
+      ? projectNavigationMapToPanel(navigation.map, centre)
       : undefined;
     // Four bands, as the reference HUD lays them out: the status spine, two
-    // panes side by side, and one fact line along the bottom. Without real
-    // streets there is nothing worth splitting the frame for, so the
-    // instruction simply takes the whole width.
+    // panes side by side, and one fact line along the bottom. The pane holds
+    // the streets when a tile has arrived and the route's own shape around
+    // the wearer when none has; only a route with no geometry at all gives
+    // the instruction the whole width.
     const actWidth = projection ? 236 : 504;
 
     context.textBaseline = 'middle';
     context.textAlign = 'left';
     context.fillStyle = gray(CHROME);
     context.font = TYPE.label;
-    context.fillText(`${navigation.mode === 'cycling' ? 'CYCLING' : 'WALKING'} · ACTIVE`, 36, 56);
+    context.fillText(`${navigation.mode === 'cycling' ? 'CYCLING' : 'WALKING'} · ACTIVE`, 36, 44);
 
-    this.drawManeuver(context, navigation.maneuver ?? 'continue', 60, 102, BRIGHT);
+    this.drawManeuver(context, navigation.maneuver ?? 'continue', 60, 90, BRIGHT);
     context.fillStyle = gray(BRIGHT);
     context.font = mono(20);
-    context.fillText(formatNavigationDistance(navigation.maneuverDistanceM ?? 0), 98, 102);
+    context.fillText(formatNavigationDistance(navigation.maneuverDistanceM ?? 0), 98, 90);
 
     context.fillStyle = gray(BRIGHT);
     context.font = TYPE.guide;
-    this.fitText(context, navigation.primary, 36, 146, actWidth);
+    this.fitText(context, navigation.primary, 36, 134, actWidth);
     context.fillStyle = gray(SUPPORT);
     context.font = TYPE.body;
-    this.drawWrappedText(context, navigation.secondary, 36, 174, actWidth, LEAD.body, 2);
+    this.drawWrappedText(context, navigation.secondary, 36, 162, actWidth, LEAD.body, 2);
 
     context.fillStyle = gray(CHROME);
     context.font = TYPE.meta;
-    this.fitText(context, navigation.hint, 36, 210, actWidth);
+    this.fitText(context, navigation.hint, 36, 198, actWidth);
 
     if (projection) this.drawNavigationMap(context, projection, panel);
 
@@ -4094,67 +2176,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.restore();
   }
 
-  private drawNavigationWarning(
-    context: CanvasRenderingContext2D,
-    navigation: NavigationHudModel,
-  ): void {
-    const warning = navigation.view !== 'rerouting';
-    context.textBaseline = 'middle';
-    context.textAlign = 'center';
-    context.fillStyle = gray(warning ? BRIGHT : SUPPORT);
-    context.font = TYPE.label;
-    context.fillText(upper(navigation.view.replace('_', ' ')), 288, 63);
-    if (navigation.view === 'wrong_way') {
-      this.drawManeuver(context, 'u_turn', 288, 105, BRIGHT);
-    } else if (navigation.view === 'rerouting') {
-      this.drawRerouteMark(context, 288, 105, SUPPORT);
-    } else {
-      this.drawWarningMark(context, 288, 105, warning ? BRIGHT : SUPPORT);
-    }
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.glance;
-    context.fillText(navigation.primary, 288, 155);
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.body;
-    context.fillText(navigation.secondary, 288, 184);
-    context.fillStyle = gray(CHROME);
-    context.font = TYPE.meta;
-    // The gesture line lives at HINT_BASELINE_Y on every other screen. It
-    // sat at 211 here only because drawNavigationFooter had taken 267 for
-    // the distance remaining, so the one line a wearer scans for "what can
-    // I do" moved whenever the page changed. The footer yields: a fact row
-    // can sit above the hint, the hint cannot move.
-    context.textAlign = 'center';
-    context.fillText(navigation.hint, 288, HINT_BASELINE_Y);
-    this.drawNavigationFooter(
-      context,
-      navigation.remainingDistanceM === undefined
-        ? 'Route held'
-        : `${formatNavigationDistance(navigation.remainingDistanceM)} left`,
-    );
-  }
-
-  private drawNavigationArrival(
-    context: CanvasRenderingContext2D,
-    navigation: NavigationHudModel,
-  ): void {
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    context.fillStyle = gray(CHROME);
-    context.font = TYPE.label;
-    context.fillText('ARRIVED', 36, 59);
-    // A small check aids recognition; the former 25px poster centerpiece
-    // spent the page on it.
-    this.drawArrivalMark(context, 47, 84, BRIGHT, 11);
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.primary;
-    this.fitText(context, navigation.primary, 68, 84, 472);
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.secondary;
-    this.fitText(context, navigation.secondary, 36, 108, 504);
-    this.drawNavigationFooter(context, navigation.hint);
-  }
-
   /** "arrive 9:54" from a minutes-remaining figure, or '' when there isn't one.
    *
    * A duration answers "how much longer"; a CLOCK TIME answers "do I make
@@ -4175,14 +2196,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     copy: string,
     width = 504,
   ): void {
-    // Left-aligned, and one line ABOVE the hint. It is a row of facts, so it
-    // lines up with the content above it — but it no longer occupies
-    // HINT_BASELINE_Y, which belongs to the gesture line on every screen.
+    // Left-aligned on the bottom band, not centred: it is a row of facts,
+    // and facts line up with the content above them.
     context.fillStyle = gray(SUPPORT);
     context.font = TYPE.meta;
     context.textAlign = 'left';
     context.textBaseline = 'middle';
-    this.fitText(context, copy, 36, NAVIGATION_FOOTER_BASELINE_Y, width);
+    this.fitText(context, copy, 36, HINT_BASELINE_Y, width);
   }
 
   private drawNavigationProgress(
@@ -4196,66 +2216,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillRect(36, 253, width, 3);
     context.fillStyle = gray(SUPPORT);
     context.fillRect(36, 253, Math.round(width * normalized), 3);
-  }
-
-  private drawWarningMark(
-    context: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    level: number,
-  ): void {
-    context.strokeStyle = gray(level);
-    context.fillStyle = gray(level);
-    context.lineWidth = 2;
-    context.beginPath();
-    context.moveTo(x, y - 26);
-    context.lineTo(x + 25, y + 20);
-    context.lineTo(x - 25, y + 20);
-    context.closePath();
-    context.stroke();
-    context.fillRect(x - 1.5, y - 9, 3, 17);
-    context.beginPath();
-    context.arc(x, y + 14, 2, 0, Math.PI * 2);
-    context.fill();
-  }
-
-  private drawRerouteMark(
-    context: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    level: number,
-  ): void {
-    context.strokeStyle = gray(level);
-    context.lineWidth = 3;
-    context.beginPath();
-    context.arc(x, y, 22, -Math.PI * 0.25, Math.PI * 1.4);
-    context.stroke();
-    context.fillStyle = gray(level);
-    context.beginPath();
-    context.moveTo(x + 20, y - 17);
-    context.lineTo(x + 30, y - 18);
-    context.lineTo(x + 25, y - 8);
-    context.closePath();
-    context.fill();
-  }
-
-  private drawArrivalMark(
-    context: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    level: number,
-    radius = 25,
-  ): void {
-    context.strokeStyle = gray(level);
-    context.lineWidth = 2;
-    context.beginPath();
-    context.arc(x, y, radius, 0, Math.PI * 2);
-    context.stroke();
-    context.beginPath();
-    context.moveTo(x - radius * 0.48, y);
-    context.lineTo(x - radius * 0.12, y + radius * 0.36);
-    context.lineTo(x + radius * 0.56, y - radius * 0.44);
-    context.stroke();
   }
 
   private drawManeuver(
@@ -4349,9 +2309,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     retention: 'tail' | 'leading' = 'tail',
   ): number {
     const lines = wrapHudText(text, maxWidth, (value) => context.measureText(value).width);
-    const visible = retention === 'leading'
-      ? visibleHudLeadingLines(lines, maximumLines)
-      : visibleHudTailLines(lines, maximumLines);
+    const count = Math.max(1, maximumLines);
+    const visible = retention === 'leading' ? lines.slice(0, count) : lines.slice(-count);
+    // The cut is marked where it happened: an ellipsis after the last kept
+    // line, or before the first when the oldest lines scrolled away.
+    if (lines.length > count && visible.length > 0) {
+      if (retention === 'leading') visible[visible.length - 1] = `${visible[visible.length - 1]}…`;
+      else visible[0] = `…${visible[0]}`;
+    }
     visible.forEach((value, index) => {
       this.fitText(context, value, x, y + index * lineHeight, maxWidth);
     });
@@ -4360,117 +2325,4 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     return visible.length;
   }
 
-  /** A dense terminal tail is the primary content surface for Brainstorm.
-   * There are no message cards: only bounded, speaker-prefixed text. */
-  private drawBrainstormTranscript(
-    context: CanvasRenderingContext2D,
-    transcript: string,
-    x: number,
-    y: number,
-    maximumLines: number,
-    scroll: { offset: number; rows: number; visible: number },
-  ): void {
-    const measure = (value: string) => context.measureText(value).width;
-    const width = 576 - x * 2;
-    const total = brainstormTranscriptRowCount(transcript, width, measure);
-    if (scroll.offset > 0 && total > scroll.rows) {
-      // Content grew while the wearer was reading history: keep their
-      // place, not the distance-from-tail.
-      scroll.offset = Math.min(
-        scroll.offset + (total - scroll.rows),
-        Math.max(0, total - maximumLines),
-      );
-    }
-    scroll.rows = total;
-    scroll.visible = maximumLines;
-    // The SAME width everywhere: total above, wrap here, draw below. This
-    // was a literal 504 while total counted at 548 — so every row wrapped
-    // ~44px early (the dead right margin the wearer keeps pointing at) and
-    // the scroll arithmetic disagreed with the rows actually shown.
-    const lines = brainstormTranscriptLines(
-      transcript, width, maximumLines, measure, scroll.offset,
-    );
-    // Elapsed-while-thinking is DEVICE time. It used to be computed on
-    // the Mac and re-shipped as a whole frame over BLE every three
-    // seconds; the wearer clocked the chunkiness immediately. The engine
-    // paints "Thinking…" once, and this appends live seconds locally.
-    const last = lines.length - 1;
-    if (last >= 0 && scroll.offset === 0 && lines[last]!.endsWith('Thinking…')) {
-      if (this.thinkingKey !== lines[last]) {
-        this.thinkingKey = lines[last]!;
-        this.thinkingSince = Date.now();
-      }
-      const waited = Math.max(0, Math.floor((Date.now() - this.thinkingSince) / 1000));
-      lines[last] = `${lines[last]} ${Math.floor(waited / 60)}:${String(waited % 60).padStart(2, '0')}`;
-    } else if (last >= 0 && !lines[last]!.endsWith('Thinking…')) {
-      this.thinkingKey = '';
-    }
-    // Two-tone rows. Every line used to be drawn at one brightness, so a
-    // screen of discussion was a flat wall of text with no way in — the
-    // wearer reads this to THINK, and could not tell at a glance who was
-    // speaking or where an answer started. The speaker tag is dim and the
-    // words are bright, which is the whole hierarchy a monochrome lens
-    // has. Continuation rows carry no tag and stay bright, so a wrapped
-    // sentence reads as one block instead of restarting.
-    lines.forEach((line, index) => {
-      const baselineY = y + index * LEAD.transcript;
-      // Digits, em-dashes and dots belong in a tag: a REPAIR turn is
-      // labelled "CODEX — REPAIR 1", and it rendered flat — no dim tag, no
-      // bright body — on the one row where the split matters most, since a
-      // repair is the corrected version of a claim the verifier just
-      // rejected. The " > " delimiter is what makes this safe; prose does
-      // not contain it.
-      // The scrollback marker rides the FIRST visible row whenever older
-      // rows are hidden (windowHudTailLines prepends '…'), and it defeated
-      // this split: '…CODEX > …' matches no tag, so the topmost row drew
-      // wholly bright on every scrolled frame — the one row a scrolling
-      // reader looks at first. Peel the marker, draw it dim, split the rest.
-      const marker = line.startsWith('…') ? '…' : '';
-      const body = marker ? line.slice(1) : line;
-      const split = /^([A-Z][A-Z0-9 .\u2014-]{0,22}) > /.exec(body);
-      if (!split) {
-        context.fillStyle = gray(BRIGHT);
-        this.fitText(context, line, x, baselineY, width);
-        return;
-      }
-      const tag = `${marker}${split[1]} `;
-      context.fillStyle = gray(CHROME);
-      this.fitText(context, tag, x, baselineY, width);
-      const tagWidth = context.measureText(tag).width;
-      context.fillStyle = gray(BRIGHT);
-      // The SAME width the wrapper used, less the tag already drawn. When
-      // the column widened to 548 this was a literal 504, so a row the
-      // wrapper legally filled was ellipsized mid-word — the exact "…"
-      // the wearer reported, from a second copy of a number.
-      this.fitText(
-        context, body.slice(split[0].length), x + tagWidth, baselineY,
-        width - tagWidth,
-      );
-    });
-  }
-
-  private thinkingKey = '';
-  private thinkingSince = 0;
-
-  /** True while the transcript tail is a silent "Thinking…" marker — the
-   * presenter uses this to run a LOCAL 1s repaint, since no frame will
-   * arrive from the Mac until the collaborator produces something. */
-  transcriptIsThinking(): boolean {
-    return this.thinkingKey !== '';
-  }
-
-  private drawAssistantOverlayText(
-    context: CanvasRenderingContext2D,
-    lines: readonly string[],
-  ): void {
-    // The caller passes one measured page. No ellipsis is synthesized here:
-    // every wrapped row belongs to exactly one reachable page, including the
-    // opening and final sentences from the recorded four-sentence answer.
-    const fontSize = ASSISTANT_OVERLAY_FONT_PX;
-    context.font = prose(fontSize);
-    const layout = assistantOverlayTextLayout(lines.length, fontSize);
-    lines.forEach((line, index) => {
-      context.fillText(line, 288, layout.firstBaselineY + index * layout.lineHeight);
-    });
-  }
 }

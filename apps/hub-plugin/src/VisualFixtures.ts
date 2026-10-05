@@ -207,6 +207,12 @@ export class BrowserHudPreview implements HudFramePainter {
     documentRoot.body.replaceChildren(this.canvas);
   }
 
+  /** The preview has no glass to hand a page to: a firmware page simply
+   * replaces the pixels with nothing, as the dev host accepts every rebuild. */
+  async withPageTransition(replacePage: () => Promise<boolean>): Promise<boolean> {
+    return replacePage();
+  }
+
   async paint(frame: HudVisualFrame): Promise<boolean> {
     const rgba = stitchHudPreviewRgba(await this.renderer.render(frame));
     const image = this.context.createImageData(CANVAS.width, CANVAS.height);
