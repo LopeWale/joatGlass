@@ -793,8 +793,9 @@ describe('CapabilityMenu', () => {
 
     await menu.openFromContextualMenu(1); // Planning
     await vi.waitFor(() => expect(sent.filter((m) => (m.event as { containerName?: string }).containerName === 'capmenu')).toHaveLength(3));
-    expect(listOptions[4]?.title).toBe('PLANNING');
-    expect(listOptions[4]).not.toHaveProperty('nativeFirmwareList');
+    // The loading page is a firmware list; only the month grid itself, a
+    // page with no Even template, stays raster.
+    expect(listOptions[4]).toMatchObject({ title: 'PLANNING', nativeFirmwareList: true });
     expect(await menu.presentList('PLANNING · PLAN · AUGUST 2026', rows(2), latestRequestId(sent), true)).toBe(true);
     expect(listOptions[5]).not.toHaveProperty('nativeFirmwareList');
   });

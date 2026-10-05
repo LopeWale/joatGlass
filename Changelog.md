@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-10-05 — Build JOAT 0.1.94 firmware-modals package
+
+- Rebuilt the existing JOAT package from `ed72d9c` with the same `scripts/pack.sh`, the same `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.94 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Canonical `apps/hub-plugin/joat.ehpk`: 160045 bytes, SHA-256 `384aa955acc33f96e766c138beff4e3cd0e108f7303d8f054f03793b1c11810d`. Carries the firmware receipts, outcome strips, productivity pages, pre-route navigation frames and the remaining firmware titles; the Mac side (a reader with a tap action is selectable) is in the brain. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-05 — The modals a tap lands on are firmware pages too
+
+- The wearer's point: fixing a page is not enough when the page its tap redirects to is still pixels. A map of every HUD surface and every transition between them (tap, Back, scroll past an edge, Mac push) found thirteen raster targets one gesture away from a firmware page and one presenter fault: from a firmware text page, Home, a receipt, a productivity frame or a navigation frame never repainted the glass at all, because only the firmware-list owner triggered the image rebuild. Every native content owner now recreates the four image containers before an image paint.
+- A receipt or an outcome strip over a firmware page is a firmware page: one rebuild in, and the list or reader comes back as the page it was when the strip settles. Before, a saved reminder over the Planning day rebuilt the image page and repainted the list as pixels under a two-tile strip, and a receipt over a text page was invisible.
+- A Calendar or Reminders page (failed, uncertain, due) is a firmware text page, paged in place. Every navigation frame before the live map (confirm the place, repair, mode, preview, the warnings, arrival, error) is a firmware text page whose cursor moves upgrade the page in place; only the guidance frame with its map is pixels.
+- The Messages result, draft review, compose, setup, access and retry pages, the QuickNotes recorder, the saved Brainstorm reader, `ACTIVITY · EMPTY`, the Planning refresh and reminder notices, the Planning loading page and every timeout page joined the firmware sets. A reader with a tap action is now selectable, so "tap: continue" on a saved Brainstorm reaches the Mac (it never did). The legacy review's staged return keeps the conversation's firmware-list shape. Back on a resting Brainstorm frame is Home. Text pages say "double-click" like every other page.
+- `scripts/simulator_transitions_native_probe.py` drives all of it from a firmware list in the official simulator and records zero image tiles on every step but the map. Still pixels by design: the overview, the Planning month grid, the live map. Still a voice hint: the due reminder page, until its tap completes the reminder.
+- Tests: new presenter cases for receipts, strips, productivity pages, Home from a text page and the navigation frames; the navigation replay pins that only guidance follows tiles; `navigationNativeBody` has its own file. Both suites pass (plugin 1131, Mac 3027).
+
 ## 2026-10-05 — Build JOAT 0.1.93 control-surface package
 
 - Rebuilt the existing JOAT package from `be079a6` with the same `scripts/pack.sh`, the same `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.

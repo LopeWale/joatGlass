@@ -2464,7 +2464,10 @@ class CapabilityRouter:
             reader.title,
             [f"{reader.index + 1}/{len(reader.pages)} · {reader.label}"[:64], *reader.pages[reader.index]],
             hint=" · ".join(hint),
-            selectable=review and review_complete,
+            # A reader with a tap action (continue this Brainstorm, confirm
+            # this draft on its last page) must report the tap; the plugin
+            # drops taps on a page it was told is not selectable.
+            selectable=bool(reader.tap_hint) and (not review or review_complete),
             reader_page=(reader.trace_id, reader.index, len(reader.pages)),
         )
 
