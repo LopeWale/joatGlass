@@ -1925,7 +1925,21 @@ async def main() -> None:
         deliver_task_alert,
         evaluate=lambda occurrence: evaluate_reminder_occurrence(occurrence, personal_data),
         card_log=card_log,
+        # The due page is a control surface: its tap completes the reminder
+        # through the same confirmed flow the spoken "complete reminder" uses.
+        complete=productivity_actions.complete_reminder_by_identity,
     )
+
+    def complete_due_from_glasses(occurrence_id: str) -> None:
+        async def complete() -> None:
+            explanation = await task_monitor.complete_from_glasses(occurrence_id)
+            if explanation:
+                await hud.receipt(explanation)
+                await hud.settle_assistant()
+
+        asyncio.get_running_loop().create_task(complete())
+
+    transport.on_reminder_due_complete(complete_due_from_glasses)
     task_monitor_task = asyncio.get_running_loop().create_task(task_monitor.run())
     # The feeds are polled on the wearer's cadence (news.json, default every
     # fifteen minutes) and pushed after every pass; the first pass is what

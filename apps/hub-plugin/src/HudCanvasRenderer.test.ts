@@ -212,7 +212,7 @@ describe('productivity escape copy', () => {
     [{ phase: 'check', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
     [{ phase: 'cancelled', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
     [{ phase: 'not_saved', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
-    [{ phase: 'due', monitoringArmed: false }, 'say: complete reminder · Back: double-click to Planning'],
+    [{ phase: 'due', monitoringArmed: false }, 'tap: complete · Back: double-click to Planning'],
   ] as const)('keeps %o visibly escapable', (model, hint) => {
     expect(productivityActionHint(model)).toBe(hint);
   });

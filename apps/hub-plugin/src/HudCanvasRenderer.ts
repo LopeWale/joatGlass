@@ -893,7 +893,7 @@ export function productivityPhaseProgress(phase: ProductivityHudModel['phase']):
  * cancels an in-flight native write nor claims an unavailable post-save undo.
  */
 export function productivityActionHint(model: Pick<ProductivityHudModel, 'phase' | 'monitoringArmed'>): string {
-  if (model.phase === 'due') return 'say: complete reminder · Back: double-click to Planning';
+  if (model.phase === 'due') return 'tap: complete · Back: double-click to Planning';
   if (model.phase === 'saved' && model.monitoringArmed) {
     return 'Back: double-click to Planning · monitoring next';
   }

@@ -78,6 +78,7 @@ function usesTextPage(normalized: string): boolean {
 export function usesFirmwareList(title: string | undefined): boolean {
   return title !== undefined && FIRMWARE_LIST_TITLES.has(title.trim().toUpperCase());
 }
+import { reminderDueCompleteFor } from './ReminderDueReceipt';
 import {
   CAPABILITIES,
   VOICE_REQUEST_PREFIX,
@@ -1065,6 +1066,7 @@ export class CapabilityMenu {
       return false;
     }
     this.view = 'productivity';
+    this.productivityShown = productivity;
     this.productivityReturn = 'Planning';
     this.productivityAnchorUnixMs = isPlanningAnchor(productivity.planningAnchorUnixMs)
       ? productivity.planningAnchorUnixMs
@@ -1448,7 +1450,15 @@ export class CapabilityMenu {
   /** Right temple/ring click selects the highlighted custom-rendered row. */
   handleClick(): boolean {
     if (this.view === 'closed') return false;
-    if (this.view === 'productivity') return true;
+    if (this.view === 'productivity') {
+      // The due page is a control surface: its tap completes the reminder.
+      // The message carries only the opaque ids the Mac bound the page to,
+      // and the Mac still confirms before it writes.
+      const shown = this.productivityShown;
+      const complete = shown ? reminderDueCompleteFor(shown) : undefined;
+      if (complete && shown && this.hud.isProductivityVisible(shown)) this.link.send(complete);
+      return true;
+    }
     if (this.view === 'transition') return true;
     if (this.view === 'data') {
       return this.selectDataRow();
@@ -2508,7 +2518,11 @@ export class CapabilityMenu {
     }, PRODUCTIVITY_OUTCOME_RETURN_DELAY_MS);
   }
 
+  /** The productivity page on the glass while `view` is 'productivity'. */
+  private productivityShown?: ProductivityHudModel;
+
   private clearProductivityReturn(): void {
+    this.productivityShown = undefined;
     this.planningReceiptRefresh = undefined;
     this.productivityReturnEpoch += 1;
     if (this.productivityReturnTimer !== undefined) {
