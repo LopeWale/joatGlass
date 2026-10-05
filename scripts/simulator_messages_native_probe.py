@@ -19,7 +19,7 @@ message is sent: the final Messages.app boundary is the recording sender.
 """
 from __future__ import annotations
 
-import asyncio, importlib.util, json, logging, sys, tempfile, time, urllib.request
+import asyncio, hashlib, importlib.util, json, logging, sys, tempfile, time, urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -32,7 +32,7 @@ from joat.services.capabilities import CapabilityRouter
 from joat.services.hud import HudWriter
 from joat.services.message_reply import MessageReplyController
 from joat.services.status import StatusPublisher
-from joat.core.protocol import VOICE_REQUEST_PREFIX as VOICE_PREFIX
+from joat.core.protocol import PromptPresent, VOICE_REQUEST_PREFIX as VOICE_PREFIX
 
 log = logging.getLogger('drive')
 BASE = 'http://127.0.0.1:9898'
@@ -78,6 +78,14 @@ async def press(action: str, settle: float = 0.3) -> None:
 
 async def _wait_for_history_index(router: CapabilityRouter, index: int) -> None:
     while router._message_history is None or router._message_history.index != index:
+        await asyncio.sleep(0.05)
+
+
+async def _wait_until(predicate, timeout: float) -> None:  # type: ignore[no-untyped-def]
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise TimeoutError('condition did not become true')
         await asyncio.sleep(0.05)
 
 
@@ -161,6 +169,58 @@ async def main() -> None:
                 await asyncio.wait_for(_wait_for_history_index(router, 0), timeout=30)
                 await snap('3c-latest-again', 1.0)
                 report['newer_page_timing'] = timing_since(console(), ids); ids = last_id(console())
+
+            # The reader: the newest message is row 1 of the firmware list.
+            await press('down', 0.3)
+            t_read = time.monotonic()
+            await press('click', 0.2)
+            await _wait_until(lambda: router._message_detail is not None, 30)
+            report['reader_after_tap_s'] = round(time.monotonic() - t_read, 2)
+            await snap('3d-reader', 1.0)
+            report['reader_timing'] = timing_since(console(), ids); ids = last_id(console())
+            # One swipe pages the text page locally or asks the Mac; either
+            # way it must not paint an image tile.
+            await press('down', 0.8)
+            await snap('3e-reader-down', 0.6)
+            report['reader_down_timing'] = timing_since(console(), ids); ids = last_id(console())
+            await press('double_click', 0.5)
+            await _wait_until(lambda: router._message_detail is None, 30)
+            await snap('3f-thread-again', 1.0)
+            report['reader_back_timing'] = timing_since(console(), ids); ids = last_id(console())
+
+            # The question page: one bare prompt, exactly as a "reply" with
+            # no words raises it. The simulator has no microphone, so the
+            # plugin may retire the question right after its receipt; the
+            # screenshot is taken inside that receipt.
+            presented = asyncio.Event()
+            shot = asyncio.get_running_loop().create_future()
+            def on_presented(ack) -> bool:  # type: ignore[no-untyped-def]
+                report['question_ack_success'] = ack.success
+                presented.set()
+                return ack.success
+            present = PromptPresent(
+                prompt_id='probe-question', question='What should I say?',
+                presentation_binding=hashlib.sha256(b'probe-question').hexdigest(),
+                connection_generation=gateway.audio_connection_generation or '',
+                source='glasses', expires_in_ms=8000, owner_kind='messages',
+                owner_id='probe', field='body')
+            t_q = time.monotonic()
+            question = asyncio.create_task(gateway.request_prompt(
+                present, on_presented=on_presented, on_revoked=lambda: None, timeout_s=4.5))
+            try:
+                await asyncio.wait_for(presented.wait(), timeout=10)
+                report['question_presented_after_s'] = round(time.monotonic() - t_q, 2)
+            except asyncio.TimeoutError:
+                report['question_presented_after_s'] = None
+            await snap('3g-question', 0.6)
+            report['question_timing'] = timing_since(console(), ids); ids = last_id(console())
+            await gateway.cancel_prompt('probe-question')
+            try:
+                report['question_result'] = await asyncio.wait_for(question, timeout=10)
+            except Exception as exc:  # noqa: BLE001
+                report['question_result'] = repr(exc)
+            await snap('3h-after-question', 1.0)
+            report['question_dismiss_timing'] = timing_since(console(), ids); ids = last_id(console())
 
             # voice draft injected exactly as the acceptance script does it
             t2 = time.monotonic()

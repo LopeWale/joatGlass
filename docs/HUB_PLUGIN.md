@@ -181,6 +181,9 @@ other three, so a swipe shipped three tiles.
 | Open MESSAGES, ACTIVITY or the AGENT TERMINAL picker | 4 | **0** — one `rebuildPageContainer` to a firmware list page |
 | Open a Messages conversation thread from the picker | 4 | **0** — one rebuild to a firmware list; its first row names the page ("Latest messages", "Older messages") |
 | Page an older or newer slice of the thread | 2-4 | **0** — tap the Mac-appended "▲ Newer messages" / "▼ Older messages" row; the Mac answers with the next `hud.list` (0.2 s in the simulator) |
+| Open a message from the thread (`MESSAGES · MESSAGE`) | 4 | **0** — one rebuild to a firmware text page; a swipe pages it in place (`textContainerUpgrade`), and past its edge asks the Mac for its next page as before |
+| Back from the message to the thread | 4 | **0** — the thread returns as the firmware list it was |
+| The question page ("What should I say?") | 4 (`paintExact`) | **0** — one rebuild to a firmware text page; dismissal returns the retained page (image, firmware list or terminal) |
 | Scroll rows on those pages | 2-4 per step | **0** — the firmware moves the highlight |
 | Back from a firmware list to the overview | 4 | 4 + one rebuild |
 | Tap into any other tab, any page change | 4 | 4 — a new page is new pixels |
@@ -261,9 +264,19 @@ The levers that remain are design decisions, not code:
 - ~~Native answer page~~ — 2026-10-05: an `answer` overlay over the visual
   HUD is `assistantAnswerLayout` (owner `overlay-native`): status, a
   seven-line body paged in place with `textContainerUpgrade`, a hint line.
-  Receipts stay on the image page (two tiles beat a page swap). Still
-  image pages in Messages: the prompt question ("What should I say?") and
-  the message reader.
+  Receipts stay on the image page (two tiles beat a page swap).
+- ~~Native message reader and question page~~ — 2026-10-05: a `hud.list`
+  titled `MESSAGES · MESSAGE` (`TEXT_PAGE_TITLES` in `CapabilityMenu`)
+  opts into `nativeTextPage`: the presenter joins the Mac's rows, pages
+  them for the firmware font with `paginateAnswer`, draws `textPageLayout`
+  (owner `text-page-native`) and pages in place on swipe; a swipe past
+  the local edge is not consumed, so the menu asks the Mac for its
+  neighbouring page through the same `cappage` request. The question page
+  is `promptQuestionLayout` (owner `prompt-native`) under the same barrier;
+  without it the raster `paintExact` prompt remains. Every Messages page on
+  the reply path is now firmware-drawn; the probe records zero image tiles
+  from picker to result and back. `?joatTestPromptMic=1` (DEV) lets the
+  simulator, which has no microphone, keep a question on screen.
 - **Fewer grey levels** — anti-aliased text is what LZ4 compresses worst.
   Quantising to four levels would shrink each tile's BLE payload, but the
   gain is unmeasured until `durationMs` is read from hardware.

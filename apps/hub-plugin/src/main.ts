@@ -189,6 +189,14 @@ const LIVE_MENU_ACCEPTANCE = ((): CapabilityName | undefined => {
   return CAPABILITIES.find((name) => name === requested);
 })();
 
+/** DEV acceptance only: `?joatTestPromptMic=1` answers a question's
+ * microphone as ready without opening one, so the official simulator (which
+ * has no audio device) can show the question page long enough to be
+ * photographed. The question still arrives, is acknowledged and is cancelled
+ * over the real wire; only the capture it would arm is skipped. */
+const LIVE_PROMPT_WITHOUT_MIC = import.meta.env.DEV
+  && new URLSearchParams(window.location.search).get('joatTestPromptMic') === '1';
+
 /** Webview status panel (index.html). Absent ids are a no-op by design. */
 function setPanel(id: string, text: string): void {
   const el = document.getElementById(id);
@@ -431,8 +439,15 @@ async function boot(): Promise<void> {
     console.warn('[joat] rich HUD layouts unavailable; using live minimal recovery surface');
   }
   const audio = new AudioStreamer(client, link);
+  const promptAudio: Pick<AudioStreamer, 'openPromptMicrophone' | 'activatePromptEpoch' | 'clearPromptEpoch'> = LIVE_PROMPT_WITHOUT_MIC
+    ? {
+      openPromptMicrophone: () => ({ ready: Promise.resolve(true), release: () => undefined }),
+      activatePromptEpoch: (_epoch, acknowledge) => acknowledge(),
+      clearPromptEpoch: () => undefined,
+    }
+    : audio;
   const promptedInput = new PromptedInputController({
-    presenter: hud, audio, link,
+    presenter: hud, audio: promptAudio, link,
     isOwnerCurrent: (message) => menuRef?.isMessagePromptCurrent(message) ?? false,
     onCancel: (message, reason) => {
       if (reason === 'back' && message.ownerKind === 'messages') {
