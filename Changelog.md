@@ -24,6 +24,8 @@
 
 - Two of the audit's dead frames are driven now. `joat --imu-trace PATH` arms `imu.control` and `imu.trace` on every hello and appends the glasses' raw samples to PATH as JSON lines, which is the calibration path docs/NEXT_STEPS.md §5 described as "already wired" while nothing on the Mac sent the downlinks. The Mac remembers the plugin's resume-policy report and, under "Mac decides", answers a worn report with the mic off by asking for ears; before, that policy left the mic off for good. `policy.set`, `shutdown`, the conversation dismiss and `show_brainstorm` stay as hooks without a caller, listed with their reasons in docs/HUB_PLUGIN.md. Two plugin exports nothing called are gone, and `.env.example` and the HUB_PLUGIN pixel note say what the code does.
 
+- The Planning week and day pages are firmware lists. A Planning page with the Mac's row map and no month grid opts in; every row was already a Mac action by index and Back was already the Mac's, so the wire is unchanged. The month dashboard (grid plus hovered-day pane) is the one raster capability page left. Probe run (`scripts/simulator_planning_native_probe.py`): month → week → day → event and Back, zero tiles on every page but the month.
+
 ## 2026-09-13 — Build JOAT 0.1.90 native conversation update
 
 - Built the existing JOAT package from committed source `a62f19c` in an isolated export. Eight release-candidate and release-manifest checks, TypeScript checking, and the production Vite build passed. The package keeps ID `com.example.joat`, minimum Even App 2.2.9, SDK 0.0.14, and the reviewed secure MacBook-first, Mac Mini-second Tailscale candidates.

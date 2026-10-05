@@ -818,6 +818,51 @@ describe('CapabilityMenu', () => {
     expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'QUICKNOTES · DETAIL', nativeTextPage: true });
   });
 
+  it('draws the Planning week and day pages as firmware lists and keeps Back with the Mac', async () => {
+    const { menu, hud, listOptions, sent } = rig();
+    // As the presenter answers: the page about to be shown by its opt-in,
+    // the page on the glass by what was shown last.
+    hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
+      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true
+        : !(listOptions[listOptions.length - 1] as { nativeFirmwareList?: boolean } | undefined)?.nativeFirmwareList
+    ));
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Planning'));
+    await vi.waitFor(() => expect(latestRequestId(sent)).not.toBe(''));
+    const requestId = latestRequestId(sent);
+    const week = [
+      'MON OCT 5 · 2 events', 'TUE OCT 6 · free', 'WED OCT 7 · 1 reminder', 'THU OCT 8 · free',
+      'FRI OCT 9 · free', 'SAT OCT 10 · free', 'SUN OCT 11 · free',
+      '‹ SEP 28', 'OCT 12 ›', '○ VIEW · MONTH', '● VIEW · WEEK', '○ VIEW · DAY',
+    ];
+    expect(await menu.presentList(
+      'PLANNING · PLAN · OCT 5–11', week, requestId, true, 'tap: open · left x2: back',
+      undefined, 'Planning · OCT 5–11', 7, undefined, undefined, undefined, { canGoBack: true, selectedIndex: 0 },
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'PLANNING · PLAN · OCT 5–11', nativeFirmwareList: true });
+
+    // The firmware reports the tapped row; the Mac resolves it by index.
+    sent.length = 0;
+    expect(menu.handleList(click(2))).toBe(true);
+    expect(sent[sent.length - 1]).toMatchObject({
+      kind: 'input', event: { containerName: 'capdata', selectedName: 'PLANNING', selectedIndex: 2, requestId },
+    });
+    const day = ['[09:00] Standup', '[16:30] □ Call the dentist', '‹ TUE OCT 6', 'THU OCT 8 ›', '○ VIEW · MONTH', '○ VIEW · WEEK', '● VIEW · DAY'];
+    expect(await menu.presentList(
+      'PLANNING · PLAN · WED OCT 7', day, requestId, true, 'tap: open · left x2: back',
+      undefined, 'Planning · WED OCT 7', 2,
+      [{ time: 'Today, 09:00', kind: 'event', title: 'Standup' }, { time: 'Today, 16:30', kind: 'reminder', title: 'Call the dentist' }, null, null, null, null, null],
+      undefined, undefined, { canGoBack: true, selectedIndex: 2 },
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'PLANNING · PLAN · WED OCT 7', nativeFirmwareList: true });
+
+    // Back is the Mac's: one planning-back lifecycle, no local repaint.
+    sent.length = 0;
+    await menu.toggle();
+    expect(sent[sent.length - 1]).toMatchObject({
+      kind: 'input', event: { containerName: 'capability-lifecycle', selectedName: 'planning-back', requestId },
+    });
+  });
+
   it('draws Notifications and a Planning entry natively', async () => {
     const { menu, hud, listOptions, sent } = rig();
     hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
