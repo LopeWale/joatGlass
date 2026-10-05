@@ -219,7 +219,9 @@ class _NoteListState:
     page_pending: bool = False
 
 
-_NOTE_LIST_PAGE_SIZE = 20
+# The firmware list draws at most 20 rows (HudPageBuilder.listLayout caps
+# there), and an archive page carries up to two paging rows after its notes.
+_NOTE_LIST_PAGE_SIZE = 18
 
 
 @dataclass(slots=True)
@@ -2273,15 +2275,28 @@ class CapabilityRouter:
             hints.insert(0, "up newer")
         if state.index + 1 < count:
             hints.insert(0, "down older")
+        labels = [row.label for row in rows] or [
+            'Say “JOAT, start a quicknote …” to record.',
+            'Say “JOAT, note …” to save exact text.',
+        ]
+        # The firmware list reports taps, never scrolls, so the archive pages
+        # through rows: the plugin turns a tap on either into the page request
+        # the swipe used to send. Both sit past the note rows, so a tap on
+        # them never reaches _select_note.
+        newer_index = older_index = None
+        if state.index:
+            newer_index = len(labels)
+            labels.append("▲ Newer notes")
+        if state.index + 1 < count:
+            older_index = len(labels)
+            labels.append("▼ Older notes")
         await self._show_focus(
             "QUICKNOTES" if rows else "QUICKNOTES · EMPTY",
-            [row.label for row in rows] or [
-                'Say “JOAT, start a quicknote …” to record.',
-                'Say “JOAT, note …” to save exact text.',
-            ],
+            labels,
             hint=" · ".join(hints),
             selectable=bool(rows),
             quick_notes_page=(state.index, count),
+            page_controls=(newer_index, older_index),
         )
 
     async def _page_note_list(self, state: _NoteListState, event: InputEvent) -> None:
@@ -2568,9 +2583,11 @@ class CapabilityRouter:
         quick_notes_page: tuple[int, int] | None = None,
         reader_page: tuple[str, int, int] | None = None,
         control_start_index: int | None = None,
+        page_controls: tuple[int | None, int | None] | None = None,
     ) -> None:
         """Render non-dashboard capability states in the shared focus shell."""
         await self._send_list(HudList(
+            page_controls=page_controls,
             items=items,
             title=title,
             hint=hint,
