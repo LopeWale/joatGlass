@@ -87,7 +87,10 @@ async def test_group_history_full_reader_paging_and_back(tmp_path: Path) -> None
     await router._select_message(1, 'group')
     assert transport.frame.title == 'MESSAGES · CONVERSATION'
     assert transport.frame.selectable
-    assert 'down older' in transport.frame.hint
+    # Paging travels as tapped rows, not a swipe hint.
+    newer, older = transport.frame.page_controls or (None, None)
+    assert newer is None and older is not None
+    assert transport.frame.items[older] == '▼ Older messages'
     assert 'read-only' in transport.frame.hint
     assert 'say reply' not in transport.frame.hint
     assert not any('JOAT, reply' in row or 'Mic off?' in row for row in transport.frame.items)
@@ -114,7 +117,8 @@ async def test_group_history_full_reader_paging_and_back(tmp_path: Path) -> None
     assert router._message_detail is None
     await router._page_message_history(EventType.SCROLL_BOTTOM, 'older', None)
     assert any('Alex · Message 1' == row for row in transport.frame.items)
-    assert 'down older' not in transport.frame.hint
+    assert transport.frame.page_controls is not None
+    assert transport.frame.page_controls[1] is None
     await router._page_message_history(EventType.SCROLL_TOP, 'newer', None)
     assert transport.frame.items[1].startswith('Sam · ')
     router.on_input(InputEvent(container_name='capability-lifecycle', selected_name='messages-home'))
