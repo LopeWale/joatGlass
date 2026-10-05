@@ -14,7 +14,7 @@
     "pack": "zsh scripts/pack.sh"
   },
   "dependencies": {
-    "@evenrealities/even_hub_sdk": "^0.0.14",
+    "@evenrealities/even_hub_sdk": "^0.0.16",
     "@evenrealities/pretext": "^0.1.4",
     "@phosphor-icons/core": "2.1.1"
   },
