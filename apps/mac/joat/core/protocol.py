@@ -434,12 +434,53 @@ class PromptCancel:
         }
 
 
+CONTROL_ACTIONS = frozenset({
+    "refresh",
+    "brainstorm.reset",
+    "account.add",
+    "account.activate",
+    "account.signin",
+    "account.code",
+    "account.cancel",
+    "account.dismiss",
+    "account.signout",
+    "account.remove",
+    "account.rename",
+    "model.select",
+})
+"""What the phone's control screen may ask the Mac to do.
+
+A closed set with per-action field allowlists, like every other uplink: the
+phone screen is a remote control for JOAT's own settings, never a channel
+for arbitrary commands."""
+
+CONTROL_PROVIDERS = ("claude", "codex")
+CONTROL_MODEL_SLOTS = ("codex", "claude", "assistant")
+_CONTROL_PROFILE_ID = re.compile(r"default|acct-[0-9a-f]{8}")
+_CONTROL_OPTION = re.compile(r"[A-Za-z0-9._ -]{1,40}")
+
+
+@dataclass(frozen=True, slots=True)
+class ControlAction:
+    """One request from the phone's JOAT control screen (not the lenses)."""
+
+    action: str
+    provider: Literal["claude", "codex"] | None = None
+    profile_id: str | None = None
+    label: str | None = None
+    # A one-time sign-in code pasted on the phone. Excluded from repr so a
+    # logged message can never carry it.
+    code: str | None = field(default=None, repr=False)
+    slot: str | None = None
+    option: str | None = None
+
+
 UplinkMessage = (
     Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck
     | Location | G2Diagnostic | BrainstormAction | NavigationAction | NavigationRouteAck
     | NavigationViewAck | NavigationState | NavigationRerouteRequest
     | NavigationOrigin | NavigationOriginFailure | ReminderDueAck | ProductivityViewAck
-    | PromptAck | PromptCancel
+    | PromptAck | PromptCancel | ControlAction
 )
 
 
@@ -1587,6 +1628,137 @@ class PairingSet:
         return {"kind": "pairing.set", "token": self.token}
 
 
+@dataclass(frozen=True, slots=True)
+class ControlSeat:
+    """A Brainstorm seat as the phone shows it."""
+
+    name: str
+    title: str
+    installed: bool
+    account: str
+    """logged_in, logged_out, limited, missing or unknown."""
+    account_label: str
+    model: str
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "name": self.name, "title": self.title, "installed": self.installed,
+            "account": self.account, "accountLabel": self.account_label, "model": self.model,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ControlProfile:
+    """One saved account. Names and state only — never a credential."""
+
+    profile_id: str
+    label: str
+    state: str
+    is_default: bool
+    active: bool
+    email: str | None = None
+    plan: str | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        wire: dict[str, Any] = {
+            "id": self.profile_id, "label": self.label, "state": self.state,
+            "isDefault": self.is_default, "active": self.active,
+        }
+        if self.email is not None:
+            wire["email"] = self.email
+        if self.plan is not None:
+            wire["plan"] = self.plan
+        return wire
+
+
+@dataclass(frozen=True, slots=True)
+class ControlProvider:
+    provider: Literal["claude", "codex"]
+    title: str
+    installed: bool
+    profiles: tuple[ControlProfile, ...]
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider, "title": self.title, "installed": self.installed,
+            "profiles": [p.to_wire() for p in self.profiles],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ControlModelSlot:
+    key: str
+    title: str
+    current: str
+    options: tuple[str, ...]
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"key": self.key, "title": self.title, "current": self.current,
+                "options": list(self.options)}
+
+
+@dataclass(frozen=True, slots=True)
+class ControlLogin:
+    """An in-progress sign-in, finished by the wearer on the phone."""
+
+    provider: Literal["claude", "codex"]
+    profile_id: str
+    stage: str
+    message: str
+    url: str | None = None
+    code: str | None = None
+    needs_code: bool = False
+
+    def to_wire(self) -> dict[str, Any]:
+        wire: dict[str, Any] = {
+            "provider": self.provider, "profileId": self.profile_id, "stage": self.stage,
+            "message": self.message, "needsCode": self.needs_code,
+        }
+        if self.url is not None:
+            if not self.url.startswith("https://"):
+                raise ProtocolError("sign-in link must be https")
+            wire["url"] = self.url
+        if self.code is not None:
+            wire["code"] = self.code
+        return wire
+
+
+@dataclass(frozen=True, slots=True)
+class ControlState:
+    """Everything the phone's control screen renders, sent whole.
+
+    Whole-state rather than deltas: the screen is small, changes are rare
+    and human-paced, and a phone that reconnects mid-sign-in needs exactly
+    one message to be right again.
+    """
+
+    revision: int
+    brainstorm_state: str
+    brainstorm_phase: str
+    brainstorm_detail: str
+    seats: tuple[ControlSeat, ...]
+    accounts: tuple[ControlProvider, ...]
+    models: tuple[ControlModelSlot, ...]
+    login: ControlLogin | None = None
+    notice: str = ""
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": "control.state",
+            "revision": self.revision,
+            "brainstorm": {
+                "state": self.brainstorm_state,
+                "phase": self.brainstorm_phase,
+                "detail": self.brainstorm_detail,
+                "seats": [s.to_wire() for s in self.seats],
+            },
+            "accounts": [a.to_wire() for a in self.accounts],
+            "models": [m.to_wire() for m in self.models],
+            "login": self.login.to_wire() if self.login is not None else None,
+            "notice": self.notice,
+        }
+
+
 DownlinkMessage = (
     AuthAccepted
     | HudText
@@ -1618,6 +1790,7 @@ DownlinkMessage = (
     | PolicySet
     | Shutdown
     | PairingSet
+    | ControlState
 )
 
 
@@ -2223,6 +2396,75 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
     raise ProtocolError("g2 diagnostic type is invalid")
 
 
+def _control_text(value: Any, field_name: str, maximum: int) -> str:
+    if not isinstance(value, str):
+        raise ProtocolError(f"control {field_name} is invalid")
+    text = " ".join(value.split())
+    if not text or len(text) > maximum or not text.isprintable():
+        raise ProtocolError(f"control {field_name} is invalid")
+    return text
+
+
+def _parse_control_action(payload: dict[str, Any]) -> ControlAction:
+    action = payload.get("action")
+    if not isinstance(action, str) or action not in CONTROL_ACTIONS:
+        raise ProtocolError("control action is invalid")
+    if action in ("refresh", "brainstorm.reset", "account.cancel", "account.dismiss"):
+        allowed = {"kind", "action"}
+    elif action == "account.add":
+        allowed = {"kind", "action", "provider", "label"}
+    elif action == "account.rename":
+        allowed = {"kind", "action", "provider", "profileId", "label"}
+    elif action == "account.code":
+        allowed = {"kind", "action", "code"}
+    elif action == "model.select":
+        allowed = {"kind", "action", "slot", "option"}
+    else:
+        allowed = {"kind", "action", "provider", "profileId"}
+    if set(payload) != allowed:
+        raise ProtocolError("control action has unsupported or missing fields")
+    provider: Literal["claude", "codex"] | None = None
+    if "provider" in allowed:
+        raw_provider = payload["provider"]
+        if raw_provider == "claude":
+            provider = "claude"
+        elif raw_provider == "codex":
+            provider = "codex"
+        else:
+            raise ProtocolError("control provider is invalid")
+    profile_id: str | None = None
+    if "profileId" in allowed:
+        raw_profile = payload["profileId"]
+        if not isinstance(raw_profile, str) or _CONTROL_PROFILE_ID.fullmatch(raw_profile) is None:
+            raise ProtocolError("control profileId is invalid")
+        profile_id = raw_profile
+    label = _control_text(payload["label"], "label", 40) if "label" in allowed else None
+    code: str | None = None
+    if "code" in allowed:
+        raw_code = payload["code"]
+        if not isinstance(raw_code, str):
+            raise ProtocolError("control code is invalid")
+        cleaned = "".join(raw_code.split())
+        if not cleaned or len(cleaned) > 512 or not cleaned.isprintable():
+            raise ProtocolError("control code is invalid")
+        code = cleaned
+    slot: str | None = None
+    option: str | None = None
+    if "slot" in allowed:
+        raw_slot = payload["slot"]
+        if raw_slot not in CONTROL_MODEL_SLOTS:
+            raise ProtocolError("control slot is invalid")
+        slot = str(raw_slot)
+        raw_option = payload["option"]
+        if not isinstance(raw_option, str) or _CONTROL_OPTION.fullmatch(raw_option) is None:
+            raise ProtocolError("control option is invalid")
+        option = raw_option
+    return ControlAction(
+        action=action, provider=provider, profile_id=profile_id,
+        label=label, code=code, slot=slot, option=option,
+    )
+
+
 def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
     """Turn a decoded JSON object into a typed uplink message.
 
@@ -2659,5 +2901,7 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
             if resume not in RESUME_POLICIES:
                 raise ProtocolError(f"unknown resume policy {resume!r}")
             return Policy(resume=resume)
+        case "control.action":
+            return _parse_control_action(payload)
         case _:
             raise ProtocolError(f"unknown uplink kind {kind!r}")

@@ -6,59 +6,134 @@
     <meta name="color-scheme" content="light dark" />
     <title>JOAT</title>
     <style>
-      :root { font: 16px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; color: #202124; background: #f2f2f7; --surface: #fff; --line: #e5e5ea; --secondary: #636366; --control: #f2f2f7; }
-      @media (prefers-color-scheme: dark) { :root { color: #f5f5f7; background: #101012; --surface: #1c1c1e; --line: #38383a; --secondary: #ababaf; --control: #2c2c2e; } }
+      /* Even app phone-side tokens (everything-evenhub design-guidelines,
+         "Phone-Side App UI"): TC/BC greys, brand yellow #FEF991 as accent
+         only, 4/8 spacing grid, 20px screen edge, 16px card padding.
+         Glasses green #3CFA44 never appears on the phone. */
+      :root {
+        --text: #232323; --dim: #7B7B7B; --bg: #FFFFFF; --surface: #EEEEEE;
+        --input: rgba(35, 35, 35, .08); --line: rgba(35, 35, 35, .1);
+        --accent: #FEF991; --on-accent: #232323;
+        --good: #2E7D32; --warn: #8A6100; --bad: #B3261E;
+        font: 400 16px/1.4 "FK Grotesk Neue", -apple-system, BlinkMacSystemFont, "Source Han Sans", sans-serif;
+        letter-spacing: -.01em; color: var(--text); background: var(--bg);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --text: #FFFFFF; --dim: #8A8A8A; --bg: #111111; --surface: #1A1A1A;
+          --input: rgba(255, 255, 255, .08); --line: rgba(255, 255, 255, .1);
+          --good: #7BD88F; --warn: #F2C55C; --bad: #FF8A80;
+        }
+      }
       * { box-sizing: border-box; }
-      body { margin: 0; padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)); }
+      body { margin: 0; padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)); background: var(--bg); }
       main { max-width: 480px; margin: auto; }
-      header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 24px; gap: 16px; }
-      h1 { font-size: 24px; letter-spacing: -.04em; font-weight: 650; margin: 0; }
-      #p-link { color: var(--secondary); font-size: 13px; text-align: right; }
-      h2 { font-size: 12px; font-weight: 500; color: var(--secondary); margin: 20px 14px 7px; text-transform: uppercase; letter-spacing: .04em; }
-      .group { background: var(--surface); border-radius: 12px; overflow: hidden; }
-      .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 50px; padding: 10px 14px; }
-      .row + .row { border-top: 1px solid var(--line); }
-      label { flex-shrink: 0; font-size: 15px; }
-      select, button { font: inherit; color: inherit; }
-      select { min-width: 0; max-width: 72%; border: 0; background: transparent; text-align: right; font-size: 14px; min-height: 32px; }
-      button { border: 0; background: transparent; cursor: pointer; min-height: 44px; padding: 10px 14px; font-size: 15px; }
-      .action { width: 100%; text-align: left; border-top: 1px solid var(--line); font-weight: 500; }
+      header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; gap: 16px; }
+      h1 { font-size: 24px; font-weight: 600; letter-spacing: -.02em; margin: 0; }
+      #p-link { color: var(--dim); font-size: 13px; text-align: right; }
+      .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; background: var(--input); border-radius: 12px; margin-bottom: 16px; }
+      .tabs button { min-height: 40px; border-radius: 8px; font-size: 15px; font-weight: 500; color: var(--dim); padding: 8px; }
+      .tabs button.selected { background: var(--bg); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
+      h2 { font-size: 11px; font-weight: 500; color: var(--dim); margin: 24px 4px 8px; text-transform: uppercase; letter-spacing: .04em; }
+      h3 { font-size: 18px; font-weight: 500; letter-spacing: -.01em; margin: 0 0 8px; }
+      .group, .card { background: var(--surface); border-radius: 12px; overflow: hidden; }
+      .card { padding: 16px; }
+      .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 52px; padding: 12px 16px; width: 100%; text-align: left; }
+      .row + .row, .profile + .profile, .profile + .add, .row + .add, .group > * + .action { border-top: 1px solid var(--line); }
+      .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      .name { font-size: 16px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .sub { font-size: 13px; color: var(--dim); overflow-wrap: anywhere; }
+      .fix { font-size: 13px; color: var(--warn); }
+      label { flex-shrink: 0; font-size: 16px; }
+      select, button, input { font: inherit; color: inherit; letter-spacing: inherit; }
+      select { min-width: 0; max-width: 60%; border: 0; background: transparent; text-align: right; font-size: 15px; min-height: 32px; }
+      button { border: 0; background: transparent; cursor: pointer; min-height: 44px; padding: 10px 16px; font-size: 15px; }
+      input { width: 100%; min-height: 44px; border: 0; border-radius: 10px; background: var(--input); padding: 10px 12px; font-size: 16px; }
+      .action { width: 100%; text-align: left; font-weight: 500; }
+      .btn { border-radius: 10px; font-weight: 500; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 10px 16px; }
+      .btn.primary { background: var(--accent); color: var(--on-accent); }
+      .btn.ghost { background: var(--input); }
+      .btn.danger { color: var(--bad); }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+      .buttons.compact { margin: 0; padding: 0 16px 12px; }
+      .buttons.compact .btn { min-height: 36px; padding: 6px 12px; font-size: 14px; }
       button:disabled, select:disabled { opacity: .45; }
-      :focus-visible { outline: 2px solid currentColor; outline-offset: -3px; border-radius: 5px; }
-      .support, .feedback { margin: 8px 14px 0; color: var(--secondary); font-size: 12px; }
+      :focus-visible { outline: 2px solid currentColor; outline-offset: 2px; border-radius: 8px; }
+      .badge { flex-shrink: 0; font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .04em; padding: 4px 8px; border-radius: 999px; background: var(--input); }
+      .badge.good { color: var(--good); } .badge.warn { color: var(--warn); } .badge.bad { color: var(--bad); } .badge.quiet { color: var(--dim); }
+      .in-use { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: .04em; background: var(--accent); color: var(--on-accent); padding: 2px 6px; border-radius: 6px; }
+      .room-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+      .room-title { font-size: 18px; font-weight: 500; }
+      .room-detail { margin: 8px 0 0; color: var(--dim); font-size: 15px; }
+      .notice { margin: 0 4px 12px; font-size: 13px; color: var(--text); }
+      .notice:empty { display: none; }
+      .support, .feedback { margin: 8px 4px 0; color: var(--dim); font-size: 13px; }
+      .card .support { margin: 0 0 8px; }
       .feedback:empty { display: none; }
-      details { margin-top: 22px; font-size: 13px; }
-      summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; color: var(--secondary); }
+      .login { margin-bottom: 8px; display: flex; flex-direction: column; gap: 8px; }
+      .login .buttons { margin-top: 4px; }
+      .device-code { display: flex; align-items: center; gap: 12px; background: var(--input); border-radius: 10px; padding: 8px 8px 8px 12px; }
+      .device-code .label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); }
+      .device-code .code { flex: 1; font-size: 24px; font-weight: 600; letter-spacing: .08em; user-select: all; -webkit-user-select: all; }
+      .paste { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; }
+      .add .paste { padding: 12px 16px; }
+      .paste input { flex: 1 1 100%; }
+      details { margin-top: 24px; font-size: 13px; }
+      summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; color: var(--dim); }
       summary::after { content: '›'; font-size: 20px; } details[open] summary::after { transform: rotate(90deg); }
-      dl { margin: 0; padding: 8px 14px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 18px; font-size: 12px; }
-      dt { color: var(--secondary); } dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
-      details .support { padding-bottom: 12px; }
+      dl { margin: 0; padding: 8px 16px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 18px; font-size: 13px; }
+      dt { color: var(--dim); } dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+      details .support { padding: 0 12px 12px; }
+      [hidden] { display: none !important; }
     </style>
   </head>
   <body>
     <main id="panel">
       <header><h1>JOAT</h1><span id="p-link" role="status">Starting…</span></header>
-      <section aria-labelledby="connection-title">
-        <h2 id="connection-title">Connection</h2>
+      <nav class="tabs" role="tablist" aria-label="JOAT settings">
+        <button id="tab-brainstorm" role="tab" type="button" aria-controls="view-brainstorm" aria-selected="true">Brainstorm</button>
+        <button id="tab-accounts" role="tab" type="button" aria-controls="view-accounts" aria-selected="false">Accounts</button>
+        <button id="tab-connection" role="tab" type="button" aria-controls="view-connection" aria-selected="false">Connection</button>
+      </nav>
+      <p id="c-notice" class="notice" role="status"></p>
+
+      <section id="view-brainstorm" role="tabpanel" aria-labelledby="tab-brainstorm">
+        <div id="c-room" class="card"></div>
+        <h2>Seats</h2>
+        <div id="c-seats" class="group" hidden></div>
+        <h2>Models</h2>
+        <div id="c-models" class="group" hidden></div>
+        <div class="buttons">
+          <button id="c-reset" class="btn primary" type="button" disabled>Reset Brainstorm</button>
+          <button id="c-refresh" class="btn ghost" type="button" disabled>Refresh</button>
+        </div>
+        <p class="support">Reset stops a running Brainstorm, finds Codex and Claude on the Mac again, and re-checks their sign-in. Tap a seat to manage its account.</p>
+      </section>
+
+      <section id="view-accounts" role="tabpanel" aria-labelledby="tab-accounts" hidden>
+        <div id="c-login"></div>
+        <div id="c-accounts"></div>
+      </section>
+
+      <section id="view-connection" role="tabpanel" aria-labelledby="tab-connection" hidden>
+        <h2 id="connection-title">Mac</h2>
         <div class="group">
           <div class="row"><label for="p-brain">Mac</label><select id="p-brain" disabled aria-describedby="brain-help"></select></div>
           <button id="p-connect" class="action" disabled type="button">Reconnect</button>
         </div>
         <p id="brain-help" class="support">Connect retries the Mac you choose. To use another Mac, select it and tap Connect.</p>
         <p id="p-action" class="feedback" role="status"></p>
-      </section>
-      <section aria-labelledby="voice-title">
         <h2 id="voice-title">Listening</h2>
         <div class="group"><div class="row"><label for="p-resume">After an interruption</label><select id="p-resume" disabled><option value="confirm">Ask first</option><option value="auto">Resume automatically</option><option value="mac">Let Mac decide</option></select></div></div>
         <p class="support">Controls when the microphone resumes after a pause.</p>
+        <details class="group">
+          <summary>Troubleshooting</summary>
+          <dl><dt>Mac</dt><dd id="p-active-brain">—</dd><dt>Address</dt><dd id="p-url">—</dd><dt>Plugin</dt><dd id="p-status">Starting…</dd><dt>Microphone</dt><dd id="p-mic">Off</dd><dt>Resume policy</dt><dd id="p-policy">—</dd></dl>
+          <p id="p-recovery" class="support">Open this page in Even Hub to connect.</p>
+          <button id="p-location-check" class="action" disabled type="button">Check phone location</button>
+          <p id="p-location-result" class="support" role="status"></p>
+        </details>
       </section>
-      <details class="group">
-        <summary>Troubleshooting</summary>
-        <dl><dt>Mac</dt><dd id="p-active-brain">—</dd><dt>Address</dt><dd id="p-url">—</dd><dt>Plugin</dt><dd id="p-status">Starting…</dd><dt>Microphone</dt><dd id="p-mic">Off</dd><dt>Resume policy</dt><dd id="p-policy">—</dd></dl>
-        <p id="p-recovery" class="support">Open this page in Even Hub to connect.</p>
-        <button id="p-location-check" class="action" disabled type="button">Check phone location</button>
-        <p id="p-location-result" class="support" role="status"></p>
-      </details>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

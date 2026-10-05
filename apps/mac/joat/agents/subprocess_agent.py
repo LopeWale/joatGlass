@@ -19,10 +19,17 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 
 from ..services.models import DEFAULT_CODEX_MODEL
-from ..services.roundtable import failure_notice
+from ..services.roundtable import LIMIT_DETAIL, SIGNED_OUT_DETAIL, failure_notice
+from .cli_failures import classify_cli_failure
+from .cli_locate import find_codex_binary
+
+EnvProvider = Callable[[], Mapping[str, str | None]]
+"""Late-bound environment overlay for one spawn. A value of None REMOVES
+the variable, so the default account really is the CLI's default even when
+the brain itself was launched with CLAUDE_CONFIG_DIR or CODEX_HOME set."""
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +103,8 @@ class SubprocessAgent:
                  notices: bool = True,
                  capture: bool = False,
                  cwd: str | None = None,
-                 env_extra: dict[str, str] | None = None) -> None:
+                 env_extra: dict[str, str] | None = None,
+                 env_provider: EnvProvider | None = None) -> None:
         # Read the CLI's incremental protocol instead of its final stdout.
         # Measured on the real binaries: plain `-p` delivers a whole answer
         # in one chunk with the first byte at 10.4s of a 10.7s turn, so the
@@ -125,6 +133,10 @@ class SubprocessAgent:
         # and hand the child the MCP token without touching os.environ.
         self._cwd = cwd
         self._env_extra = dict(env_extra or {})
+        # Which subscription ACCOUNT this spawn runs as: read per call, like
+        # the model, so switching accounts on the phone takes effect on the
+        # very next turn without rebuilding any seat.
+        self._env_provider = env_provider
         self.last_returncode: int | None = None
         self.last_failed = False
         self.last_output = ""
@@ -141,6 +153,12 @@ class SubprocessAgent:
         env = {k: v for k, v in os.environ.items() if k not in self._env_strip}
         env["OTEL_SDK_DISABLED"] = "true"
         env.update(self._env_extra)
+        if self._env_provider is not None:
+            for key, value in self._env_provider().items():
+                if value is None:
+                    env.pop(key, None)
+                else:
+                    env[key] = value
         self.last_returncode = None
         self.last_failed = False
         self.last_output = ""
@@ -260,11 +278,14 @@ class SubprocessAgent:
                     )
                 except asyncio.TimeoutError:
                     pass
-                if proc.returncode:
+                if proc.returncode or result_failed:
                     log.warning("agent %s exited %s", self._name, proc.returncode)
                     if self._notices:
                         yield "\n" + failure_notice(
-                            self._name, f"exited {proc.returncode} — see the log"
+                            self._name,
+                            self._failure_detail(
+                                "".join(captured) + final_answer, proc.returncode,
+                            ),
                         ) + "\n"
         finally:
             if proc.returncode is None:
@@ -290,18 +311,32 @@ class SubprocessAgent:
                 log.warning("agent %s killed but not reaped within 2s "
                             "(a child is holding its stdout)", self._name)
 
+    @staticmethod
+    def _failure_detail(output: str, returncode: int | None) -> str:
+        """Name the two causes the wearer can fix from the phone; keep the
+        exit code for everything else (the log has the rest)."""
+        kind = classify_cli_failure(output)
+        if kind == "signed_out":
+            return SIGNED_OUT_DETAIL
+        if kind == "limit":
+            return LIMIT_DETAIL
+        return f"exited {returncode} — see the log"
+
     def _is_noise(self, line: str) -> bool:
         return bool(self._noise and self._noise.match(line.strip()))
 
 
-def proposer(model: Callable[[], str | None] | None = None) -> SubprocessAgent | None:
+def proposer(
+    model: Callable[[], str | None] | None = None,
+    env_provider: EnvProvider | None = None,
+) -> SubprocessAgent | None:
     """Codex proposes, in a read-only sandbox.
 
     `model` is a late-bound reader (normally ModelRegistry.provider("codex"))
     so a switch takes effect on the next turn. With none supplied it falls
     back to the boot-time env pin, preserving the previous behaviour.
     """
-    binary = shutil.which("codex")
+    binary = find_codex_binary()
     if binary is None:
         return None
     if model is None:
@@ -314,6 +349,10 @@ def proposer(model: Callable[[], str | None] | None = None) -> SubprocessAgent |
         name="codex",
         model=model,
         model_flag="-m",
+        # Captured so a failed turn can say "signed out" or "usage limit"
+        # instead of an exit code (agents/cli_failures.py).
+        capture=True,
+        env_provider=env_provider,
     )
 
 
@@ -321,7 +360,10 @@ def proposer(model: Callable[[], str | None] | None = None) -> SubprocessAgent |
 _CLAUDE_NOISE = re.compile(r"^Client\.\w+\(\) called but server does not advertise")
 
 
-def critic(model: Callable[[], str | None] | None = None) -> SubprocessAgent | None:
+def critic(
+    model: Callable[[], str | None] | None = None,
+    env_provider: EnvProvider | None = None,
+) -> SubprocessAgent | None:
     """Claude critiques, via the official binary only (RULES.md #9).
 
     ANTHROPIC_API_KEY is stripped so the critic always runs on the
@@ -341,4 +383,5 @@ def critic(model: Callable[[], str | None] | None = None) -> SubprocessAgent | N
                            env_strip=("ANTHROPIC_API_KEY",),
                            noise=_CLAUDE_NOISE, name="claude",
                            model=model, model_flag="--model",
-                           stream_json=True)
+                           stream_json=True, capture=True,
+                           env_provider=env_provider)

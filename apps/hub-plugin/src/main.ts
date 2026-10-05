@@ -40,6 +40,7 @@ import { EventRouter, type LifecycleHandler } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
 import { PhoneControlPanel } from './PhoneControlPanel';
+import { PhoneControlScreen } from './PhoneControlScreen';
 import { CapabilityMenu } from './CapabilityMenu';
 import {
   CAPABILITIES,
@@ -303,7 +304,11 @@ async function boot(): Promise<void> {
   let displayYielded = false;
   let exiting = false;
   let phonePanel: PhoneControlPanel | undefined;
+  // The phone-side Brainstorm/Accounts screen. It only ever sends
+  // `control.action`; everything it shows comes from the Mac.
+  const controlScreen = new PhoneControlScreen({ send: (message) => link.send(message) });
   link.onState((state) => {
+    controlScreen.setConnected(state === 'connected' && !link.wasReplaced);
     if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'link', state);
     setPanel('p-link', link.wasReplaced ? 'Another JOAT display connected. Use Reconnect to take over.' : state);
     phonePanel?.updateLink(state);
@@ -952,6 +957,9 @@ async function boot(): Promise<void> {
           void client.require().setLocalStorage(PAIRING_TOKENS_KEY, encoded).catch(() => {});
           void client.require().setLocalStorage(TOKEN_KEY, '').catch(() => {});
         });
+        break;
+      case 'control.state':
+        controlScreen.update(msg);
         break;
       case 'policy.set':
         // Mac-side config path; the wearer's on-glasses menu is the other.

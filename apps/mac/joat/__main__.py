@@ -62,10 +62,12 @@ from .agents.openclaw_terminal import (
 )
 from .agents.claude_completer import ClaudeCompleter
 from .agents.subprocess_agent import critic, find_claude_binary, proposer
+from .agents.cli_accounts import AccountRegistry
 from .audio.router import AudioRouter
 from .audio.whisper_serve import WhisperServeEngine
 from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
+from .services.brainstorm_control import BrainstormControl, BrainstormRoom
 from .core.pairing import PairingStore
 from .channels.biome import DEFAULT_STREAM_DIR, BiomeNotificationStore
 from .channels.cards import CardLog
@@ -469,6 +471,22 @@ async def main() -> None:
     # The shared secret for the Even AI door AND the MCP route the CLI seats
     # use to reach the belt; created once at first boot (0600).
     agent_secret = agent_token()
+    # Which saved subscription account each CLI seat runs as — chosen on the
+    # phone's control screen (services/brainstorm_control.py), read per
+    # spawn, so a switch lands on the next turn with no restart.
+    account_registry = AccountRegistry()
+    claude_env = account_registry.env_provider("claude")
+    codex_env = account_registry.env_provider("codex")
+    # Every CLI seat, so a sign-in or account switch can make all of them
+    # forget the old login's sessions and find a moved binary again.
+    cli_seats: list[ClaudeCliReplyEngine | CodexCliReplyEngine] = []
+    accounts: dict[str, str] = {}
+    control_listeners: list[Callable[[], None]] = []
+
+    def notify_control() -> None:
+        for listener in control_listeners:
+            listener()
+
     if args.no_llm:
         log.info("LLM disabled (--no-llm) — echoing transcripts")
     else:
@@ -529,21 +547,22 @@ async def main() -> None:
         door = None if args.no_agent_endpoint else McpDoor(
             url=f"http://127.0.0.1:{args.agent_port}/mcp", token=agent_secret,
         )
-        accounts: dict[str, str] = {}
-
         def note_account(seat: str, state: str) -> None:
             accounts[seat] = state
             status.set(accounts=dict(accounts))
+            notify_control()
 
         mind_seats: dict[str, ReplyEngine] = {}
         if mlx_replier is not None:
             mind_seats["local"] = mlx_replier
         mind_seats["claude"] = ClaudeCliReplyEngine(
-            find_claude_binary(), grounding=grounding, model=models.provider("claude"), mcp=door,
+            find_claude_binary(), env_provider=claude_env,
+            binary_provider=find_claude_binary, grounding=grounding, model=models.provider("claude"), mcp=door,
             on_account=note_account,
         )
         mind_seats["codex"] = CodexCliReplyEngine(
-            find_codex_binary(), grounding=grounding, model=models.provider("codex"), mcp=door,
+            find_codex_binary(), env_provider=codex_env,
+            binary_provider=find_codex_binary, grounding=grounding, model=models.provider("codex"), mcp=door,
             on_account=note_account,
         )
         seat_switch = SeatSwitch(
@@ -561,12 +580,14 @@ async def main() -> None:
         if mlx_replier is not None:
             worker_seats["local"] = LocalTaskEngine(mlx_replier, WORKER_PERSONA)
         worker_seats["claude"] = ClaudeCliReplyEngine(
-            find_claude_binary(), model=models.provider("claude"),
+            find_claude_binary(), env_provider=claude_env,
+            binary_provider=find_claude_binary, model=models.provider("claude"),
             persona=WORKER_PERSONA, workdir=DEFAULT_WORKDIR / "worker",
             on_account=note_account,
         )
         worker_seats["codex"] = CodexCliReplyEngine(
-            find_codex_binary(), model=models.provider("codex"),
+            find_codex_binary(), env_provider=codex_env,
+            binary_provider=find_codex_binary, model=models.provider("codex"),
             persona=WORKER_PERSONA, workdir=DEFAULT_WORKDIR / "worker",
             on_account=note_account,
         )
@@ -578,16 +599,23 @@ async def main() -> None:
         if mlx_replier is not None:
             door_seats["local"] = mlx_replier
         door_seats["claude"] = ClaudeCliReplyEngine(
-            find_claude_binary(), grounding=grounding, model=models.provider("claude"),
+            find_claude_binary(), env_provider=claude_env,
+            binary_provider=find_claude_binary, grounding=grounding, model=models.provider("claude"),
             mcp=door, on_account=note_account, session_ttl_s=0.0,
             workdir=DEFAULT_WORKDIR / "door",
         )
         door_seats["codex"] = CodexCliReplyEngine(
-            find_codex_binary(), grounding=grounding, model=models.provider("codex"),
+            find_codex_binary(), env_provider=codex_env,
+            binary_provider=find_codex_binary, grounding=grounding, model=models.provider("codex"),
             mcp=door, on_account=note_account, session_ttl_s=0.0,
             workdir=DEFAULT_WORKDIR / "door",
         )
         door_replier = SeatSwitch(door_seats, chosen=models.provider("assistant"))
+        cli_seats.extend(
+            seat for group in (mind_seats, worker_seats, door_seats)
+            for seat in group.values()
+            if isinstance(seat, (ClaudeCliReplyEngine, CodexCliReplyEngine))
+        )
         llm_warm_task = asyncio.create_task(seat_switch.warm(), name="mind-warm")
         log.info("reply engine: subscription seats %s (+%d tools over MCP); boot seat %s",
                  ", ".join(mind_seats), len(belt_tools), args.agent)
@@ -877,10 +905,16 @@ async def main() -> None:
             log.info(
                 "Agent Terminal spans %d Macs", len(extra_host_lanes) + 1,
             )
-    seats: list[tuple[str, str, object]] = [
-        ("codex", "proposer", proposer(models.provider("codex"))),
-        ("claude", "critic", critic(models.provider("claude"))),
-    ]
+    def build_seats() -> list[tuple[str, str, object]]:
+        # Re-run on demand (phone: Refresh / Reset Brainstorm / account
+        # switch), never only at boot: a ChatGPT app update that moved the
+        # bundled Codex used to leave Brainstorm dead until a restart.
+        return [
+            ("codex", "proposer", proposer(models.provider("codex"), codex_env)),
+            ("claude", "critic", critic(models.provider("claude"), claude_env)),
+        ]
+
+    seats: list[tuple[str, str, object]] = build_seats()
 
     def current_seated() -> list[tuple[str, str, object]]:
         return [(name, role, agent) for name, role, agent in seats if agent]
@@ -1041,6 +1075,7 @@ async def main() -> None:
             seat_count=len(current_seated()),
             phase=phase,
         )
+        notify_control()
 
     def publish_brainstorm_state(state: str) -> None:
         if state == "running":
@@ -1050,6 +1085,7 @@ async def main() -> None:
             seat_count=len(current_seated()),
             phase="opening" if state == "running" else "closing",
         )
+        notify_control()
 
     def wearer_terminal_reason(terminal: dict[str, str | bool]) -> str:
         """Translate compact engine state into the exact G2 recovery copy.
@@ -1372,6 +1408,75 @@ async def main() -> None:
         sessions.handle_brainstorm_action(action)
 
     transport.on_brainstorm_action(on_brainstorm_action)
+
+    def refresh_seats() -> None:
+        """Find the CLIs again and forget sessions from the old login."""
+        seats[:] = build_seats()
+        for cli_seat in cli_seats:
+            cli_seat.rediscover()
+        if not sessions.active:
+            ready = brainstorm_available()
+            status.set(debate=f"{len(current_seated())} seats" if ready
+                       else f"missing: {', '.join(missing_seats()) or 'seats'}")
+            status.set_brainstorm(
+                state="ready" if ready else "unavailable",
+                seat_count=len(current_seated()),
+                phase="idle",
+            )
+        log.info("brainstorm seats refreshed: %s",
+                 ", ".join(n for n, _r, _a in current_seated()) or "none")
+
+    async def warm_cli_seats() -> None:
+        for cli_seat in cli_seats:
+            try:
+                await cli_seat.warm()
+            except Exception:
+                log.warning("%s seat warm-up failed", cli_seat.name, exc_info=False)
+
+    async def reset_brainstorm_room() -> bool:
+        cancelled = await sessions.reset_brainstorm()
+        if capabilities.brainstorm_view_current:
+            await hud.show_brainstorm(topic_capture_view(False))
+        return cancelled
+
+    def brainstorm_room() -> BrainstormRoom:
+        projection = status.brainstorm_projection()
+        ready = brainstorm_available()
+        detail = (
+            "Codex and Claude are seated." if ready
+            else f"{', '.join(n.capitalize() for n in missing_seats()) or 'A seat'} "
+                 "isn't available on the Mac."
+        )
+        return BrainstormRoom(
+            state=str(projection["state"]),
+            phase=str(projection["phase"]),
+            detail=detail,
+            seats=tuple((name, agent is not None) for name, _role, agent in seats),
+        )
+
+    brainstorm_control = BrainstormControl(
+        registry=account_registry,
+        models=models,
+        send=transport.send,
+        room=brainstorm_room,
+        refresh_seats=refresh_seats,
+        reset_room=reset_brainstorm_room,
+        warm_seats=warm_cli_seats,
+        observed=lambda: dict(accounts),
+    )
+    control_listeners.append(brainstorm_control.publish_soon)
+    transport.on_control_action(brainstorm_control.handle)
+
+    async def publish_control_on_connect() -> None:
+        await brainstorm_control.probe_all()
+        await brainstorm_control.publish()
+
+    def on_hello_publish_control(_hello: Hello) -> None:
+        # The phone screen fills in as soon as the plugin connects, with
+        # fresh sign-in state rather than whatever was true at boot.
+        asyncio.get_running_loop().create_task(publish_control_on_connect())
+
+    transport.on_hello(on_hello_publish_control)
     transport.on_navigation_origin(on_navigation_origin)
     transport.on_navigation_origin_failure(on_navigation_origin_failure)
     transport.on_navigation_view_ack(on_navigation_view_ack)

@@ -46,8 +46,35 @@ still SEE the failure, so it is a visible turn that is not a quotable one.
 """
 
 
+SIGNED_OUT_DETAIL = "signed out — sign in from the phone"
+"""The notice detail for a seat whose subscription login is gone. Named so
+the HUD can say WHY a seat went quiet, and where the fix is: the JOAT
+plugin screen on the phone (Accounts), not a terminal on the Mac."""
+
+LIMIT_DETAIL = "usage limit — switch account on the phone"
+"""The notice detail for a seat whose subscription is spent for now."""
+
+
 def failure_notice(name: str, detail: str) -> str:
     return f"{FAILURE_MARK} {name} could not answer: {detail}".strip()
+
+
+def failure_summary(text: str) -> str:
+    """The few words a HUD row shows for a failed turn.
+
+    Only the two actionable causes are named; anything else stays the
+    generic "could not answer" — the raw detail is an exit code or a CLI
+    complaint, and quoting it reads like an argument the seat never made.
+    """
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith(FAILURE_MARK):
+            continue
+        if SIGNED_OUT_DETAIL in stripped:
+            return SIGNED_OUT_DETAIL
+        if LIMIT_DETAIL in stripped:
+            return LIMIT_DETAIL
+    return "could not answer"
 
 
 def is_failure(text: str) -> bool:
