@@ -334,7 +334,9 @@ class TestMessageReplyController:
         assert result == "Submitted to Messages for Dele; delivery unverified."
         assert sender.sent == [("+14055550123", "On my way")]
 
-    async def test_accepted_confirmation_clears_the_selected_recipient(self) -> None:
+    async def test_accepted_confirmation_consumes_consent_not_the_conversation(self) -> None:
+        """Changelog 2026-09-12: a successful legacy reply keeps its
+        conversation, but every next reply needs its own confirmation."""
         sender, confirm = FakeSender(), ScriptedConfirm(True)
         replies = MessageReplyController(sender, confirm)
         replies.select(THREAD, trace_id="hud-one-shot")
@@ -342,10 +344,64 @@ class TestMessageReplyController:
         assert await replies.handle_command("reply saying First") == (
             "Submitted to Messages for Dele; delivery unverified."
         )
+        assert len(confirm.calls) == 1
+        assert await replies.handle_command("reply saying Second") == (
+            "Submitted to Messages for Dele; delivery unverified."
+        )
+        assert len(confirm.calls) == 2, "the second reply needed a fresh confirmation"
+        assert confirm.calls[0][0] != confirm.calls[1][0], "consent is per action, never reused"
+        assert sender.sent == [("+14055550123", "First"), ("+14055550123", "Second")]
+
+    async def test_restored_conversation_keeps_its_original_expiry(self) -> None:
+        now = [100.0]
+        sender, confirm = FakeSender(), ScriptedConfirm(True)
+        replies = MessageReplyController(
+            sender,
+            confirm,
+            selection_ttl_s=120.0,
+            monotonic=lambda: now[0],
+        )
+        replies.select(THREAD, trace_id="hud-restored-expiry")
+        now[0] = 150.0
+
+        assert await replies.handle_command("reply saying First") == (
+            "Submitted to Messages for Dele; delivery unverified."
+        )
+        # Past the ORIGINAL expiry (100 + 120), not a renewed one from the send.
+        now[0] = 221.0
+        assert await replies.handle_command("reply saying Second") == (
+            "Message selection expired. Open Messages and choose the conversation again."
+        )
+        assert len(confirm.calls) == 1
+        assert sender.sent == [("+14055550123", "First")]
+
+    @pytest.mark.parametrize(
+        ("possible_external_commit", "first_result"),
+        [
+            (False, "Could not send to Dele. Check Messages on your Mac."),
+            (
+                True,
+                "Messages may have submitted the reply to Dele. "
+                "Check Messages on your Mac before trying again.",
+            ),
+        ],
+    )
+    async def test_failed_send_does_not_re_arm_the_recipient(
+        self, possible_external_commit: bool, first_result: str,
+    ) -> None:
+        sender = FakeSender(MessageSendError(
+            "Messages unavailable", possible_external_commit=possible_external_commit,
+        ))
+        confirm = ScriptedConfirm(True)
+        replies = MessageReplyController(sender, confirm)
+        replies.select(THREAD, trace_id="hud-failed-send")
+
+        assert await replies.handle_command("reply saying First") == first_result
         assert await replies.handle_command("reply saying Second") == (
             "Select a Messages conversation first."
         )
-        assert sender.sent == [("+14055550123", "First")]
+        assert len(confirm.calls) == 1
+        assert sender.sent == []
 
     async def test_selected_recipient_expires_before_a_late_voice_draft(self) -> None:
         now = [100.0]

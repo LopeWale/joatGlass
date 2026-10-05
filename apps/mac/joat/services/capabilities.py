@@ -529,7 +529,9 @@ class CapabilityRouter:
                     return
                 self._terminal_opening_revision += 1
                 terminal_revision = self._terminal_opening_revision
-            schedule = asyncio.get_running_loop().create_task
+            schedule: Callable[[Coroutine[Any, Any, None]], asyncio.Task[None]] = (
+                asyncio.get_running_loop().create_task
+            )
             if event.selected_name in {"PLANNING", "CALENDAR", "TASKS", "REMINDERS"}:
                 if (event.request_id != self._active_request_id or self._planning_back_pending
                         or self._planning_completion_active):
@@ -2255,10 +2257,10 @@ class CapabilityRouter:
         if not self._request_is_current():
             return
         def chronology(row: _NoteRow) -> tuple[int, str, str]:
-            note = row.voice_note or row.text_note
-            assert note is not None
-            identity = row.voice_note.capture_id if row.voice_note else row.text_note.note_id
-            return (-note.updated_at_us, row.kind, identity)
+            if row.voice_note is not None:
+                return (-row.voice_note.updated_at_us, row.kind, row.voice_note.capture_id)
+            assert row.text_note is not None
+            return (-row.text_note.updated_at_us, row.kind, row.text_note.note_id)
         self._note_list = _NoteListState(tuple(sorted(rows, key=chronology)))
         await self._show_note_list_page()
 

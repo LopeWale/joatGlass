@@ -340,12 +340,22 @@ def bridge_response(*, calendar="full_access", reminders="full_access", result=N
     )
 
 
-async def wait_until(predicate, *, attempts: int = 100) -> None:  # type: ignore[no-untyped-def]
-    for _ in range(attempts):
+async def wait_until(predicate, *, timeout_s: float = 2.0) -> None:  # type: ignore[no-untyped-def]
+    """Poll until ``predicate`` holds, bounded by wall-clock time.
+
+    The router hands SQLite reads to worker threads (``asyncio.to_thread``),
+    so a fixed count of ``sleep(0)`` loop turns can be exhausted in
+    microseconds before the thread has returned. A deadline is the only
+    bound that survives scheduler jitter; the fast path still returns on
+    the first turn that satisfies the predicate.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
         if predicate():
             return
-        await asyncio.sleep(0)
-    raise AssertionError("condition did not become true")
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition did not become true")
+        await asyncio.sleep(0.001)
 
 
 async def collect_note_reader(router, transport, *, request_id, trace_id):  # type: ignore[no-untyped-def]
@@ -1410,14 +1420,16 @@ class TestCapabilityViews:
             release_confirmation.set()
             await replies.aclose()
 
-    async def test_group_message_cannot_be_misrouted_to_one_participant(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        now = time.time()
+    async def test_group_message_cannot_be_misrouted_to_one_participant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Group identity is independent of reply support: a group with no
+        # chat GUID has no send target, so it reads as "Participant" and
+        # never arms a reply to whichever member happened to write last.
+        thread = MessageThread("Project team", "handle-0", "Ship it", time.time(), is_group=True)
+        monkeypatch.setattr(FakeMessages, "recent_threads", lambda _self, limit=5: [thread])
         replies = FakeReplies()
-        router, transport, _ = make_router(
-            tmp_path,
-            rows=[("Project team", "Ship it", now, False)],
-            replies=replies,
-        )
+        router, transport, _ = make_router(tmp_path, rows=[], replies=replies)
         await router.open("Messages")
 
         router.on_input(InputEvent(
@@ -1686,10 +1698,11 @@ class TestCapabilityViews:
         await asyncio.sleep(0)
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.title == "PLANNING · EVENT"
+        # One footer: the Back copy lives in the hint, not duplicated as a row
+        # (Changelog 2026-09-11, "duplicated Back copy on event details").
         assert detail.items == [
             "Design review",
             "09:30 · Event",
-            "Read-only native item · left x2 Planning",
         ]
         assert detail.hint == "left x2 Planning"
 
