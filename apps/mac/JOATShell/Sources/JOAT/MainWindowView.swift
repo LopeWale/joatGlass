@@ -59,7 +59,7 @@ struct MainWindowView: View {
                 case .intelligence:
                     IntelligenceView(engine: engine, readiness: readiness)
                 case .news:
-                    NewsSettingsView(model: newsModel).disabled(engine.isPreview)
+                    NewsSettingsView(model: newsModel, commands: engine.commands).disabled(engine.isPreview)
                 case .access:
                     AccessSettingsView(engine: engine, readiness: readiness)
                 case .diagnostics:

@@ -144,6 +144,8 @@ final class EngineController: ObservableObject {
     @Published var g2DiagnosticNotice: String?
     @Published var privateTailnetGateway: Bool
 
+    let commands = EngineCommandChannel()
+
     private var process: Process?
     private var userStopped = false
     private var recentCrashes: [Date] = []
@@ -372,25 +374,35 @@ final class EngineController: ObservableObject {
             env["JOAT_NATIVE_BRIDGE"] = NativeBridgeServer.shared.socketURL.path
         }
         env = Self.navigationLaunchEnvironment(inherited: env, repo: repo)
+        let commandLaunch = commands.prepare()
+        env["JOAT_COMMAND_EPOCH"] = commandLaunch.epoch
+        env["JOAT_COMMAND_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
         p.environment = env
-        p.standardOutput = log
+        p.standardInput = commandLaunch.input
+        p.standardOutput = commandLaunch.output
         p.standardError = log
         p.terminationHandler = { [weak self] proc in
-            Task { @MainActor in self?.engineExited(code: proc.terminationStatus) }
+            Task { @MainActor in
+                guard let self, self.process === proc else { return }
+                self.engineExited(code: proc.terminationStatus)
+            }
         }
         NativeBridgeServer.shared.authorizePeerProcessID(nil)
         do {
             try p.run()
             NativeBridgeServer.shared.authorizePeerProcessID(p.processIdentifier)
             process = p
+            commands.attach(processIdentifier: p.processIdentifier, epoch: commandLaunch.epoch)
             lastStartedAt = Date()
             state = .running
         } catch {
+            commands.disconnect()
             fail("engine spawn failed: \(error.localizedDescription)")
         }
     }
 
     func stop(completion: (() -> Void)? = nil) {
+        commands.disconnect()
         scheduledRecovery?.cancel()
         scheduledRecovery = nil
         userStopped = true
@@ -420,6 +432,7 @@ final class EngineController: ObservableObject {
     }
 
     private func engineExited(code: Int32) {
+        commands.disconnect()
         NativeBridgeServer.shared.authorizePeerProcessID(nil)
         process = nil
         isTransitioning = false
