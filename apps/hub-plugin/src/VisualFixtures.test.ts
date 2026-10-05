@@ -32,11 +32,17 @@ describe('visual fixtures', () => {
     expect(greenAt(575, 0)).toBe(34);
     expect(greenAt(0, 287)).toBe(51);
     expect(greenAt(575, 287)).toBe(68);
+    // One strict pass over all 165,888 pixels: a per-pixel expect() costs
+    // more than the stitch itself and timed the test out. The first byte
+    // that is not pure opaque green is reported by offset.
+    let firstOffChannel = -1;
     for (let offset = 0; offset < rgba.length; offset += 4) {
-      expect(rgba[offset]).toBe(0);
-      expect(rgba[offset + 2]).toBe(0);
-      expect(rgba[offset + 3]).toBe(255);
+      if (rgba[offset] !== 0 || rgba[offset + 2] !== 0 || rgba[offset + 3] !== 255) {
+        firstOffChannel = offset;
+        break;
+      }
     }
+    expect(firstOffChannel).toBe(-1);
   });
 
   it('covers every productivity collection and durable write receipt', () => {

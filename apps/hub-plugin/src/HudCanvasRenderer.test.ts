@@ -201,16 +201,18 @@ describe('QuickNotes exact reader', () => {
 });
 
 describe('productivity escape copy', () => {
+  // GesturePolicy routes a double-click as Back on every source (temple or
+  // ring), so the escape is named by the gesture, not by a hand.
   it.each([
-    [{ phase: 'verifying', monitoringArmed: false }, 'Back: left x2 to Planning'],
-    [{ phase: 'saved', monitoringArmed: true }, 'Back: left x2 to Planning · monitoring next'],
-    [{ phase: 'monitoring', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
-    [{ phase: 'completed', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
-    [{ phase: 'failed', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
-    [{ phase: 'check', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
-    [{ phase: 'cancelled', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
-    [{ phase: 'not_saved', monitoringArmed: false }, 'Back: left x2 to Planning · auto in 5s'],
-    [{ phase: 'due', monitoringArmed: false }, 'say: complete reminder · Back: left x2 to Planning'],
+    [{ phase: 'verifying', monitoringArmed: false }, 'Back: double-click to Planning'],
+    [{ phase: 'saved', monitoringArmed: true }, 'Back: double-click to Planning · monitoring next'],
+    [{ phase: 'monitoring', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
+    [{ phase: 'completed', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
+    [{ phase: 'failed', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
+    [{ phase: 'check', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
+    [{ phase: 'cancelled', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
+    [{ phase: 'not_saved', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
+    [{ phase: 'due', monitoringArmed: false }, 'say: complete reminder · Back: double-click to Planning'],
   ] as const)('keeps %o visibly escapable', (model, hint) => {
     expect(productivityActionHint(model)).toBe(hint);
   });
@@ -219,7 +221,7 @@ describe('productivity escape copy', () => {
 describe('flat productivity chrome', () => {
   it('collapses confirmation controls into one static low-bandwidth footer', () => {
     expect(HudCanvas.confirmationActionHint()).toBe(
-      'tap: confirm · swipe: cancel · left x2: back · auto-cancel',
+      'tap: confirm · swipe: cancel · double-click: back · auto-cancel',
     );
   });
 
@@ -305,7 +307,11 @@ describe('semantic HUD chrome', () => {
   });
 
   it('does not advertise the right-temple exit gesture as notification navigation', () => {
-    expect(NOTIFICATION_DISMISS_HINT).toBe('tap: dismiss · left x2: menu');
+    // The card advertises only its dismissal action: the right-temple exit
+    // is the host's, and the menu is the firmware's long-press (2026-09-11,
+    // the extra double-click-menu footer was removed from the Home card).
+    expect(NOTIFICATION_DISMISS_HINT).toBe('tap: dismiss');
+    expect(NOTIFICATION_DISMISS_HINT).not.toMatch(/right|exit|menu/i);
   });
 
   it('keeps the recovery instruction in the warning card instead of rendering it twice', () => {
@@ -724,7 +730,7 @@ describe('Brainstorm wearable actions', () => {
     });
     expect(hint).toContain('swipe: scroll');
     expect(hint).toContain('tap: terminal');
-    expect(hint).toContain('left x2: cancel');
+    expect(hint).toContain('double-click: cancel');
     // An open-ended capability nobody knows about is not a capability.
     // JOAT can act on any reply — "make that shorter", "send that to
     // hermes" — and nothing on the glass said so.
@@ -736,16 +742,20 @@ describe('Brainstorm wearable actions', () => {
       screen: 'brainstorm',
       state: 'ready',
       noToolsChecked: true,
-    })).toBe('tap: speak · left x2: menu');
+    })).toBe('tap: speak · double-click: menu');
   });
 
   it('shows the diagnostic test gesture only when the Mac explicitly arms it', () => {
+    // GesturePolicy makes a double-click Back on every source, so the old
+    // "right/ring x2: test" press no longer exists to advertise: an armed
+    // but ordinary ready screen keeps the plain hint, and the test action
+    // is disclosed only by the Mac's explicit `acceptance_ready` state.
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'ready',
       noToolsChecked: true,
       acceptanceArmed: true,
-    } as Parameters<typeof brainstormActionHint>[0])).toBe('tap: speak · right/ring x2: test · left x2: menu');
+    } as Parameters<typeof brainstormActionHint>[0])).toBe('tap: speak · double-click: menu');
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'ready',
@@ -755,13 +765,13 @@ describe('Brainstorm wearable actions', () => {
       screen: 'brainstorm',
       state: 'acceptance_ready',
       noToolsChecked: true,
-    })).toBe('tap: start test · left x2: menu');
+    })).toBe('tap: start test · double-click: menu');
     expect(brainstormStateLabel('acceptance_ready')).toBe('TEST READY');
     expect(brainstormActionHint({
       screen: 'brainstorm',
       state: 'topic_capture',
       noToolsChecked: true,
-    })).toBe('speak your question · left x2: cancel');
+    })).toBe('speak your question · double-click: cancel');
     expect(brainstormStateLabel('topic_capture')).toBe('SPEAK NOW');
   });
 });
@@ -796,7 +806,7 @@ describe('resolveHudOverview', () => {
       title: 'Connecting',
       primary: 'Waiting for JOAT on your Mac…',
       recovery: 'This screen will refresh automatically.',
-      hint: 'left x2: menu · long-press: mic',
+      hint: 'double-click: menu · long-press: mic',
     });
   });
 
@@ -811,7 +821,7 @@ describe('resolveHudOverview', () => {
       title: 'Reconnecting',
       primary: 'Restoring JOAT on your Mac…',
       recovery: 'This screen will refresh automatically.',
-      hint: 'left x2: menu · long-press: mic',
+      hint: 'double-click: menu · long-press: mic',
     });
   });
 

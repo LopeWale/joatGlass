@@ -4,6 +4,8 @@ import { HudPresenter } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import type { BridgeClient } from './BridgeClient';
 import type { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
+import { hudSpineLabel } from './HudCanvasRenderer';
+import type { HudVisualFrame } from './HudVisualSurface';
 import { ContainerId } from './types';
 
 /**
@@ -40,9 +42,44 @@ function realPresenter(): HudPresenter {
 
 const wrote = (id: ContainerId) => paints.filter((p) => p.containerID === id);
 
+/**
+ * The lens path. Since 2026-09-11 the native status line carries only the
+ * phone's own facts (clock · MIC · battery) and the Mac's state word
+ * ("hearing you…", "reconnecting") is drawn by the renderer's spine from the
+ * line Chrome composes into the StatusBar stream — one top-left tile per
+ * state change. A frame-recording painter observes that composed line.
+ */
+const frames: HudVisualFrame[] = [];
+
+function visualPresenter(): HudPresenter {
+  const client = {
+    require: () => ({
+      textContainerUpgrade: async (u: TextContainerUpgrade) => {
+        paints.push(u);
+        return true;
+      },
+      rebuildPageContainer: async () => {
+        rebuilds += 1;
+        return true;
+      },
+    }),
+  } as unknown as BridgeClient;
+  return new HudPresenter(client, new HudPageBuilder(), {
+    paint: async (frame) => {
+      frames.push(frame);
+      return true;
+    },
+  });
+}
+
+/** The frame-status line Chrome last composed, as the spine reads it. */
+const lastStatus = () => frames[frames.length - 1]!.status;
+const lastSpine = () => hudSpineLabel(frames[frames.length - 1]!);
+
 beforeEach(() => {
   vi.useFakeTimers();
   paints.length = 0;
+  frames.length = 0;
   rebuilds = 0;
 });
 
@@ -96,7 +133,31 @@ describe('Chrome', () => {
     }
   });
 
-  it('reserves the battery slot before truncating a long Mac status', () => {
+  it('reserves the battery slot before truncating a long Mac status', async () => {
+    const hud = visualPresenter();
+    const chrome = new Chrome(hud);
+    chrome.setBattery(100, false);
+    chrome.setLink('connected');
+    chrome.setMacState('brainstorm connection test preparing reconnect');
+    chrome.start();
+    await vi.advanceTimersByTimeAsync(0);
+    chrome.stop();
+
+    // The composed line keeps the clock and the battery and shortens only
+    // the state word, within the 46-character status wire budget.
+    const content = lastStatus();
+    expect(content).toContain('JOAT brainstorm');
+    expect(content).toMatch(/\sbat 100%$/);
+    expect(content.length).toBeLessThanOrEqual(46);
+    // The spine draws the shortened word; the battery survives beside it.
+    expect(lastSpine()).toMatch(/^JOAT · BRAINSTORM CONNECTION/);
+    expect(lastSpine()).not.toContain('BAT');
+  });
+
+  it('keeps the native status line to the phone\'s own facts, battery last', () => {
+    // Without a renderer the firmware text container shows only what the
+    // phone knows for certain — clock, mic, battery — never the Mac's
+    // transient word, which would be stale the moment the brain went away.
     const hud = realPresenter();
     const chrome = new Chrome(hud);
     chrome.setBattery(100, false);
@@ -106,19 +167,32 @@ describe('Chrome', () => {
     chrome.stop();
 
     const content = wrote(ContainerId.StatusBar).pop()!.content!;
-    expect(content).toContain('JOAT brainstorm');
-    expect(content).toMatch(/\sbat 100%$/);
+    expect(content).toMatch(/^\d{1,2}:\d{2} · MIC OFF · bat 100%$/);
     expect(content.length).toBeLessThanOrEqual(46);
   });
 
-  it('reports the LINK before the mic — a wearer whose brain is gone needs that first', () => {
-    const hud = realPresenter();
+  it('reports the LINK before the mic — a wearer whose brain is gone needs that first', async () => {
+    const hud = visualPresenter();
     const chrome = new Chrome(hud);
     chrome.setMic(true);
     chrome.setLink('reconnecting');
     chrome.start();
+    await vi.advanceTimersByTimeAsync(0);
     chrome.stop();
-    expect(wrote(ContainerId.StatusBar).pop()!.content).toContain('reconnecting');
+    // The state word is the link, not "listening": the spine says so.
+    expect(lastStatus()).toContain('JOAT reconnecting');
+    expect(lastStatus()).not.toContain('listening');
+    expect(lastSpine()).toBe('JOAT · RECONNECTING');
+    // The microphone keeps its own structured slot, on the lens and on the
+    // native status line alike.
+    expect(frames[frames.length - 1]!.micOn).toBe(true);
+    const native = realPresenter();
+    const nativeChrome = new Chrome(native);
+    nativeChrome.setMic(true);
+    nativeChrome.setLink('reconnecting');
+    nativeChrome.start();
+    nativeChrome.stop();
+    expect(wrote(ContainerId.StatusBar).pop()!.content).toMatch(/^\d{1,2}:\d{2} · MIC ON$/);
   });
 
   it('a 30s tick during a focus page NEVER rebuilds the page', async () => {
@@ -136,18 +210,35 @@ describe('Chrome', () => {
   });
 
   it('setStatus from anywhere becomes the state word, not a second writer', async () => {
-    const hud = realPresenter();
+    const hud = visualPresenter();
     const chrome = new Chrome(hud);
+    chrome.setBattery(64, false);
     chrome.setLink('connected');
     chrome.start();
-    paints.length = 0;
+    await vi.advanceTimersByTimeAsync(0);
+    frames.length = 0;
     await hud.setStatus('JOAT · settings');
-    const bar = wrote(ContainerId.StatusBar);
+    await vi.advanceTimersByTimeAsync(0);
     chrome.stop();
+    expect(frames.length).toBeGreaterThan(0);
+    // Composed INTO the line — clock and battery survive the announcement,
+    // and nothing paints the raw announcement as a line of its own.
+    expect(frames.every((frame) => frame.status !== 'JOAT · settings')).toBe(true);
+    expect(lastStatus()).toMatch(/^\d{1,2}:\d{2} JOAT settings bat 64%$/);
+    expect(lastSpine()).toBe('JOAT · SETTINGS');
+    // The native status line has the same single writer: the announcement
+    // never reaches the firmware container as a second, competing write.
+    const native = realPresenter();
+    const nativeChrome = new Chrome(native);
+    nativeChrome.setLink('connected');
+    nativeChrome.start();
+    paints.length = 0;
+    await native.setStatus('JOAT · settings');
+    const bar = wrote(ContainerId.StatusBar);
+    nativeChrome.stop();
     expect(bar.length).toBeGreaterThan(0);
-    // Composed INTO the line — clock and battery survive the announcement.
-    expect(bar[bar.length - 1]!.content).toContain('settings');
-    expect(bar[bar.length - 1]!.content).toMatch(/\d{1,2}:\d{2}/);
+    expect(bar.every((p) => p.content !== 'JOAT · settings')).toBe(true);
+    expect(bar[bar.length - 1]!.content).toMatch(/^\d{1,2}:\d{2} · MIC OFF$/);
   });
 
   it('stop() halts the interval so a torn-down Chrome cannot paint', () => {
