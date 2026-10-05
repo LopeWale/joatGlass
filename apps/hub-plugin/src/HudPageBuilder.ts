@@ -315,7 +315,19 @@ export class HudPageBuilder {
     const TOP = LINE_BAND(1);                       // 31
     const PANE_LINES = 7;
     const HINT_Y = CANVAS.height - LINE_BAND(1);    // 257
-    const text = (value: string): string => value.trim() || ' ';
+    // Trailing whitespace only: a leading run is the rail's indent.
+    const text = (value: string): string => (value.trim() ? value.replace(/\s+$/, '') : ' ');
+    // Every band, not just the pane, is cut to what its inner box holds
+    // (font-measurement skill: measure against width − 2×(padding+border),
+    // pxTruncate per line). Status, title, hint and the clock column carry
+    // Mac-supplied text; uncut, a long title or hint wrapped to a second
+    // line inside a one-line band and the firmware drew a scrollbar.
+    const fit = (value: string, width: number, height: number, padding: number): string => {
+      const innerW = width - 2 * padding;
+      const lines = Math.max(1, Math.floor((height - 2 * padding) / LINE));
+      return text(value).split('\n').slice(0, lines)
+        .map((line) => pxTruncate(line, innerW)).join('\n');
+    };
     const preview = view.paneBody.split('\n')
       .map((row) => row.trim()).filter(Boolean)
       .slice(0, PANE_LINES)
@@ -323,8 +335,11 @@ export class HudPageBuilder {
       .join('\n');
     // '>' as the cursor, which is Even's documented convention for marking
     // a selected row ("Prefix text items with > as a cursor indicator").
+    // The font is proportional: '> ' measures 15px and a space 5px, so an
+    // unselected row is indented THREE spaces to keep every label on the
+    // same x (two spaces left them 5px left of the selected one).
     const rail = view.tabs
-      .map(({ label, active }) => `${active ? '>' : ' '} ${label}`)
+      .map(({ label, active }) => `${active ? '> ' : '   '}${label}`)
       .join('\n');
     const band = (
       containerID: number, containerName: string,
@@ -335,7 +350,7 @@ export class HudPageBuilder {
       xPosition: x, yPosition: y, width, height,
       paddingLength: padding, borderWidth: 0,
       isEventCapture: capture, zOrderIndex: z,
-      textColor, content: fitUtf8(text(content), TEXT_CONTAINER_MAX_BYTES),
+      textColor, content: fitUtf8(fit(content, width, height, padding), TEXT_CONTAINER_MAX_BYTES),
     });
     // The time lives here only; the status line carries the date.
     const clockColumn = [view.clock, view.ambient, view.extra ?? '']

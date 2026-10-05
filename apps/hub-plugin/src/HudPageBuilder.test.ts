@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { utf8ByteLength, validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
-import { measureTextWrap, pxTruncate } from '@evenrealities/pretext';
+import { getTextWidth, measureTextWrap, pxTruncate } from '@evenrealities/pretext';
 import { HudPageBuilder } from './HudPageBuilder';
 import { CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId } from './types';
 
@@ -305,6 +305,32 @@ describe('HudPageBuilder invariants', () => {
     // The time is printed once, in the clock column, not in the status line too.
     expect(by['clock']!.content.split('\n')).toEqual(['9:52', '72° Clear', '3 unread']);
     expect(by['pane']!.content.split('\n')).toHaveLength(7);
+  });
+
+  it('text overview: long Mac text is cut to its band (no scrollbar) and rail labels share one x', () => {
+    const page = builder.overviewTextLayout({
+      status: 'Wednesday, September 30 · MIC ON · bat 7% · charging · glasses L 12% R 9% · reconnecting to Mac',
+      clock: '12:59', date: 'Wed, Sep 30', ambient: '104° Thunderstorms and heavy rain', extra: '128 unread',
+      tabs: [
+        { label: 'NOTIFICATIONS', active: false }, { label: 'NEWS', active: true },
+        { label: 'POMODORO', active: false }, { label: 'SEARCH', active: false },
+      ],
+      paneTitle: 'NEWS · BBC World · Woman and three children die in house fire on Merseyside',
+      paneBody: 'one',
+      hint: 'tap: open article · swipe: tabs · double-click: back · long-press: mute microphone · ring: scroll',
+    }) as unknown as { textObject: Array<{
+      containerName: string; content: string; width: number; height: number; paddingLength: number; borderWidth: number;
+    }> };
+    for (const t of page.textObject.filter((c) => c.containerName !== 'divider')) {
+      const inset = t.paddingLength + t.borderWidth;
+      const lines = Math.floor((t.height - 2 * inset) / 27);
+      expect(measureTextWrap(t.content, t.width - 2 * inset).lineCount, t.containerName).toBeLessThanOrEqual(lines);
+    }
+    // Proportional font: the selected row's '> ' and an unselected row's
+    // indent measure the same, so every label starts at the same x.
+    const rail = page.textObject.find((t) => t.containerName === 'tabs')!.content.split('\n');
+    const indent = (row: string): number => getTextWidth(row.slice(0, row.length - row.trimStart().replace(/^> /, '').length));
+    expect(new Set(rail.map(indent)).size).toBe(1);
   });
 
   it('reader layout: an opened article is four firmware text containers, body captures, rows rejoined', () => {
