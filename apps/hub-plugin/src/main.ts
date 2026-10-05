@@ -41,6 +41,8 @@ import { EventRouter, type LifecycleHandler } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
 import { PhoneControlPanel } from './PhoneControlPanel';
+import { Places, placesToWire } from './Places';
+import { PlacesPanel } from './PlacesPanel';
 import { CapabilityMenu } from './CapabilityMenu';
 import {
   CAPABILITIES,
@@ -198,6 +200,21 @@ const LIVE_PROMPT_WITHOUT_MIC = import.meta.env.DEV
   && new URLSearchParams(window.location.search).get('joatTestPromptMic') === '1';
 
 /** Webview status panel (index.html). Absent ids are a no-op by design. */
+/** The phone page's two tabs: Connection (the existing form) and Places. */
+function installPhoneTabs(): void {
+  const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('nav.tabs [role="tab"]'));
+  for (const tab of tabs) {
+    tab.addEventListener('click', () => {
+      for (const other of tabs) {
+        const selected = other === tab;
+        other.setAttribute('aria-selected', String(selected));
+        const panel = document.getElementById(other.getAttribute('aria-controls') ?? '');
+        if (panel) panel.hidden = !selected;
+      }
+    });
+  }
+}
+
 function setPanel(id: string, text: string): void {
   const el = document.getElementById(id);
   if (el) el.textContent = text;
@@ -467,6 +484,16 @@ async function boot(): Promise<void> {
     setPanel('p-policy', policy);
     phonePanel?.updatePolicy(policy);
   });
+  // The wearer's saved places: edited on the phone page, mirrored to the
+  // Even host's storage, and sent whole to the Mac on every change and on
+  // every connect, so "navigate home" resolves there.
+  const places = new Places();
+  places.load();
+  places.onChange((list) => {
+    link.send({ kind: 'places', places: placesToWire(list) });
+  });
+  new PlacesPanel({ places, currentLocation: () => location.requestNavigationOrigin() });
+  installPhoneTabs();
   phonePanel = new PhoneControlPanel({
     link,
     urls: MAC_WS_URLS,
@@ -509,6 +536,10 @@ async function boot(): Promise<void> {
   // kills and is shared across the dev/packed origins, unlike the browser
   // localStorage mirror. Best-effort and async — boot never waits on it.
   void settings.attachHostStorage({
+    get: (key) => client.require().getLocalStorage(key),
+    set: (key, value) => client.require().setLocalStorage(key, value),
+  });
+  void places.attachHostStorage({
     get: (key) => client.require().getLocalStorage(key),
     set: (key, value) => client.require().setLocalStorage(key, value),
   });
@@ -1012,8 +1043,10 @@ async function boot(): Promise<void> {
       // corrected by the reconnect itself.
       ...(phoneTimeZone() ? { timeZone: phoneTimeZone() } : {}),
     });
-    // Announce the persisted policy so the Mac's session logic starts in sync.
+    // Announce the persisted policy so the Mac's session logic starts in sync,
+    // and the saved places so a route to "home" resolves on this Mac.
     link.send({ kind: 'policy', resume: settings.resumePolicy });
+    link.send({ kind: 'places', places: placesToWire(places.list()) });
     link.send({ kind: 'device', connect: 'connected', mic: audio.isOpen,
       micSource: audio.lastSource === AudioInputSource.Phone ? 'phone' : 'glasses' });
   };

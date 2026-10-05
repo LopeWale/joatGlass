@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Awaitable, Callable
+from collections import deque
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 import logging
 import math
@@ -16,6 +17,8 @@ from ..core.interfaces import GlassesTransport, NavigationProvider
 from ..navigation.map_image import MapImageError, map_move_meters, render_map_tile
 from ..core.navigation import NavigationCandidate, NavigationPoint, ProviderRoute
 from ..core.protocol import (
+    SavedPlace,
+    NavigationCoordinate,
     NavigationMapPanel,
     NavigationAction,
     NavigationHudView,
@@ -139,18 +142,25 @@ class _SearchReady:
     failure: Literal["location"] | None = None
 
 
-#: How far the wearer must move before the street panel is refetched.
+#: How far apart, along the route, the street tiles are fetched.
 #:
-#: This is a distance on the PANEL, not an arbitrary round number. At zoom
-#: 16 and this latitude the tile runs about 1.95 m per pixel, so the old
-#: 120 m let the wearer drift ~62 px from the centre of a 208 px-tall pane —
-#: 60% of the way to the edge, with the ground ahead of them scrolled off
-#: and their own marker sitting in the bottom corner. 60 m halves that to
-#: under a third of the half-pane, which keeps the road ahead in view.
-#:
-#: The cost is bounded: each refresh is one Mapbox fetch and one image send
-#: (~0.5-2 s over BLE), and at walking pace 60 m is about 45 seconds apart.
-_MAP_REFRESH_METERS = 60.0
+#: The Mac never receives a live position during guidance (the privacy
+#: boundary in ARCHITECTURE.md), so it cannot refetch the streets as the
+#: wearer walks — and until 2026-10-05 it did not: one tile at the origin,
+#: and the wearer walked off it within a few hundred metres. Instead the
+#: tiles are fetched ALONG THE ROUTE as soon as the route is known, and the
+#: plugin draws the one nearest the wearer. This is a distance on the
+#: PANEL: at zoom 16 the tile runs about 1.95 m per pixel, so a 220 px-tall
+#: pane covers ~430 m and a 284 px-wide one ~550 m; 180 m keeps the wearer
+#: within ~90 m of a tile centre, under a quarter of the pane from its
+#: middle, with the road ahead always in view.
+_MAP_STRIDE_METERS = 180.0
+#: Two centres this close are the same tile; a reroute re-walks its new
+#: geometry and only the stretch that changed is fetched again.
+_MAP_DEDUPE_METERS = 30.0
+#: A route long enough to need more tiles than this gets sparser ones: the
+#: cost of a tile is one Mapbox fetch and one image over the link.
+_MAP_MAX_TILES = 24
 
 _ROUTE_FAILURE_COPY: dict[str, tuple[str, str]] = {
     # Each one names a different next move for the wearer.
@@ -200,9 +210,14 @@ class NavigationSession(Session):
         proximity: NavigationPoint | None = None,
         refresh_proximity: ProximityRefresh | None = None,
         map_token: str = "",
+        places: Callable[[], Sequence[SavedPlace]] | None = None,
     ) -> None:
         self._initial_query = query
         self._provider = provider
+        # The wearer's saved places (phone page). "Navigate home" resolves
+        # to the saved coordinates without a provider search, or searches
+        # the saved address when that is all the place has.
+        self._places = places
         self._transport = transport
         self._session_id = session_id
         self._proximity = proximity
@@ -215,7 +230,9 @@ class NavigationSession(Session):
         # precondition for navigating.
         self._map_token = map_token
         self._map_task: asyncio.Task[None] | None = None
-        self._map_centre: NavigationPoint | None = None
+        #: Tile centres fetched or queued for this session, in order.
+        self._map_centres: list[NavigationPoint] = []
+        self._map_queue: deque[NavigationPoint] = deque()
         self._events: asyncio.Queue[object] = asyncio.Queue()
         self._generation = 0
         self._search_generation = 0
@@ -477,16 +494,36 @@ class NavigationSession(Session):
                     "location",
                 ))
                 return
-            try:
-                candidates = await self._provider.search(search_request.text, proximity)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning(
-                    "navigation destination search failed type=%s",
-                    type(exc).__name__,
-                )
-                candidates = None
+            saved = self._saved_place_for(search_request.text)
+            search_text = search_request.text
+            if saved is not None and saved.latitude is not None and saved.longitude is not None:
+                candidates = [_saved_place_candidate(saved)]
+            else:
+                if saved is not None and saved.address:
+                    search_text = saved.address
+                try:
+                    candidates = await self._provider.search(search_text, proximity)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.warning(
+                        "navigation destination search failed type=%s",
+                        type(exc).__name__,
+                    )
+                    candidates = None
+                if saved is not None and candidates:
+                    # The wearer named the place; keep that name on the lens.
+                    candidates = [
+                        NavigationCandidate(
+                            choice_id=candidate.choice_id,
+                            label=saved.name,
+                            address=candidate.address,
+                            point=candidate.point,
+                            repair_hint=candidate.repair_hint,
+                            distance_m=candidate.distance_m,
+                        )
+                        for candidate in candidates[:1]
+                    ]
             await self._events.put(_SearchReady(
                 generation,
                 candidates,
@@ -495,6 +532,17 @@ class NavigationSession(Session):
             ))
 
         self._search_task = asyncio.create_task(search())
+
+    def _saved_place_for(self, text: str) -> SavedPlace | None:
+        if self._places is None:
+            return None
+        wanted = _normalise_place_name(text)
+        if not wanted:
+            return None
+        for place in self._places():
+            if _normalise_place_name(place.name) == wanted:
+                return place
+        return None
 
     async def _handle_search_ready(self, ready: _SearchReady) -> None:
         if ready.generation != self._search_generation:
@@ -685,48 +733,59 @@ class NavigationSession(Session):
         self._error_recovery = None
         await self._transport.send(self._origin_request)
 
-    def _refresh_map_panel(self, origin: NavigationPoint) -> None:
-        """Fetch the streets around the wearer, at most one request in flight.
+    def _queue_map_centres(self, centres: Iterable[NavigationPoint]) -> None:
+        """Fetch the streets around each centre, one request in flight.
 
-        Throttled by distance, not by time: standing still costs nothing,
-        and a HUD panel is only stale once the wearer has actually walked
-        out of it.
+        Centres already fetched (or queued) for this session are skipped,
+        so the origin tile requested before the route is known is not
+        fetched twice when the route's first centre lands on it, and a
+        reroute fetches only the stretch of road that is new.
         """
         if not self._map_token:
             return
-        centre = self._map_centre
-        if centre is not None and map_move_meters(
-            centre.latitude, centre.longitude, origin.latitude, origin.longitude,
-        ) < _MAP_REFRESH_METERS:
+        for centre in centres:
+            if any(
+                map_move_meters(
+                    known.latitude, known.longitude, centre.latitude, centre.longitude,
+                ) < _MAP_DEDUPE_METERS
+                for known in self._map_centres
+            ):
+                continue
+            self._map_centres.append(centre)
+            self._map_queue.append(centre)
+        if not self._map_queue:
             return
         if self._map_task is not None and not self._map_task.done():
             return
-        self._map_centre = origin
         session_id = self._session_id
 
-        async def fetch() -> None:
-            try:
-                tile = await render_map_tile(
-                    self._map_token, origin.latitude, origin.longitude,
-                )
-            except (MapImageError, OSError) as exc:
-                log.info("navigation map unavailable: %s", type(exc).__name__)
-                return
-            except asyncio.CancelledError:
-                raise
-            if self._cancelled or self._session_id != session_id:
-                return
-            await self._transport.send(NavigationMapPanel(
-                session_id=session_id,
-                latitude=tile.latitude,
-                longitude=tile.longitude,
-                zoom=tile.zoom,
-                width=tile.width,
-                height=tile.height,
-                png_base64=base64.b64encode(tile.png).decode("ascii"),
-            ))
+        async def fetch_all() -> None:
+            while self._map_queue:
+                if self._cancelled or self._session_id != session_id:
+                    return
+                centre = self._map_queue.popleft()
+                try:
+                    tile = await render_map_tile(
+                        self._map_token, centre.latitude, centre.longitude,
+                    )
+                except (MapImageError, OSError) as exc:
+                    log.info("navigation map unavailable: %s", type(exc).__name__)
+                    continue
+                except asyncio.CancelledError:
+                    raise
+                if self._cancelled or self._session_id != session_id:
+                    return
+                await self._transport.send(NavigationMapPanel(
+                    session_id=session_id,
+                    latitude=tile.latitude,
+                    longitude=tile.longitude,
+                    zoom=tile.zoom,
+                    width=tile.width,
+                    height=tile.height,
+                    png_base64=base64.b64encode(tile.png).decode("ascii"),
+                ))
 
-        self._map_task = asyncio.get_running_loop().create_task(fetch())
+        self._map_task = asyncio.get_running_loop().create_task(fetch_all())
 
     async def _handle_origin(self, origin: NavigationOrigin) -> None:
         request = self._origin_request
@@ -742,7 +801,9 @@ class NavigationSession(Session):
         self._origin_request = None
         self._locating_visible_since = None
         self._origin = NavigationPoint(origin.latitude, origin.longitude)
-        self._refresh_map_panel(self._origin)
+        # The first tile, before the route is known: the streets the wearer
+        # is standing in are worth having the moment guidance starts.
+        self._queue_map_centres([self._origin])
         await self._send_view(NavigationHudView(
             view="uncertain",
             primary=f"Finding a {self._mode} route",
@@ -893,6 +954,9 @@ class NavigationSession(Session):
         self._provider_route = ready.route
         self._route_revision = ready.revision
         self._generation = max(self._generation, ready.generation)
+        # The streets along the whole route, fetched now rather than as the
+        # wearer walks: the Mac hears no positions during guidance.
+        self._queue_map_centres(route_map_centres(ready.route.plan.geometry))
         if ready.install_immediately:
             await self._send_route()
             return
@@ -1079,8 +1143,9 @@ class NavigationSession(Session):
 
     def _cancel_work(self) -> list[asyncio.Task[None]]:
         self._reroute_after_view_ack = None
+        self._map_queue.clear()
         tasks = [
-            task for task in (self._search_task, self._route_task)
+            task for task in (self._search_task, self._route_task, self._map_task)
             if task is not None and not task.done()
         ]
         for task in tasks:
@@ -1092,6 +1157,62 @@ class NavigationSession(Session):
     def _cancel_task(task: asyncio.Task[None] | None) -> None:
         if task is not None and not task.done():
             task.cancel()
+
+
+def _normalise_place_name(text: str) -> str:
+    """"my home", "the office." and "Home" name the same saved place."""
+    words = re.sub(r"[^\w\s'-]", " ", text.casefold()).split()
+    while words and words[0] in ("my", "the", "our"):
+        words = words[1:]
+    return " ".join(words)
+
+
+def _saved_place_candidate(place: SavedPlace) -> NavigationCandidate:
+    assert place.latitude is not None and place.longitude is not None
+    return NavigationCandidate(
+        choice_id=f"place:{place.place_id}",
+        label=place.name,
+        address=place.address or "Saved place",
+        point=NavigationPoint(place.latitude, place.longitude),
+    )
+
+
+def route_map_centres(
+    geometry: Sequence[NavigationCoordinate],
+    *,
+    stride_m: float = _MAP_STRIDE_METERS,
+    max_tiles: int = _MAP_MAX_TILES,
+) -> list[NavigationPoint]:
+    """Tile centres along a route: the start, every `stride_m` of road, the end.
+
+    Walked along the geometry rather than sampled from its vertices, so a
+    long straight segment still gets a tile every stride. A route longer
+    than `max_tiles` strides gets a longer stride instead of more tiles.
+    """
+    if len(geometry) < 2:
+        return [NavigationPoint(p.latitude, p.longitude) for p in geometry[:1]]
+    legs: list[float] = []
+    for a, b in zip(geometry, geometry[1:]):
+        legs.append(map_move_meters(a.latitude, a.longitude, b.latitude, b.longitude))
+    total = sum(legs)
+    stride = max(stride_m, total / max(1, max_tiles - 1)) if total > 0 else stride_m
+    centres = [NavigationPoint(geometry[0].latitude, geometry[0].longitude)]
+    next_at = stride
+    walked = 0.0
+    for (a, b), leg in zip(zip(geometry, geometry[1:]), legs):
+        while leg > 0 and next_at <= walked + leg:
+            fraction = (next_at - walked) / leg
+            centres.append(NavigationPoint(
+                a.latitude + (b.latitude - a.latitude) * fraction,
+                a.longitude + (b.longitude - a.longitude) * fraction,
+            ))
+            next_at += stride
+        walked += leg
+    end = NavigationPoint(geometry[-1].latitude, geometry[-1].longitude)
+    last = centres[-1]
+    if map_move_meters(last.latitude, last.longitude, end.latitude, end.longitude) >= _MAP_DEDUPE_METERS:
+        centres.append(end)
+    return centres[:max_tiles]
 
 
 def _candidate_option(

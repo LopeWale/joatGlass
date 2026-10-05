@@ -72,7 +72,7 @@ describe('a receipt over a firmware page', () => {
     expect(main(r.rebuilds[r.rebuilds.length - 1])).toBe('Noted.');
     r.reset();
     expect(await r.hud.dismissAssistantOverlay()).toBe(true);
-    expect(r.writes()).toEqual(['rebuild:0:3:1']);
+    expect(r.writes()).toEqual(['rebuild:0:2:1']);
     expect(r.frames).toEqual([]);
   });
 
@@ -108,7 +108,7 @@ describe('an outcome strip over a firmware list', () => {
       expect(main(r.rebuilds[r.rebuilds.length - 1])).toBe('SAVED · Buy filters\nSaved');
       r.reset();
       await vi.advanceTimersByTimeAsync(5_100);
-      expect(r.writes()).toEqual(['rebuild:0:3:1']);
+      expect(r.writes()).toEqual(['rebuild:0:2:1']);
       expect(r.frames).toEqual([]);
     } finally {
       vi.useRealTimers();

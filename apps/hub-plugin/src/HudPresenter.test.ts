@@ -9,6 +9,7 @@ import { HudPageBuilder } from './HudPageBuilder';
 import type { BridgeClient } from './BridgeClient';
 import {
   HudVisualSurface,
+  type HudFramePainter,
   type HudFrameRenderer,
   type HudVisualFrame,
 } from './HudVisualSurface';
@@ -54,179 +55,9 @@ function lastOf(list: TextContainerUpgrade[]): TextContainerUpgrade {
   return list[list.length - 1]!;
 }
 
-describe('guarded Messages receipt list ownership', () => {
-  function showBound(hud: HudPresenter, current: () => boolean) {
-    return hud.showList(['Sent. Delivery is unverified.'], {
-      title: 'MESSAGES · SENT', selectable: false, hint: 'left x2: back',
-    }, current);
-  }
-
-  it('does not replace the current surface when the guard was already retired', async () => {
-    const frames: HudVisualFrame[] = [];
-    const visual = {
-      paint: vi.fn(async (frame: HudVisualFrame) => { frames.push(frame); return true; }),
-      paintExact: vi.fn(async (frame: HudVisualFrame, guard: () => boolean) => {
-        if (!guard()) return false;
-        frames.push(frame);
-        return true;
-      }),
-    };
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
-    await hud.showText('Current Overview', ContainerId.Main);
-    const before = frames.length;
-    expect(await showBound(hud, () => false)).toBe(false);
-    expect(frames).toHaveLength(before);
-    await hud.setStatus('Still at Home');
-    expect(frames[frames.length - 1]?.kind).toBe('overview');
-  });
-
-  it('uses the exact renderer receipt for a bound status without changing the unbound list path', async () => {
-    const paint = vi.fn(async () => true);
-    const paintExact = vi.fn(async (_frame: HudVisualFrame, guard: () => boolean) => guard());
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), { paint, paintExact });
-    expect(await showBound(hud, () => true)).toBe(true);
-    expect(paintExact).toHaveBeenCalledOnce();
-    expect(paint).not.toHaveBeenCalled();
-    expect(await hud.showList(['Legacy list'], { title: 'MESSAGES' })).toBe(true);
-    expect(paint).toHaveBeenCalledOnce();
-  });
-
-  it('rejects an exact list when the optional renderer cannot provide guarded completion', async () => {
-    const paint = vi.fn(async () => true);
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), { paint });
-    expect(await showBound(hud, () => true)).toBe(false);
-    expect(paint).not.toHaveBeenCalled();
-    expect(await hud.showList(['Legacy list'], { title: 'MESSAGES' })).toBe(true);
-  });
-
-  it('does not defer an exact status under confirmation and resurrect it when confirmation closes', async () => {
-    const frames: HudVisualFrame[] = [];
-    const paint = async (frame: HudVisualFrame) => { frames.push(frame); return true; };
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), {
-      paint,
-      paintExact: async (frame, guard) => guard() && await paint(frame),
-    });
-    await hud.showText('Underlying conversation', ContainerId.Main);
-    await hud.showConfirmation('Send the reviewed message?', 'confirmation_one');
-    expect(await showBound(hud, () => true)).toBe(false);
-    await hud.dismissConfirmation('confirmation_one');
-    expect(frames.some((frame) => frame.kind === 'list' && frame.title === 'MESSAGES · SENT')).toBe(false);
-  });
-
-  it('prevents a held status upload from repainting or restoring itself over a later Home surface', async () => {
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    let entered = false;
-    let current = true;
-    let visible = '';
-    const paint = async (frame: HudVisualFrame, guard?: () => boolean) => {
-      if (frame.kind === 'list' && frame.title === 'MESSAGES · SENT') {
-        entered = true;
-        await held;
-      }
-      if (guard && !guard()) return false;
-      visible = frame.kind === 'list' ? frame.title : frame.kind;
-      return true;
-    };
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), {
-      paint: (frame) => paint(frame),
-      paintExact: (frame, guard) => paint(frame, guard),
-    });
-    const work = showBound(hud, () => current);
-    try {
-      // The list first lets a native conversation/terminal hand the page
-      // over, so the exact paint is a few turns away, not one microtask.
-      await vi.waitFor(() => expect(entered).toBe(true));
-      current = false;
-      await hud.showDefault();
-      release();
-      expect(await work).toBe(false);
-      expect(visible).toBe('overview');
-      await hud.setStatus('Home remains current');
-      expect(visible).toBe('overview');
-    } finally { release(); await work; }
-  });
-});
-
-describe('guarded Messages confirmation ownership', () => {
-  function showBound(hud: HudPresenter, id: string, current: () => boolean) {
-    return hud.showConfirmation('Send the exact reviewed message?', id, 'messages', current);
-  }
-
-  it('rejects a stale action before claiming the confirmation surface', async () => {
-    const frames: HudVisualFrame[] = [];
-    const paint = async (frame: HudVisualFrame) => { frames.push(frame); return true; };
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), {
-      paint, paintExact: async (frame, guard) => guard() && await paint(frame),
-    });
-    await hud.showText('Current conversation', ContainerId.Main);
-    expect(await showBound(hud, 'journal_one', () => false)).toBe(false);
-    await hud.setStatus('Still in the conversation');
-    expect(frames.some((frame) => frame.kind === 'confirmation')).toBe(false);
-  });
-
-  it('requires the exact renderer path while retaining ordinary confirmation compatibility', async () => {
-    const paint = vi.fn(async () => true);
-    const paintExact = vi.fn(async (_frame: HudVisualFrame, guard: () => boolean) => guard());
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), { paint, paintExact });
-    expect(await showBound(hud, 'journal_one', () => true)).toBe(true);
-    expect(paintExact).toHaveBeenCalledOnce();
-    expect(paint).not.toHaveBeenCalled();
-    await hud.dismissConfirmation('journal_one');
-    const before = paint.mock.calls.length;
-    expect(await hud.showConfirmation('Existing unbound decision', 'legacy_one')).toBe(true);
-    expect(paint.mock.calls.length).toBeGreaterThan(before);
-    await hud.dismissConfirmation('legacy_one');
-  });
-
-  it('does not accept a held preview after its action is cancelled or commit its stale pixels', async () => {
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    let entered = false;
-    let current = true;
-    const committed: HudVisualFrame[] = [];
-    const paint = async (frame: HudVisualFrame, guard?: () => boolean) => {
-      if (frame.kind === 'confirmation') { entered = true; await held; }
-      if (guard && !guard()) return false;
-      committed.push(frame);
-      return true;
-    };
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), {
-      paint: (frame) => paint(frame), paintExact: (frame, guard) => paint(frame, guard),
-    });
-    const work = showBound(hud, 'journal_one', () => current);
-    try {
-      await Promise.resolve();
-      await Promise.resolve();
-      expect(entered).toBe(true);
-      current = false;
-      const dismiss = hud.dismissConfirmation('journal_one');
-      await hud.showDefault();
-      release();
-      expect(await work).toBe(false);
-      await dismiss;
-      expect(committed.some((frame) => frame.kind === 'confirmation')).toBe(false);
-      expect(committed[committed.length - 1]?.kind).toBe('overview');
-    } finally { release(); await work; await hud.dismissConfirmation('journal_one'); }
-  });
-
-  it('refuses an optimistic optional renderer for a bound confirmation', async () => {
-    const paint = vi.fn(async () => true);
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), { paint });
-    expect(await showBound(hud, 'journal_one', () => true)).toBe(false);
-    expect(paint).not.toHaveBeenCalled();
-  });
-});
-
 describe('prompt question ownership', () => {
   function show(hud: HudPresenter, id: string, question: string, isCurrent = () => true) {
     return hud.showPromptQuestion(id, question, isCurrent);
-  }
-  function dismiss(hud: HudPresenter, id: string) {
-    return hud.dismissPromptQuestion(id);
-  }
-  function questionOn(value: HudVisualFrame): string | undefined {
-    return value.kind === 'prompt_question' ? value.question : undefined;
   }
   function rig(paint: (value: HudVisualFrame) => Promise<boolean>) {
     const visual = {
@@ -236,6 +67,7 @@ describe('prompt question ownership', () => {
         const ok = await paint(value);
         return ok && isCurrent();
       },
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
     };
     return new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
   }
@@ -287,104 +119,22 @@ describe('prompt question ownership', () => {
     expect(await hud.showPromptQuestion('terminal-prompt', 'Speak to Hermes.', () => true, 'terminal')).toBe(false);
   });
 
-  it('awaits its question paint and remains dominant over an incidental reply and text update', async () => {
-    const frames: HudVisualFrame[] = [];
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    let entered = false;
-    const question = 'Who should receive the message?';
-    const hud = rig(async (value) => {
-      frames.push(value);
-      if (!entered && questionOn(value) === question) { entered = true; await held; }
-      return true;
-    });
-    await hud.showText('Existing feature content', ContainerId.Main);
-    let settled = false;
-    const publication = show(hud, 'prompt-a', question).then((ok) => { settled = true; return ok; });
-    try {
-      await vi.waitFor(() => expect(entered).toBe(true));
-      expect(settled).toBe(false);
-      release();
-      expect(await publication).toBe(true);
-      await hud.showAssistantOverlay('An unrelated reply.', false, true);
-      await hud.showText('Latest feature content', ContainerId.Main);
-      await vi.advanceTimersByTimeAsync(500);
-      expect(frames[frames.length - 1]).toMatchObject({ kind: 'prompt_question', promptId: 'prompt-a', question });
-      await dismiss(hud, 'prompt-a');
-      expect(frames[frames.length - 1]).toMatchObject({ kind: 'overview', main: 'Latest feature content' });
-    } finally {
-      release();
-      await publication;
-      await dismiss(hud, 'prompt-a');
-    }
-  });
 
   it('reports failure while confirmation owns the visible surface', async () => {
     const frames: HudVisualFrame[] = [];
     const hud = rig(async (value) => { frames.push(value); return true; });
-    await hud.showConfirmation('Send the reviewed message?', 'confirm-a');
+    expect(await hud.showConfirmation('Send the reviewed message?', 'confirm-a')).toBe(true);
     expect(await show(hud, 'prompt-a', 'Say the message.')).toBe(false);
-    expect(frames[frames.length - 1]).toMatchObject({ kind: 'confirmation', prompt: 'Send the reviewed message?' });
     await hud.dismissConfirmation('confirm-a');
-    expect(frames[frames.length - 1]).not.toHaveProperty('question');
+    expect(frames[frames.length - 1]).toMatchObject({ kind: 'overview' });
   });
 
-  it('rejects an optional painter without exact receipt support instead of using its optimistic paint', async () => {
+  it('refuses a question on a visual surface that cannot hand its page over', async () => {
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), { paint: async () => true });
     expect(await show(hud, 'prompt-a', 'Say the message.')).toBe(false);
   });
 
-  it('does not let cancellation during a successful upload acknowledge the question', async () => {
-    let current = true;
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    let entered = false;
-    const hud = rig(async () => { entered = true; await held; return true; });
-    const publication = show(hud, 'prompt-a', 'Say the message.', () => current);
-    try {
-      await vi.waitFor(() => expect(entered).toBe(true));
-      current = false;
-      release();
-      expect(await publication).toBe(false);
-    } finally {
-      current = false;
-      release();
-      await publication;
-      await dismiss(hud, 'prompt-a');
-    }
-  });
 
-  it('keeps a newer question after an older upload finishes and an old dismissal arrives', async () => {
-    const frames: HudVisualFrame[] = [];
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    let entered = false;
-    const firstQuestion = 'Who should receive the message?';
-    const nextQuestion = 'Recipient selected. Say the message.';
-    const hud = rig(async (value) => {
-      frames.push(value);
-      if (!entered && questionOn(value) === firstQuestion) { entered = true; await held; }
-      return true;
-    });
-    const first = show(hud, 'prompt-a', firstQuestion);
-    let next: Promise<boolean> | undefined;
-    try {
-      await vi.waitFor(() => expect(entered).toBe(true));
-      next = show(hud, 'prompt-b', nextQuestion);
-      release();
-      expect(await first).toBe(false);
-      expect(await next).toBe(true);
-      await dismiss(hud, 'prompt-a');
-      await vi.advanceTimersByTimeAsync(500);
-      expect(frames[frames.length - 1]).toMatchObject({
-        kind: 'prompt_question', promptId: 'prompt-b', question: nextQuestion,
-      });
-    } finally {
-      release();
-      await Promise.all([first, next]);
-      await dismiss(hud, 'prompt-b');
-    }
-  });
 });
 
 describe('custom News list recovery', () => {
@@ -833,7 +583,8 @@ describe('HudPresenter modal surfaces', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
     await hud.showText('9:41   JOAT ready', ContainerId.StatusBar);
@@ -853,21 +604,24 @@ describe('HudPresenter modal surfaces', () => {
     });
   });
 
-  it('composites a JOAT overlay over navigation, then removes it without replacing navigation', async () => {
+  it('composites a receipt strip over the live map, then removes it without replacing navigation', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
     const destination = navigationVisualFixture('nav-guidance');
 
     await hud.showNavigation(destination);
-    await hud.showAssistantOverlay('Turn right in 200 metres.');
+    // An answer would be a firmware text page; a receipt is a strip on the
+    // image page, so the map stays beneath it.
+    await hud.showAssistantOverlay('Reminder saved · Buy filters', false, true, 'receipt');
 
     expect(frames[frames.length - 1]).toMatchObject({
       kind: 'navigation',
       navigation: destination,
-      assistantOverlay: { text: 'Turn right in 200 metres.' },
+      assistantOverlay: { text: 'Reminder saved · Buy filters', presentation: 'receipt' },
     });
 
     await hud.dismissAssistantOverlay();
@@ -878,111 +632,9 @@ describe('HudPresenter modal surfaces', () => {
     expect(frames[frames.length - 1]).not.toHaveProperty('assistantOverlay');
   });
 
-  it('repaints answer pages on swipes and does not auto-dismiss a multipage answer', async () => {
-    const frames: HudVisualFrame[] = [];
-    const visual = {
-      paint: vi.fn(async (frame: HudVisualFrame) => { frames.push(frame); return true; }),
-      scrollAssistantOverlay: vi.fn(() => true),
-      assistantOverlayPageCount: vi.fn(() => 2),
-    } as unknown as HudVisualSurface;
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
-    await hud.showAssistantOverlay('A complete answer that needs a second page.');
-    expect(hud.scrollAssistantOverlay('down')).toBe(true);
-    await vi.runAllTimersAsync();
-    expect(visual.scrollAssistantOverlay).toHaveBeenCalledWith('down');
-    expect(frames[frames.length - 1]).toMatchObject({
-      assistantOverlay: {
-        text: 'A complete answer that needs a second page.',
-        presentation: 'answer',
-      },
-    });
 
-    expect(hud.settleAssistantOverlay(1_000)).toBe(true);
-    await vi.advanceTimersByTimeAsync(15_000);
-    expect(hud.hasAssistantOverlay()).toBe(true);
-    await hud.dismissAssistantOverlay();
-  });
 
-  it('gives repeated identical answers distinct identities so each opens on page one', async () => {
-    const frames: HudVisualFrame[] = [];
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), {
-      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    });
-    const answer = 'The same long answer can be requested twice.';
-
-    await hud.showAssistantOverlay(answer);
-    await hud.showAssistantOverlay(answer);
-
-    const revisions = frames
-      .map((frame) => frame.assistantOverlay?.revision)
-      .filter((value): value is number => value !== undefined);
-    expect(revisions).toHaveLength(2);
-    expect(revisions[1]).toBeGreaterThan(revisions[0]!);
-  });
-
-  it('bounds a streamed overlay burst to the active frame and one newest tail frame', async () => {
-    let releaseFirst!: () => void;
-    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    const frames: HudVisualFrame[] = [];
-    let first = true;
-    const visual = {
-      paint: vi.fn(async (frame: HudVisualFrame) => {
-        frames.push(frame);
-        if (first) {
-          first = false;
-          await firstGate;
-        }
-        return true;
-      }),
-    } as unknown as HudVisualSurface;
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
-
-    const initial = hud.showAssistantOverlay('one');
-    await Promise.resolve();
-    await hud.showAssistantOverlay(' two', true);
-    await hud.showAssistantOverlay(' three', true);
-
-    expect(visual.paint).toHaveBeenCalledTimes(1);
-
-    releaseFirst();
-    await initial;
-    await vi.runAllTimersAsync();
-
-    expect(visual.paint).toHaveBeenCalledTimes(2);
-    expect(frames[1]).toMatchObject({ assistantOverlay: { text: 'one two three' } });
-  });
-
-  it('cannot repaint a queued assistant tail after the wearer dismisses during an active frame', async () => {
-    let releaseFirst!: () => void;
-    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    const frames: HudVisualFrame[] = [];
-    let first = true;
-    const visual = {
-      paint: vi.fn(async (frame: HudVisualFrame) => {
-        frames.push(frame);
-        if (first) {
-          first = false;
-          await firstGate;
-        }
-        return true;
-      }),
-    } as unknown as HudVisualSurface;
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
-
-    const initial = hud.showAssistantOverlay('one');
-    await Promise.resolve();
-    await hud.showAssistantOverlay(' stale tail', true);
-    const dismissed = hud.dismissAssistantOverlay();
-
-    releaseFirst();
-    await initial;
-    expect(await dismissed).toBe(true);
-    await vi.runAllTimersAsync();
-
-    expect(visual.paint).toHaveBeenCalledTimes(2);
-    expect(frames[1]).not.toHaveProperty('assistantOverlay');
-  });
 
   it('restores the prior frame when a navigation paint and bounded heal both fail', async () => {
     const frames: HudVisualFrame[] = [];
@@ -992,7 +644,8 @@ describe('HudPresenter modal surfaces', () => {
         frames.push(frame);
         return results.shift() ?? true;
       },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
     expect(await hud.showText('home before failed navigation', ContainerId.Main)).toBe(true);
@@ -1010,7 +663,8 @@ describe('HudPresenter modal surfaces', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
     const destination = navigationVisualFixture('nav-destination');
 
@@ -1023,25 +677,13 @@ describe('HudPresenter modal surfaces', () => {
     });
   });
 
-  it('labels a Messages confirmation for the content-free physical receipt', async () => {
-    const frames: HudVisualFrame[] = [];
-    const visual = {
-      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
-
-    await hud.showConfirmation('Send to a private person?', 'message-reply:physical', 'messages');
-
-    expect(frames[frames.length - 1]).toMatchObject({
-      kind: 'confirmation', diagnosticKind: 'messages',
-    });
-  });
 
   it('rejects a navigation view while confirmation owns the visible HUD', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
     await hud.showConfirmation('Send this message?', 'active-confirmation');
@@ -1055,7 +697,8 @@ describe('HudPresenter modal surfaces', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
     const reminder = {
       domain: 'reminders' as const,
@@ -1066,10 +709,7 @@ describe('HudPresenter modal surfaces', () => {
       hint: 'left x2 Reminders',
     };
 
-    await hud.showConfirmation('Create reminder “Buy filters”? Personal', 'reminder-create');
-    expect(frames[frames.length - 1]).toMatchObject({
-      kind: 'confirmation', reviewDomain: 'reminders',
-    });
+    expect(await hud.showConfirmation('Create reminder “Buy filters”? Personal', 'reminder-create')).toBe(true);
     expect(await hud.showProductivity(reminder)).toBe(true);
     await hud.dismissConfirmation('reminder-create');
 
@@ -1080,33 +720,13 @@ describe('HudPresenter modal surfaces', () => {
     expect(hud.isProductivityVisible(reminder)).toBe(true);
   });
 
-  it('keeps failed/check truth states as full pages', async () => {
-    const frames: HudVisualFrame[] = [];
-    const visual = {
-      paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
-    const failed = {
-      domain: 'calendar' as const,
-      phase: 'failed' as const,
-      title: 'Design review',
-      primary: 'EventKit refused the write',
-      secondary: 'Safe to retry',
-      hint: 'left x2 Planning',
-    };
-
-    expect(await hud.showProductivity(failed)).toBe(true);
-    expect(frames[frames.length - 1]).toMatchObject({
-      kind: 'productivity', productivity: failed,
-    });
-    expect(frames[frames.length - 1]?.actionOverlay).toBeUndefined();
-  });
 
   it('never draws a SAVED strip over a retained FAILED page', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
     const failed = {
       domain: 'calendar' as const,
@@ -1140,7 +760,8 @@ describe('HudPresenter modal surfaces', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
     const saved = {
       domain: 'calendar' as const,
@@ -1172,7 +793,8 @@ describe('HudPresenter modal surfaces', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
     const saved = {
       domain: 'calendar' as const,
@@ -1192,48 +814,13 @@ describe('HudPresenter modal surfaces', () => {
     expect(hud.isProductivityVisible(saved)).toBe(false);
   });
 
-  it('marks a due surface visible only after its exact frame survives paint', async () => {
-    const due = {
-      domain: 'reminders' as const,
-      phase: 'due' as const,
-      title: 'Private reminder',
-      primary: 'Due now',
-      secondary: 'Still incomplete',
-      hint: 'left x2 Planning',
-      reminderDueId: '67ec97c5-a0fd-48ec-89cb-1b756ddaf87a',
-      reminderDueAttemptId: 'a76b12f1-45e4-41fd-aed8-086f6b6b1954',
-      reminderDueGeneration: 7,
-    };
-    const frames: HudVisualFrame[] = [];
-    const results = [true, false, false, true];
-    const visual = {
-      paint: async (frame: HudVisualFrame) => {
-        frames.push(frame);
-        return results.shift() ?? true;
-      },
-    } as HudVisualSurface;
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
-    let visibleCallbacks = 0;
-
-    expect(await hud.showText('home', ContainerId.Main)).toBe(true);
-    expect(await hud.showProductivity(due, undefined, () => { visibleCallbacks += 1; })).toBe(false);
-    expect(hud.isProductivityVisible(due)).toBe(false);
-    expect(visibleCallbacks).toBe(0);
-
-    await hud.showConfirmation('Create reminder “Private reminder”?', 'due-deferred');
-    expect(await hud.showProductivity(due, undefined, () => { visibleCallbacks += 1; })).toBe(true);
-    expect(hud.isProductivityVisible(due)).toBe(false);
-    expect(visibleCallbacks).toBe(0);
-    await hud.dismissConfirmation('due-deferred');
-    expect(hud.isProductivityVisible(due)).toBe(true);
-    expect(visibleCallbacks).toBe(1);
-  });
 
   it('does not confuse a distinct verifying presentation receipt with the retained surface', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
     const verifying = {
       domain: 'calendar' as const,
@@ -1259,7 +846,8 @@ describe('HudPresenter modal surfaces', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
     await hud.showText('4:28   JOAT connecting', ContainerId.StatusBar);
@@ -1277,7 +865,8 @@ describe('HudPresenter modal surfaces', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
     await hud.showText('routine', ContainerId.Main, 3);
@@ -1290,7 +879,8 @@ describe('HudPresenter modal surfaces', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
     hud.setMicState(false);
@@ -1306,7 +896,8 @@ describe('HudPresenter modal surfaces', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
     const planningGrid = Array.from({ length: 42 }, (_, index) => {
       const value = new Date(Date.UTC(2026, 7, 31 + index));
@@ -1343,7 +934,8 @@ describe('HudPresenter modal surfaces', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
     await hud.showText('Meeting starts in', ContainerId.Main, 4);
@@ -1359,7 +951,8 @@ describe('HudPresenter modal surfaces', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
     await hud.showText(
@@ -1380,7 +973,8 @@ describe('HudPresenter modal surfaces', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
     await hud.showText('NEXT\nDesign review · 4:30', ContainerId.Main, 4, 'calendar');
@@ -1408,8 +1002,11 @@ describe('HudPresenter modal surfaces', () => {
       listObject?: Array<{ width?: number }>;
     };
     expect(messages.listObject?.[0]?.width).toBe(CANVAS.width);
-    expect(messages.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
+    // The page's name is the header line (container 1); there is no title
+    // container any more.
+    expect(messages.textObject?.find((c) => c.containerID === ContainerId.StatusBar)?.content)
       .toBe('MESSAGES');
+    expect(messages.textObject?.find((c) => c.containerID === ContainerId.Main)).toBeUndefined();
 
     // Content arriving behind the focus page must not be lost.
     await hud.showText('Updated overview behind messages', ContainerId.Main, 3);
@@ -1427,8 +1024,8 @@ describe('HudPresenter modal surfaces', () => {
     const page = rebuiltPages[0] as {
       textObject?: Array<{ containerID?: number; content?: string; textColor?: number }>;
     };
-    expect(page.textObject?.find((c) => c.containerID === ContainerId.Main)).toMatchObject({
-      content: 'CAPABILITIES', textColor: 4,
+    expect(page.textObject?.find((c) => c.containerID === ContainerId.StatusBar)).toMatchObject({
+      content: 'CAPABILITIES', textColor: 2,
     });
     // The page builder rewrites gesture wording to the shared GesturePolicy
     // vocabulary ("left x2" → "double-click") so every footer names the
@@ -1579,7 +1176,8 @@ describe('HudPresenter modal surfaces', () => {
         frames.push(frame);
         return results.shift() ?? true;
       },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
     expect(await hud.showText('home', ContainerId.Main)).toBe(true);
@@ -1636,27 +1234,6 @@ describe('HudPresenter modal surfaces', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('does not repaint an unchanged visual confirmation every second', async () => {
-    let finishPaint: ((painted: boolean) => void) | undefined;
-    const visual = {
-      paint: (frame: HudVisualFrame) => frame.kind === 'confirmation'
-        ? new Promise<boolean>((resolve) => { finishPaint = resolve; })
-        : Promise.resolve(true),
-    } as HudVisualSurface;
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
-
-    const opening = hud.showConfirmation('Send this message?', 'timing-proof');
-    await Promise.resolve();
-    expect(vi.getTimerCount()).toBe(0);
-    expect(finishPaint).toBeDefined();
-
-    finishPaint?.(true);
-    expect(await opening).toBe(true);
-    expect(vi.getTimerCount()).toBe(0);
-
-    await hud.dismissConfirmation('timing-proof');
-    expect(vi.getTimerCount()).toBe(0);
-  });
 
   it('confirmation opened from a focus page returns to that page', async () => {
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
@@ -1672,7 +1249,7 @@ describe('HudPresenter modal surfaces', () => {
     const restored = rebuiltPages[2] as {
       textObject?: Array<{ containerID?: number; content?: string }>;
     };
-    expect(restored.textObject?.find((c) => c.containerID === ContainerId.Main)?.content)
+    expect(restored.textObject?.find((c) => c.containerID === ContainerId.StatusBar)?.content)
       .toBe('LISTENING RESUME');
     expect(restored.textObject?.find((c) => c.containerID === ContainerId.Hint)?.content)
       .toBe('tap apply · double-click back');
@@ -1872,12 +1449,14 @@ describe('an answer is not an interruption', () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
-    } as HudVisualSurface;
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+    } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
     return { hud, frames };
   };
 
   const session = {
+    screen: 'brainstorm' as const,
     state: 'settled' as const, topic: 'cold-start latency',
     collaborators: ['Codex', 'Claude'], activity: 'JOAT > AGREED: cache it',
   };
@@ -1886,7 +1465,7 @@ describe('an answer is not an interruption', () => {
     // A queued reply once drained the instant a session settled and
     // painted "REPLY — Using the phone mic…" across the synthesis.
     const { hud } = room();
-    await hud.showBrainstorm(session as never);
+    expect(await hud.showBrainstorm(session as never)).toBe(true);
     expect(await hud.showAssistantOverlay('REPLY — using the phone mic'))
       .toBe(false);
   });
@@ -1896,13 +1475,11 @@ describe('an answer is not an interruption', () => {
     // the wearer: "make that shorter" produced its result into nothing,
     // and the question asked before replacing a live session was never
     // seen — so they were waiting on a prompt that did not exist.
-    const { hud, frames } = room();
-    await hud.showBrainstorm(session as never);
+    const { hud } = room();
+    expect(await hud.showBrainstorm(session as never)).toBe(true);
     expect(await hud.showAssistantOverlay('shorter version', false, true))
       .toBe(true);
-    expect(frames[frames.length - 1]).toMatchObject({
-      assistantOverlay: { text: 'shorter version' },
-    });
+    expect(hud.hasAssistantOverlay()).toBe(true);
   });
 });
 

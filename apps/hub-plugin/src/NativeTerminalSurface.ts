@@ -2,7 +2,8 @@ import {
   TextContainerUpgrade,
   type RebuildPageContainer,
 } from '@evenrealities/even_hub_sdk';
-import { getTextWidth, pxTruncate } from '@evenrealities/pretext';
+import { pxTruncate } from '@evenrealities/pretext';
+import { firmwareLineWidth } from './FirmwareText';
 import type { BridgeClient } from './BridgeClient';
 import { TerminalConversationViewport } from './TerminalConversation';
 import { wrapTerminalParagraph } from './TerminalText';
@@ -246,7 +247,7 @@ export function nativeTerminalFooter(
     ...scrollHint(older, newer),
     'double-click: back',
   ];
-  return oneMeasuredLine(parts.join(' · '), getTextWidth);
+  return oneMeasuredLine(parts.join(' · '), firmwareLineWidth);
 }
 
 function validLayout(layout: RebuildPageContainer, page: NativeTerminalPage): boolean {
@@ -287,6 +288,8 @@ export class NativeTerminalSurface {
   /** Last body acknowledged by the bridge, including a superseded write. It
    * remains the overwrite-length authority so stale tail text is cleared. */
   private physicalBodyText = '';
+  /** Last head line acknowledged by the bridge, for the same reason. */
+  private physicalHeadText = '';
   private lastPaintSucceeded = false;
   private draining?: Promise<void>;
 
@@ -296,7 +299,9 @@ export class NativeTerminalSurface {
     private readonly replacePage: (page: RebuildPageContainer) => Promise<boolean>,
     options: NativeTerminalSurfaceOptions = {},
   ) {
-    this.measureTextWidth = options.measureTextWidth ?? getTextWidth;
+    // A row is one firmware line when the firmware's own measurement
+    // (leading spaces dropped, glyphs rounded one by one) fits the width.
+    this.measureTextWidth = options.measureTextWidth ?? firmwareLineWidth;
   }
 
   async present(
@@ -313,11 +318,15 @@ export class NativeTerminalSurface {
       && this.desired !== undefined
       && this.conversationKey(this.desired.model) !== key;
     if (entering) this.visit += 1;
+    // The head line is the status header; a revision presented without one
+    // keeps the line it has rather than reverting to the bare page name.
+    const retainedStatus = !entering ? this.desired?.status : undefined;
+    const nextStatus = status?.trim() ? status.replace(/\s+/gu, ' ').trim() : retainedStatus;
     const desired: DesiredTerminal = {
       visit: this.visit,
       token: ++this.nextToken,
       model: copy,
-      ...(status?.trim() ? { status: status.replace(/\s+/gu, ' ').trim() } : {}),
+      ...(nextStatus ? { status: nextStatus } : {}),
       isCurrent,
     };
     this.desired = desired;
@@ -359,6 +368,19 @@ export class NativeTerminalSurface {
     await this.ensureDrain();
     return this.prompt === candidate && this.renderedPromptId === id
       && this.lastPaintSucceeded && current(isCurrent);
+  }
+
+  /** The head line is the page's status header (clock · page · mic ·
+   * battery). A changed line is one head upgrade in the same serialized
+   * lane as the body, so the clock keeps moving on a long terminal visit. */
+  async setStatus(status: string): Promise<boolean> {
+    if (!this.canInteract() || !this.desired) return false;
+    const clean = status.replace(/\s+/gu, ' ').trim();
+    if (!clean || clean === this.desired.status) return true;
+    this.desired = { ...this.desired, status: clean, token: ++this.nextToken };
+    this.dirty = true;
+    await this.ensureDrain();
+    return this.desired?.status === clean && this.lastPaintSucceeded;
   }
 
   async dismissPrompt(id: string): Promise<boolean> {
@@ -500,12 +522,15 @@ export class NativeTerminalSurface {
       : [brainstorm ? 'Say “JOAT, brainstorm …” or tap to speak.' : 'Tap to speak to this agent.'];
     const bodyRows = [...visible, ...question];
     while (bodyRows.length < contentRows) bodyRows.push(' ');
-    const status = oneMeasuredLine([
+    // The page's head line IS the status header (clock · page · mic ·
+    // battery, composed by the presenter), so the body's state row no
+    // longer repeats it.
+    const status = oneMeasuredLine(
       brainstorm
         ? brainstormStatusRow(desired.model)
         : `${focusName(desired.model.topic)} > ${stateName(desired.model)}`,
-      desired.status,
-    ].filter(Boolean).join(' · '), this.measureTextWidth);
+      this.measureTextWidth,
+    );
     const footer = oneMeasuredLine(
       brainstorm && prompt === undefined
         ? brainstormFooter(desired.model, page.newer)
@@ -515,7 +540,7 @@ export class NativeTerminalSurface {
     const bodyText = [status, ...bodyRows.slice(0, contentRows), footer].join('\n');
     if (bodyText.length > MAX_UPGRADE_UNITS) return;
     return {
-      headText: headTextFor(desired.model),
+      headText: desired.status ?? headTextFor(desired.model),
       bodyText,
       conversationKey: this.conversationKey(desired.model),
       older: page.older,
@@ -589,12 +614,15 @@ export class NativeTerminalSurface {
       if (replaced && this.active && this.desired?.visit === snapshot.desired.visit) {
         this.pageMounted = true;
         this.physicalBodyText = snapshot.page.bodyText;
+        this.physicalHeadText = snapshot.page.headText;
       }
       return replaced;
     } catch { return false; }
   }
 
   private async upgradeBody(snapshot: RenderSnapshot): Promise<boolean> {
+    if (!this.snapshotCurrent(snapshot)) return false;
+    if (!await this.upgradeHead(snapshot)) return false;
     if (!this.snapshotCurrent(snapshot)) return false;
     const previous = this.physicalBodyText;
     if (previous === snapshot.page.bodyText) return true;
@@ -615,6 +643,26 @@ export class NativeTerminalSurface {
     } catch { return false; }
   }
 
+  private async upgradeHead(snapshot: RenderSnapshot): Promise<boolean> {
+    const previous = this.physicalHeadText;
+    if (previous === snapshot.page.headText) return true;
+    try {
+      const accepted = await this.client.require().textContainerUpgrade(
+        new TextContainerUpgrade({
+          containerID: NativeTerminalContainer.Head.id,
+          containerName: NativeTerminalContainer.Head.name,
+          contentOffset: 0,
+          contentLength: Math.max(previous.length, snapshot.page.headText.length),
+          content: snapshot.page.headText || ' ',
+        }),
+      );
+      if (accepted && this.active && this.desired?.visit === snapshot.desired.visit) {
+        this.physicalHeadText = snapshot.page.headText;
+      }
+      return accepted;
+    } catch { return false; }
+  }
+
   private clearVisit(): void {
     this.visit += 1;
     this.nextToken += 1;
@@ -625,6 +673,7 @@ export class NativeTerminalSurface {
     this.desired = undefined;
     this.prompt = undefined;
     this.physicalBodyText = '';
+    this.physicalHeadText = '';
     this.lastPaintSucceeded = false;
     this.renderedPromptId = undefined;
   }

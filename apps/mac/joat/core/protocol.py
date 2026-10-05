@@ -255,6 +255,69 @@ class Policy:
     resume: ResumePolicy
 
 
+#: Bounds for a saved place as the phone page sends it. A place is a name
+#: and either an address to search for or coordinates to route to (or both);
+#: the whole list replaces the Mac's copy on every change.
+PLACE_NAME_MAX_CHARS = 40
+PLACE_ADDRESS_MAX_CHARS = 120
+PLACES_MAX = 50
+
+
+@dataclass(frozen=True, slots=True)
+class SavedPlace:
+    """One place the wearer saved on the phone page (Home, Work, ...)."""
+
+    place_id: str
+    name: str
+    address: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Places:
+    """The wearer's saved places, whole: the phone page is their editor."""
+
+    places: tuple[SavedPlace, ...]
+
+
+def _saved_place(raw: object) -> SavedPlace:
+    if not isinstance(raw, dict):
+        raise ProtocolError("saved place must be an object")
+    allowed = {"id", "name", "address", "latitude", "longitude"}
+    if not set(raw) <= allowed or "id" not in raw or "name" not in raw:
+        raise ProtocolError("saved place has unsupported fields")
+    place_id = raw["id"]
+    name = raw["name"]
+    if not isinstance(place_id, str) or not 1 <= len(place_id) <= 64 or not place_id.isprintable():
+        raise ProtocolError("saved place id is invalid")
+    if not isinstance(name, str):
+        raise ProtocolError("saved place name is invalid")
+    name = " ".join(name.split())
+    if not 1 <= len(name) <= PLACE_NAME_MAX_CHARS:
+        raise ProtocolError("saved place name is invalid")
+    address = raw.get("address")
+    if address is not None:
+        if not isinstance(address, str):
+            raise ProtocolError("saved place address is invalid")
+        address = " ".join(address.split()) or None
+        if address is not None and len(address) > PLACE_ADDRESS_MAX_CHARS:
+            raise ProtocolError("saved place address is invalid")
+    latitude = raw.get("latitude")
+    longitude = raw.get("longitude")
+    if (latitude is None) != (longitude is None):
+        raise ProtocolError("saved place coordinates are incomplete")
+    if latitude is not None:
+        latitude = _navigation_number(latitude, "latitude", minimum=-90, maximum=90)
+        longitude = _navigation_number(longitude, "longitude", minimum=-180, maximum=180)
+    if address is None and latitude is None:
+        raise ProtocolError("saved place needs an address or coordinates")
+    return SavedPlace(
+        place_id=place_id, name=name, address=address,
+        latitude=latitude, longitude=longitude,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Location:
     """Wearer position from the phone (bridge.getAppLocation — the
@@ -451,7 +514,7 @@ class PromptCancel:
 
 
 UplinkMessage = (
-    Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | PairingAck
+    Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | Places | PairingAck
     | Location | G2Diagnostic | BrainstormAction | NavigationAction | NavigationRouteAck
     | NavigationViewAck | NavigationState | NavigationRerouteRequest
     | NavigationOrigin | NavigationOriginFailure | ReminderDueAck | ReminderDueComplete
@@ -2674,5 +2737,15 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
             if resume not in RESUME_POLICIES:
                 raise ProtocolError(f"unknown resume policy {resume!r}")
             return Policy(resume=resume)
+        case "places":
+            if set(payload) != {"kind", "places"}:
+                raise ProtocolError("places update has unsupported fields")
+            raw_places = payload["places"]
+            if not isinstance(raw_places, list) or len(raw_places) > PLACES_MAX:
+                raise ProtocolError("places update is invalid")
+            places = tuple(_saved_place(item) for item in raw_places)
+            if len({place.place_id for place in places}) != len(places):
+                raise ProtocolError("places update repeats an id")
+            return Places(places=places)
         case _:
             raise ProtocolError(f"unknown uplink kind {kind!r}")

@@ -64,7 +64,7 @@ const READER = { title: 'MESSAGES · MESSAGE', hint: 'down more · say reply · 
 describe('HudPresenter native text page for a Mac-paged reader', () => {
   it('shows the reader as one text page with the live status and no image tiles', async () => {
     const r = rig();
-    await r.hud.showText('12:34 JOAT mic off bat 80%', ContainerId.StatusBar);
+    await r.hud.setStatusModel({ clock: '12:34', link: 'connected', mic: false, battery: 80, charging: false });
     await r.hud.showText('home card', ContainerId.Main);
     const framesBefore = r.frames.length;
 
@@ -75,7 +75,10 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     expect(page?.listObject ?? []).toHaveLength(0);
     expect(page?.textObject?.map((c) => c.containerName)).toEqual(['status', 'main', 'hint']);
     expect(text(page, 'main')).toBe('1/1 · From Dele\nCall me when you arrive.');
-    expect(text(page, 'status')).toBe('12:34 JOAT mic off bat 80%');
+    // The header names the page: clock · page · mic glyph · battery glyph,
+    // one line composed from the status model, instead of a status line in
+    // words plus a second line for the title.
+    expect(text(page, 'status')).toBe('12:34 · MESSAGES · MESSAGE · ○ · ▆');
     expect(text(page, 'hint')).toBe(READER.hint);
     expect(r.frames).toHaveLength(framesBefore);
     expect(r.hud.usesCustomListSelection()).toBe(false);
@@ -199,7 +202,7 @@ describe('HudPresenter native prompt question over the visual HUD', () => {
     expect(await r.hud.dismissPromptQuestion('prompt-3')).toBe(true);
 
     const since = r.operations.slice(before);
-    expect(since.filter((op) => op.startsWith('rebuild:0:3:1'))).toHaveLength(1);
+    expect(since.filter((op) => op.startsWith('rebuild:0:2:1'))).toHaveLength(1);
     expect(since.filter((op) => op.startsWith('rebuild:4:') || op.startsWith('visual:') || op.startsWith('exact:'))).toHaveLength(0);
   });
 

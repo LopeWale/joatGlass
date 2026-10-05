@@ -35,7 +35,16 @@ Keep these independent:
    no other `.env` values. A configured token enables walking/cycling
    navigation; if no token is present, navigation shows the provider-unavailable
    screen instead of falling through to the general assistant.
-6. Start one continuous video before speaking. Film the G2 optics closely
+6. Optional: save the destination as a place on the phone page's Places tab
+   first (name plus address, or "Use my location" at the destination on an
+   earlier visit). It then sits first on the glasses' Navigation page, one
+   tap from a route, and "navigate home" resolves on the Mac. Watch, during
+   guidance, that the position dot and the progress bar move between
+   instructions and that the street tile changes as you walk; the first
+   fix of the route logs `[joat] navigation fix shape` in the plugin
+   console (which optional fields the host filled, no position), which is
+   the first thing to read if the page sits on "Finding your position".
+7. Start one continuous video before speaking. Film the G2 optics closely
    enough to read each HUD transition. Mute the video before sharing if it
    includes the spoken address. Do not send an address screenshot or screen
    recording.
