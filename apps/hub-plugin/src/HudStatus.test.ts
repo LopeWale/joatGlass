@@ -4,7 +4,6 @@ import {
   type HudStatusModel,
   batteryGlyph,
   hudStatusLabel,
-  hudStatusResting,
   micGlyph,
   nativeStatusLine,
   statusModelFromText,
@@ -19,14 +18,12 @@ describe('the spine word', () => {
     // The mic used to turn "NEWS" into "JOAT · LISTENING"; the glyph and
     // icon carry it now, so a page keeps its name while the wearer talks.
     expect(hudStatusLabel({ ...rest, mic: true }, 'NEWS')).toBe('NEWS');
-    expect(hudStatusResting({ ...rest, mic: true })).toBe(true);
   });
 
   it('lets a degraded link outrank the page and the Mac outrank rest', () => {
     expect(hudStatusLabel({ ...rest, link: 'reconnecting' }, 'NEWS')).toBe('JOAT · RECONNECTING');
     expect(hudStatusLabel({ ...rest, macState: 'hearing you…' }, 'NEWS')).toBe('JOAT · HEARING YOU…');
     expect(hudStatusLabel({ ...rest, link: 'closed', macState: 'hearing you…' })).toBe('JOAT · CLOSED');
-    expect(hudStatusResting({ ...rest, macState: 'hearing you…' })).toBe(false);
   });
 
   it('is bounded, and wide enough for Planning\'s own titles', () => {

@@ -595,10 +595,7 @@ describe('CapabilityMenu', () => {
   });
 
   it('draws QuickNotes, Notifications and the readers natively, paging the archive by its rows', async () => {
-    const { menu, hud, listOptions, sent } = rig();
-    hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
-      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true : true
-    ));
+    const { menu, listOptions, sent } = rig();
     await menu.openFromContextualMenu(CAPABILITIES.indexOf('QuickNotes'));
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
@@ -641,13 +638,9 @@ describe('CapabilityMenu', () => {
   });
 
   it('draws the Planning week and day pages as firmware lists and keeps Back with the Mac', async () => {
-    const { menu, hud, listOptions, sent } = rig();
+    const { menu, listOptions, sent } = rig();
     // As the presenter answers: the page about to be shown by its opt-in,
     // the page on the glass by what was shown last.
-    hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
-      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true
-        : !(listOptions[listOptions.length - 1] as { nativeFirmwareList?: boolean } | undefined)?.nativeFirmwareList
-    ));
     await menu.openFromContextualMenu(CAPABILITIES.indexOf('Planning'));
     await vi.waitFor(() => expect(latestRequestId(sent)).not.toBe(''));
     const requestId = latestRequestId(sent);
@@ -686,10 +679,7 @@ describe('CapabilityMenu', () => {
   });
 
   it('draws Notifications and a Planning entry natively', async () => {
-    const { menu, hud, listOptions, sent } = rig();
-    hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
-      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true : true
-    ));
+    const { menu, listOptions, sent } = rig();
     await menu.openNotifications();
     await vi.waitFor(() => expect(latestRequestId(sent)).not.toBe(''));
     expect(await menu.presentList(
@@ -723,9 +713,6 @@ describe('CapabilityMenu', () => {
       if (direction === 'down' && localPages > 0) { localPages -= 1; return true; }
       return false;
     });
-    hud.usesCustomListSelection = vi.fn((next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
-      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true : true
-    ));
     await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList('MESSAGES', rows(2), latestRequestId(sent), true)).toBe(true);
@@ -822,15 +809,6 @@ describe('CapabilityMenu', () => {
   });
 
 
-  it('keeps rows four and five reachable after the Mac replaces the loading view', async () => {
-    const { menu, moves, sent } = rig();
-    await menu.openFromContextualMenu(0); // Messages
-    await vi.waitFor(() => expect(sent).toHaveLength(1));
-    await menu.presentList('MESSAGES', rows(5), latestRequestId(sent), true);
-
-    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
-    expect(moves).toEqual([1]);
-  });
 
   it('clicking a selected Messages row emits one traced reply-selection event', async () => {
     const { menu, sent } = rig();
@@ -840,7 +818,9 @@ describe('CapabilityMenu', () => {
     expect(await menu.presentList(
       'MESSAGES', rows(3), latestRequestId(sent), true,
     )).toBe(true);
-    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    // The firmware list moves its highlight and reports it; a temple tap
+    // then selects the row the wearer sees.
+    menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 1));
 
     expect(menu.handleClick()).toBe(true);
     expect(sent[1]).toMatchObject({
@@ -886,29 +866,36 @@ describe('CapabilityMenu', () => {
     info.mockRestore();
   });
 
-  it('keeps a Messages picker selection when a native scroll reports its stale zero index', async () => {
-    const { menu, selections, sent } = rig();
+  it('follows the row the firmware list reports, and reads an absent index as row one', async () => {
+    const { menu, sent } = rig();
     await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList('MESSAGES', rows(3), requestId, true)).toBe(true);
 
-    // The official G2 simulator emits the same list index while reporting a
-    // downward scroll. The scroll direction remains an ordinary G2 control,
-    // so preserve the locally mirrored highlight until its following click.
-    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 0))).toBe(true);
-    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 0))).toBe(true);
-    expect(menu.handleList(click(0))).toBe(true);
-
-    expect(selections).toEqual([1, 2]);
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 1))).toBe(true);
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 2))).toBe(true);
+    expect(menu.handleList(click(2))).toBe(true);
     expect(sent[1]).toMatchObject({
       kind: 'input',
-      event: {
-        containerName: 'capdata',
-        selectedIndex: 2,
-        selectedName: 'MESSAGES',
-        requestId,
-      },
+      event: { containerName: 'capdata', selectedIndex: 2, selectedName: 'MESSAGES', requestId },
+    });
+  });
+
+  it('opens a firmware list with the cursor on row one, whatever row the Mac remembers', async () => {
+    const { menu, sent } = rig();
+    await menu.openFromContextualMenu(1); // Planning
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const requestId = latestRequestId(sent);
+    expect(await menu.presentList(
+      'PLANNING · PLAN · WEEK', rows(4), requestId, true, 'tap: open · double-click: back',
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      { canGoBack: true, selectedIndex: 2 },
+    )).toBe(true);
+    // The transport omits a zero index: a tap on the first row arrives bare.
+    expect(menu.handleList(clickRow0())).toBe(true);
+    expect(sent[sent.length - 1]).toMatchObject({
+      kind: 'input', event: { containerName: 'capdata', selectedIndex: 0 },
     });
   });
 
@@ -1140,12 +1127,14 @@ describe('CapabilityMenu', () => {
       'down older · say reply · left x2: back',
     )).toBe(true);
 
-    for (let index = 0; index < 3; index += 1) {
-      expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    // The firmware list reports each row it moves to; a swipe that stays on
+    // the last row is the boundary, and only that asks for the older page.
+    for (const index of [1, 2, 3]) {
+      expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, index))).toBe(true);
     }
     expect(sent).toHaveLength(2);
-    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
-    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 3))).toBe(true);
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 3))).toBe(true);
     expect(sent).toHaveLength(3);
     expect(sent[2]).toMatchObject({
       kind: 'input',
@@ -1161,7 +1150,7 @@ describe('CapabilityMenu', () => {
       'MESSAGES · CONVERSATION', rows(3), requestId, false,
       'up newer · say reply · left x2: back',
     )).toBe(true);
-    expect(menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_TOP_EVENT))).toBe(true);
     expect(sent).toHaveLength(4);
     expect(sent[3]).toMatchObject({
       kind: 'input',

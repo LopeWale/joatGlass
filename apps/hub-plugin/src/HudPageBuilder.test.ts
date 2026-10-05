@@ -53,7 +53,7 @@ const LAYOUTS: ReadonlyArray<[string, Page]> = [
   ['confirmation', builder.confirmationLayout('Send reply?') as Page],
   ['visual-startup', builder.visualStartup() as Page],
   ['visual', builder.visualLayout() as Page],
-  ['visual-compatibility', builder.visualCompatibilityLayout() as Page],
+  ['visual-compatibility', builder.visualLayout() as Page],
   ['assistant-conversation', builder.assistantConversationLayout({
     cardTop: 128,
     cardHeight: 132,
@@ -169,7 +169,7 @@ describe('HudPageBuilder invariants', () => {
     })).filter(({ itemName }) => itemName !== 'Settings');
     expect(expected).toHaveLength(CAPABILITIES.length - 1);
     expect(visual.menuObject?.menuItems).toEqual(expected);
-    expect((builder.visualCompatibilityLayout() as Page).menuObject?.menuItems).toEqual(expected);
+    expect((builder.visualLayout() as Page).menuObject?.menuItems).toEqual(expected);
   });
 
   it('still routes a retired id from a host showing a cached menu', () => {

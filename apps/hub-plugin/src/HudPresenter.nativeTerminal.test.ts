@@ -99,7 +99,6 @@ describe('HudPresenter native Agent Terminal journey', () => {
     // It is also the page's only title line.
     expect(r.rebuilds[0]?.textObject?.find((c) => c.containerName === 'status')?.content)
       .toBe('AGENT TERMINAL · 9:41 JOAT listening bat 87%');
-    expect(r.hud.usesCustomListSelection()).toBe(false);
 
     expect(await r.hud.showBrainstorm(terminal())).toBe(true);
     expect(r.rebuilds).toHaveLength(2);

@@ -424,15 +424,6 @@ export class HudPageBuilder {
   }
 
   /**
-   * Kept as a named alias for older focused fixtures. The transparent text
-   * layer remains the sole gesture owner; the OS-owned contextual overlay is
-   * independently declared on the page when the negotiated host supports it.
-   */
-  visualCompatibilityLayout(): RebuildPageContainer {
-    return this.visualLayout();
-  }
-
-  /**
    * One Even-style native conversation card. Wearer and JOAT text occupy
    * aligned transparent layers so the fixed firmware font can express role
    * hierarchy with brightness even though it exposes no bold font weight.

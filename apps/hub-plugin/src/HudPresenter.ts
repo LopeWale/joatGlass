@@ -257,6 +257,15 @@ function textPageHint(page: number, count: number, macHint: string): string {
   return count > 1 ? `${page + 1}/${count} · ${hint}` : hint;
 }
 
+/** Every list is Even's own list unless it is a reader (a text page) or
+ * carries the Planning month's grid, the one list drawn as an image. A
+ * caller that forgets the flag still gets a firmware list, never an empty
+ * image page: the renderer draws no other list. */
+function isFirmwareList(options: ListSurfaceOptions, visual: boolean): boolean {
+  if (options.nativeFirmwareList === true) return true;
+  return visual && options.nativeTextPage !== true && normalizePlanningGrid(options.planningGrid) === undefined;
+}
+
 /** An answer, a reader or a question as firmware pages: the firmware wraps
  * each page's words at its own break points, and `measureTextWrap` decides
  * how many a page holds (FirmwareText). */
@@ -549,18 +558,6 @@ export class HudPresenter {
     const active = this.displayActive;
     const bridgeCurrent = this.client.captureDisplayGuard?.() ?? (() => true);
     return () => active && this.displayActive && revision === this.displayRevision && bridgeCurrent();
-  }
-
-  /** The custom list owns its cursor; the compatibility list is firmware-owned.
-   * Without `next` this describes the page on the glass. With `next` it
-   * describes the page about to be shown: a menu deciding how the NEXT page
-   * selects must not read the answer off the current one, or a raster
-   * conversation opened from a firmware picker inherits the picker's cursor. */
-  usesCustomListSelection(next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }): boolean {
-    if (this.visual === undefined) return false;
-    if (next) return next.nativeFirmwareList !== true && !this.usesNativeTextPage(next);
-    return !(this.surface.kind === 'list'
-      && (this.surface.options.nativeFirmwareList || this.usesNativeTextPage(this.surface.options)));
   }
 
   /** A reader is Even's own text page over the visual HUD; the text
@@ -1362,7 +1359,7 @@ export class HudPresenter {
     items: string[], options: ListSurfaceOptions = {}, isCurrent?: () => boolean,
   ): Promise<boolean> {
     if (!await this.prepareAssistantConversationHandoff()) return false;
-    if (!options.nativeFirmwareList && !await this.prepareNativeTerminalHandoff()) return false;
+    if (!isFirmwareList(options, this.visual !== undefined) && !await this.prepareNativeTerminalHandoff()) return false;
     if (isCurrent && this.usesNativeTextPage(options)) {
       return this.renderNativeTextPage({
         kind: 'list', items: [...items], options: this.resolveListOptions(options), selectedIndex: 0,
@@ -1830,55 +1827,6 @@ export class HudPresenter {
     return painted && this.surface === surface && foregroundAvailable();
   }
 
-  async setSelection(index: number): Promise<boolean> {
-    if (
-      this.surface.kind === 'default'
-      || this.surface.kind === 'navigation'
-      || this.surface.kind === 'brainstorm'
-      || this.surface.kind === 'productivity'
-    ) return false;
-    const maximum = Math.max(0, this.surface.items.length - 1);
-    const selectedIndex = Math.max(0, Math.min(maximum, index));
-    const surface: HudSurface = { ...this.surface, selectedIndex };
-    return this.renderList(surface);
-  }
-
-  /** Restore only after the selected custom row has painted and still owns
-   * the surface. Native compatibility lists have no cursor-setting API. */
-  async restoreSelection(index: number): Promise<boolean> {
-    const displayCurrent = this.captureDisplayGuard();
-    if (!displayCurrent()) return false;
-    const current = this.surface;
-    if (current.kind !== 'list' || this.confirmation || this.promptQuestion
-      || this.assistantConversation.isActive()) return false;
-    const selectedIndex = Math.max(0, Math.min(Math.max(0, current.items.length - 1), index));
-    if (!this.visual) return selectedIndex === 0 ? this.setSelection(0) : false;
-    const surface: HudSurface = { ...current, selectedIndex };
-    const painted = await this.renderList(surface);
-    if (!displayCurrent()) return false;
-    if (!painted && this.surface === surface && !this.confirmation && !this.promptQuestion
-      && !this.assistantConversation.isActive()) {
-      this.surface = current;
-      // One direct rollback paint follows the existing bounded recovery.
-      // Never recurse into another healing attempt or overwrite a successor.
-      await this.visual.paint(this.visualFrame());
-    }
-    return painted && this.surface === surface && !this.confirmation && !this.promptQuestion
-      && !this.assistantConversation.isActive();
-  }
-
-  moveSelection(delta: number): Promise<boolean> {
-    if (
-      this.surface.kind === 'default'
-      || this.surface.kind === 'navigation'
-      || this.surface.kind === 'brainstorm'
-      || this.surface.kind === 'productivity'
-    ) {
-      return Promise.resolve(false);
-    }
-    return this.setSelection(this.surface.selectedIndex + delta);
-  }
-
   private async renderNavigation(
     surface: Extract<HudSurface, { kind: 'navigation' }>,
     statusOverride?: string,
@@ -2029,10 +1977,8 @@ export class HudPresenter {
 
   /**
    * Repaint the visible pomodoro exactly when its next digit moves: every
-   * second on the expanded tab, every minute on the resting overview. A
-   * tick is a localTick — no new information from the Mac — so it is not a
-   * wearer-visible frame receipt, and it stops the moment the timer is not
-   * on the glass or not running.
+   * minute on the resting overview, and it stops the moment the timer is
+   * not on the glass or not running.
    */
   /** The expanded Pomodoro on the firmware list cannot be upgraded in
    * place: once a minute the owner of its rows (CapabilityMenu) rebuilds
@@ -2051,7 +1997,7 @@ export class HudPresenter {
         this.onNativePanelTick?.();
         return;
       }
-      void this.paintVisual(true);
+      void this.paintVisual();
     }, delay);
   }
 
@@ -2065,7 +2011,7 @@ export class HudPresenter {
     if (this.surface.kind === 'list' && this.surface.options.railTab === 'pomodoro') {
       // A firmware list is rebuilt per minute; the raster page repainted
       // one tile per second.
-      return pomodoroTickDelayMs(pomodoro, now, this.surface.options.nativeFirmwareList ? 60_000 : 1000);
+      return pomodoroTickDelayMs(pomodoro, now, 60_000);
     }
     return undefined;
   }
@@ -2713,7 +2659,7 @@ export class HudPresenter {
         : {}),
       hint: (options.hint?.trim() || DEFAULT_LIST_HINT).slice(0, MAX_FOCUS_HINT_CHARS),
       selectable: options.selectable ?? false,
-      ...(options.nativeFirmwareList ? { nativeFirmwareList: true } : {}),
+      ...(isFirmwareList(options, this.visual !== undefined) ? { nativeFirmwareList: true } : {}),
       ...(options.nativeTextPage ? { nativeTextPage: true } : {}),
       ...(options.nativeTextPage && options.nativeTextPageFromEnd ? { nativeTextPageFromEnd: true } : {}),
       ...(options.railTab ? { railTab: options.railTab } : {}),
@@ -2881,7 +2827,7 @@ export class HudPresenter {
     return true;
   }
 
-  private async paintVisual(localTick = false): Promise<boolean> {
+  private async paintVisual(): Promise<boolean> {
     this.removeRetiredNotifications();
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
@@ -2892,7 +2838,7 @@ export class HudPresenter {
     // page: the image page beneath it is not repainted while it is pending.
     if (this.confirmation || this.promptQuestion) return true;
     const notificationId = this.hasVisibleNotification() ? this.notificationId : undefined;
-    const ok = await this.visual.paint(this.visualFrame(), localTick);
+    const ok = await this.visual.paint(this.visualFrame());
     if (ok && displayCurrent() && notificationId === this.notificationId) {
       this.paintedNotificationId = notificationId;
     }

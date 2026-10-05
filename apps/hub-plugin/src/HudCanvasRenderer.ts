@@ -42,9 +42,7 @@ import {
   type ProductivityHudModel,
 } from './types';
 import {
-  ASSISTANT_CONVERSATION_VISUAL_GEOMETRY,
   splitGrayscaleTiles,
-  type AssistantConversationVisual,
   type AssistantOverlayVisual,
   type HudFrameRenderer,
   type HudImageTile,
@@ -63,7 +61,6 @@ import {
   LEAD,
   mono,
   HINT_BASELINE_Y,
-  RAIL_HEIGHT,
   upper,
   PITCH,
 } from './HudTypography';
@@ -84,13 +81,6 @@ const HAIRLINE = 51;
  * Fourteen, not zero: the outermost pixels of a waveguide are where the
  * image is least reliable, and a glyph clipped by the lens edge is worse
  * than one that never reached it. Everything between is content. */
-/** Measured mean advance of the prose face (TYPE.transcript, 11px) — a
- * 63-character row rendered by the REAL simulator spans 326px → 5.18 px per character.
- * Exported as code, not prose, because the wire's column budget
- * (`BRAINSTORM_ROW_COLUMNS` in core/protocol.py) is derived from it and a
- * cross-language test re-derives the equality — a number living only in a
- * comment cannot fail a build when the font changes. */
-export const HUD_TEXT_MEAN_ADVANCE_PX = 5.18;
 export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss';
 
 /** One size for an answer, always.
@@ -170,9 +160,6 @@ export const PANEL_RAIL = {
   /** Icon TOP for each of the four slots, evenly spaced between the spine
    * and the footer; the icon's centre is 7px lower. */
   slotY: [70, 118, 166, 214],
-  /** Icon left edge when a tab is expanded full-width; the list's own
-   * selection rail stays at x=36 and rows at x=52, untouched. */
-  expandedX: 12,
 } as const;
 
 /** What a swipe, a tap and a hold do on a panel tab. Truthful: all wired.
@@ -245,11 +232,6 @@ export const HUD_VISUAL_GEOMETRY = {
    * icons alone. Everything below it moved up by the same 12 px. */
   spineHeight: 24,
   statusBaselineY: 12,
-  statusDividerY: 23.5,
-  overviewMainX: 176,
-  overviewTrayY: 168,
-  overviewContextY: 214,
-  listContentX: 93,
 } as const;
 
 /** Where the spine's right-tile icons sit. Both stay east of the tile
@@ -466,8 +448,6 @@ export const PLANNING_DASHBOARD = {
   paneRight: 556,
   paneHeadingY: 46,
   paneFirstRowY: 72,
-  paneRowPitch: PITCH.paneRow,
-  paneRowCapacity: 6,
 } as const;
 
 /** Center of one date cell on the dashboard grid, index 0..41 Monday-first. */
@@ -959,26 +939,12 @@ export function projectMercatorPanel(
 
 export class HudCanvasRenderer implements HudFrameRenderer {
   private readonly icons: Promise<Record<HudIconName, HTMLImageElement>>;
-  private assistantMeasureContext?: CanvasRenderingContext2D;
 
   constructor() {
     this.icons = Promise.all(
       (Object.entries(ICON_SOURCES) as Array<[HudIconName, string]>)
         .map(async ([name, source]) => [name, await loadSvg(source)] as const),
     ).then((entries) => Object.fromEntries(entries) as Record<HudIconName, HTMLImageElement>);
-  }
-
-  measureAssistantConversationText(text: string): number {
-    if (!this.assistantMeasureContext) {
-      const canvas = document.createElement('canvas');
-      this.assistantMeasureContext = canvas.getContext('2d', { alpha: false }) ?? undefined;
-    }
-    const context = this.assistantMeasureContext;
-    if (!context) return Number.POSITIVE_INFINITY;
-    // The answer is the slightly wider role. Measuring every turn with it
-    // guarantees the dim wearer line cannot overrun the shared text edge.
-    context.font = TYPE.assistant;
-    return context.measureText(text).width;
   }
 
   async render(frame: HudVisualFrame): Promise<readonly HudImageTile[]> {
@@ -1027,9 +993,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // The assistant is not a page. It is painted last into the same four G2
     // image tiles, so it can speak over any feature without allocating an
     // impossible fifth image container or replacing the feature underneath.
-    if (frame.assistantConversation) {
-      this.drawAssistantConversation(context, frame.assistantConversation);
-    } else if (frame.assistantOverlay) {
+    if (frame.assistantOverlay) {
       this.drawAssistantOverlay(context, frame.assistantOverlay);
     }
 
@@ -1113,150 +1077,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     overlay: AssistantOverlayVisual,
   ): void {
     this.drawAssistantPill(context, overlay.text);
-  }
-
-  /** One retained conversation card, composited into the page JOAT already
-   * owns.  Its lower edge never moves; each added line extends only the top.
-   * This keeps the dashboard/feature alive underneath and lets the four-tile
-   * cache transmit only quadrants whose pixels actually changed. */
-  private drawAssistantConversation(
-    context: CanvasRenderingContext2D,
-    conversation: AssistantConversationVisual,
-  ): void {
-    const geometry = ASSISTANT_CONVERSATION_VISUAL_GEOMETRY;
-    const lineCapacity = Math.max(1, Math.min(
-      geometry.maximumLines,
-      Math.floor(conversation.lineCapacity),
-    ));
-    const height = geometry.topPadding
-      + lineCapacity * geometry.lineHeight
-      + geometry.footerHeight;
-    const top = geometry.bottom - height;
-    const right = geometry.x + geometry.width;
-    const textX = geometry.x + geometry.textInsetLeft;
-    const textWidth = geometry.width
-      - geometry.textInsetLeft
-      - geometry.textInsetRight;
-
-    context.save();
-    // The conversation temporarily owns the complete content field beneath
-    // the status spine. Leaving the dashboard clock or a feature sentence
-    // visible above a short card makes one exchange read as two simultaneous
-    // interfaces. Presenter state remains intact and is restored exactly when
-    // conversation ownership ends.
-    context.fillStyle = gray(0);
-    context.fillRect(3, 25, CANVAS.width - 6, CANVAS.height - 28);
-    context.fillStyle = gray(0);
-    roundedRect(context, geometry.x, top, geometry.width, height, 6);
-    context.fill();
-    context.strokeStyle = gray(CHROME);
-    context.lineWidth = 1;
-    context.stroke();
-
-    context.textAlign = 'left';
-    context.textBaseline = 'middle';
-    const firstBaseline = top + geometry.topPadding + 7;
-    conversation.visibleLines.slice(0, lineCapacity).forEach((line, index) => {
-      if (line.role === 'separator') return;
-      context.fillStyle = gray(line.role === 'assistant' ? BRIGHT : CHROME);
-      context.font = line.role === 'assistant' ? TYPE.assistant : TYPE.body;
-      this.fitText(
-        context,
-        line.text,
-        textX,
-        firstBaseline + index * geometry.lineHeight,
-        textWidth,
-      );
-    });
-
-    if (conversation.totalLines > lineCapacity) {
-      const trackX = right - 14;
-      const trackTop = top + geometry.topPadding;
-      const trackHeight = lineCapacity * geometry.lineHeight;
-      const thumbHeight = Math.max(
-        10,
-        Math.round((lineCapacity / conversation.totalLines) * trackHeight),
-      );
-      const travel = Math.max(0, trackHeight - thumbHeight);
-      const maximum = Math.max(1, conversation.maximumScrollFromTail);
-      const startFromTop = maximum - Math.max(
-        0,
-        Math.min(maximum, conversation.scrollFromTail),
-      );
-      const thumbTop = trackTop + Math.round((startFromTop / maximum) * travel);
-      context.fillStyle = gray(QUIET);
-      context.fillRect(trackX, trackTop, 2, trackHeight);
-      context.fillStyle = gray(SUPPORT);
-      context.fillRect(trackX, thumbTop, 2, thumbHeight);
-    }
-
-    // The marker occupies a deliberate break in the bottom rule. Current G2
-    // footage shows one compact glyph morphing through bar, cross, post, and
-    // square silhouettes while Even AI is working; keep that motion local to
-    // the glyph so transcript pixels remain stable between activity ticks.
-    // The physical image bridge serializes tile writes. The exact optical
-    // centre is also the x=288 tile seam, where an animation would make every
-    // tick upload both lower tiles and could delay answer pixels. A compact
-    // 8-10px glyph centred five pixels left remains optically central while
-    // keeping every changing activity pixel in one tile.
-    const markerCenter = geometry.x + geometry.width / 2;
-    const activityCenter = markerCenter - 5;
-    context.fillStyle = gray(0);
-    context.fillRect(markerCenter - 42, geometry.bottom - 2, 84, 5);
-    if (conversation.continuePrompt) {
-      context.fillStyle = gray(SUPPORT);
-      context.font = TYPE.hint;
-      context.textAlign = 'center';
-      this.fitText(
-        context,
-        'Continue?  tap stay · double-click exit',
-        markerCenter,
-        geometry.bottom - 11,
-        310,
-      );
-    } else if (conversation.state === 'ready') {
-      context.fillStyle = gray(SUPPORT);
-      context.beginPath();
-      context.arc(markerCenter, geometry.bottom, 2.25, 0, Math.PI * 2);
-      context.fill();
-    } else {
-      context.fillStyle = gray(BRIGHT);
-      const frame = conversation.indicatorFrame % 8;
-      switch (frame) {
-        case 0: // wide H
-          context.fillRect(activityCenter - 5, geometry.bottom - 5, 2, 10);
-          context.fillRect(activityCenter + 3, geometry.bottom - 5, 2, 10);
-          context.fillRect(activityCenter - 3, geometry.bottom - 1, 6, 3);
-          break;
-        case 1: // two close posts
-          context.fillRect(activityCenter - 4, geometry.bottom - 4, 2, 8);
-          context.fillRect(activityCenter + 2, geometry.bottom - 4, 2, 8);
-          break;
-        case 2: // cross
-          context.fillRect(activityCenter - 1, geometry.bottom - 6, 3, 12);
-          context.fillRect(activityCenter - 5, geometry.bottom - 1, 10, 3);
-          break;
-        case 3: // horizontal bar
-          context.fillRect(activityCenter - 5, geometry.bottom - 2, 10, 5);
-          break;
-        case 4: // separated points
-          context.fillRect(activityCenter - 3, geometry.bottom - 1, 3, 3);
-          context.fillRect(activityCenter + 2, geometry.bottom - 1, 3, 3);
-          break;
-        case 5: // vertical bar
-          context.fillRect(activityCenter - 2, geometry.bottom - 6, 4, 12);
-          break;
-        case 6: // open square
-          context.lineWidth = 2;
-          context.strokeStyle = gray(BRIGHT);
-          context.strokeRect(activityCenter - 4, geometry.bottom - 5, 7, 10);
-          break;
-        default: // solid square, the quietest active phase
-          context.fillRect(activityCenter - 4, geometry.bottom - 4, 8, 8);
-          break;
-      }
-    }
-    context.restore();
   }
 
   private drawOverview(
@@ -1348,7 +1168,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // The tab rail, and the tab it has selected. Notifications IS the
     // resting pane below; the other three draw their cached push instead.
     if (frame.rail) {
-      this.drawTabRail(context, frame.rail.activeTab, icons, 'overview');
+      this.drawTabRail(context, frame.rail.activeTab, icons);
       if (frame.rail.activeTab !== 'notifications') {
         this.drawPanelPane(context, frame.rail, icons);
         context.fillStyle = gray(QUIET);
@@ -1490,10 +1310,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context: CanvasRenderingContext2D,
     activeTab: PanelTab,
     icons: Record<HudIconName, HTMLImageElement>,
-    mode: 'overview' | 'expanded',
   ): void {
     const rail = PANEL_RAIL;
-    const x = mode === 'overview' ? rail.x : rail.expandedX;
+    const x = rail.x;
     const iconFor: Record<PanelTab, HTMLImageElement> = {
       notifications: icons.notifications,
       news: icons.news,
@@ -1507,12 +1326,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       if (!active) return;
       const centerY = top + rail.iconSize / 2;
       context.fillStyle = gray(BRIGHT);
-      if (mode === 'overview') {
-        // The bracket: the lit tab attaches to the pane it opens.
-        context.fillRect(x + rail.iconSize + 2, Math.round(centerY) - 1, 6, 2);
-      } else {
-        context.fillRect(x - 7, Math.round(centerY) - 10, 3, RAIL_HEIGHT);
-      }
+      // The bracket: the lit tab attaches to the pane it opens.
+      context.fillRect(x + rail.iconSize + 2, Math.round(centerY) - 1, 6, 2);
     });
   }
 

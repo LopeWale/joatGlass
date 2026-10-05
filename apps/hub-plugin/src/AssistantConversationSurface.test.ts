@@ -127,50 +127,6 @@ describe('native Even-style assistant conversation model', () => {
 });
 
 describe('AssistantConversationSurface delivery', () => {
-  it('gives streamed answer pixels priority over decorative activity ticks', async () => {
-    vi.useFakeTimers();
-    const { client } = fakeClient();
-    const painted: Array<{ state: string; indicatorFrame: number }> = [];
-    const surface = new AssistantConversationSurface(
-      client as never,
-      new HudPageBuilder(),
-      async () => true,
-      {
-        indicatorIntervalMs: 450,
-        continuationPromptEnabled: false,
-        paintView: async (view) => {
-          painted.push({ state: view.state, indicatorFrame: view.indicatorFrame });
-          return true;
-        },
-      },
-    );
-    try {
-      await surface.present(snapshot(1, [
-        { role: 'user', text: 'Tell me something.' },
-      ], 'thinking'));
-      await vi.advanceTimersByTimeAsync(450);
-      await surface.whenIdle();
-      expect(painted[painted.length - 1]).toEqual({
-        state: 'thinking', indicatorFrame: 1,
-      });
-
-      await surface.present(snapshot(2, [
-        { role: 'user', text: 'Tell me something.' },
-        { role: 'assistant', text: 'The answer has started' },
-      ], 'answering'));
-      await surface.whenIdle();
-      const afterAnswerPixels = painted.length;
-      await vi.advanceTimersByTimeAsync(1_999);
-      await surface.whenIdle();
-      expect(painted).toHaveLength(afterAnswerPixels);
-      await vi.advanceTimersByTimeAsync(1);
-      await surface.whenIdle();
-      expect(painted).toHaveLength(afterAnswerPixels + 1);
-    } finally {
-      surface.retireForHandoff();
-      vi.useRealTimers();
-    }
-  });
 
   it('builds one native card, streams newer revisions in place, and never sends image tiles', async () => {
     const { client, rebuildPageContainer, textContainerUpgrade } = fakeClient();

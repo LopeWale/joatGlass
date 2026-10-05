@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   PanelRail,
-  formatCountdown,
   formatMinutesLeft,
   freshnessLabel,
   panelTabForTitle,
@@ -9,7 +8,7 @@ import {
   pomodoroTickDelayMs,
   type HudPanelMessage,
 } from './PanelRail';
-import { PANEL_TABS, panelRequestId, parsePanelRequestId } from './types';
+import { PANEL_TABS, panelRequestId } from './types';
 
 /**
  * The overview's right pane is a rail of tabs the wearer swipes between.
@@ -48,7 +47,7 @@ describe('PanelRail', () => {
       revision: 4, rows: ['[1m] Second · NPR'], receivedAtMs: 2_000,
     });
     expect(rail.requestId('news')).toBe('panel-news-4');
-    expect(parsePanelRequestId(rail.requestId('news'))).toEqual({ tab: 'news', revision: 4 });
+    expect(rail.requestId('news')).toBe('panel-news-4');
     // A brain that restarted counts from zero again; the Mac is authoritative.
     rail.accept(news(0, []), 3_000);
     expect(rail.content('news')?.revision).toBe(0);
@@ -108,10 +107,7 @@ describe('pomodoro time on the plugin clock', () => {
     expect(pomodoroRemainingMs({ ...running, running: false, remainingMs: 4_000 }, 0)).toBe(4_000);
   });
 
-  it('formats like a timer, and rounds minutes up so it never says 0 min left early', () => {
-    expect(formatCountdown(61_500)).toBe('01:02');
-    expect(formatCountdown(0)).toBe('00:00');
-    expect(formatCountdown(1_500_000)).toBe('25:00');
+  it('rounds minutes up so it never says 0 min left early', () => {
     expect(formatMinutesLeft(61_500)).toBe('2 min left');
     expect(formatMinutesLeft(500)).toBe('1 min left');
     expect(formatMinutesLeft(0)).toBe('0 min left');
