@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-06 — Build JOAT 0.1.107
+
+- Packed from `c10cb86` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.107 above the last recorded build (0.1.106); app.json, package.json and package-lock.json all 0.1.107. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1114 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 158434 bytes, SHA-256 `d650af5c7311cbae4c1ba2a18c16e49af7e6579991f8318de6ddbcbe575cc860`. Adds to 0.1.106 the one image header on every page and the working indicator inside JOAT's box. Plugin-only. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-06 — One header on every page; JOAT's working indicator inside its box
 
 The wearer: "Why are we not using a template for the top bar?… use images… for icons without slowing down rendering for things that are not needing to change very often". And the working indicator "is in the middle and half of it is in the box and the other half out".
