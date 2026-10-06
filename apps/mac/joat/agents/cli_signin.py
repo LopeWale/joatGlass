@@ -34,7 +34,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from .cli_accounts import AccountProfile, AccountRegistry, Provider
+from .cli_accounts import AMBIENT_LOGIN_ENV, AccountProfile, AccountRegistry, Provider
+from .cli_env import cli_env
 from .cli_locate import find_codex_binary
 from .subprocess_agent import find_claude_binary
 
@@ -51,12 +52,10 @@ CODE_CHECK_TIMEOUT_S = 90.0
 """How long "Checking the code…" may last before the phone says so."""
 PROBE_TIMEOUT_S = 20.0
 MAX_PASTED_CODE = 512
-STRIP_ENV = (
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-    "OPENAI_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
-)
-"""A sign-in must create a subscription login, never be short-circuited by
-an ambient key or token the brain happened to inherit."""
+SIGN_IN_STRIP_ENV = tuple(key for keys in AMBIENT_LOGIN_ENV.values() for key in keys)
+"""Dropped on top of the shared list (`cli_env.STRIP_ENV`): a sign-in must
+create a subscription login, never be short-circuited by one the brain
+inherited, the Mac's own login token included."""
 
 CODEX_DEVICE_HINT = (
     "If Continue is greyed out, allow device code sign-in in ChatGPT → "
@@ -169,13 +168,12 @@ class CliSignIn:
     # ── probes ──────────────────────────────────────────────────────────────
 
     def _env(self, profile: AccountProfile) -> dict[str, str]:
-        env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
+        env = cli_env(SIGN_IN_STRIP_ENV)
         for key, value in self._registry.env_overlay(profile.provider, profile).items():
             if value is None:
                 env.pop(key, None)
             else:
                 env[key] = value
-        env["OTEL_SDK_DISABLED"] = "true"
         return env
 
     async def _run(self, argv: list[str], profile: AccountProfile) -> tuple[int | None, str]:

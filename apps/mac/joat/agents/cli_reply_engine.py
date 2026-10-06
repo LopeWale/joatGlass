@@ -52,10 +52,6 @@ CHUNK_CHARS = 64
 SESSION_TTL_S = 1800.0
 TURN_TIMEOUT_S = 90.0
 AUTH_PROBE_TIMEOUT_S = 20.0
-STRIP_ENV = (
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-    "OPENAI_API_KEY",
-)
 DEFAULT_WORKDIR = Path.home() / "Library/Application Support/JOAT/mind"
 
 PERSONA = (
@@ -308,12 +304,14 @@ class _CliSeat(ReplyEngine):
         yield notice
 
     # ── spawning, through the Brainstorm seats' own runner ──────────────────
+    # The runner drops the shared credential list (`cli_env.STRIP_ENV`) on
+    # every launch, these seats' turns and auth probes included.
 
     def _agent(self, command: list[str], *, stream_json: bool,
                timeout_s: float | None = None,
                env_extra: dict[str, str] | None = None) -> SubprocessAgent:
         return SubprocessAgent(
-            command, env_strip=STRIP_ENV, timeout_s=timeout_s or self._timeout_s,
+            command, timeout_s=timeout_s or self._timeout_s,
             name=self.name, stream_json=stream_json, notices=False, capture=True,
             cwd=str(self._workdir), env_extra=env_extra,
             env_provider=self._env_provider,
@@ -731,7 +729,6 @@ __all__ = [
     "PERSONA",
     "SESSION_TTL_S",
     "SIGNED_OUT_NOTICE",
-    "STRIP_ENV",
     "ClaudeCliReplyEngine",
     "CodexCliReplyEngine",
     "McpDoor",
