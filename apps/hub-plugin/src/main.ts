@@ -43,7 +43,7 @@ import { PhoneControlPanel } from './PhoneControlPanel';
 import { PhoneControlScreen } from './PhoneControlScreen';
 import { Places, placesToWire } from './Places';
 import { PlacesPanel } from './PlacesPanel';
-import { CapabilityMenu } from './CapabilityMenu';
+import { CapabilityMenu, usesFirmwareList } from './CapabilityMenu';
 import {
   CAPABILITIES,
   ContainerId,
@@ -129,6 +129,8 @@ type VisualState =
   | 'overview'
   | 'live-concurrency'
   | 'confirmation'
+  | 'message-reply-question'
+  | 'message-reply-confirm'
   | 'assistant-overlay'
   | 'nav-receipt'
   | ProductivityVisualState
@@ -175,6 +177,7 @@ const VISUAL_STATE = ((): VisualState | undefined => {
   return requested === 'overview'
     || requested === 'live-concurrency'
     || requested === 'confirmation' || requested === 'assistant-overlay'
+    || requested === 'message-reply-question' || requested === 'message-reply-confirm'
     || requested === 'nav-receipt'
     || isProductivityVisualState(requested)
     || isProductivityLifecycleVisualState(requested)
@@ -610,6 +613,8 @@ async function boot(): Promise<void> {
     },
   };
 
+  // The open reply draft's "say it again", while its consent is up.
+  let confirmationRetry: (() => boolean) | undefined;
   new EventRouter(
     client,
     link,
@@ -628,6 +633,7 @@ async function boot(): Promise<void> {
     hud,
     (direction) => hud.scrollTranscript(direction),
     promptedInput,
+    () => confirmationRetry?.() ?? false,
   ).attach();
 
   // Official-simulator visual gate. This is DEV-only and drives the same
@@ -961,7 +967,19 @@ async function boot(): Promise<void> {
         if (msg.diagnosticKind === 'messages' && msg.messageUIActionId === undefined) {
           menu.stageLegacyReviewReturn(msg.actionId);
         }
+        const messageUIActionId = msg.messageUIActionId;
+        const retry = msg.diagnosticKind === 'messages' && messageUIActionId !== undefined
+          ? () => {
+            // Ask the Mac to say it again, then decline this draft: the Mac
+            // asks afresh once the draft has ended, in either order.
+            if (!ownerCurrent() || !menu.retryMessageAction(messageUIActionId)) return false;
+            imu.declineByTap();
+            return true;
+          }
+          : undefined;
+        confirmationRetry = retry;
         imu.prepare(msg.actionId, (accepted) => {
+          if (confirmationRetry === retry) confirmationRetry = undefined;
           void deliverAfterConfirmationDismissal({
             accepted,
             dismiss: () => hud.dismissConfirmation(msg.actionId),
@@ -1420,10 +1438,13 @@ async function renderVisualState(
       );
       return;
     }
+    // Drawn as production draws it: a reader is Even's text page.
+    const nativeTextPage = !usesFirmwareList({ title: fixture.title, selectable: fixture.selectable });
     await hud.showList(fixture.items, {
       title: fixture.title,
       hint: fixture.hint,
       selectable: fixture.selectable,
+      ...(nativeTextPage ? { nativeTextPage: true } : {}),
     });
     return;
   }
@@ -1431,6 +1452,27 @@ async function renderVisualState(
   if (state === 'confirmation') {
     if (imu) await runVisualConfirmationFixture(hud, imu);
     else await hud.showConfirmation(VISUAL_CONFIRMATION_PROMPT, 'browser-visual-confirmation');
+    return;
+  }
+
+  // A Messages reply in JOAT's conversation card: the question, then the
+  // wearer's words for consent. Inert — nothing reaches the Mac.
+  if (state === 'message-reply-question') {
+    await hud.showPromptQuestion(
+      'visual-reply-question', 'What do you want to say back to Adele?', () => true, 'messages',
+    );
+    return;
+  }
+  if (state === 'message-reply-confirm') {
+    const id = 'visual-reply-confirm';
+    const visible = await hud.showConfirmation(
+      'Send to Adele? “On my way, see you at 4:30.”', id, 'messages',
+    );
+    if (imu) {
+      imu.prepare(id, () => { void hud.dismissConfirmation(id); });
+      if (visible) imu.activate(id, 8000);
+      else imu.cancel(id);
+    }
     return;
   }
 

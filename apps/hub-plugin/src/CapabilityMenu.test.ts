@@ -199,6 +199,36 @@ describe('Brainstorm surface ownership', () => {
   });
 });
 
+/** The Mac's thread (2026-10-06): one reader it pages itself, a counter row
+ * then "Speaker: words" lines, with `readerPage` naming it. */
+const THREAD_TITLE = 'MESSAGES · CONVERSATION';
+const THREAD_ID = 'thread-trace-dele';
+const threadPage = (index: number, count = 2) => ({ id: THREAD_ID, index, count });
+const threadRows = (index: number, count = 2) => [
+  `${index + 1}/${count} · Adele`, `Adele: page ${index + 1} words`, 'You: on my way',
+];
+
+async function openThread(r: ReturnType<typeof rig>) {
+  await r.menu.openFromContextualMenu(0); // Messages
+  await vi.waitFor(() => expect(r.sent).toHaveLength(1));
+  const requestId = latestRequestId(r.sent);
+  expect(await r.menu.presentList('MESSAGES', ['New message', 'Adele · Preview'], requestId, true)).toBe(true);
+  expect(r.menu.handleList(click(1))).toBe(true);
+  const selectionId = (r.sent[r.sent.length - 1]!.event as { traceId: string }).traceId;
+  return { requestId, selectionId };
+}
+
+function showThread(
+  menu: CapabilityMenu, requestId: string, index: number, count = 2,
+  hint = 'down more · tap: reply · left x2: back', selectable = true,
+  pageControls?: { newerIndex?: number; olderIndex?: number },
+) {
+  return menu.presentList(
+    THREAD_TITLE, threadRows(index, count), requestId, selectable, hint,
+    undefined, 'Adele', undefined, undefined, undefined, threadPage(index, count), undefined, pageControls,
+  );
+}
+
 describe('CapabilityMenu', () => {
   it('recognizes only the explicit safe-action lifecycle namespace', () => {
     expect(isActionLifecycleTitle('ACTION · VERIFYING')).toBe(true);
@@ -679,41 +709,42 @@ describe('CapabilityMenu', () => {
     expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'PLANNING · EVENT', nativeTextPage: true });
   });
 
-  it('draws the message reader as a firmware text page, pages it locally, then asks the Mac past its edge', async () => {
-    const { menu, hud, listOptions, lists, sent } = rig();
+  it('draws the thread as a firmware text page, pages it locally, then asks the Mac past its edge by the reader id', async () => {
+    const r = rig();
+    const { menu, hud, listOptions, lists, sent } = r;
     let localPages = 1;
     hud.scrollTextPage = vi.fn((direction: 'up' | 'down') => {
       if (direction === 'down' && localPages > 0) { localPages -= 1; return true; }
       return false;
     });
-    await menu.openFromContextualMenu(0); // Messages
-    await vi.waitFor(() => expect(sent).toHaveLength(1));
-    expect(await menu.presentList('MESSAGES', rows(2), latestRequestId(sent), true)).toBe(true);
-    expect(menu.handleList(click(1))).toBe(true);
-    const requestId = latestRequestId(sent);
-    expect(await menu.presentList(
-      'MESSAGES · CONVERSATION', ['Latest messages', 'Dele · Opening words', 'Say reply'], requestId, true,
-      'tap read · say reply · left x2: back',
-    )).toBe(true);
-    menu.handleList(click(1));
-    const items = ['1/2 · From Dele', 'Opening words of a long message'];
-    expect(await menu.presentList(
-      'MESSAGES · MESSAGE', items, requestId, false, 'down more · say reply · left x2: back',
-    )).toBe(true);
-    // The rows go to the presenter untouched (no raster prose pager) with the opt-in.
-    expect(lists[lists.length - 1]).toEqual(items);
-    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'MESSAGES · MESSAGE', nativeTextPage: true });
+    const { requestId } = await openThread(r);
+    expect(await showThread(menu, requestId, 0)).toBe(true);
+    // The rows go to the presenter untouched as Even's own text page.
+    expect(lists[lists.length - 1]).toEqual(threadRows(0));
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: THREAD_TITLE, nativeTextPage: true });
+    expect(listOptions[listOptions.length - 1]).not.toHaveProperty('nativeFirmwareList');
 
-    const before = sent.length;
+    sent.length = 0;
     // First swipe: the text page turns its own page; nothing goes to the Mac.
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
-    expect(sent).toHaveLength(before);
-    // Past the local edge the Mac's footer offers "down more", so the Mac is asked.
+    expect(sent).toEqual([]);
+    // Past the local edge the generic reader request names the thread.
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
-    expect(sent).toHaveLength(before + 1);
-    expect(sent[sent.length - 1]).toMatchObject({
-      kind: 'input',
-      event: { containerName: 'cappage', selectedName: 'MESSAGES', eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId },
+    expect(sent).toEqual([{ kind: 'input', event: {
+      containerName: 'cappage', selectedName: 'MESSAGES', selectedIndex: 0,
+      eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId, traceId: THREAD_ID,
+    } }]);
+    // One page request at a time.
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(sent).toHaveLength(1);
+
+    // The next page lands in place; a tap on it replies to the thread.
+    expect(await showThread(menu, requestId, 1)).toBe(true);
+    sent.length = 0;
+    expect(menu.handleClick()).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.event).toMatchObject({
+      containerName: 'capmessage', selectedName: 'MESSAGES', selectedIndex: 0, requestId,
     });
   });
 
@@ -821,71 +852,24 @@ describe('CapabilityMenu', () => {
     } }]);
   });
 
-  it('draws a conversation with paging rows as a firmware list and turns their taps into page requests', async () => {
-    const { menu, listOptions, sent } = rig();
-    await menu.openFromContextualMenu(0); // Messages
-    await vi.waitFor(() => expect(sent).toHaveLength(1));
-    expect(await menu.presentList('MESSAGES', rows(2), latestRequestId(sent), true)).toBe(true);
-    expect(menu.handleList(click(1))).toBe(true);
-    const requestId = latestRequestId(sent);
-    const thread = [
-      'Latest messages',
-      'Dele · Unread · Attachment',
-      'You · Read · On my way',
-      'Say “JOAT, reply saying …”',
-      'Mic off? Long press to enable.',
-      '▼ Older messages',
-    ];
-    expect(await menu.presentList(
-      'MESSAGES · CONVERSATION', thread, requestId, true, 'tap read · say reply · left x2: back',
-      undefined, 'Dele', undefined, undefined, undefined, undefined, undefined, { olderIndex: 5 },
+  it('never draws the thread as a firmware list: stray paging rows are ignored and a tap replies', async () => {
+    const r = rig();
+    const { menu, listOptions, sent } = r;
+    const { requestId } = await openThread(r);
+    expect(await showThread(
+      menu, requestId, 0, 2, 'down more · tap: reply · left x2: back', true, { olderIndex: 2 },
     )).toBe(true);
-    expect(listOptions[listOptions.length - 1]).toMatchObject({
-      title: 'MESSAGES · CONVERSATION', nativeFirmwareList: true,
-    });
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: THREAD_TITLE, nativeTextPage: true });
+    expect(listOptions[listOptions.length - 1]).not.toHaveProperty('nativeFirmwareList');
 
-    // The firmware reports the tapped row. A heading or instruction row is inert.
+    // A tap the firmware reports on the "older" index is still the reply,
+    // never a page request: the thread pages by swipe through its reader.
     sent.length = 0;
-    expect(menu.handleList(clickRow0())).toBe(true);
-    expect(menu.handleList(click(3))).toBe(true);
-    expect(sent).toEqual([]);
-
-    // A message row reads it, with the raw list index the Mac owns.
     expect(menu.handleList(click(2))).toBe(true);
-    expect(sent[sent.length - 1]?.event).toMatchObject({
-      containerName: 'capmessage', selectedName: 'MESSAGES', selectedIndex: 2, requestId,
-    });
-    // The Mac answers that read with the message page; a fresh thread frame
-    // restores the conversation before the paging row is used.
-    expect(await menu.presentList(
-      'MESSAGES · CONVERSATION', thread, requestId, true, 'tap read · say reply · left x2: back',
-      undefined, 'Dele', undefined, undefined, undefined, undefined, undefined, { olderIndex: 5 },
-    )).toBe(true);
-
-    // The paging row is the page request the swipe used to send.
-    sent.length = 0;
-    expect(menu.handleList(click(5))).toBe(true);
-    expect(sent[sent.length - 1]?.event).toMatchObject({
-      containerName: 'cappage', selectedName: 'MESSAGES',
-      eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId,
-    });
-    // Until that page lands, further taps on the thread are ignored.
-    sent.length = 0;
-    expect(menu.handleList(click(1))).toBe(true);
-    expect(sent).toEqual([]);
-
-    const older = ['Older messages', 'Dele · Earlier', 'Say “JOAT, reply saying …”', '▲ Newer messages'];
-    expect(await menu.presentList(
-      'MESSAGES · CONVERSATION', older, requestId, true, 'tap read · say reply · left x2: back',
-      undefined, 'Dele', undefined, undefined, undefined, undefined, undefined, { newerIndex: 3 },
-    )).toBe(true);
-    expect(menu.handleList(click(3))).toBe(true);
-    expect(sent[sent.length - 1]?.event).toMatchObject({
-      containerName: 'cappage', eventType: OsEventTypeList.SCROLL_TOP_EVENT, requestId,
-    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.event).toMatchObject({ containerName: 'capmessage', selectedName: 'MESSAGES', requestId });
+    expect(sent.some((m) => (m.event as { containerName?: string }).containerName === 'cappage')).toBe(false);
   });
-
-
 
   it('clicking a selected Messages row emits one traced reply-selection event', async () => {
     const { menu, sent } = rig();
@@ -995,99 +979,49 @@ describe('CapabilityMenu', () => {
     info.mockRestore();
   });
 
-  it('routes a selected transcript line to the Mac-owned full-message reader', async () => {
-    const { menu, sent } = rig();
+  it('turns a tap on the thread into one traced reply request until the Mac answers', async () => {
+    const r = rig();
+    const { menu, sent } = r;
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
-    await menu.openFromContextualMenu(0); // Messages
-    await vi.waitFor(() => expect(sent).toHaveLength(1));
-    const requestId = latestRequestId(sent);
-    expect(await menu.presentList('MESSAGES', rows(2), requestId, true)).toBe(true);
-    expect(menu.handleList(click(1))).toBe(true);
-    expect(await menu.presentList(
-      'MESSAGES · CONVERSATION',
-      ['Latest messages', 'Dele · Opening words', 'You · Reply', 'Say reply'],
-      requestId,
-      true,
-      'say reply · left x2: back',
-    )).toBe(true);
+    const { requestId, selectionId } = await openThread(r);
+    expect(await showThread(menu, requestId, 0)).toBe(true);
 
-    expect(menu.handleList(click(1))).toBe(true);
-    expect(menu.handleList(click(1))).toBe(true);
-    expect(sent).toHaveLength(3);
-    expect(sent[2]).toMatchObject({
+    sent.length = 0;
+    expect(menu.handleClick()).toBe(true);
+    expect(menu.handleClick()).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
       kind: 'input',
-      event: {
-        containerName: 'capmessage',
-        selectedName: 'MESSAGES',
-        selectedIndex: 1,
-        requestId,
-      },
+      event: { containerName: 'capmessage', selectedName: 'MESSAGES', selectedIndex: 0, requestId },
     });
-    const traceId = (sent[2]?.event as { traceId?: string }).traceId;
+    const traceId = (sent[0]?.event as { traceId?: string }).traceId;
     expect(traceId).toMatch(/^hud-/);
+    // Its own trace: the conversation's selection keeps owning the visit.
+    expect(traceId).not.toBe(selectionId);
     expect(info).toHaveBeenCalledWith(
-      `[joat trace] trace=${traceId} stage=message-read-requested index=1`,
+      `[joat trace] trace=${traceId} stage=message-reply-requested index=0`,
     );
-
-    expect(await menu.presentList(
-      'MESSAGES · MESSAGE',
-      ['From Dele · 1/2', 'Opening words'],
-      requestId,
-      false,
-      'down more · say reply · left x2: back',
-    )).toBe(true);
-    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
-    expect(sent).toHaveLength(4);
-    expect(sent[3]).toMatchObject({
-      kind: 'input',
-      event: {
-        containerName: 'cappage',
-        selectedName: 'MESSAGES',
-        eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT,
-        requestId,
-      },
-    });
+    expect(info).not.toHaveBeenCalledWith(expect.stringContaining('stage=message-read-requested'));
     info.mockRestore();
   });
 
-  it('returns from full text to the live conversation before clearing its reply target', async () => {
-    const { menu, lists, sent, visibleSelection } = rig();
-    await menu.openFromContextualMenu(0); // Messages
-    await vi.waitFor(() => expect(sent).toHaveLength(1));
-    const requestId = latestRequestId(sent);
-    const conversations = ['New message', 'Dele · Preview'];
-    const transcript = ['Latest messages', 'Dele · Opening words', 'Say reply'];
-    expect(await menu.presentList('MESSAGES', conversations, requestId, true)).toBe(true);
-    menu.handleList(click(1));
-    const selectionId = (sent[1]!.event as { traceId: string }).traceId;
-    expect(await menu.presentList(
-      'MESSAGES · CONVERSATION', transcript, requestId, true,
-      'tap read · say reply · left x2: back',
-    )).toBe(true);
-    menu.handleList(click(1));
-    expect(await menu.presentList(
-      'MESSAGES · MESSAGE', ['From Dele · 1/1', 'Opening words'], requestId, false,
-      'say reply · left x2: back',
-    )).toBe(true);
+  it('keeps no page of the thread in Back history: Back from a later page lands on the picker', async () => {
+    const r = rig();
+    const { menu, lists, sent, visibleSelection } = r;
+    const { requestId, selectionId } = await openThread(r);
+    expect(await showThread(menu, requestId, 0)).toBe(true);
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(await showThread(menu, requestId, 1)).toBe(true);
 
+    sent.length = 0;
     await menu.toggle();
-    expect(lists[lists.length - 1]).toEqual(transcript);
-    // The thread is a firmware list: Back lands on row one.
+    expect(lists[lists.length - 1]).toEqual(['New message', 'Adele · Preview']);
+    // The picker is a firmware list: Back lands on row one.
     expect(visibleSelection()).toBe(0);
-    expect(sent[3]).toEqual({
-      kind: 'input',
-      event: { containerName: 'capability-lifecycle', selectedName: 'messages-conversation', requestId, traceId: selectionId },
-    });
-
-    await menu.toggle();
-    expect(lists[lists.length - 1]).toEqual(conversations);
-    // The picker is a firmware list: Back lands on row one (the firmware
-    // has no cursor-setting API), so the row the wearer left is not restored.
-    expect(visibleSelection()).toBe(0);
-    expect(sent[4]).toEqual({
+    expect(sent).toEqual([{
       kind: 'input',
       event: { containerName: 'capability-lifecycle', selectedName: 'messages-list', requestId, traceId: selectionId },
-    });
+    }]);
   });
 
   it('asks the Mac to cancel discard before enabling refreshed QuickNotes controls', async () => {
@@ -1192,79 +1126,45 @@ describe('CapabilityMenu', () => {
     expect(visibleSelection()).toBe(0);
   });
 
-  it('requests older and newer conversation pages only at scroll boundaries', async () => {
-    const { menu, sent } = rig();
-    await menu.openFromContextualMenu(0); // Messages
-    await vi.waitFor(() => expect(sent).toHaveLength(1));
-    const requestId = latestRequestId(sent);
-    expect(await menu.presentList('MESSAGES', rows(2), requestId, true)).toBe(true);
-    menu.handleList(click(1));
+  it('asks the Mac for a thread page only where its reader has one', async () => {
+    const r = rig();
+    const { menu, sent } = r;
+    const { requestId } = await openThread(r);
+    // The first page: nothing newer.
+    expect(await showThread(menu, requestId, 0, 2)).toBe(true);
+    sent.length = 0;
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);
+    expect(sent).toEqual([]);
+    // The last page: nothing older, whatever the footer says.
+    expect(await showThread(menu, requestId, 1, 2, 'up previous · down more · tap: reply · left x2: back')).toBe(true);
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(sent).toEqual([]);
+    // A thread frame without a reader is not paged from the old footer wording.
     expect(await menu.presentList(
-      'MESSAGES · CONVERSATION', rows(4), requestId, false,
-      'down older · say reply · left x2: back',
+      THREAD_TITLE, threadRows(0), requestId, true, 'down older · tap: reply · left x2: back',
     )).toBe(true);
-
-    // The firmware list reports each row it moves to; a swipe that stays on
-    // the last row is the boundary, and only that asks for the older page.
-    for (const index of [1, 2, 3]) {
-      expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, index))).toBe(true);
-    }
-    expect(sent).toHaveLength(2);
-    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 3))).toBe(true);
-    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 3))).toBe(true);
-    expect(sent).toHaveLength(3);
-    expect(sent[2]).toMatchObject({
-      kind: 'input',
-      event: {
-        containerName: 'cappage',
-        selectedName: 'MESSAGES',
-        eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT,
-        requestId,
-      },
-    });
-
-    expect(await menu.presentList(
-      'MESSAGES · CONVERSATION', rows(3), requestId, false,
-      'up newer · say reply · left x2: back',
-    )).toBe(true);
-    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_TOP_EVENT))).toBe(true);
-    expect(sent).toHaveLength(4);
-    expect(sent[3]).toMatchObject({
-      kind: 'input',
-      event: {
-        containerName: 'cappage',
-        selectedName: 'MESSAGES',
-        eventType: OsEventTypeList.SCROLL_TOP_EVENT,
-        requestId,
-      },
-    });
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 2))).toBe(true);
+    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 2))).toBe(true);
+    expect(sent).toEqual([]);
   });
 
-  it('forwards native list scroll boundary events for a paged conversation', async () => {
-    const { menu, sent } = rig();
-    await menu.openFromContextualMenu(0); // Messages
-    await vi.waitFor(() => expect(sent).toHaveLength(1));
-    const requestId = latestRequestId(sent);
-    expect(await menu.presentList('MESSAGES', rows(2), requestId, true)).toBe(true);
-    menu.handleList(click(1));
-    expect(await menu.presentList(
-      'MESSAGES · CONVERSATION', rows(4), requestId, false,
-      'down older · say reply · left x2: back',
-    )).toBe(true);
-
-    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 1))).toBe(true);
-    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 2))).toBe(true);
-    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 3))).toBe(true);
-    expect(sent).toHaveLength(2);
-    expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 3))).toBe(true);
-    expect(sent).toHaveLength(3);
-    expect(sent[2]).toMatchObject({
-      kind: 'input',
-      event: {
-        containerName: 'cappage',
-        eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT,
-        requestId,
-      },
+  it('pages the thread back to newer messages and opens that page from its end', async () => {
+    const r = rig();
+    const { menu, listOptions, sent } = r;
+    const { requestId } = await openThread(r);
+    expect(await showThread(menu, requestId, 1, 3, 'up previous · down more · tap: reply · left x2: back')).toBe(true);
+    expect(listOptions[listOptions.length - 1]).not.toHaveProperty('nativeTextPageFromEnd');
+    sent.length = 0;
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);
+    expect(sent).toEqual([{ kind: 'input', event: {
+      containerName: 'cappage', selectedName: 'MESSAGES', selectedIndex: 1,
+      eventType: OsEventTypeList.SCROLL_TOP_EVENT, requestId, traceId: THREAD_ID,
+    } }]);
+    // Swiping back reads on from the end of the newer page.
+    expect(await showThread(menu, requestId, 0, 3)).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({
+      title: THREAD_TITLE, nativeTextPage: true, nativeTextPageFromEnd: true,
     });
   });
 

@@ -28,6 +28,7 @@ class _Visit:
 class _Action:
     visit: _Visit
     action_id: str
+    reply: bool = True
     status: MessageActionStatus | None = None
 
 
@@ -39,7 +40,8 @@ class MessageUIController:
                  after_input: Callable[[MessageActionStatus], Awaitable[None]],
                  connection_generation: Callable[[], str | None],
                  fence_audio: Callable[[], int], capturing: Callable[[], bool],
-                 revoke_prompt: Callable[[str], None]) -> None:
+                 revoke_prompt: Callable[[str], None],
+                 on_sent: Callable[[str], Awaitable[None]] | None = None) -> None:
         self._replies = replies
         self._publish = publish
         self._after_input = after_input
@@ -47,6 +49,11 @@ class MessageUIController:
         self._fence_audio = fence_audio
         self._capturing = capturing
         self._revoke_prompt = revoke_prompt
+        # Back on the thread with the sent reply as its newest message.
+        self._on_sent = on_sent
+        # The draft the wearer chose to say again; its question is asked
+        # afresh once the draft has ended.
+        self._retry: str | None = None
         self._visit: _Visit | None = None
         self._action: _Action | None = None
         self._reply_fence: int | None = None
@@ -96,6 +103,34 @@ class MessageUIController:
             self._action = None
             self._cancel(action)
 
+    def retry(self, action_id: str) -> None:
+        """Say the draft again: end it, then ask its question afresh.
+
+        The Hub declines the draft's confirmation itself, and the two can
+        arrive in either order, so the new question waits for the old
+        draft's ending.
+        """
+        action = self._action
+        if action is None or action.action_id != action_id or not action.reply:
+            return
+        self._retry = action_id
+        if action.status is not None and action.status.state in _TERMINAL:
+            self._start_retry(action)
+
+    def _start_retry(self, action: _Action) -> None:
+        if self._retry != action.action_id:
+            return
+        self._retry = None
+
+        async def again() -> None:
+            refused = await self._begin(reply=True)
+            if refused:
+                log.info("Messages retry refused")
+
+        task = asyncio.create_task(again())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
     def _cancel(self, action: _Action) -> None:
         if self._start is not None and self._start[0] is action:
             self._start[1].cancel()
@@ -144,7 +179,7 @@ class MessageUIController:
         previous = self._action
         if previous is not None and (previous.status is None or previous.status.state not in _TERMINAL):
             return "Finish or cancel the current message first."
-        action = _Action(visit, "messages-ui-" + secrets.token_hex(16))
+        action = _Action(visit, "messages-ui-" + secrets.token_hex(16), reply)
         self._action = action
         try:
             async def publish_start() -> None:
@@ -208,6 +243,7 @@ class MessageUIController:
         action.status = status
         if status.state not in _TERMINAL or not self._current(action.visit):
             return
+        body = self._replies.message_action_body(status.action_id) if status.state == "sent" else None
 
         async def publish() -> None:
             if (self._action is not action or not self._current(action.visit)
@@ -219,6 +255,15 @@ class MessageUIController:
                     action.action_id, status.state, status.message)), 5.0)
             except Exception as exc:
                 log.warning("Messages UI receipt failed error=%s", type(exc).__name__)
+            if self._action is not action:
+                return
+            if self._retry == action.action_id:
+                self._start_retry(action)
+            elif status.state == "sent" and body is not None and self._on_sent is not None:
+                try:
+                    await self._on_sent(body)
+                except Exception as exc:
+                    log.warning("Messages thread refresh failed error=%s", type(exc).__name__)
 
         task = asyncio.create_task(publish())
         self._tasks.add(task)

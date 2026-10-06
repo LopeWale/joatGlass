@@ -286,6 +286,11 @@ class MessageReplyController:
         """Read an action without reissuing a confirmation or external send."""
         return self._known_action(action_id).status
 
+    def message_action_body(self, action_id: str) -> str | None:
+        """The body an action carries, once the wearer has said it."""
+        action = self._prepared.get(action_id)
+        return action.body if action is not None else None
+
     def message_prompt_field(self, action_id: str) -> Literal["recipient", "body"] | None:
         """The exact typed input this action can currently accept from speech."""
         action = self._known_action(action_id)
@@ -464,8 +469,8 @@ class MessageReplyController:
             needs_input=needs_input, candidates=candidates,
             verification_level="delivery_unverified" if state == "sent" else None,
         )
-        if state not in {"awaiting_input", "awaiting_confirmation", "sending"}:
-            action.body = None
+        terminal = state not in {"awaiting_input", "awaiting_confirmation", "sending"}
+        if terminal:
             action.recipient = None
             action.candidates.clear()
             if action.expiry is not None:
@@ -480,6 +485,11 @@ class MessageReplyController:
                 # Publication observes a committed receipt. Its failure must
                 # never alter that result or retry an external submission.
                 log.warning("message status observer failed error=%s", type(exc).__name__)
+        if terminal:
+            # Dropped only after the observers ran: the Messages UI reads a
+            # sent reply's words in that callback to show it on the thread.
+            # Nothing keeps them past it.
+            action.body = None
         return action.status
 
     async def _resolve_prepared_recipient(self, action: _PreparedMessage, query: str) -> None:
@@ -549,7 +559,12 @@ class MessageReplyController:
             self._set_status(action, "failed", "This conversation has no Messages send target. Open it again on your Mac.")
             return
         if action.body is None:
-            self._set_status(action, "awaiting_input", f"Recipient {action.recipient.sender} selected. Say the message.", needs_input="body")
+            question = (
+                f"What do you want to say back to {action.recipient.sender}?"
+                if action.origin_kind == "messages.selection"
+                else f"Recipient {action.recipient.sender} selected. Say the message."
+            )
+            self._set_status(action, "awaiting_input", question, needs_input="body")
             return
         self._set_status(action, "awaiting_confirmation", "Awaiting your confirmation on the glasses.")
         if action.expiry is not None:

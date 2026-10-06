@@ -21,9 +21,9 @@ describe('MessagesViewState', () => {
     });
   });
 
-  it('permits a Mac-authorized transcript entry to open its full reader', () => {
+  it('lets a tap on a Mac-authorized thread reply to it', () => {
     expect(resolveMessagesViewState('MESSAGES · CONVERSATION', true)).toEqual({
-      screen: 'conversation', rowAction: 'read_message', selectable: true,
+      screen: 'conversation', rowAction: 'reply', selectable: true,
     });
     expect(resolveMessagesViewState('MESSAGES · CONVERSATION', false)).toEqual({
       screen: 'conversation', rowAction: 'none', selectable: false,
@@ -33,7 +33,6 @@ describe('MessagesViewState', () => {
   it.each([
     ['MESSAGES · REPLY', 'conversation'],
     ['MESSAGES · COMPOSE', 'compose'],
-    ['MESSAGES · MESSAGE', 'message_detail'],
     ['MESSAGES · EMPTY', 'empty'],
     ['MESSAGES · READ ONLY', 'read_only'],
   ])('keeps %s informational', (title, screen) => {
@@ -44,6 +43,12 @@ describe('MessagesViewState', () => {
 
   it('fails closed for an unknown Messages title', () => {
     expect(resolveMessagesViewState('MESSAGES · FORGED', true)).toEqual({
+      screen: 'invalid', rowAction: 'none', selectable: false,
+    });
+  });
+
+  it('fails closed for the retired single-message reader title', () => {
+    expect(resolveMessagesViewState('MESSAGES · MESSAGE', true)).toEqual({
       screen: 'invalid', rowAction: 'none', selectable: false,
     });
   });

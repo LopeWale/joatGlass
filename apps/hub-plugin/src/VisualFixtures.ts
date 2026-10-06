@@ -28,7 +28,6 @@ const VISUAL_CONFIRMATION_ID = 'visual-confirmation';
 export const PRODUCTIVITY_VISUAL_STATES = [
   'messages',
   'messages-conversation',
-  'message-reader',
   'messages-compose',
   'notifications',
   'notification-detail',
@@ -265,34 +264,19 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
         '[3h] Dele · Attachment',
       ],
     },
-    // Two-column transcript: incoming carries the weight, the wearer's own
-    // words recede. Mirrors capabilities._show_message_history_page.
+    // The thread as one reader, newest first; a tap replies.
+    // Mirrors capabilities._show_message_history_page.
     'messages-conversation': {
       title: 'MESSAGES · CONVERSATION',
-      hint: 'tap read · say reply · left x2: back',
+      hint: 'down more · tap: reply · left x2: back',
       selectable: true,
       items: [
-        'Latest messages — down for older',
-        'Adele · Can you send the latest mockups before the review?',
-        'You · Exporting them now, give me ten minutes.',
-        'Adele · Perfect. Dele wants the dark variants too.',
-        'You · Both palettes are in the file.',
-        'Adele · You are a lifesaver. See you at 4:30.',
-        'Say “JOAT, reply saying …”',
-        'Mic off? Long press to enable.',
-      ],
-    },
-    // Full-text reader: quiet metadata, bright body, Mac-paged.
-    'message-reader': {
-      title: 'MESSAGES · MESSAGE',
-      hint: 'down more · say reply · left x2: back',
-      selectable: false,
-      items: [
-        'Adele · Unread · page 1 of 2',
-        'Can you send the latest mockups before the review?',
-        'Dele wants to compare the dark variants against the',
-        'brand palette before we commit, and the print vendor',
-        'needs final art by Thursday morning at the latest.',
+        '1/1+ · Adele',
+        'Adele: You are a lifesaver. See you at 4:30.',
+        'You: Both palettes are in the file.',
+        'Adele: Perfect. Dele wants the dark variants too.',
+        'You: Exporting them now, give me ten minutes.',
+        'Adele: Can you send the latest mockups before the review?',
       ],
     },
     'messages-compose': {

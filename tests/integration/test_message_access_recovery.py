@@ -85,42 +85,48 @@ async def test_group_history_full_reader_paging_and_back(tmp_path: Path) -> None
     router, transport = make_router(store_at(path), replies)
     await router.open('Messages')
     await router._select_message(1, 'group')
-    assert transport.frame.title == 'MESSAGES · CONVERSATION'
-    assert transport.frame.selectable
-    # Paging travels as tapped rows, not a swipe hint.
-    newer, older = transport.frame.page_controls or (None, None)
-    assert newer is None and older is not None
-    assert transport.frame.items[older] == '▼ Older messages'
-    assert 'read-only' in transport.frame.hint
-    assert 'say reply' not in transport.frame.hint
-    assert not any('JOAT, reply' in row or 'Mic off?' in row for row in transport.frame.items)
-    assert transport.frame.items[1].startswith('Sam · ')
-    assert transport.frame.items[2].startswith('You · ')
-    assert transport.frame.items[3].startswith('Sam · ')
+    frame = transport.frame
+    assert frame.title == 'MESSAGES · CONVERSATION'
+    # A group without a Mac-side chat target is read-only: nothing to tap.
+    assert not frame.selectable
+    assert frame.page_controls is None
+    assert 'read-only' in frame.hint
+    assert 'say reply' not in frame.hint
+    assert not any('JOAT, reply' in row or 'Mic off?' in row for row in frame.items)
+    # All ten synthetic messages fit one chat.db page; nothing older.
+    assert frame.items[0].startswith('1/') and '+' not in frame.items[0].split(' · ')[0]
+    assert frame.items[0].endswith(' · Project team (group)')
+    assert frame.items[1].startswith('Sam: Full group message.')
     assert replies.selected == []
     assert not router._message_selection_active
 
-    await router._select_message_detail(1, 'read', None)
     pages = []
     while True:
         frame = transport.frame
-        assert frame.title == 'MESSAGES · MESSAGE'
-        assert 'From Sam' in frame.items[0]
+        wire = frame.to_wire()
+        assert frame.title == 'MESSAGES · CONVERSATION'
         assert 'read-only' in frame.hint and 'say reply' not in frame.hint
         assert 'left x2: back' in frame.hint
-        pages.extend(frame.to_wire()['items'][1:])
+        assert wire['readerPage']['id'] == 'group'
+        assert wire['readerPage']['index'] == len(pages)
+        pages.append(wire['items'][1:])
         if 'down more' not in frame.hint:
             break
-        await router._page_message_detail(EventType.SCROLL_BOTTOM, 'more', None)
-    assert ''.join(pages) == BODY
+        await router._page_message_history(EventType.SCROLL_BOTTOM, 'group', None)
+    assert len(pages) > 1
+    text = ''.join(row for page in pages for row in page)
+    # The long newest message is whole, then every older one, newest first.
+    assert text.startswith('Sam: ' + BODY + '\nYou: Message 9\nSam: Message 8\nAlex: Message 7\n')
+    assert text.endswith('\nAlex: Message 1')
+    assert text.count('\n') == BODY.count('\n') + 9
     router.on_input(InputEvent(container_name='capability-lifecycle', selected_name='messages-conversation'))
-    assert router._message_detail is None
-    await router._page_message_history(EventType.SCROLL_BOTTOM, 'older', None)
-    assert any('Alex · Message 1' == row for row in transport.frame.items)
-    assert transport.frame.page_controls is not None
-    assert transport.frame.page_controls[1] is None
-    await router._page_message_history(EventType.SCROLL_TOP, 'newer', None)
-    assert transport.frame.items[1].startswith('Sam · ')
+    assert router._message_history is not None
+    # Another trace cannot page this reader.
+    before = len(transport.sent)
+    await router._page_message_history(EventType.SCROLL_TOP, 'forged', None)
+    assert len(transport.sent) == before
+    await router._page_message_history(EventType.SCROLL_TOP, 'group', None)
+    assert transport.frame.to_wire()['readerPage']['index'] == len(pages) - 2
     router.on_input(InputEvent(container_name='capability-lifecycle', selected_name='messages-home'))
     assert router._message_history is None
     assert replies.selected == []
@@ -190,10 +196,9 @@ async def test_unknown_group_sender_is_not_mislabeled_as_group_name(tmp_path: Pa
     router, transport = make_router(store_at(path), Replies())
     await router.open('Messages')
     await router._select_message(1, 'group')
-    assert transport.frame.items[1].startswith('Participant · ')
-    await router._select_message_detail(1, 'read', None)
-    assert 'From Participant' in transport.frame.items[0]
-    assert 'From Project team' not in transport.frame.items[0]
+    assert transport.frame.items[0].endswith(' · Project team (group)')
+    assert transport.frame.items[1].startswith('Participant: Full group message.')
+    assert not any(row.startswith('Project team:') for row in transport.frame.items[1:])
 
 
 async def test_same_reader_recovers_after_access_denial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

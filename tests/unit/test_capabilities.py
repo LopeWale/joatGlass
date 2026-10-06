@@ -298,6 +298,73 @@ class HeldHistoryMessages(FakeMessages):
         )
 
 
+class OlderHistoryMessages(FakeMessages):
+    """A full first thread page with older history waiting in chat.db."""
+
+    def __init__(self) -> None:
+        super().__init__([("Dele", "Newest 30", time.time())])
+        self.page_calls: list[int | None] = []
+
+    def thread_message_page(
+        self,
+        thread: MessageThread,
+        *,
+        limit: int = 8,
+        before_row_id: int | None = None,
+    ) -> MessageHistoryPage:
+        del thread, limit
+        self.page_calls.append(before_row_id)
+        if before_row_id is None:
+            # Ten one-row messages: exactly one ten-row reader page.
+            return MessageHistoryPage(entries=tuple(
+                MessageEntry(f"Newest {row}", float(row), row % 2 == 0, row_id=row)
+                for row in range(30, 20, -1)
+            ), has_older=True)
+        assert before_row_id == 21
+        return MessageHistoryPage(entries=tuple(
+            MessageEntry(f"Older {row}", float(row), False, row_id=row)
+            for row in range(20, 17, -1)
+        ), has_older=False)
+
+
+class SentReplyMessages(FakeMessages):
+    """A two-page thread; chat.db records the wearer's reply only later."""
+
+    def __init__(self, *, records_after: int | None) -> None:
+        super().__init__([("Dele", "Preview", time.time())])
+        #: The read count from which chat.db has the sent row; None = never.
+        self.records_after = records_after
+        self.reads = 0
+
+    def thread_message_page(
+        self,
+        thread: MessageThread,
+        *,
+        limit: int = 8,
+        before_row_id: int | None = None,
+    ) -> MessageHistoryPage:
+        del thread, limit, before_row_id
+        self.reads += 1
+        entries = (MessageEntry("word " * 140 + "END", 5.0, False, row_id=5),)
+        if self.records_after is not None and self.reads >= self.records_after:
+            entries = (MessageEntry("On my way!", 6.0, True, row_id=6, delivery="sent"), *entries)
+        return MessageHistoryPage(entries=entries, has_older=False)
+
+
+def conversation_frames(transport: FakeTransport) -> list[HudList]:
+    return [
+        m for m in transport.sent
+        if isinstance(m, HudList) and m.title == "MESSAGES · CONVERSATION"
+    ]
+
+
+def page_event(event_type: int, trace_id: str, request_id: str | None) -> InputEvent:
+    return InputEvent(
+        container_name="cappage", selected_name="MESSAGES", event_type=event_type,
+        trace_id=trace_id, request_id=request_id,
+    )
+
+
 class FakePersonalData:
     def __init__(self, responses):  # type: ignore[no-untyped-def]
         self._responses = responses
@@ -524,12 +591,14 @@ class FakeVoiceCapture:
 class FakeMessageUI:
     """Duck-typed MessageUIController: the conversation page's reply control."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, refusal: str = "") -> None:
         #: Reply-flow calls only; `retired` counts the visit resets that
         #: opening or leaving Messages performs regardless of the page.
         self.calls: list[str] = []
         self.selections: list[tuple[str | None, str]] = []
         self.retired = 0
+        #: What begin_reply answers: "" when the question went up, else why not.
+        self.refusal = refusal
 
     def matches(self, request_id: str | None, selection_id: str | None) -> bool:
         return False
@@ -556,7 +625,7 @@ class FakeMessageUI:
 
     async def begin_reply(self) -> str:
         self.calls.append("begin_reply")
-        return "reply"
+        return self.refusal
 
 
 def receipts(transport: FakeTransport) -> list[str]:
@@ -1060,14 +1129,12 @@ class TestCapabilityViews:
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.title == "MESSAGES · CONVERSATION"
         # The page carries the conversation only: no spoken-grammar rows,
-        # and no reply row either, since no message UI can take the tap.
-        assert detail.items == [
-            "Complete conversation on this Mac",
-            "Adaeze · Call me",
-        ]
-        assert detail.hint == "tap read · left x2: back"
-        assert router._message_history is not None
-        assert router._message_history.reply_index is None
+        # and no tap-to-reply either, since no message UI can take the tap.
+        assert detail.items == ["1/1 · Adaeze", "Adaeze: Call me"]
+        assert detail.hint == "read-only · left x2: back"
+        assert detail.selectable is False
+        assert detail.page_controls is None
+        assert detail.reader_page == ("hud-12", 0, 1)
 
     async def test_selecting_a_message_opens_complete_conversation_context(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
@@ -1084,25 +1151,28 @@ class TestCapabilityViews:
             trace_id="hud-context",
             request_id="messages-context",
         ))
-        await wait_until(lambda: any(
-            isinstance(item, HudList) and item.title == "MESSAGES · CONVERSATION"
-            for item in transport.sent
-        ))
+        await wait_until(lambda: bool(conversation_frames(transport)))
 
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.title == "MESSAGES · CONVERSATION"
+        assert detail.request_id == "messages-context"
+        # Newest first, one whole message per logical line.
         assert detail.items == [
-            "Complete conversation on this Mac",
-            "Dele · Great",
-            "You · On my way",
-            "Dele · Are you coming?",
+            "1/1 · Dele",
+            "Dele: Great\n",
+            "You: On my way\n",
+            "Dele: Are you coming?",
         ]
-        assert detail.hint == "tap read · left x2: back"
-        assert detail.selectable is True
+        assert detail.hint == "read-only · left x2: back"
+        assert detail.reader_page == ("hud-context", 0, 1)
 
-    async def test_the_reply_row_tap_begins_the_prepared_reply(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        """A replyable thread with a message UI ends in "✎ Reply"; tapping
-        that row starts the same prepared reply the spoken grammar would."""
+    @pytest.mark.parametrize("index", [0, 1, 3, 4, 57])
+    async def test_a_tap_anywhere_on_the_thread_begins_the_prepared_reply(
+        self, tmp_path, index: int,
+    ) -> None:  # type: ignore[no-untyped-def]
+        """A replyable thread with a message UI is one tappable reader; any
+        tap on it, whatever row the Hub reports, starts the prepared reply
+        the spoken grammar would."""
         replies = FakeReplies()
         message_ui = FakeMessageUI()
         router, transport, _ = make_router(tmp_path, replies=replies, message_ui=message_ui)
@@ -1118,51 +1188,94 @@ class TestCapabilityViews:
             trace_id="hud-reply",
             request_id="messages-reply",
         ))
-        await wait_until(lambda: any(
-            isinstance(item, HudList) and item.title == "MESSAGES · CONVERSATION"
-            for item in transport.sent
-        ))
+        await wait_until(lambda: bool(conversation_frames(transport)))
         assert message_ui.selections == [("messages-reply", "hud-reply")]
         assert message_ui.retired == 1  # opening Messages resets any old visit
         assert message_ui.calls == ["conversation_ready"]
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.items == [
-            "Complete conversation on this Mac",
-            "Dele · Great",
-            "You · On my way",
-            "Dele · Are you coming?",
-            "✎ Reply",
+            "1/1 · Dele",
+            "Dele: Great\n",
+            "You: On my way\n",
+            "Dele: Are you coming?",
         ]
-        assert detail.hint == "tap read · left x2: back"
+        assert detail.hint == "tap: reply · left x2: back"
         assert detail.selectable is True
-        assert router._message_history is not None
-        assert router._message_history.reply_index == 4
+        assert detail.page_controls is None
+        assert not any("Reply" in row for row in detail.items)
 
-        # A message row opens the reader; only the reply row begins a reply.
+        # A stale request cannot reply.
         router.on_input(InputEvent(
-            container_name="capmessage", selected_index=1,
-            trace_id="hud-reply", request_id="messages-reply",
+            container_name="capmessage", selected_index=index,
+            trace_id="hud-reply", request_id="messages-stale",
         ))
-        await wait_until(lambda: router._message_detail is not None)
+        await asyncio.sleep(0.01)
         assert message_ui.calls == ["conversation_ready"]
 
+        before = len(transport.sent)
         router.on_input(InputEvent(
-            container_name="capmessage", selected_index=4,
+            container_name="capmessage", selected_index=index,
             trace_id="hud-reply", request_id="messages-reply",
         ))
         await wait_until(lambda: "begin_reply" in message_ui.calls)
         assert message_ui.calls == ["conversation_ready", "begin_reply"]
         assert router._message_selection_active is True
+        # The tap never re-targets: the Mac-side selection is unchanged and
+        # an accepted question paints nothing over it.
+        assert len(replies.selected) == 1
+        await asyncio.sleep(0.01)
+        assert receipts(transport) == []
+        assert len(transport.sent) == before
 
-        # A stale request cannot reach the reply row.
+    async def test_a_refused_thread_tap_says_why_on_the_glass(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        message_ui = FakeMessageUI(refusal="Finish or cancel the current message first.")
+        router, transport, _ = make_router(
+            tmp_path, rows=[("Dele", "Great", time.time())], replies=FakeReplies(),
+            message_ui=message_ui,
+        )
+        await router.open("Messages", request_id="messages-refused")
+        await router._select_capability_row("MESSAGES", 1, "hud-refused", "messages-refused")
         router.on_input(InputEvent(
-            container_name="capmessage", selected_index=4,
-            trace_id="hud-reply", request_id="messages-stale",
+            container_name="capmessage", selected_index=2,
+            trace_id="hud-refused", request_id="messages-refused",
+        ))
+        await wait_until(lambda: bool(receipts(transport)))
+        assert receipts(transport) == ["Finish or cancel the current message first."]
+
+    async def test_a_thread_tap_without_a_message_ui_says_replying_is_unavailable(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(
+            tmp_path, rows=[("Dele", "Great", time.time())], replies=FakeReplies(),
+        )
+        await router.open("Messages", request_id="messages-no-ui")
+        await router._select_capability_row("MESSAGES", 1, "hud-no-ui", "messages-no-ui")
+        router.on_input(InputEvent(
+            container_name="capmessage", selected_index=1,
+            trace_id="hud-no-ui", request_id="messages-no-ui",
+        ))
+        await wait_until(lambda: bool(receipts(transport)))
+        assert receipts(transport) == ["Replying is unavailable in this session."]
+
+    async def test_a_thread_tap_before_any_conversation_is_open_is_dropped(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        message_ui = FakeMessageUI()
+        router, transport, _ = make_router(
+            tmp_path, rows=[("Dele", "Great", time.time())], replies=FakeReplies(),
+            message_ui=message_ui,
+        )
+        await router.open("Messages", request_id="messages-picker")
+        before = len(transport.sent)
+        router.on_input(InputEvent(
+            container_name="capmessage", selected_index=1,
+            trace_id="forged", request_id="messages-picker",
         ))
         await asyncio.sleep(0.01)
-        assert message_ui.calls == ["conversation_ready", "begin_reply"]
+        assert "begin_reply" not in message_ui.calls
+        assert len(transport.sent) == before
 
-    async def test_a_read_only_thread_has_no_reply_row_even_with_a_message_ui(
+    async def test_a_read_only_thread_is_not_tappable_even_with_a_message_ui(
         self, tmp_path,
     ) -> None:  # type: ignore[no-untyped-def]
         message_ui = FakeMessageUI()
@@ -1175,30 +1288,21 @@ class TestCapabilityViews:
             selected_index=message_row_index(transport, "] Dele ·"),
             trace_id="hud-read-only", request_id="messages-read-only",
         ))
-        await wait_until(lambda: any(
-            isinstance(item, HudList) and item.title == "MESSAGES · CONVERSATION"
-            for item in transport.sent
-        ))
+        await wait_until(lambda: bool(conversation_frames(transport)))
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert detail.items == ["Complete conversation on this Mac", "Dele · Great"]
-        assert detail.hint == "tap read · read-only · left x2: back"
-        assert router._message_history is not None
-        assert router._message_history.reply_index is None
-        router.on_input(InputEvent(
-            container_name="capmessage", selected_index=2,
-            trace_id="hud-read-only", request_id="messages-read-only",
-        ))
-        await asyncio.sleep(0.01)
-        assert "begin_reply" not in message_ui.calls
+        assert detail.items == ["1/1 · Dele", "Dele: Great"]
+        assert detail.hint == "read-only · left x2: back"
+        assert detail.selectable is False
+        assert "conversation_ready" not in message_ui.calls
+        assert router._message_selection_active is False
 
-    async def test_selecting_a_transcript_entry_opens_the_paged_full_text_reader(
+    async def test_a_long_message_reads_whole_across_thread_pages(
         self, tmp_path,
     ) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
         router, transport, _ = make_router(tmp_path, replies=replies)
-        router._messages = LongHistoryMessages([  # type: ignore[assignment]
-            ("Dele", "Preview", time.time()),
-        ])
+        messages = LongHistoryMessages([("Dele", "Preview", time.time())])
+        router._messages = messages  # type: ignore[assignment]
         await router.open("Messages", request_id="messages-full-reader")
 
         router.on_input(InputEvent(
@@ -1208,59 +1312,47 @@ class TestCapabilityViews:
             trace_id="hud-reader-conversation",
             request_id="messages-full-reader",
         ))
-        await wait_until(lambda: any(
-            isinstance(item, HudList) and item.title == "MESSAGES · CONVERSATION"
-            for item in transport.sent
-        ))
-
-        router.on_input(InputEvent(
-            container_name="capmessage",
-            selected_name="MESSAGES",
-            selected_index=1,
-            trace_id="hud-reader-open",
-            request_id="messages-full-reader",
-        ))
-        await wait_until(lambda: any(
-            isinstance(item, HudList) and item.title == "MESSAGES · MESSAGE"
-            for item in transport.sent
-        ))
-        first_page = [
-            item for item in transport.sent
-            if isinstance(item, HudList) and item.title == "MESSAGES · MESSAGE"
-        ][-1]
-        assert first_page.items[0] == "1/2 · From Dele · unread"
-        assert len(first_page.items) > 2
+        await wait_until(lambda: bool(conversation_frames(transport)))
+        first_page = conversation_frames(transport)[-1]
+        assert first_page.items[0] == "1/2 · Dele"
+        assert len(first_page.items) == 11
         assert all(len(line) <= 62 for line in first_page.items[1:])
-        assert " ".join(first_page.items[1:]).startswith("Opening words")
-        assert first_page.hint == "down more · left x2: back"
+        assert first_page.items[1].startswith("● Dele: Opening words")
+        assert first_page.hint == "down more · read-only · left x2: back"
         assert first_page.selectable is False
+        assert first_page.reader_page == ("hud-reader-conversation", 0, 2)
         assert len(replies.selected) == 1
 
-        router.on_input(InputEvent(
-            container_name="cappage",
-            selected_name="MESSAGES",
-            event_type=EventType.SCROLL_BOTTOM,
-            trace_id="hud-reader-more",
-            request_id="messages-full-reader",
+        # The page gesture is bound to the reader's own trace.
+        router.on_input(page_event(EventType.SCROLL_BOTTOM, "hud-other", "messages-full-reader"))
+        await asyncio.sleep(0.01)
+        assert len(conversation_frames(transport)) == 1
+
+        router.on_input(page_event(
+            EventType.SCROLL_BOTTOM, "hud-reader-conversation", "messages-full-reader",
         ))
-        await wait_until(lambda: len([
-            item for item in transport.sent
-            if isinstance(item, HudList) and item.title == "MESSAGES · MESSAGE"
-        ]) == 2)
-        second_page = [
-            item for item in transport.sent
-            if isinstance(item, HudList) and item.title == "MESSAGES · MESSAGE"
-        ][-1]
-        assert second_page.items[0] == "2/2 · From Dele · unread"
-        assert second_page.hint == "up previous · left x2: back"
-        assert first_page.items[1] != second_page.items[1]
+        await wait_until(lambda: len(conversation_frames(transport)) == 2)
+        second_page = conversation_frames(transport)[-1]
+        assert second_page.items[0] == "2/2 · Dele"
+        assert second_page.hint == "up previous · read-only · left x2: back"
+        assert second_page.reader_page == ("hud-reader-conversation", 1, 2)
+        assert "".join([*first_page.items[1:], *second_page.items[1:]]) == (
+            "● Dele: " + messages.body
+        )
         assert len(replies.selected) == 1
+
+        # Past the last page with nothing older: nothing is read or painted.
+        await asyncio.sleep(0)
+        router.on_input(page_event(
+            EventType.SCROLL_BOTTOM, "hud-reader-conversation", "messages-full-reader",
+        ))
+        await asyncio.sleep(0.01)
+        assert len(conversation_frames(transport)) == 2
 
         router.on_input(InputEvent(
             container_name="capability-lifecycle",
             selected_name="messages-conversation",
         ))
-        assert router._message_detail is None
         assert router._message_history is not None
         assert replies.cleared == ["messages-open"]
 
@@ -1277,9 +1369,9 @@ class TestCapabilityViews:
         pytest.param("😀" * 320 + "FINAL", id="emoji-exceeds-ten-old-rows"),
         pytest.param("  Opening\r\n\r\n" + "Keep  every\tspace.\r\n" * 35 + "FINAL\n  ",
                      id="exact-whitespace"),
-        pytest.param("e\u0301 👩\u200d💻 " * 100 + "FINAL", id="combining-and-joined-emoji"),
+        pytest.param("é 👩‍💻 " * 100 + "FINAL", id="combining-and-joined-emoji"),
     ])
-    async def test_full_message_reader_preserves_exact_serialized_pages_and_back(
+    async def test_thread_reader_preserves_exact_serialized_pages_and_back(
         self, tmp_path, body: str,
     ) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
@@ -1290,13 +1382,12 @@ class TestCapabilityViews:
         request_id = "message-exact-reader"
         await router.open("Messages", request_id=request_id)
         await router._select_capability_row("MESSAGES", 1, "select-thread", request_id)
-        await router._select_message_detail(1, "select-message", request_id)
 
         pages = []
         for expected in range(100):
             frame = [item for item in transport.sent if isinstance(item, HudList)][-1]
             wire = frame.to_wire()
-            assert frame.title == "MESSAGES · MESSAGE"
+            assert frame.title == "MESSAGES · CONVERSATION"
             assert frame.request_id == request_id
             assert wire["items"] == frame.items, "body cannot be shortened during serialization"
             assert 2 <= len(frame.items) <= 11
@@ -1306,37 +1397,39 @@ class TestCapabilityViews:
                 if ord(char) > 0xFFFF or unicodedata.east_asian_width(char) in "WF" else 1
                 for char in row.rstrip("\r\n")
             ) <= 62 for row in frame.items[1:])
-            counter = re.match(r"^(\d+)/(\d+) · From Dele · unread$", frame.items[0])
-            assert counter is not None, "prepared reader pages must identify their row contract first"
+            counter = re.match(r"^(\d+)/(\d+) · Dele$", frame.items[0])
+            assert counter is not None, "reader pages must identify their page first"
             index, total = int(counter[1]) - 1, int(counter[2])
             assert index == expected
+            assert wire["readerPage"] == {"id": "select-thread", "index": index, "count": total}
             assert ("down more" in (frame.hint or "")) == (index + 1 < total)
             assert ("up previous" in (frame.hint or "")) == (index > 0)
             pages.append(wire)
             if index + 1 == total:
                 break
-            await router._page_message_history(EventType.SCROLL_BOTTOM, "page-next", request_id)
+            await router._page_message_history(EventType.SCROLL_BOTTOM, "select-thread", request_id)
         else:
-            pytest.fail("message reader did not expose its final page")
+            pytest.fail("thread reader did not expose its final page")
 
         assert len(pages) > 1
-        assert "".join(row for page in pages for row in page["items"][1:]) == body
+        assert "".join(row for page in pages for row in page["items"][1:]) == "● Dele: " + body
         assert "FINAL" in "".join(pages[-1]["items"][1:])
         assert messages.body == body
         assert len(replies.selected) == 1
 
         before = len(transport.sent)
-        await router._page_message_history(EventType.SCROLL_TOP, "stale", "old-request")
+        await router._page_message_history(EventType.SCROLL_TOP, "select-thread", "old-request")
         assert len(transport.sent) == before
-        await router._page_message_history(EventType.SCROLL_TOP, "page-previous", request_id)
+        await router._page_message_history(EventType.SCROLL_TOP, "forged-trace", request_id)
+        assert len(transport.sent) == before
+        await router._page_message_history(EventType.SCROLL_TOP, "select-thread", request_id)
         assert transport.sent[-1].to_wire() == pages[-2]
         router.on_input(InputEvent(container_name="capability-lifecycle",
             selected_name="messages-conversation", request_id=request_id))
-        assert router._message_detail is None
         assert router._message_history is not None
         assert len(replies.selected) == 1
 
-    async def test_full_message_reader_keeps_counter_visible_before_long_metadata(
+    async def test_thread_reader_keeps_counter_visible_before_a_long_sender(
         self, tmp_path,
     ) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path, replies=FakeReplies())
@@ -1345,14 +1438,16 @@ class TestCapabilityViews:
         router._messages = messages  # type: ignore[assignment]
         await router.open("Messages", request_id="long-sender")
         await router._select_capability_row("MESSAGES", 1, "select-thread", "long-sender")
-        await router._select_message_detail(1, "select-message", "long-sender")
         frame = [item for item in transport.sent if isinstance(item, HudList)][-1]
         wire = frame.to_wire()
-        assert wire["items"][0].startswith("1/1 · From ")
+        assert wire["items"][0].startswith("1/1 · 😀")
         assert len(wire["items"][0].encode("utf-16-le")) // 2 <= 64
-        assert "".join(wire["items"][1:]) == "Exact body."
+        # The header is cut on whole code points, never mid-surrogate.
+        wire["items"][0].encode("utf-8")
+        assert wire["items"][1:] == frame.items[1:]
+        assert "".join(wire["items"][1:]) == "● " + "😀" * 50 + ": Exact body."
 
-    async def test_conversation_pages_are_request_bound_and_show_message_metadata(
+    async def test_conversation_lines_show_message_metadata_and_older_history_on_the_page(
         self, tmp_path,
     ) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
@@ -1368,73 +1463,165 @@ class TestCapabilityViews:
             trace_id="hud-history",
             request_id="messages-history",
         ))
-        await wait_until(lambda: any(
-            isinstance(item, HudList) and item.title == "MESSAGES · CONVERSATION"
-            for item in transport.sent
-        ))
+        await wait_until(lambda: bool(conversation_frames(transport)))
 
-        latest = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        latest = conversation_frames(transport)[-1]
         assert latest.items == [
-            "Latest messages",
-            "Dele · Unread · Attachment",
-            "You · Read · On my way",
-            "Dele · Are you coming?",
-            "▼ Older messages",
+            "1/1+ · Dele",
+            "● Dele: [attachment]\n",
+            "You: On my way\n",
+            "Dele: Are you coming?",
         ]
-        assert latest.hint == "tap read · left x2: back"
-        # The paging rows are addressed by index, never by their copy.
-        assert latest.page_controls == (None, 4)
-
-        router.on_input(InputEvent(
-            container_name="cappage",
-            selected_name="MESSAGES",
-            event_type=2,
-            trace_id="hud-history-older",
-            request_id="messages-history",
-        ))
-        await wait_until(lambda: any(
-            isinstance(item, HudList)
-            and item.items
-            and item.items[0] == "Older messages"
-            for item in transport.sent
-        ))
-        older = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert messages.page_calls == [None, 10]
-        assert older.items == [
-            "Older messages",
-            "Dele · Earlier",
-            "▲ Newer messages",
-        ]
-        assert older.hint == "tap read · left x2: back"
-        assert older.page_controls == (2, None)
-        # The async page task clears its duplicate-input guard after its
-        # replacement frame is committed, as the production bridge does.
+        # chat.db has older messages: the reader promises one more page.
+        assert latest.hint == "down more · read-only · left x2: back"
+        assert latest.reader_page == ("hud-history", 0, 2)
+        assert latest.page_controls is None
         await asyncio.sleep(0)
 
-        router.on_input(InputEvent(
-            container_name="cappage",
-            selected_name="MESSAGES",
-            event_type=1,
-            trace_id="hud-history-newer",
-            request_id="messages-history",
-        ))
-        await wait_until(lambda: any(
-            isinstance(item, HudList)
-            and item.items
-            and item.items[0] == "Latest messages"
-            for item in transport.sent[2:]
-        ))
-        assert messages.page_calls == [None, 10]
+        # Neither a stale request nor another trace can read older history.
+        router.on_input(page_event(EventType.SCROLL_BOTTOM, "hud-history", "stale-request"))
+        await asyncio.sleep(0.01)
+        router.on_input(page_event(EventType.SCROLL_BOTTOM, "hud-forged", "messages-history"))
+        await asyncio.sleep(0.01)
+        assert messages.page_calls == [None]
+        assert len(conversation_frames(transport)) == 1
 
-        router.on_input(InputEvent(
-            container_name="cappage",
-            selected_name="MESSAGES",
-            event_type=1,
-            trace_id="stale-history-newer",
-            request_id="stale-request",
-        ))
-        await asyncio.sleep(0)
+        router.on_input(page_event(EventType.SCROLL_BOTTOM, "hud-history", "messages-history"))
+        await wait_until(lambda: len(conversation_frames(transport)) == 2)
         assert messages.page_calls == [None, 10]
+        # The older message fits the same page: it is repainted with it, and
+        # without the promise of more.
+        current = conversation_frames(transport)[-1]
+        assert current.items == [
+            "1/1 · Dele",
+            "● Dele: [attachment]\n",
+            "You: On my way\n",
+            "Dele: Are you coming?\n",
+            "Dele: Earlier",
+        ]
+        assert current.hint == "read-only · left x2: back"
+        assert current.reader_page == ("hud-history", 0, 1)
+        await asyncio.sleep(0)
+
+        router.on_input(page_event(EventType.SCROLL_BOTTOM, "hud-history", "messages-history"))
+        await asyncio.sleep(0.01)
+        assert messages.page_calls == [None, 10]
+        assert len(conversation_frames(transport)) == 2
+
+    async def test_a_swipe_past_the_last_page_reads_older_messages_into_the_next_page(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        replies = FakeReplies()
+        messages = OlderHistoryMessages()
+        router, transport, _ = make_router(tmp_path, replies=replies)
+        router._messages = messages  # type: ignore[assignment]
+        await router.open("Messages", request_id="messages-older")
+        await router._select_capability_row("MESSAGES", 1, "hud-older", "messages-older")
+
+        first = conversation_frames(transport)[-1]
+        assert first.items[0] == "1/1+ · Dele"
+        assert first.items[1] == "You: Newest 30\n"
+        assert first.items[-1] == "Dele: Newest 21"
+        assert len(first.items) == 11
+        assert first.reader_page == ("hud-older", 0, 2)
+        assert "down more" in (first.hint or "")
+        assert messages.page_calls == [None]
+
+        router.on_input(page_event(EventType.SCROLL_BOTTOM, "hud-older", "messages-older"))
+        await wait_until(lambda: len(conversation_frames(transport)) == 2)
+        # Older rows are read from before the oldest row already shown.
+        assert messages.page_calls == [None, 21]
+        second = conversation_frames(transport)[-1]
+        assert second.items == [
+            "2/2 · Dele",
+            "Dele: Older 20\n",
+            "Dele: Older 19\n",
+            "Dele: Older 18",
+        ]
+        assert second.hint == "up previous · read-only · left x2: back"
+        assert second.reader_page == ("hud-older", 1, 2)
+        assert len(replies.selected) == 1
+        await asyncio.sleep(0)
+
+        # Back up to the newest page without another read.
+        router.on_input(page_event(EventType.SCROLL_TOP, "hud-older", "messages-older"))
+        await wait_until(lambda: len(conversation_frames(transport)) == 3)
+        assert conversation_frames(transport)[-1].items[:2] == ["1/2 · Dele", "You: Newest 30\n"]
+        assert messages.page_calls == [None, 21]
+
+    async def test_a_sent_reply_shows_as_the_newest_message_once_chat_db_has_it(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        messages = SentReplyMessages(records_after=3)
+        router, transport, _ = make_router(
+            tmp_path, replies=FakeReplies(), message_ui=FakeMessageUI(),
+        )
+        router._messages = messages  # type: ignore[assignment]
+        await router.open("Messages", request_id="messages-sent")
+        await router._select_capability_row("MESSAGES", 1, "hud-sent", "messages-sent")
+        await router._page_message_history(EventType.SCROLL_BOTTOM, "hud-sent", "messages-sent")
+        assert conversation_frames(transport)[-1].items[0] == "2/2 · Dele"
+
+        await router.show_sent_reply("On my way!")
+        # The first post-send read missed the row; the wait found it.
+        assert messages.reads == 3
+        frame = conversation_frames(transport)[-1]
+        assert frame.request_id == "messages-sent"
+        assert frame.items[0] == "1/2 · Dele"
+        assert frame.items[1] == "You: On my way!\n"
+        assert frame.reader_page == ("hud-sent", 0, 2)
+        assert frame.hint == "down more · tap: reply · left x2: back"
+        state = router._message_history
+        assert state is not None and state.entries[0].row_id == 6
+        assert [entry.from_me for entry in state.entries] == [True, False]
+
+    async def test_a_sent_reply_missing_from_chat_db_is_shown_from_the_send(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # type: ignore[no-untyped-def]
+        import joat.services.capabilities as capabilities
+        monkeypatch.setattr(capabilities, "_SENT_REPLY_WAIT_S", 0.05)
+        messages = SentReplyMessages(records_after=None)
+        router, transport, _ = make_router(
+            tmp_path, replies=FakeReplies(), message_ui=FakeMessageUI(),
+        )
+        router._messages = messages  # type: ignore[assignment]
+        await router.open("Messages", request_id="messages-fallback")
+        await router._select_capability_row("MESSAGES", 1, "hud-fallback", "messages-fallback")
+        await router._page_message_history(EventType.SCROLL_BOTTOM, "hud-fallback", "messages-fallback")
+
+        await router.show_sent_reply("  Running late  ")
+        assert messages.reads > 1
+        frame = conversation_frames(transport)[-1]
+        assert frame.request_id == "messages-fallback"
+        assert frame.items[0] == "1/2 · Dele"
+        assert frame.items[1] == "You:   Running late  \n"
+        assert frame.items[2].startswith("Dele: word word")
+        assert frame.reader_page == ("hud-fallback", 0, 2)
+        state = router._message_history
+        assert state is not None
+        assert state.entries[0].from_me is True and state.entries[0].text == "  Running late  "
+        assert len(state.entries) == 2
+
+    async def test_a_sent_reply_does_not_paint_after_the_wearer_leaves_the_thread(
+        self, tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        messages = SentReplyMessages(records_after=None)
+        router, transport, _ = make_router(
+            tmp_path, replies=FakeReplies(), message_ui=FakeMessageUI(),
+        )
+        router._messages = messages  # type: ignore[assignment]
+        await router.open("Messages", request_id="messages-left")
+        await router._select_capability_row("MESSAGES", 1, "hud-left", "messages-left")
+        pending = asyncio.create_task(router.show_sent_reply("Hello"))
+        await wait_until(lambda: messages.reads >= 2)
+        router.on_input(InputEvent(
+            container_name="capability-lifecycle", selected_name="messages-list",
+            request_id="messages-left",
+        ))
+        before = len(transport.sent)
+        await asyncio.wait_for(pending, 5)
+        assert len(transport.sent) == before
+        assert router._message_history is None
 
     async def test_selection_time_permission_loss_replaces_the_list_with_retry(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
@@ -1511,12 +1698,14 @@ class TestCapabilityViews:
         assert router._message_history is None
         assert transport.sent == before
 
+    @pytest.mark.parametrize("error", [
+        pytest.param(PermissionError("synthetic old page failure"), id="failure"),
+        pytest.param(None, id="late-success"),
+    ])
     async def test_old_message_page_failure_cannot_clear_new_selection(
-        self, tmp_path,
+        self, tmp_path, error: OSError | None,
     ) -> None:  # type: ignore[no-untyped-def]
-        messages = HeldHistoryMessages(
-            hold_older=True, error=PermissionError("synthetic old page failure"),
-        )
+        messages = HeldHistoryMessages(hold_older=True, error=error)
         replies = FakeReplies()
         router, transport, _ = make_router(tmp_path, replies=replies)
         router._messages = messages  # type: ignore[assignment]
@@ -1524,8 +1713,10 @@ class TestCapabilityViews:
         first_index = message_row_index(transport, "] Thread A ·")
         second_index = message_row_index(transport, "] Thread B ·")
         await router._select_capability_row("MESSAGES", first_index, "first", "held-page")
+        # Thread A has older history; the swipe past its only page reads it.
+        assert conversation_frames(transport)[-1].reader_page == ("first", 0, 2)
         pending = asyncio.create_task(router._page_message_history(
-            EventType.SCROLL_BOTTOM, "old-page", "held-page",
+            EventType.SCROLL_BOTTOM, "first", "held-page",
         ))
         try:
             assert await asyncio.to_thread(messages.started.wait, 1)
@@ -1543,6 +1734,8 @@ class TestCapabilityViews:
         assert router._message_selection_active is True
         assert router._message_history is not None
         assert router._message_history.thread.sender == "Thread B"
+        assert [entry.row_id for entry in router._message_history.entries] == [10]
+        assert router._message_history.index == 0
         assert transport.sent == before
 
     async def test_returning_home_clears_the_selected_message_recipient(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -1687,11 +1880,15 @@ class TestCapabilityViews:
     ) -> None:
         # Group identity is independent of reply support: a group with no
         # chat GUID has no send target, so it reads as "Participant" and
-        # never arms a reply to whichever member happened to write last.
+        # never arms a reply to whichever member happened to write last,
+        # even with a message UI that could take a tap.
         thread = MessageThread("Project team", "handle-0", "Ship it", time.time(), is_group=True)
         monkeypatch.setattr(FakeMessages, "recent_threads", lambda _self, limit=5: [thread])
         replies = FakeReplies()
-        router, transport, _ = make_router(tmp_path, rows=[], replies=replies)
+        message_ui = FakeMessageUI()
+        router, transport, _ = make_router(
+            tmp_path, rows=[], replies=replies, message_ui=message_ui,
+        )
         await router.open("Messages")
 
         router.on_input(InputEvent(
@@ -1700,17 +1897,17 @@ class TestCapabilityViews:
             selected_index=message_row_index(transport, "] Project team"),
             trace_id="hud-group",
         ))
-        await wait_until(lambda: any(
-            isinstance(m, HudList) and m.title == "MESSAGES · CONVERSATION"
-            for m in transport.sent
-        ))
+        await wait_until(lambda: bool(conversation_frames(transport)))
 
         assert replies.selected == []
         frame = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert frame.selectable
-        assert "Participant · Ship it" in frame.items
-        assert "read-only" in frame.hint
+        assert frame.selectable is False
+        assert frame.items == ["1/1 · Project team (group)", "Participant: Ship it"]
+        assert frame.hint == "read-only · left x2: back"
         assert "say reply" not in frame.hint
+        assert "conversation_ready" not in message_ui.calls
+        assert router._message_selection_active is False
+        assert thread.handle not in repr(transport.sent)
 
     async def test_group_with_chat_guid_arms_reply_and_keeps_identity_mac_side(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -1721,24 +1918,35 @@ class TestCapabilityViews:
         )
         monkeypatch.setattr(FakeMessages, "recent_threads", lambda _self, limit=5: [thread])
         replies = FakeReplies()
-        router, transport, _ = make_router(tmp_path, rows=[], replies=replies)
+        message_ui = FakeMessageUI()
+        router, transport, _ = make_router(
+            tmp_path, rows=[], replies=replies, message_ui=message_ui,
+        )
         await router.open("Messages")
         router.on_input(InputEvent(
             container_name="capdata", selected_name="MESSAGES",
             selected_index=message_row_index(transport, "] Project team"), trace_id="group-guid",
         ))
         await wait_until(lambda: bool(replies.selected))
-        await wait_until(lambda: any(
-            isinstance(message, HudList) and message.title == "MESSAGES · CONVERSATION"
-            for message in transport.sent
-        ))
+        await wait_until(lambda: bool(conversation_frames(transport)))
 
         assert replies.selected == [(thread, "group-guid")]
         frame = [message for message in transport.sent if isinstance(message, HudList)][-1]
-        assert frame.hint == "tap read · left x2: back"
+        assert frame.hint == "tap: reply · left x2: back"
         assert "read-only" not in frame.hint
-        assert "Participant · Ship it" in frame.items
-        wire_frames = repr(transport.sent)
+        assert frame.selectable is True
+        assert frame.items == ["1/1 · Project team (group)", "Participant: Ship it"]
+        assert frame.reader_page == ("group-guid", 0, 1)
+
+        # A tap replies to the whole group: the target never crosses the
+        # wire and the tap cannot re-select a participant.
+        router.on_input(InputEvent(
+            container_name="capmessage", selected_index=1, trace_id="group-guid",
+        ))
+        await wait_until(lambda: "begin_reply" in message_ui.calls)
+        assert replies.selected == [(thread, "group-guid")]
+        wire_frames = repr(transport.sent) + repr([m.to_wire() for m in transport.sent
+                                                   if hasattr(m, "to_wire")])
         assert thread.handle not in wire_frames
         assert thread.chat_guid not in wire_frames
 
