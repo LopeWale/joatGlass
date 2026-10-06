@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from joat.agents.cli_accounts import AccountProfile, AccountRegistry
-from joat.agents.cli_signin import CliSignIn, LoginSnapshot
+from joat.agents.cli_signin import CLAUDE_STEPS, CliSignIn, LoginSnapshot
 
 FAKE_CLAUDE = f"""#!{sys.executable}
 import sys
@@ -69,6 +69,7 @@ async def test_a_wrong_code_asks_again_instead_of_checking_forever(tmp_path: Pat
     signin.start(registry.active("claude"))
     first = await _until(signin, "enter_code")
     assert first.needs_code and first.url is not None
+    assert first.message == CLAUDE_STEPS and "Authorize" in first.message
 
     assert signin.submit_code("WRONG")
     again = await _until(signin, "enter_code")

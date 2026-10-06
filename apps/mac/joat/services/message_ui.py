@@ -67,6 +67,11 @@ class MessageUIController:
         if visit is not None and self._current(visit):
             self._reply_fence = self._fence_audio()
 
+    def conversation_on_glass(self) -> bool:
+        """The selected conversation is still the page the wearer is on."""
+        visit = self._visit
+        return visit is not None and self._reply_fence is not None and self._current(visit)
+
     def matches(self, request_id: str | None, selection_id: str | None) -> bool:
         visit = self._visit
         return visit is not None and (request_id, selection_id) == (visit.request_id, visit.selection_id)
@@ -133,6 +138,8 @@ class MessageUIController:
     async def _begin(self, *, reply: bool) -> str:
         visit = self._visit
         if visit is None or not self._current(visit):
+            if visit is not None and self._capturing():
+                return "Wait for the microphone to finish, then reply."
             return "Open Messages and choose a conversation first."
         previous = self._action
         if previous is not None and (previous.status is None or previous.status.state not in _TERMINAL):
