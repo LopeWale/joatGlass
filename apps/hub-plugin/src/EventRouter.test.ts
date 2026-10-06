@@ -1040,25 +1040,10 @@ describe('EventRouter — production Messages menu composition', () => {
   it('routes physical menu and list events into the bound Mac request, then walks back to Home', async () => {
     let dispatch: (event: EvenHubEvent) => void = () => {};
     const sent: UplinkMessage[] = [];
-    // Mirrors HudPresenter.usesCustomListSelection: a page drawn as the
-    // firmware's own list (the Messages picker and thread since 2026-10-05)
-    // lets the firmware cursor own the reported row index.
-    type NativeListOptions = { nativeFirmwareList?: boolean; nativeTextPage?: boolean };
-    let shownOptions: NativeListOptions | undefined;
-    const ownsCustomCursor = (options: NativeListOptions | undefined) => options !== undefined
-      && options.nativeFirmwareList !== true && options.nativeTextPage !== true;
     const hud = {
-      usesCustomListSelection: (next?: NativeListOptions) => next
-        ? ownsCustomCursor(next)
-        : ownsCustomCursor(shownOptions),
-      showList: vi.fn(async (_items: string[], options?: NativeListOptions) => {
-        shownOptions = options;
-        return true;
-      }),
+      showList: vi.fn(async () => true),
       showDefault: vi.fn(async () => true),
       setStatus: vi.fn(async () => true),
-      setSelection: vi.fn(async () => true),
-      moveSelection: vi.fn(async () => true),
       showProductivity: vi.fn(async () => true),
     } as unknown as HudPresenter;
     const link = {

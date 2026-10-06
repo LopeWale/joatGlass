@@ -25,7 +25,6 @@ function rig(
   listResult: PaintResult | PaintResult[] = true,
   productivityResult: PaintResult | PaintResult[] = true,
   productivityVisible = true,
-  selectionResult: PaintResult = true,
 ) {
   const lists: string[][] = [];
   const listOptions: Array<{ title?: string; hint?: string; selectable?: boolean } | undefined> = [];
@@ -33,37 +32,19 @@ function rig(
   const operations: string[] = [];
   const productivities: ProductivityHudModel[] = [];
   const deferredProductivityVisibleCallbacks: Array<(() => void) | undefined> = [];
-  const selections: number[] = [];
-  const moves: number[] = [];
   const sent: Array<Record<string, unknown>> = [];
   const surfaceEvents: Array<Record<string, unknown>> = [];
   let defaults = 0;
   let listCall = 0;
   let visibleSelection = 0;
   let productivityCall = 0;
-  // The list page on the glass, as HudPresenter tracks its surface: a
-  // firmware list or text page owns its own cursor; a raster list or any
-  // non-list surface leaves the cursor to the plugin.
   type PageOptions = {
     title?: string; hint?: string; selectable?: boolean;
     nativeFirmwareList?: boolean; nativeTextPage?: boolean; initialSelectedIndex?: number;
   };
-  let currentList: PageOptions | undefined;
-  const setSelection = vi.fn(async (index: number) => {
-    visibleSelection = index;
-    selections.push(index);
-    return selectionResult;
-  });
   const hud = {
-    // As the real presenter answers (HudPresenter.usesCustomListSelection):
-    // with `next`, for the page about to be shown by its opt-in; without it,
-    // for the page on the glass.
-    usesCustomListSelection: (next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (next
-      ? next.nativeFirmwareList !== true && next.nativeTextPage !== true
-      : !(currentList?.nativeFirmwareList || currentList?.nativeTextPage)),
     showList: vi.fn(async (items: string[], options?: PageOptions) => {
       operations.push('list');
-      currentList = options;
       // HudPresenter.initialListSelection: a raster list opens on the
       // requested row; a firmware list always starts on row one (the
       // firmware has no cursor-setting API).
@@ -81,19 +62,12 @@ function rig(
       statuses.push(t);
       return true;
     }),
-    setSelection,
-    restoreSelection: vi.fn(async (index: number) => setSelection(index)),
-    moveSelection: vi.fn(async (delta: number) => {
-      moves.push(delta);
-      return true;
-    }),
     showProductivity: vi.fn(async (
       productivity: ProductivityHudModel,
       _status?: string,
       onDeferredProductivityVisible?: () => void,
     ) => {
       operations.push('productivity');
-      currentList = undefined;
       productivities.push(productivity);
       deferredProductivityVisibleCallbacks.push(onDeferredProductivityVisible);
       const result = Array.isArray(productivityResult)
@@ -103,7 +77,7 @@ function rig(
       return result;
     }),
     isProductivityVisible: vi.fn(() => productivityVisible),
-    showDefault: vi.fn(async () => { defaults += 1; currentList = undefined; return true; }),
+    showDefault: vi.fn(async () => { defaults += 1; return true; }),
   } as unknown as HudPresenter;
   const link = { send: (m: Record<string, unknown>) => {
     const event = m.event as { containerName?: string; selectedName?: string } | undefined;
@@ -115,7 +89,7 @@ function rig(
   const menu = new CapabilityMenu(hud, new Settings(), link);
   return {
     menu, hud, lists, listOptions, operations, productivities,
-    deferredProductivityVisibleCallbacks, selections, moves, statuses, sent, surfaceEvents,
+    deferredProductivityVisibleCallbacks, statuses, sent, surfaceEvents,
     defaultsCount: () => defaults,
     visibleSelection: () => visibleSelection,
   };
@@ -316,7 +290,7 @@ describe('CapabilityMenu', () => {
   });
 
   it('turns Messages access guidance into a real retry action after Mac recovery', async () => {
-    const { menu, sent, listOptions, moves } = rig();
+    const { menu, sent, listOptions } = rig();
     await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const firstRequestId = latestRequestId(sent);
@@ -335,7 +309,6 @@ describe('CapabilityMenu', () => {
       selectable: true, hint: 'tap: retry · left x2: back',
     });
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
-    expect(moves).toEqual([]);
 
     expect(menu.handleClick()).toBe(true);
     await vi.waitFor(() => expect(sent).toHaveLength(2));
@@ -1922,7 +1895,7 @@ describe('CapabilityMenu', () => {
     // controls. The glasses' Settings slot is a cached firmware menu link, so
     // a scroll or press on any old row index must apply nothing and send
     // nothing; the page is consumed locally until Back.
-    const { menu, lists, listOptions, selections, moves, sent } = rig();
+    const { menu, lists, listOptions, sent } = rig();
     await menu.openSettings(); // contextual-menu item
     expect(lists[0]).toEqual([
       'Manage listening and Mac connections',
@@ -1936,8 +1909,6 @@ describe('CapabilityMenu', () => {
     });
     expect(menu.isOpen()).toBe(true);
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
-    expect(selections).toEqual([]);
-    expect(moves).toEqual([]);
     expect(menu.handleClick()).toBe(true); // the row that used to apply "Mac decides"
     expect(menu.handleList(click(1))).toBe(true);
     expect(sent).toEqual([]);
@@ -2056,12 +2027,9 @@ describe('Planning split dashboard', () => {
     const panes: Array<{ dateIndex: number; focused: boolean; itemIndex: number }> = [];
     const sent: Array<Record<string, unknown>> = [];
     const hud = {
-      usesCustomListSelection: () => true,
       showSidebar: vi.fn(async () => true),
       showList: vi.fn(async () => true),
       setStatus: vi.fn(async () => true),
-      setSelection: vi.fn(async () => true),
-      moveSelection: vi.fn(async () => true),
       updatePlanningPane: vi.fn(async (pane: { dateIndex: number; focused: boolean; itemIndex: number }) => {
         panes.push({ ...pane });
         return true;

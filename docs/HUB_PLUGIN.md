@@ -556,7 +556,9 @@ the packer never invents one; nothing bumps it automatically, so an
 unbumped repack collides with what is already on the hub and the only
 offer is "add and replace" — silently overwriting a build that was not
 this one. The number lives in `app.json`, `package.json`, and
-`package-lock.json`; all three move together.
+`package-lock.json`; all three move together (`npm version <x.y.z>
+--no-git-tag-version` moves the last two), and `pack.sh` refuses a package
+whose three numbers differ.
 
 **The packer is deterministic** (measured 2026-09-01: two packs of one
 clean worktree were byte-identical, SHA-256 `f4a597b5…` both times). So a
