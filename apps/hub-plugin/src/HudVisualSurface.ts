@@ -5,6 +5,7 @@ import {
 import type { BridgeClient } from './BridgeClient';
 import type { G2DiagnosticTrace } from './G2DiagnosticTrace';
 import type { HudStatusModel } from './HudStatus';
+import type { EvenReaderLine } from './EvenFont';
 import { isNavigationSetupStatus, type NavigationHudModel } from './NavigationHud';
 import type { PanelRailVisual } from './PanelRail';
 import {
@@ -87,6 +88,17 @@ type HudVisualBaseFrame =
     status: string;
     micOn: boolean;
     navigation: NavigationHudModel;
+  }
+  | {
+    /** A reader set in Even's font at 66% across the whole canvas
+     * (EvenFont.ts): the Messages thread and every Mac-paged reader. */
+    kind: 'reader';
+    status: string;
+    micOn: boolean;
+    title: string;
+    lines: EvenReaderLine[];
+    /** The page's hint, its first clause the page count ("2/3"). */
+    hint: string;
   };
 
 /** Overlays composite into the same four G2 images, not a fifth container.
@@ -105,6 +117,8 @@ export interface HudFrameRenderer {
   render(frame: HudVisualFrame): Promise<readonly HudImageTile[]>;
   /** The header band alone, as its two image halves. */
   renderHeader?(model: HudStatusModel, label: string): Promise<readonly HudImageTile[]>;
+  /** Whether this renderer sets readers in Even's font (EvenFont.ts). */
+  readonly drawsReaders?: boolean;
 }
 
 /** A header repaint queued on the same single image lane as frames. */
@@ -127,6 +141,9 @@ export interface HudFramePainter {
   paintHeader?(model: HudStatusModel, label: string, isCurrent: () => boolean): Promise<boolean>;
   /** Whether this painter can draw the header (its renderer has one). */
   canPaintHeader?(): boolean;
+  /** Whether this painter draws a reader page in Even's font at 66%. A
+   * painter without it keeps readers as firmware text pages. */
+  canPaintReader?(): boolean;
   /** Wait for queued paints without cancelling their delivery receipts. */
   whenIdle?(timeoutMs?: number): Promise<boolean>;
   /** Hold image submissions while a bounded native-idle check and page
@@ -381,6 +398,10 @@ export class HudVisualSurface implements HudFramePainter {
 
   canPaintHeader(): boolean {
     return this.renderer.renderHeader !== undefined;
+  }
+
+  canPaintReader(): boolean {
+    return this.renderer.drawsReaders === true;
   }
 
   paintHeader(model: HudStatusModel, label: string, isCurrent: () => boolean): Promise<boolean> {

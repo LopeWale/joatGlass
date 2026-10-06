@@ -19,6 +19,7 @@ import {
 } from './AssistantConversationSurface';
 import { paginateMeasured } from './FirmwareText';
 import { overlayConversation } from './ConversationOverlay';
+import { paginateEven, type EvenReaderLine } from './EvenFont';
 import { hasImageHeader, withImageHeader } from './HeaderImage';
 import { ASSISTANT_ANSWER_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
 import { type HudStatusModel, hudStatusLabel, nativeStatusLine } from './HudStatus';
@@ -227,6 +228,9 @@ let nativeOverviewEnabled = String(import.meta.env.VITE_NATIVE_OVERVIEW ?? '1') 
 /** Every firmware page carries the image spine as its header
  * (HeaderImage.ts); `VITE_IMAGE_HEADER=0` keeps the firmware text line. */
 const imageHeaderEnabled = String(import.meta.env.VITE_IMAGE_HEADER ?? '1') !== '0';
+/** Readers set in Even's font at 66% across the whole canvas (the wearer's
+ * ask, 2026-10-06); `VITE_EVEN_FONT_PAGES=0` keeps firmware text pages. */
+const evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '1') !== '0';
 
 /** Tests that pin the IMAGE overview select it here. Never product code. */
 export function setNativeOverviewForTest(on: boolean): void {
@@ -281,6 +285,9 @@ interface NativeTextPageState {
   page: number;
   body: string;
   hint: string;
+  /** Present when the page is set in Even's font on an image page
+   * (EvenFont.ts) rather than as a firmware text page. */
+  lines?: EvenReaderLine[][];
 }
 
 /** The swipe promises a Mac reader writes for its own pages, formatted. */
@@ -724,6 +731,64 @@ export class HudPresenter {
    * compatibility surface (no visual HUD) shows it as its text layout. */
   private usesNativeTextPage(options: { nativeTextPage?: boolean }): boolean {
     return options.nativeTextPage === true && this.visual !== undefined;
+  }
+
+  /** A reader drawn in Even's font at 66% on the four image tiles, where
+   * the painter can draw one; otherwise it stays a firmware text page. */
+  private usesEvenFontPage(options: { nativeTextPage?: boolean }): boolean {
+    return evenFontPagesEnabled && this.usesNativeTextPage(options) && this.visual?.canPaintReader?.() === true;
+  }
+
+  /** The reader on the glass is an Even-font image page. Derived, not
+   * stored, so it cannot outlive the page. */
+  private evenFontPageOnGlass(): boolean {
+    const state = this.nativeTextPage;
+    return this.pageOwner === 'visual' && this.surface.kind === 'list'
+      && this.usesEvenFontPage(this.surface.options)
+      && state?.lines !== undefined && state.source === this.surface.items.join('\n');
+  }
+
+  /** Lay the reader out in Even's font and paint it as an image page. */
+  private async renderEvenFontPage(
+    surface: Extract<HudSurface, { kind: 'list' }>,
+    current: () => boolean,
+  ): Promise<boolean> {
+    const from = this.tracePage();
+    const source = surface.items.join('\n');
+    const lines = paginateEven(surface.items, surface.options.title.trim().toUpperCase().startsWith('MESSAGES'));
+    const pages = lines.map((page) => page.map((line) => line.text).join('\n'));
+    const page = this.nativeTextPage?.source === source
+      ? Math.max(0, Math.min(this.nativeTextPage.page, pages.length - 1))
+      : surface.options.nativeTextPageFromEnd ? pages.length - 1 : 0;
+    const hint = textPageHint(page, pages.length, surface.options.hint, surface.options.reviewTapOnLastPage);
+    if (!await this.rebuildVisualPage() || !current()) {
+      this.recordPageTransition(from, 'list', 'show_list', 'failed');
+      return false;
+    }
+    if (this.surface.kind === 'default' && !this.focusReturn) {
+      this.focusReturn = {
+        streams: new Map(this.streams), brightness: new Map(this.brightness),
+        kinds: new Map(this.kinds), notificationId: this.notificationId,
+      };
+    }
+    this.clearActionOverlay();
+    this.resetAll();
+    this.surface = surface;
+    this.streams.set(ContainerId.Main, surface.options.title);
+    this.brightness.set(ContainerId.Main, 4);
+    this.streams.set(ContainerId.Hint, surface.options.hint);
+    this.brightness.set(ContainerId.Hint, 1);
+    this.nativeTextPage = { source, pages, page, body: pages[page] ?? ' ', hint, lines };
+    const visual = this.visual!;
+    const painted = visual.paintExact
+      ? await visual.paintExact(this.visualFrame(), current)
+      : await visual.paint(this.visualFrame());
+    if (!painted || !current()) {
+      this.recordPageTransition(from, 'list', 'show_list', 'failed');
+      return false;
+    }
+    this.recordPageTransition(from, 'list', 'show_list', 'success');
+    return true;
   }
 
   /** Replace a container's full text. Also resets any stream in progress.
@@ -1596,6 +1661,7 @@ export class HudPresenter {
     const current = () => displayCurrent() && !this.confirmation && !this.promptQuestion
       && (isCurrent?.() ?? true);
     if (!current()) return false;
+    if (this.usesEvenFontPage(surface.options)) return this.renderEvenFontPage(surface, current);
     const from = this.tracePage();
     const liveStatus = this.captureLiveStatus();
     const source = surface.items.join('\n');
@@ -1640,7 +1706,7 @@ export class HudPresenter {
    * of an earlier one must never hold a later page's tap back. */
   isTextPageAtEnd(): boolean {
     const state = this.nativeTextPage;
-    if (!state || this.pageOwner !== 'text-page-native') return true;
+    if (!state || (this.pageOwner !== 'text-page-native' && !this.evenFontPageOnGlass())) return true;
     return state.page >= state.pages.length - 1;
   }
 
@@ -1651,9 +1717,19 @@ export class HudPresenter {
     const macHint = this.surface.kind === 'list' && this.usesNativeTextPage(this.surface.options)
       ? this.surface.options.hint
       : this.surface.kind === 'productivity' ? productivityActionHint(this.surface.productivity) : undefined;
-    if (!state || this.pageOwner !== 'text-page-native' || macHint === undefined) return false;
+    const evenFont = this.evenFontPageOnGlass();
+    if (!state || (this.pageOwner !== 'text-page-native' && !evenFont) || macHint === undefined) return false;
     const page = direction === 'down' ? state.page + 1 : state.page - 1;
     if (page < 0 || page >= state.pages.length) return false;
+    if (evenFont) {
+      // The image page repaints; only the tiles whose pixels changed are sent.
+      const review = this.surface.kind === 'list' && this.surface.options.reviewTapOnLastPage === true;
+      state.page = page;
+      state.body = state.pages[page] ?? ' ';
+      state.hint = textPageHint(page, state.pages.length, macHint, review);
+      void this.paintVisual();
+      return true;
+    }
     const previous = { body: state.body, hint: state.hint };
     const review = this.surface.kind === 'list' && this.surface.options.reviewTapOnLastPage === true;
     state.page = page;
@@ -3068,6 +3144,17 @@ export class HudPresenter {
     // A confirmation, a question, a conversation page and a Planning outcome
     // are firmware pages; while one is on the glass the image page beneath
     // is not painted (pageOwner), so this frame describes the retained page.
+    const reader = this.nativeTextPage;
+    if (this.surface.kind === 'list' && reader?.lines && this.evenFontPageOnGlass()) {
+      return this.withOverlays({
+        kind: 'reader',
+        status,
+        micOn: this.micOn,
+        title: this.surface.options.title,
+        lines: (reader.lines[reader.page] ?? []).map((line) => ({ ...line })),
+        hint: reader.hint,
+      });
+    }
     if (this.surface.kind === 'list') {
       const railTab = this.surface.options.railTab;
       return this.withOverlays({
@@ -3433,6 +3520,9 @@ export class HudPresenter {
       rail: this.rail.export(),
       ...(assistantConversation ? { assistantConversation } : {}),
       ...(nativeTerminal ? { nativeTerminal } : {}),
+      // The reader's own page: a return from the background resumes it
+      // instead of starting the wearer over at page one.
+      ...(this.nativeTextPage ? { textPage: { source: this.nativeTextPage.source, page: this.nativeTextPage.page } } : {}),
     };
   }
 
@@ -3475,6 +3565,13 @@ export class HudPresenter {
       && !this.assistantConversation.importState(saved.assistantConversation)) return false;
     if (saved.nativeTerminal !== undefined
       && !this.nativeTerminal.importState(saved.nativeTerminal)) return false;
+    const textPage = saved.textPage as { source?: unknown; page?: unknown } | undefined;
+    if (typeof textPage?.source === 'string' && typeof textPage.page === 'number'
+      && Number.isInteger(textPage.page) && textPage.page >= 0) {
+      // Only the page index: the render that follows pages the rows again
+      // and resumes here when they are the same rows.
+      this.nativeTextPage = { source: textPage.source, pages: [], page: textPage.page, body: ' ', hint: '' };
+    }
     return true;
   }
 

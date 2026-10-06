@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-10-06 — Readers in Even's font at 66%, spread across the whole glass
+
+The wearer: pages look cramped and sparse, and only Planning uses the full 576x288; "use the smaller font display", "space shit out", and keep a margin "so things are not getting cut off at the edge of the screen".
+
+- **Every reader is now set in Even's own font at 66%**: the Messages thread first, and also the message review, News, QuickNotes and Planning readers. That means every surface that went through the firmware text page (`renderNativeTextPage`).
+  - **Why images:** the firmware gives plugin text one font at one size (a 27 px line, seven lines a page). No SDK through 0.0.16 offers a size. So the page is drawn into the four 288x144 image tiles over the full-screen input layer, as Planning is.
+  - **The font itself:** the letterforms are the firmware's, from the atlas cut from the official simulator (`src/assets/even-font.*`, `scripts/build_even_font.py`). Each glyph sits where pretext places it, so the advances and kerning are the firmware's, scaled.
+  - **Word spacing:** 1.5 px is added per space, because at 66% the firmware's space runs words together.
+- **Spaced out, edge to edge:**
+  - Body text sits on a 22 px line (the 18 px glyph line plus leading).
+  - A 6 px gap separates messages.
+  - Text runs from x 18 to 558.
+  - The hint sits at the foot, with the page count right-aligned.
+  - The thread fixture went from two messages on page 1 of 4 to six messages on page 1 of 2.
+- **Responsive, element by element** (`EvenFont.ts`):
+  - **Messages and prose** wrap at word boundaries and are never cut. A message that does not fit carries on to the next page.
+  - **One token wider than the whole line** (a long link) is the only thing broken mid-word, after `/ . - _ ? & = #` where possible.
+  - **The hint** keeps the page count whole. It drops its swipe clause first, then shortens with "…".
+  - **Rows are re-set at the new width.** The Mac's 62-column reader rows are joined back first: a row wrapped at a space or cut at the full 62 columns continues, and a line break ends a paragraph.
+  - **Sender names** ("Adele:", "You:") are drawn brighter than the words after them.
+- **Margins:** nothing is drawn within 16 px of either side, 3 px of the top or 8 px of the bottom. A test checks every placed run on stress pages (long names, doubled links, a long hint). The simulator capture has no lit pixel in those bands.
+- **Paging** repaints the tiles; it no longer upgrades the text in place. Only tiles whose pixels changed are sent, and paging back reuses the encoded tiles.
+  - Measured in the simulator: opening the thread 144–357 ms (the first open includes loading the font); a page turn 75–81 ms.
+  - On the glasses each tile is a BLE image send (about 0.1 s plus 3.9 ms/KB), so a page turn will cost more than the two text upgrades (about 83 ms each) it replaces. This is the one place the change adds latency, and it is not yet measured on hardware.
+- **A reader keeps its page through the background migration.** The page index is in the background snapshot; before this, a return started the reader over at page 1.
+- **Known limit:** when JOAT's box opens over the thread, the lines left above the box are firmware text in the firmware's size. Image tiles cannot be cut under a box without being resent.
+- **How to verify, and what is not verified:**
+  - `VITE_EVEN_FONT_PAGES=0` keeps the firmware text pages.
+  - Dev fixture: `?joatVisual=messages-conversation-long`, a real Mac-paged thread with a link cut mid-token, driven through the menu so the simulator's swipes page it.
+  - The simulator draws the firmware font as an approximation (Even's test-with-simulator guidance), so the letterforms need a look on the glasses.
+  - Not verified on physical glasses.
+- Plugin 1127 passed; typecheck clean. Plugin-only.
+
 ## 2026-10-06 — Build JOAT 0.1.107
 
 - Packed from `c10cb86` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.107 above the last recorded build (0.1.106); app.json, package.json and package-lock.json all 0.1.107. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1114 tests passed.

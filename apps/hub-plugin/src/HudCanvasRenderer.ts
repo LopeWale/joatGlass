@@ -1,4 +1,8 @@
 import { GesturePolicy } from './GesturePolicy';
+import {
+  EVEN_READER, drawEvenText, evenLineHeight, evenTextWidth, loadEvenFont, readerHint, readerLineTops,
+  type EvenReaderLine,
+} from './EvenFont';
 import chatCircleSvg from '@phosphor-icons/core/regular/chat-circle-dots.svg?raw';
 import bellSvg from '@phosphor-icons/core/regular/bell.svg?raw';
 import calendarSvg from '@phosphor-icons/core/regular/calendar-dots.svg?raw';
@@ -271,7 +275,53 @@ export function batteryIconFor(
 /** The raster lists draw flat: every pixel the rounded frame occupied was
  * a pixel of content. The dashboard and the live map keep the shell. */
 export function usesFlatHudShell(kind: HudVisualFrame['kind']): boolean {
-  return kind === 'list';
+  return kind === 'list' || kind === 'reader';
+}
+
+/** One run of text on a reader page, where it lands and how bright. */
+export interface ReaderRun {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  alpha: number;
+}
+
+/** Brightness of a reader's parts: the speaker over the words, the hint
+ * well under both. */
+const READER_ALPHA = { speaker: 1, body: 0.82, hint: 0.5 } as const;
+
+/**
+ * Every run a reader page draws, in page coordinates. The renderer draws
+ * exactly these, so the margin rule (16 px each side, 3 px top, 8 px
+ * bottom) is checked here without a canvas.
+ */
+export function readerLayout(lines: readonly EvenReaderLine[], hint: string): ReaderRun[] {
+  const runs: ReaderRun[] = [];
+  const tops = readerLineTops(lines);
+  lines.forEach((line, index) => {
+    const y = tops[index] ?? EVEN_READER.bodyTop;
+    const x = EVEN_READER.marginX;
+    const label = line.speaker ? line.text.slice(0, line.speaker) : '';
+    if (label) runs.push({ text: label, x, y, width: evenTextWidth(label), alpha: READER_ALPHA.speaker });
+    const rest = line.text.slice(label.length);
+    const restX = x + evenTextWidth(label);
+    if (rest.trim()) {
+      runs.push({ text: rest, x: restX, y, width: evenTextWidth(line.text) - evenTextWidth(label), alpha: READER_ALPHA.body });
+    }
+  });
+  const { left, right } = readerHint(hint);
+  const hintY = EVEN_READER.hintBottom - evenLineHeight();
+  if (left) {
+    runs.push({ text: left, x: EVEN_READER.marginX, y: hintY, width: evenTextWidth(left), alpha: READER_ALPHA.hint });
+  }
+  if (right) {
+    const width = evenTextWidth(right);
+    runs.push({
+      text: right, x: EVEN_READER.marginX + EVEN_READER.width - width, y: hintY, width, alpha: READER_ALPHA.hint,
+    });
+  }
+  return runs;
 }
 
 export type HudIconName =
@@ -829,6 +879,8 @@ export function hudSpinePageTitle(frame: HudVisualFrame): string {
       return hudDisplayTitle(frame.title);
     case 'navigation':
       return 'Navigation';
+    case 'reader':
+      return hudDisplayTitle(frame.title);
     default:
       return '';
   }
@@ -943,6 +995,7 @@ export function projectMercatorPanel(
 
 
 export class HudCanvasRenderer implements HudFrameRenderer {
+  readonly drawsReaders = true;
   private readonly icons: Promise<Record<HudIconName, HTMLImageElement>>;
 
   constructor() {
@@ -980,6 +1033,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       case 'navigation':
         this.drawNavigation(context, frame.navigation);
         break;
+      case 'reader': {
+        const atlas = await loadEvenFont();
+        for (const run of readerLayout(frame.lines, frame.hint)) {
+          drawEvenText(context, atlas, run.text, run.x, run.y, { alpha: run.alpha, fallbackFont: TYPE.body });
+        }
+        break;
+      }
     }
     // Chrome is the final compositing layer. Besides making ownership
     // explicit, this prevents state-specific paths from ever obscuring the
