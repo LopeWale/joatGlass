@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-06 — Build JOAT 0.1.102 reader-fixes package
+
+- Packed from `c1cf4c7` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.102 above the last recorded build (0.1.101), and app.json, package.json and package-lock.json all say 0.1.102. `evenhub` CLI, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
+- Canonical `apps/hub-plugin/joat.ehpk`: 155222 bytes, SHA-256 `91841ecc122392a47d03dc8c83c6152d63eade4334a5c341bce390d667fd4ad3`. Adds to 0.1.101 the minute-aligned home clock and the reader fixes: the spoken-reply check is a text page, every Mac-paged reader pages to its end, and a review sends only from its very last page. Plugin-only changes since 0.1.101, so a brain already restarted for 0.1.101 needs no restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-06 — Readers page to their end, and a review sends only from its last page
 
 The wearer asked where the plugin re-implements scrolling the firmware already does. Readers are paged twice: the Mac pages a text into ten-row pages, and the plugin pages each of those again for the firmware font. Three readers failed in that seam. Each failure reproduced in the official simulator, each fix is plugin-only, and each has a test that fails on the code before it.
