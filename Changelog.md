@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-06 — What the merge left behind
+
+- `HudPageBuilder.overviewTextLayout` is gone with its four tests. The 0.1.100 merge dropped the text overview's presenter path and kept the layout with no caller; it stays in history at `e5a5a3b`.
+- Six test files still stubbed the presenter's list-cursor calls (`setSelection`, `moveSelection`, `restoreSelection`, `usesCustomListSelection`) that 0.1.99 deleted, and several asserted those stubs were never called — true of any call that no longer exists. The stubs and the vacuous assertions are removed; the menu suites check what the firmware list actually does.
+- `package.json` and `package-lock.json` had said 0.1.90 since 2026-09-13 while ten builds went out, because only `app.json` reaches the package. Both say 0.1.100 now, and `pack.sh` refuses a package whose three numbers differ, naming the `npm version` command that moves them together.
+- `docs/EVEN_RESEARCH_QUESTIONS.md` #3 no longer calls the list cursor "the single blocker" on moving the panel tabs off the image path: they moved in 0.1.99. The question to Even stays open.
+- Checked after the merge, in the simulator: the three-at-once fixture (a route behind a conversation, the Pomodoro and next turn in its header, the map back at the newest frame) and the Brainstorm probe (picker, ready, the tap that arms topic capture, a streamed run, the thinking counter, the settled synthesis) — zero image tiles on every Brainstorm page. Plugin 1055 tests, typecheck and build clean.
+
 ## 2026-10-05 — Build JOAT 0.1.100 merged package
 
 - Packed from `e608c03` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.100 above the last recorded build (0.1.99). Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.

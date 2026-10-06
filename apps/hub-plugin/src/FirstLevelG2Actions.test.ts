@@ -80,7 +80,6 @@ function rig() {
     track: (unsubscribe: () => void) => unsubscribe,
   } as unknown as BridgeClient;
   const hud = {
-    usesCustomListSelection: () => true,
     showSidebar: vi.fn(async (items: string[]) => {
       sidebars.push(items);
       return true;
@@ -94,8 +93,6 @@ function rig() {
     }),
     showDefault: vi.fn(async () => true),
     setStatus: vi.fn(async () => true),
-    setSelection: vi.fn(async () => true),
-    moveSelection: vi.fn(async () => true),
     showProductivity: vi.fn(async () => true),
   } as unknown as HudPresenter;
   const link = new MacLink({ urls: ['ws://joat.test:8787/glasses'] });

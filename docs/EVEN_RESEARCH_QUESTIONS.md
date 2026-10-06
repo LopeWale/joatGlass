@@ -28,15 +28,22 @@ insufficient, not that the source is absent. Record where you looked.
 
 ### 3. List selection across a Back navigation
 Firmware lists cost far less than canvas but cannot have their selection set
-programmatically, so `restorePanelSelection` cannot restore a cursor and
-`openPanelTab` wedges the whole capability menu. Proven by breaking it and
-un-breaking it.
+programmatically: SDK 0.0.16's `index.d.ts` has no field or call that opens a
+list at an index; the host only REPORTS `currentSelectItemIndex` on a list
+event.
+
+No longer a blocker (2026-10-05, 0.1.99). Every list but the Planning month
+is a firmware list, the panel tabs included; the plugin-owned cursor and
+`restorePanelSelection` are deleted; a list opened or returned to by Back
+starts on row one, as the firmware's highlight does, and the menu follows
+the index the firmware reports. The simulator's panels probe drills News →
+article → Back without wedging the menu.
+
+Still unanswered from Even's sources, so a better pattern may exist:
 
 - How do Even's own apps preserve a cursor when returning to a list?
 - Is there any supported way to open a firmware list at an index?
 - If not, what is the intended pattern for drill-down and return?
-
-This is the single blocker on moving the panel tabs off the image path.
 
 ### 4. `textColor` / text brightness
 `MIN_TEXT_BRIGHTNESS = 0` and `MAX_TEXT_BRIGHTNESS = 4` exist in the SDK
