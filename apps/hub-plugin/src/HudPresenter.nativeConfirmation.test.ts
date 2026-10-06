@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
-import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
+import { HudPresenter, parseMessageDraft, setNativeOverviewForTest } from './HudPresenter';
 import { ContainerId } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
 
@@ -140,5 +140,88 @@ describe('HudPresenter native confirmation over the visual HUD', () => {
     expect(since.filter((op) => op.startsWith('rebuild:4:'))).toHaveLength(0);
     expect(since.filter((op) => op.startsWith('rebuild:0:2:1'))).toHaveLength(1);
     expect(since.filter((op) => op.startsWith('visual:'))).toHaveLength(0);
+  });
+});
+
+describe('parseMessageDraft', () => {
+  it('splits the plain reply consent into recipient and body', () => {
+    expect(parseMessageDraft('Send to Adele? “On my way, see you at 6.”')).toEqual({
+      recipient: 'Adele', body: 'On my way, see you at 6.',
+    });
+  });
+
+  it('splits the reviewed form, dropping the review marker from the body', () => {
+    expect(parseMessageDraft('Send to Ada Lovelace? (reviewed) “The opening words…”')).toEqual({
+      recipient: 'Ada Lovelace', body: 'The opening words…',
+    });
+  });
+
+  it.each([
+    'Send this message?',
+    'Send the exact reviewed message?',
+    'Send to Adele?',
+    'Send to Adele? “   ”',
+    'Send to work? "plain quotes"',
+    'Delete to Adele? “words”',
+  ])('returns undefined for anything else: %s', (prompt) => {
+    expect(parseMessageDraft(prompt)).toBeUndefined();
+  });
+});
+
+const CARD = ['status', 'conversation', 'wearer-turns', 'joat-turns', 'generation'];
+
+describe('HudPresenter Messages reply in the conversation card', () => {
+  it('draws a messages question as JOAT\'s turn in the conversation card, listening', async () => {
+    const r = rig();
+    expect(await r.hud.showPromptQuestion(
+      'reply-question', 'What do you want to say back to Adele?', () => true, 'messages',
+    )).toBe(true);
+    const page = r.rebuilds[r.rebuilds.length - 1];
+    expect(page?.imageObject ?? []).toHaveLength(0);
+    expect(page?.textObject?.map((c) => c.containerName)).toEqual(CARD);
+    expect(text(page, 'joat-turns')).toContain('What do you want to say back to Adele?');
+    expect(text(page, 'wearer-turns')?.trim()).toBe('');
+    expect(text(page, 'generation')).toContain('listening');
+    expect(text(page, 'generation')).toContain('double-click: cancel');
+  });
+
+  it('keeps an ordinary question on the plain question page', async () => {
+    const r = rig();
+    expect(await r.hud.showPromptQuestion('plain-question', 'What should I say?', () => true)).toBe(true);
+    const page = r.rebuilds[r.rebuilds.length - 1];
+    expect(page?.textObject?.map((c) => c.containerName)).toEqual(['status', 'main', 'hint']);
+  });
+
+  it.each([
+    ['plain', 'Send to Adele? “On my way.”'],
+    ['reviewed', 'Send to Adele? (reviewed) “On my way.”'],
+  ])('draws a %s messages confirmation as the question, then the wearer\'s words, then the gestures', async (_form, prompt) => {
+    const r = rig();
+    expect(await r.hud.showConfirmation(prompt, 'reply-consent', 'messages')).toBe(true);
+    const gate = r.rebuilds[r.rebuilds.length - 1];
+    expect(gate?.imageObject ?? []).toHaveLength(0);
+    expect(gate?.textObject?.map((c) => c.containerName)).toEqual(CARD);
+    expect(text(gate, 'joat-turns')).toContain('What do you want to say back to Adele?');
+    expect(text(gate, 'joat-turns')).not.toContain('On my way.');
+    expect(text(gate, 'wearer-turns')).toContain('On my way.');
+    expect(text(gate, 'wearer-turns')).not.toContain('(reviewed)');
+    const footer = text(gate, 'generation') ?? '';
+    expect(footer).toContain('tap: send');
+    expect(footer).toContain('long-press: retry');
+    expect(footer).toContain('double-click: cancel');
+    expect(footer).not.toContain('hold');
+  });
+
+  it('keeps the plain decision page for a non-messages confirmation and an unparsed messages one', async () => {
+    const r = rig();
+    expect(await r.hud.showConfirmation('Send to Adele? “On my way.”', 'other-consent')).toBe(true);
+    let gate = r.rebuilds[r.rebuilds.length - 1];
+    expect(gate?.textObject?.map((c) => c.containerName)).toEqual(['status', 'main', 'context', 'tray', 'hint']);
+    expect(text(gate, 'main')).toBe('CONFIRM ACTION\n\nSend to Adele? “On my way.”');
+    expect(await r.hud.dismissConfirmation('other-consent')).toBe(true);
+
+    expect(await r.hud.showConfirmation('Send the exact reviewed message?', 'unparsed', 'messages')).toBe(true);
+    gate = r.rebuilds[r.rebuilds.length - 1];
+    expect(gate?.textObject?.map((c) => c.containerName)).toEqual(['status', 'main', 'context', 'tray', 'hint']);
   });
 });

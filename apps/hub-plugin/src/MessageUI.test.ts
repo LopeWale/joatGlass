@@ -88,6 +88,15 @@ function select(r: ReturnType<typeof rig>, index = 1) {
   return selection;
 }
 
+/** The Mac's thread: a reader it pages, whose tap replies. */
+function thread(r: ReturnType<typeof rig>, requestId: string, index: number, count = 2): Promise<boolean> {
+  return r.menu.presentList(
+    'MESSAGES · CONVERSATION', [`${index + 1}/${count} · Alex`, 'Alex: Existing received message.', 'You: Thanks'],
+    requestId, true, 'down more · tap: reply · left x2: back',
+    undefined, 'Alex', undefined, undefined, undefined, { id: 'thread-alex', index, count },
+  );
+}
+
 function ui(selection: InputEventPayload, overrides: Partial<MessageUIMessage> = {}): MessageUIMessage {
   return {
     kind: 'message.ui', requestId: selection.requestId!, selectionId: selection.traceId!,
@@ -193,17 +202,21 @@ describe('Messages action ownership at wire ingress', () => {
     expect(owns(r.menu, prompt())).toBe(true);
   });
 
-  it('retains the capdata owner while a full-message read and page request use their own traces', async () => {
+  it('retains the capdata owner while thread page requests and a reply tap use their own traces', async () => {
     const r = rig();
     const requestId = await picker(r);
     const selected = select(r);
     expect(observe(r.menu, ui(selected))).toBe(true);
-    await r.menu.presentList('MESSAGES · CONVERSATION', ['Alex', 'Alex · full message'], requestId, true, 'down older');
-    r.menu.handleList({ eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: 1 } as never);
-    expect(events(r, 'capmessage')).toHaveLength(1);
-    await r.menu.presentList('MESSAGES · MESSAGE', ['1/2 · From Alex', 'Exact message text.'], requestId, false, 'down more');
+    await thread(r, requestId, 0);
     r.menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    expect(events(r, 'cappage')).toHaveLength(1);
+    expect(events(r, 'cappage')).toEqual([expect.objectContaining({
+      selectedName: 'MESSAGES', selectedIndex: 0, requestId, traceId: 'thread-alex',
+    })]);
+    await thread(r, requestId, 1);
+    r.menu.handleClick();
+    const replies = events(r, 'capmessage');
+    expect(replies).toEqual([expect.objectContaining({ selectedName: 'MESSAGES', requestId })]);
+    expect(replies[0]!.traceId).not.toBe(selected.traceId);
     expect(owns(r.menu, prompt())).toBe(true);
     expect(observe(r.menu, ui(selected, { state: 'awaiting_input' }))).toBe(true);
   });
@@ -221,7 +234,7 @@ describe('Messages action ownership at wire ingress', () => {
 });
 
 describe('Messages terminal receipts and contextual Back', () => {
-  it.each(['cancelled', 'sent', 'failed', 'uncertain'] as const)('shows full %s text read-only and Back restores the actual retained conversation', async (state) => {
+  it.each(['failed', 'uncertain'] as const)('shows full %s text read-only and Back restores the actual retained conversation', async (state) => {
     const r = rig();
     const requestId = await picker(r);
     const selected = select(r);
@@ -263,6 +276,77 @@ describe('Messages terminal receipts and contextual Back', () => {
     expect(events(r, 'capability-lifecycle')).toContainEqual(expect.objectContaining({
       selectedName: 'messages-list', requestId, traceId: selected.traceId,
     }));
+  });
+
+  it.each(['sent', 'cancelled'] as const)('paints no page for a %s reply: the thread stays and takes a tap again', async (state) => {
+    const r = rig();
+    const requestId = await picker(r);
+    const selected = select(r);
+    await thread(r, requestId, 0);
+    // The tap asks for a reply; the Mac opens the draft under the original
+    // conversation selection.
+    r.menu.handleClick();
+    expect(events(r, 'capmessage')).toHaveLength(1);
+    expect(observe(r.menu, ui(selected))).toBe(true);
+    expect(observe(r.menu, ui(selected, { state: 'awaiting_confirmation', text: 'Send to Alex?' }))).toBe(true);
+    const frames = r.frames.length;
+    const message = ui(selected, { state, text: state === 'sent' ? 'Sent. Delivery is unverified.' : 'Cancelled.' });
+    expect(observe(r.menu, message)).toBe(true);
+    expect(await show(r.menu, message)).toBe(true);
+    // No receipt page: the Mac repaints the thread itself.
+    expect(r.frames).toHaveLength(frames);
+    expect(r.visible()).toBe('MESSAGES · CONVERSATION');
+    expect(r.frames.some((frame) => frame.title === `MESSAGES · ${state.toUpperCase()}`)).toBe(false);
+    // The tap that started the reply no longer holds the thread.
+    r.menu.handleClick();
+    expect(events(r, 'capmessage')).toHaveLength(2);
+    // The Mac's repaint of the thread lands in place, and its next draft is a
+    // fresh action under the same selection.
+    expect(await thread(r, requestId, 0)).toBe(true);
+    expect(observe(r.menu, ui(selected, { actionId: 'messages-ui-two' }))).toBe(true);
+    expect(owns(r.menu, prompt('messages-ui-two'))).toBe(true);
+    await r.menu.toggle();
+    expect(r.visible()).toBe('MESSAGES');
+    expect(events(r, 'capability-lifecycle')).toContainEqual(expect.objectContaining({
+      selectedName: 'messages-list', requestId, traceId: selected.traceId,
+    }));
+  });
+
+  it('asks the Mac to say the current draft again without retiring it', async () => {
+    const r = rig();
+    const requestId = await picker(r);
+    expect(r.menu.retryMessageAction('messages-ui-one')).toBe(false); // nothing selected yet
+    const selected = select(r);
+    expect(r.menu.retryMessageAction('messages-ui-one')).toBe(false); // no action yet
+    expect(observe(r.menu, ui(selected))).toBe(true);
+    expect(observe(r.menu, ui(selected, { state: 'awaiting_confirmation', text: 'Send to Alex?' }))).toBe(true);
+    expect(r.menu.retryMessageAction('messages-ui-stale')).toBe(false);
+    expect(events(r, 'message-retry')).toEqual([]);
+
+    expect(r.menu.retryMessageAction('messages-ui-one')).toBe(true);
+    expect(events(r, 'message-retry')).toEqual([{
+      containerName: 'message-retry', selectedName: 'messages-ui-one', requestId, traceId: selected.traceId,
+    }]);
+    // Unlike cancel, the draft stays this action's until the Mac ends it.
+    expect(actionCurrent(r.menu, 'messages-ui-one')).toBe(true);
+    expect(owns(r.menu, prompt())).toBe(true);
+    expect(events(r, 'message-cancel')).toEqual([]);
+    expect(r.menu.retryMessageAction('messages-ui-one')).toBe(true);
+    expect(events(r, 'message-retry')).toHaveLength(2);
+  });
+
+  it.each(['finished', 'cancelled', 'stale', 'home'] as const)('refuses to retry a draft once it is %s', async (end) => {
+    const r = rig();
+    await picker(r);
+    const selected = select(r);
+    let current = true;
+    expect(observe(r.menu, ui(selected), () => current)).toBe(true);
+    if (end === 'finished') expect(observe(r.menu, ui(selected, { state: 'failed', text: 'Not sent.' }))).toBe(true);
+    else if (end === 'cancelled') expect(cancel(r.menu, 'messages-ui-one')).toBe(true);
+    else if (end === 'stale') current = false;
+    else await r.menu.toggle();
+    expect(r.menu.retryMessageAction('messages-ui-one')).toBe(false);
+    expect(events(r, 'message-retry')).toEqual([]);
   });
 
   it('cancels the exact action synchronously, keeps its feature beneath the question, and sends only once', async () => {
@@ -346,12 +430,12 @@ describe('Messages terminal receipts and contextual Back', () => {
     await picker(r);
     const selected = select(r);
     expect(observe(r.menu, ui(selected))).toBe(true);
-    const receipt = ui(selected, { state: 'sent', text: 'Sent. Delivery is unverified.' });
+    const receipt = ui(selected, { state: 'failed', text: 'Not sent. Messages refused it.' });
     expect(observe(r.menu, receipt)).toBe(true);
     const held = deferred();
     let entered = false;
     r.hooks.paint = async (title) => {
-      if (title === 'MESSAGES · SENT') { entered = true; await held.promise; }
+      if (title === 'MESSAGES · FAILED') { entered = true; await held.promise; }
     };
     const work = show(r.menu, receipt);
     try {
