@@ -508,7 +508,16 @@ class NewsService:
             return PanelSnapshot(rows=("[!] Some feeds unavailable · partial list", *rows))
         return PanelSnapshot(rows=rows)
 
+    @property
+    def status_rows(self) -> int:
+        """Rows the tab shows above its headlines: the "[!]" feed status.
+        A tap's row index counts them; a headline index does not."""
+        if not self._headlines:
+            return 0
+        return 1 if (self._last_error and self._fetched_at is not None) or self._partial else 0
+
     async def open(self, index: int) -> Reader | None:
+        """Open headline `index` (not a tab row: see `status_rows`)."""
         if not 0 <= index < len(self._headlines):
             return None
         headline = self._headlines[index]

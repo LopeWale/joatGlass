@@ -448,6 +448,22 @@ class WhisperServeEngine(SttEngine):
     async def flush(self) -> Transcript | None:
         return self._filter_echo(await self._flush_raw())
 
+    async def transcribe_partial(self, pcm: bytes) -> str | None:
+        """Transcribe the speech so far through the warm server, without
+        touching the utterance buffer. Only while the server is ready: a
+        partial never spawns, respawns or falls back to the batch CLI."""
+        if self._closed or not self._ready or len(pcm) < MIN_UTTERANCE_BYTES:
+            return None
+        if self._shutdown is not None and self._shutdown.is_set():
+            return None
+        try:
+            text = await asyncio.to_thread(self._post, wav_bytes(pcm))
+        except Exception as exc:
+            log.info("partial transcript skipped error=%s", type(exc).__name__)
+            return None
+        transcript = self._filter_echo(Transcript(text=text, is_final=False)) if text else None
+        return transcript.text if transcript is not None else None
+
     def _filter_echo(self, transcript: Transcript | None) -> Transcript | None:
         if transcript is not None and is_prompt_echo(transcript.text, self._prompt):
             # This transcription is discarded specifically because it is not

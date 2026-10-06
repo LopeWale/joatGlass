@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-10-06 — Your words while you reply; News taps open the right story; smaller font, header in Even's font
+
+The wearer reported five things:
+1. "the tap to click and open news page does not work"
+2. the message reply "does not show my speech as I am speaking"
+3. list rows "that have wrapped text… get overlaid slightly by the next row"
+4. "the fonts are still too big", so use the smallest row (55%)
+5. "use the fonts for time and topic in the top header", with the mic and battery the only icons
+
+- **Your words appear in the reply card while you speak.**
+  - **Why they never appeared:** no partial transcript existed anywhere. Speech-to-text (whisper) only transcribed a whole utterance after 1 s of quiet, and the first time the glass saw the words was the consent card. JOAT's own conversation worked the same way.
+  - **What the Mac does now:** while a prompt is open, it transcribes the speech so far about once a second through the warm whisper server and sends a new `prompt.partial` (`protocol.py` `PromptPartial`, `types.ts` `PromptPartialMessage`).
+    - Only for that prompt's own audio: its epoch and its connection.
+    - One request at a time.
+    - Dropped once the utterance ends.
+    - Never acted on: the final transcript alone answers.
+  - **What the glasses do:** the Hub shows the words under JOAT's question. The first words grow the card by a row; after that each update is an in-place text upgrade, and only the newest words are painted.
+  - A partial never starts or restarts the whisper server and never falls back to the batch CLI. With the batch CLI engine there are no partials.
+- **A News tap opens the story on that row.** When any feed failed, News put a "[!] Some feeds unavailable" row above the headlines, but a tap's row index was used as a headline index. Every tap opened the story below it, and the last row opened nothing (a republish that looked like a dead tap). With 3 categories × 3 feeds, one failing feed is enough. The panel now skips the status row (`NewsService.status_rows`); tapping the status row itself opens nothing.
+- **List rows stay on one line.**
+  - A multi-line message preview reached the firmware row with its line break. Pretext measures a line break as 0 px, but the firmware breaks there: two 27 px lines in a 40 px row, over the row below.
+  - Rows were also cut to the last pixel of the 536 px row, which the selected row's border narrows.
+  - The fix, Mac side: the inbox row joins the preview's whitespace.
+  - The fix, plugin side: `fitListRow` collapses whitespace in every firmware list row and cuts it to 524 px.
+- **Even's font at 55%:** readers use an 18 px line (15 px glyphs) with a 5 px gap between messages. The thread fixture holds eight messages a page, up from six at 66% and two in the firmware font.
+- **The header's words in Even's font:** the clock, the page's name, the activity chips and the low-battery number, on every image page and on the image header of every firmware page. The mic and battery stay icons.
+- **Verified in the official simulator** (`?joatVisual=message-reply-question&joatReplyWords=…`, `messages-conversation-long`):
+  - The words show in the reply card over the thread.
+  - The thread at 55% and the header in Even's font render as described.
+  - Not verified with live speech (the simulator has no microphone), and not on physical glasses.
+  - Firmware lists (the Messages inbox, News) are still the firmware's own font: only image pages can be drawn smaller.
+- **Tests:** plugin 1131 passed, typecheck clean. Mac 3455 passed, 1 skipped; the container's IPv6 test fails as before. mypy clean. Both sides change: this needs a new package and a brain restart.
+
 ## 2026-10-06 — Build JOAT 0.1.108
 
 - Packed from `fda926f` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.108 above the last recorded build (0.1.107); app.json, package.json and package-lock.json all 0.1.108. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1127 tests passed.

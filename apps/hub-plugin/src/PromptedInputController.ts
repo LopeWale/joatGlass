@@ -5,7 +5,7 @@ import type { DownlinkContext, MacLink } from './MacLink';
 import type { PromptAckMessage, PromptCancelMessage, PromptPresentMessage } from './types';
 
 interface PromptedInputOptions {
-  presenter: Partial<Pick<HudPresenter, 'showPromptQuestion' | 'dismissPromptQuestion'>>;
+  presenter: Partial<Pick<HudPresenter, 'showPromptQuestion' | 'dismissPromptQuestion' | 'showPromptPartial'>>;
   audio: Pick<AudioStreamer, 'openPromptMicrophone' | 'activatePromptEpoch' | 'clearPromptEpoch'>;
   link: Pick<MacLink, 'sendForGeneration'>;
   monotonicMs?: () => number;
@@ -28,6 +28,7 @@ const PRESENT_KEYS = [
   'source', 'expiresInMs', 'ownerKind', 'ownerId', 'field',
 ] as const;
 const CANCEL_KEYS = ['kind', 'promptId', 'connectionGeneration'] as const;
+const PARTIAL_KEYS = ['kind', 'promptId', 'connectionGeneration', 'text'] as const;
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   return Object.keys(value).length === keys.length
@@ -102,6 +103,25 @@ export class PromptedInputController {
 
   constructor(private readonly options: PromptedInputOptions) {
     this.now = options.monotonicMs ?? (() => performance.now());
+  }
+
+  /** The wearer's words so far for the question on the glass: shown only
+   * when they belong to it (same prompt, same connection, same downlink). */
+  partial(value: unknown, context: DownlinkContext): Promise<boolean> {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return Promise.resolve(false);
+    const data = value as Record<string, unknown>;
+    if (data.kind !== 'prompt.partial' || !exactKeys(data, PARTIAL_KEYS)
+      || !token(data.promptId) || !token(data.connectionGeneration)
+      || typeof data.text !== 'string' || data.text.length > 600 || data.text.includes('\0')) {
+      return Promise.resolve(false);
+    }
+    const current = this.current;
+    if (!current || !validContext(context) || !sameContext(current.context, context)
+      || current.message.promptId !== data.promptId
+      || current.message.connectionGeneration !== data.connectionGeneration
+      || !this.isCurrent(current)) return Promise.resolve(false);
+    const show = this.options.presenter.showPromptPartial;
+    return show ? show.call(this.options.presenter, data.promptId, data.text) : Promise.resolve(false);
   }
 
   observe(value: unknown, context: DownlinkContext): void {
