@@ -1456,7 +1456,9 @@ async function renderVisualState(
     await hud.showAssistantConversation({
       conversationId: 'visual-conversation',
       revision: 1,
-      state: 'ready',
+      // ?joatConvState=thinking shows the working indicator.
+      state: new URLSearchParams(window.location.search).get('joatConvState') === 'thinking'
+        ? 'thinking' : 'ready',
       continueAfterMs: 120_000,
       earlierTurnsOmitted: false,
       turns: [
