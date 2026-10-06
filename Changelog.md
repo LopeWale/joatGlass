@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-06 — Build JOAT 0.1.112
+
+- Packed from `b35a012` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.112 above the last recorded build (0.1.111); app.json, package.json and package-lock.json all 0.1.112. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1138 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 169963 bytes, SHA-256 `5b24290bc191aab2ab9a0180db1e80b3cdeddbe9034980b3252740c35eea4457`. Adds to 0.1.111 the two live-words fixes from the PR #17 review. **The Mac side changed too: restart the brain from this revision.** The package is gitignored (`*.ehpk`); this entry is its record. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-06 — Live words: a cancel waits for the card, and another speaker's words never show
 
 A review of PR #17 found two defects in the live-transcription path, both confirmed in the code and fixed.
