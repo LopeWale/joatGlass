@@ -84,6 +84,18 @@ def clean_label(label: str) -> str:
 AMBIENT_CLAUDE_LOGIN_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
 """Claude credentials a spawn can inherit that bypass the account's own home."""
 
+AMBIENT_CODEX_LOGIN_ENV = ("CODEX_ACCESS_TOKEN",)
+"""Codex's: a personal access token or agent identity, read before the
+login stored in CODEX_HOME (openai/codex, codex-rs/login/src/auth/manager.rs)."""
+
+AMBIENT_LOGIN_ENV: dict[Provider, tuple[str, ...]] = {
+    "claude": AMBIENT_CLAUDE_LOGIN_ENV,
+    "codex": AMBIENT_CODEX_LOGIN_ENV,
+}
+"""Subscription logins from the environment. They are the Mac's own login
+for the default account, so only a saved account and a sign-in drop them
+(every credential that leaves the subscription is in `cli_env.STRIP_ENV`)."""
+
 
 class AccountRegistry:
     """Which accounts exist per CLI, and which one each seat runs as.
@@ -125,11 +137,12 @@ class AccountRegistry:
         """
         chosen = profile if profile is not None else self.active(provider)
         overlay: dict[str, str | None] = {HOME_ENV[provider]: chosen.home}
-        if provider == "claude" and chosen.home is not None:
-            # A login token in the environment outranks CLAUDE_CONFIG_DIR, so
-            # a saved account ran as whatever login the brain inherited and
-            # switching did nothing. The Mac's own (default) login keeps it.
-            overlay.update({key: None for key in AMBIENT_CLAUDE_LOGIN_ENV})
+        if chosen.home is not None:
+            # A login token in the environment outranks the account's home
+            # (CLAUDE_CONFIG_DIR, CODEX_HOME), so a saved account ran as
+            # whatever login the brain inherited and switching did nothing.
+            # The Mac's own (default) login keeps it.
+            overlay.update({key: None for key in AMBIENT_LOGIN_ENV[provider]})
         return overlay
 
     def env_provider(self, provider: Provider) -> Callable[[], Mapping[str, str | None]]:
@@ -264,6 +277,7 @@ def parse_provider(value: object) -> Provider:
 
 
 __all__ = [
+    "AMBIENT_LOGIN_ENV",
     "DEFAULT_ACCOUNTS_ROOT",
     "DEFAULT_PROFILE_ID",
     "HOME_ENV",

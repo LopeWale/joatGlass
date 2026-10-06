@@ -24,8 +24,11 @@ inside this JOAT-owned conversation; neither is the interface or session owner.
 - `codex exec -s read-only` uses the user's Codex subscription and cannot write
   the workspace.
 - `claude -p` uses the user's Claude Code subscription.
-- JOAT strips `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` before launching those
-  CLIs so an ambient API key cannot silently change the billing/auth boundary.
+- JOAT drops one shared list (`agents/cli_env.py` `STRIP_ENV`) before every
+  launch of those CLIs, so an ambient credential cannot silently change the
+  billing/auth boundary. It covers API keys, bearer tokens, base URLs,
+  cloud-provider switches, Anthropic profiles and `CODEX_API_KEY`, which
+  `codex exec` takes over the ChatGPT login.
 - Hermes and OpenClaw do not participate and do not gate availability.
 - Neither Codex nor Claude is permanently first. The wearer may direct either
   one to speak next; otherwise the session continues its recorded turn policy.
