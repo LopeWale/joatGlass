@@ -6,8 +6,6 @@ import { HudPresenter } from './HudPresenter';
 import type { AssistantConversationSnapshot } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
 
-
-
 function snapshot(revision: number, answer?: string): AssistantConversationSnapshot {
   return {
     conversationId: 'native-conversation-1',
@@ -64,7 +62,7 @@ describe('HudPresenter native assistant conversation', () => {
     expect(rebuilds).toHaveLength(1);
     expect(rebuilds[0]?.imageObject ?? []).toHaveLength(0);
     expect(rebuilds[0]?.textObject?.map((item) => item.containerName)).toEqual([
-      'conversation', 'wearer-turns', 'joat-turns', 'generation',
+      'status', 'conversation', 'wearer-turns', 'joat-turns', 'scroll-position', 'generation',
     ]);
     expect(frames).toHaveLength(0);
 

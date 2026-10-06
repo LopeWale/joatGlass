@@ -795,11 +795,3 @@ export interface HudPanelPomodoro {
 export function panelRequestId(tab: PanelContentTab, revision: number): string {
   return `panel-${tab}-${revision}`;
 }
-
-export function parsePanelRequestId(
-  requestId: string | undefined,
-): { tab: PanelContentTab; revision: number } | undefined {
-  const match = requestId?.match(/^panel-(news|pomodoro|search)-(\d{1,9})$/);
-  if (!match) return undefined;
-  return { tab: match[1] as PanelContentTab, revision: Number(match[2]) };
-}

@@ -35,23 +35,6 @@ import {
 const FIRMWARE_LINE = FIRMWARE_LINE_HEIGHT;
 const LIST_ROW = 40;
 const REGION_PAD = 4;
-
-/**
- * The reply page, in whole firmware lines.
- *
- * Spine 39, body 39..249, footer 249..288. The body's inner box is
- * 576 − 2×REGION_PAD = 568 wide and 210 − 2×REGION_PAD = 202 tall, which
- * is exactly seven 27px lines with 13px spare — the pager measures against
- * these numbers, so the page it fills is the page the firmware draws.
- */
-export const ASSISTANT_ANSWER_GEOMETRY = {
-  bodyY: FIRMWARE_LINE + 12,                      // 39, directly under the spine
-  bodyHeight: 210,
-  footerY: 249,
-  footerHeight: FIRMWARE_LINE + 12,               // 39: one line inside 6px padding
-  /** Inner box handed to `paginate` — padding already subtracted. */
-  inner: { width: CANVAS.width - 2 * REGION_PAD, height: 210 - 2 * REGION_PAD },
-} as const;
 /** One firmware line inside the region padding: the header of every
  * firmware page (status container) and where the page below it starts. */
 export const NATIVE_HEADER_HEIGHT = FIRMWARE_LINE + 2 * REGION_PAD; // 35
@@ -131,11 +114,16 @@ export const ASSISTANT_ANSWER_PAGE = {
 export const ASSISTANT_CONVERSATION_GEOMETRY = {
   cardLeft: 36,
   cardWidth: 504,
-  cardBottom: 260,
+  /** The card's lower edge. The live header line sits above the card, so
+   * the card sits 14 px off the bottom (the lens margin HUD_EDGE keeps)
+   * rather than 28: seven transcript lines still fit under the header. */
+  cardBottom: 274,
   transcriptLeft: 52,
   transcriptWidth: 458,
   footerLeft: 52,
   footerWidth: 458,
+  scrollbarLeft: 516,
+  scrollbarWidth: 18,
   lineHeight: 27,
   cardTopPadding: 8,
   footerGap: 5,
@@ -148,8 +136,7 @@ export const AssistantConversationContainerId = {
   Frame: 11,
   WearerTurns: 12,
   JoatTurns: 13,
-  // 14 was ScrollPosition, retired 2026-09-24: Even AI draws no scrollbar —
-  // older lines simply leave through the top of the card (product demo).
+  ScrollPosition: 14,
   Generation: 15,
 } as const;
 
@@ -158,14 +145,9 @@ export interface AssistantConversationPage {
   cardHeight: number;
   transcriptTop: number;
   transcriptHeight: number;
-  /** Top of the one-line state/footer container. On the resting and
-   * streaming card this line straddles the card's bottom border, carrying
-   * the centred state glyph exactly where Even AI's demo puts it; the
-   * continuation prompt moves it inside the card so the border never
-   * strikes through a sentence. */
-  footerTop: number;
   dimText: string;
   brightText: string;
+  scrollbarText: string;
   footerText: string;
 }
 
@@ -190,7 +172,7 @@ export class HudPageBuilder {
    * battery (HudStatus.nativeStatusLine), composed by the presenter. It
    * replaced a status line in words plus a separate title line, so each
    * page below it starts 42 px higher than it did — a fifth list row. */
-  private statusBar(content = ''): TextContainerProperty {
+  private statusBar(content = '', zOrderIndex = 1): TextContainerProperty {
     return new TextContainerProperty({
       containerID: ContainerId.StatusBar,
       containerName: 'status',
@@ -201,7 +183,7 @@ export class HudPageBuilder {
       paddingLength: REGION_PAD,
       borderWidth: 0,
       isEventCapture: 0,
-      zOrderIndex: 1,
+      zOrderIndex,
       textColor: 2,
       content: fitHeader(content),
     });
@@ -573,37 +555,24 @@ export class HudPageBuilder {
   }
 
   /**
-   * Kept as a named alias for older focused fixtures. The transparent text
-   * layer remains the sole gesture owner; the OS-owned contextual overlay is
-   * independently declared on the page when the negotiated host supports it.
-   */
-  visualCompatibilityLayout(): RebuildPageContainer {
-    return this.visualLayout();
-  }
-
-  /**
    * One Even-style native conversation card. Wearer and JOAT text occupy
    * aligned transparent layers so the fixed firmware font can express role
    * hierarchy with brightness even though it exposes no bold font weight.
-   * The frame container is the single event owner; the plugin moves both text
-   * layers together on scroll instead of asking one firmware container to
-   * scroll independently of the other.
-   *
-   * The frame DOES draw its hairline border. Even AI's own conversation
-   * card is a bordered rounded box (product-page demo, frame-measured
-   * 2026-09-24: one hairline box, dim question over bright answer,
-   * bottom-anchored growth, the state glyph centred on the bottom border,
-   * and no scrollbar). An earlier pass removed the border citing the
-   * generic templates — but the templates show that capture does not NEED
-   * a border, not that Even's AI surface lacks one. It has one.
+   * The border is the single event owner; the plugin moves both text layers
+   * together on scroll instead of asking one firmware container to scroll
+   * independently of the other.
    */
-  assistantConversationLayout(view: AssistantConversationPage): RebuildPageContainer {
+  assistantConversationLayout(view: AssistantConversationPage, status = ''): RebuildPageContainer {
     const geometry = ASSISTANT_CONVERSATION_GEOMETRY;
     const content = (value: string): string => value || ' ';
     return new RebuildPageContainer({
-      containerTotalNum: 4,
+      containerTotalNum: 6,
       ...this.menuConfig(),
       textObject: [
+        // The live header line every page carries: clock, the other running
+        // features (Pomodoro, next turn), mic and battery. A conversation
+        // used to have none, so a timer or a route vanished behind it.
+        this.statusBar(status, 6),
         new TextContainerProperty({
           containerID: AssistantConversationContainerId.Frame,
           containerName: 'conversation',
@@ -612,14 +581,9 @@ export class HudPageBuilder {
           width: geometry.cardWidth,
           height: view.cardHeight,
           paddingLength: 0,
-          // The hairline rounded box from Even AI's own card. The simulator
-          // (matching glasses firmware) defaults borderColor to 0 —
-          // INVISIBLE — so a width alone draws nothing; the colour is the
-          // 4-bit pixel value. Mid-grey keeps the frame quieter than the
-          // bright answer text, as in the demo.
           borderWidth: 1,
-          borderColor: 8,
-          borderRadius: 10,
+          borderColor: 12,
+          borderRadius: 4,
           isEventCapture: 1,
           zOrderIndex: 1,
           textColor: 0,
@@ -654,18 +618,32 @@ export class HudPageBuilder {
           content: fitUtf8(content(view.brightText), TEXT_CONTAINER_MAX_BYTES),
         }),
         new TextContainerProperty({
+          containerID: AssistantConversationContainerId.ScrollPosition,
+          containerName: 'scroll-position',
+          xPosition: geometry.scrollbarLeft,
+          yPosition: view.transcriptTop,
+          width: geometry.scrollbarWidth,
+          height: view.transcriptHeight,
+          paddingLength: 0,
+          borderWidth: 0,
+          isEventCapture: 0,
+          zOrderIndex: 4,
+          textColor: 2,
+          content: content(view.scrollbarText),
+        }),
+        new TextContainerProperty({
           containerID: AssistantConversationContainerId.Generation,
           containerName: 'generation',
           xPosition: geometry.footerLeft,
-          yPosition: view.footerTop,
+          yPosition: geometry.cardBottom - geometry.footerBottomInset - geometry.lineHeight,
           width: geometry.footerWidth,
           height: geometry.lineHeight,
           paddingLength: 0,
           borderWidth: 0,
           isEventCapture: 0,
-          zOrderIndex: 4,
+          zOrderIndex: 5,
           textColor: 4,
-          content: fitUtf8(content(GesturePolicy.formatHint(view.footerText)), TEXT_CONTAINER_MAX_BYTES),
+          content: content(GesturePolicy.formatHint(view.footerText)),
         }),
       ],
     });

@@ -369,6 +369,27 @@ a tile; before 2026-10-05 it was dropped, so a list opened at 9:41 still
 said 9:41 at 10:05. When the line overruns the glass, the word is
 shortened, never the clock or the glyphs (`HudPageBuilder.fitHeader`).
 
+### What else is running
+
+Even's own features hold the lens one at a time; JOAT's reason to exist is
+that its features do not. Whatever page is on the glass, the header line
+also carries the other features still running, as chips between the word
+and the glyphs: `9:41 · JOAT · Focus 12m · → 80 m · ● · ▇`. The Pomodoro
+reads its phase and whole minutes (rounded up, so it never says 0 while
+time is left); the route reads its next turn as a firmware arrow (↑ ↗ → ↘
+↓ ↙ ← ↖, ◆ for the destination) and its distance, or the warning in a word
+("Off route"). The page that already shows a feature has no chip for it:
+the map carries the timer but no turn chip, the Pomodoro page the turn but
+no timer. On the image pages the spine draws the same chips right-aligned
+against the microphone, inside the right tile. The fit is by the firmware's
+own measurement: the page's word shortens and then goes, the chips and the
+glyphs stay. A chip changes in place — once a minute for the timer, when
+the rounded distance moves for the route — and never rebuilds a page.
+
+The conversation page carries the header too (it had none, so a timer or a
+route vanished behind it); its card sits on a lower edge 14 px off the
+bottom so seven transcript lines still fit under the header.
+
 ### Motion
 
 JOAT does not animate navigation. Scroll changes move the authored selection

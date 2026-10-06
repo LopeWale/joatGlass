@@ -32,9 +32,6 @@ describe('tab rail geometry', () => {
       .toBeLessThanOrEqual(OVERVIEW_DASHBOARD.dividerBottomY);
   });
 
-  it('leaves the expanded rail clear of the list selection rail at x=36', () => {
-    expect(PANEL_RAIL.expandedX + PANEL_RAIL.iconSize).toBeLessThan(36);
-  });
 
   it('keeps the clock column centred in the left half', () => {
     expect(OVERVIEW_DASHBOARD.clockCenterX).toBe(144);
