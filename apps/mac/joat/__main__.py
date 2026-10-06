@@ -2264,6 +2264,9 @@ async def main() -> None:
                 llm_warm_task.cancel()
             await asyncio.gather(llm_warm_task, return_exceptions=True)
         await sessions.close()
+        # A sign-in CLI runs in its own session (start_new_session) and
+        # outlived the brain until this was called.
+        await brainstorm_control.close()
         if agent_endpoint is not None:
             await agent_endpoint.stop()
         await message_replies.aclose()

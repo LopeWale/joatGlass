@@ -47,6 +47,8 @@ AccountState = Literal["logged_in", "logged_out", "missing", "unknown"]
 
 SIGN_IN_TIMEOUT_S = 15 * 60.0
 """Codex's own device code lifetime; Claude's flow gets the same window."""
+CODE_CHECK_TIMEOUT_S = 90.0
+"""How long "Checking the code…" may last before the phone says so."""
 PROBE_TIMEOUT_S = 20.0
 MAX_PASTED_CODE = 512
 STRIP_ENV = (
@@ -147,7 +149,12 @@ class CliSignIn:
             "claude": claude_binary, "codex": codex_binary,
         }
         self._timeout_s = timeout_s
+        self._code_check_timeout_s = min(CODE_CHECK_TIMEOUT_S, timeout_s)
         self._snapshot: LoginSnapshot | None = None
+        # Characters read from the CLI so far, and the count when a code was
+        # pasted: what the CLI printed after the paste is its answer to it.
+        self._received = 0
+        self._code_mark: int | None = None
         self._task: asyncio.Task[None] | None = None
         self._master_fd: int | None = None
         self._proc: asyncio.subprocess.Process | None = None
@@ -233,6 +240,7 @@ class CliSignIn:
             os.write(self._master_fd, cleaned.encode() + b"\r")
         except OSError:
             return False
+        self._code_mark = self._received
         self._set(replace(snapshot, stage="completing", needs_code=False,
                           message="Checking the code…"))
         return True
@@ -251,6 +259,15 @@ class CliSignIn:
         """Clear a finished sign-in from the phone."""
         if self._snapshot is not None and self._snapshot.stage in ("done", "failed", "cancelled"):
             self._set(None)
+
+    def _reprompted(self, snapshot: LoginSnapshot, text: str) -> bool:
+        """The CLI asked for a code again after one was pasted."""
+        if snapshot.stage != "completing" or self._code_mark is None:
+            return False
+        since = self._received - self._code_mark
+        if since <= 0:
+            return False
+        return "paste code" in text[-since:].lower()
 
     def _set(self, snapshot: LoginSnapshot | None) -> None:
         self._snapshot = snapshot
@@ -301,21 +318,45 @@ class CliSignIn:
         self._master_fd = master
         log.info("%s sign-in started for account %s", provider, profile.profile_id)
         text = ""
+        self._received = 0
+        self._code_mark = None
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._timeout_s
         sent_enter = False
+        checking_since: float | None = None
         try:
             while loop.time() < deadline:
                 chunk = await asyncio.to_thread(_read_some, master, 0.5)
                 if chunk is None:
                     break
+                checking = (self._snapshot or base).stage == "completing"
+                if not checking:
+                    checking_since = None
+                elif checking_since is None:
+                    checking_since = loop.time()
+                elif loop.time() - checking_since > self._code_check_timeout_s:
+                    # The CLI neither accepted the code nor asked again.
+                    self._kill()
+                    self._set(replace(self._snapshot or base, stage="failed", url=None,
+                                      code=None, needs_code=False,
+                                      message="The code wasn't accepted. Start the sign-in again."))
+                    return
                 if not chunk:
                     if proc.returncode is not None:
                         break
                     continue
-                text += strip_terminal(chunk.decode(errors="replace"))
-                text = text[-20_000:]
+                fresh = strip_terminal(chunk.decode(errors="replace"))
+                self._received += len(fresh)
+                text = (text + fresh)[-20_000:]
                 snapshot = self._snapshot or base
+                if self._reprompted(snapshot, text):
+                    # A wrong or mistyped code: Claude says so and asks again.
+                    # The phone used to stay on "Checking the code…" until
+                    # the 15-minute deadline.
+                    self._code_mark = None
+                    self._set(replace(snapshot, stage="enter_code", needs_code=True,
+                                      message="That code didn't work. Copy it again and paste it."))
+                    continue
                 updated = _advance(snapshot, text)
                 if updated != snapshot:
                     self._set(updated)
@@ -339,7 +380,10 @@ class CliSignIn:
                 self._set(replace(self._snapshot or base, stage="done", url=None, code=None,
                                   needs_code=False, message="Signed in."))
                 if self._on_signed_in is not None:
-                    self._on_signed_in(profile)
+                    try:
+                        self._on_signed_in(profile)
+                    except Exception:
+                        log.exception("sign-in observer failed")
             else:
                 log.info("%s sign-in ended rc=%s", provider, proc.returncode)
                 hint = f" {CODEX_DEVICE_HINT}" if provider == "codex" else ""
@@ -371,7 +415,9 @@ def _read_some(fd: int, timeout_s: float) -> bytes | None:
 
 def _advance(snapshot: LoginSnapshot, text: str) -> LoginSnapshot:
     """Move the phone's view forward from what the CLI has printed so far."""
-    if snapshot.stage in ("completing", "done", "failed", "cancelled"):
+    # enter_code: everything the phone needs is on it until a code is
+    # pasted, and re-deriving it here would overwrite a "didn't work" note.
+    if snapshot.stage in ("enter_code", "completing", "done", "failed", "cancelled"):
         return snapshot
     urls = _URL.findall(text)
     if snapshot.provider == "claude":

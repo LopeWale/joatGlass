@@ -85,6 +85,7 @@ class BrainstormControl:
         self._revision = 0
         self._notice = ""
         self._publish_task: asyncio.Task[None] | None = None
+        self._publish_dirty = False
         self._tasks: set[asyncio.Task[None]] = set()
         self._lock = asyncio.Lock()
 
@@ -156,13 +157,23 @@ class BrainstormControl:
             renamed = self._registry.rename(provider, profile.profile_id, action.label or "")
             return f"Renamed to “{renamed.label}”."
         if name == "account.signout":
+            self._cancel_signin_for(profile)
             ok = await self._signin.sign_out(profile)
             await self._after_account_change(provider)
             return f"Signed out of “{profile.label}”." if ok else "Sign-out didn't finish."
         if name == "account.remove":
             if profile.is_default:
                 return "This Mac's own login can be signed out, not removed."
-            await self._signin.sign_out(profile)
+            self._cancel_signin_for(profile)
+            if not await self._signin.sign_out(profile):
+                # Deleting the home of an account the CLI still holds a login
+                # for orphans that login (Claude keeps it in the Keychain),
+                # and nothing could revoke it afterwards. Keep the account
+                # unless the CLI itself says nobody is signed in.
+                status = await self._signin.status(profile)
+                if status.state == "logged_in":
+                    return (f"Sign-out didn't finish, so “{profile.label}” was kept. "
+                            "Try again.")
             removed = self._registry.remove(provider, profile.profile_id)
             self._forget_home(removed)
             self._status.pop((provider, profile.profile_id), None)
@@ -173,14 +184,26 @@ class BrainstormControl:
     # ── outbound ────────────────────────────────────────────────────────────
 
     def publish_soon(self) -> None:
-        """Coalesce bursts (a phase change and an account flip) into one send."""
+        """Coalesce bursts (a phase change and an account flip) into one send.
+
+        A change that lands while a send is in flight marks the state dirty
+        and is sent after it: the snapshot is taken when a send starts, so
+        returning early used to drop it — a device code that arrived while
+        the phone was slow to take the previous frame never reached it.
+        """
+        self._publish_dirty = True
         if self._publish_task is not None and not self._publish_task.done():
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._publish_task = loop.create_task(self.publish())
+        self._publish_task = loop.create_task(self._publish_while_dirty())
+
+    async def _publish_while_dirty(self) -> None:
+        while self._publish_dirty:
+            self._publish_dirty = False
+            await self.publish()
 
     async def publish(self) -> None:
         self._revision += 1
@@ -253,10 +276,15 @@ class BrainstormControl:
 
         async def adopt() -> None:
             async with self._lock:
-                self._registry.activate(profile.provider, profile.profile_id)
-                await self._after_account_change(profile.provider)
-                self._notice = (f"{PROVIDER_TITLES[profile.provider]} signed in as "
-                                f"“{profile.label}” and now in use.")
+                try:
+                    self._registry.activate(profile.provider, profile.profile_id)
+                except AccountError:
+                    # Removed while its sign-in was finishing.
+                    self._notice = f"“{profile.label}” was removed before its sign-in finished."
+                else:
+                    await self._after_account_change(profile.provider)
+                    self._notice = (f"{PROVIDER_TITLES[profile.provider]} signed in as "
+                                    f"“{profile.label}” and now in use.")
             await self.publish()
 
         self._spawn(adopt())
@@ -300,9 +328,24 @@ class BrainstormControl:
         if home.name == profile.profile_id and home.parent.name == profile.provider:
             shutil.rmtree(home, ignore_errors=True)
 
+    def _cancel_signin_for(self, profile: AccountProfile) -> None:
+        """Stop a sign-in still running for an account being signed out or
+        removed: left alone, the CLI kept writing into a home that was about
+        to be deleted, and finishing it re-activated a removed account."""
+        current = self._signin.current
+        if (current is not None and current.provider == profile.provider
+                and current.profile_id == profile.profile_id
+                and current.stage not in ("done", "failed", "cancelled")):
+            self._signin.cancel()
+
     def _spawn(self, coro: Awaitable[None]) -> None:
         async def run() -> None:
-            await coro
+            try:
+                await coro
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("phone control task failed")
 
         task = asyncio.get_running_loop().create_task(run())
         self._tasks.add(task)

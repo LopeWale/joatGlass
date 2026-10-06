@@ -266,3 +266,50 @@ class TestStreamJsonReading:
         )
         out = "".join([chunk async for chunk in agent.stream("ignored")])
         assert "the whole answer" in out, out
+
+
+class TestFailureReadsTheCliNotTheAnswer:
+    """`last_diagnostic` is what the sign-in / limit classifier reads. A
+    model's answer may say "sign in"; a failed turn must not become a
+    signed-out seat because of it (2026-10-06)."""
+
+    async def test_stream_json_answer_text_is_not_a_complaint(self) -> None:
+        delta = ('{"type":"stream_event","event":{"type":"content_block_delta",'
+                 '"delta":{"type":"text_delta","text":"Users sign in, then log in again."}}}')
+        agent = SubprocessAgent(
+            [sys.executable, "-c", f"print({delta!r}); raise SystemExit(1)"],
+            stream_json=True, capture=True, notices=False,
+        )
+        out = await collect(agent, "p")
+        assert "sign in" in out and agent.last_failed
+        assert "sign in" in agent.last_output, "the capture still holds everything"
+        assert "sign in" not in agent.last_diagnostic
+
+    async def test_stream_json_prose_and_error_results_are_complaints(self) -> None:
+        script = ("print('Failed to authenticate: OAuth session expired')\n"
+                  "print('{\"type\":\"result\",\"result\":\"You have hit your usage limit\",\"is_error\":true}')\n"
+                  "raise SystemExit(1)")
+        agent = SubprocessAgent([sys.executable, "-c", script],
+                                stream_json=True, capture=True, notices=False)
+        await collect(agent, "p")
+        assert "Failed to authenticate" in agent.last_diagnostic
+        assert "usage limit" in agent.last_diagnostic
+
+    async def test_plain_mode_reads_errors_and_prose_tail_not_answer_events(self) -> None:
+        answer = '{"type": "item.completed", "item": {"type": "agent_message", "text": "sign in first"}}'
+        failed = '{"type": "turn.failed", "error": {"message": "usage limit reached"}}'
+        script = (f"import sys\nprint({answer!r})\nprint({failed!r})\n"
+                  "print('Error: not logged in', file=sys.stderr)\nraise SystemExit(1)")
+        agent = SubprocessAgent([sys.executable, "-c", script], capture=True, notices=False)
+        await collect(agent, "p")
+        assert "sign in first" not in agent.last_diagnostic
+        assert "usage limit reached" in agent.last_diagnostic
+        assert "not logged in" in agent.last_diagnostic
+
+    async def test_a_timed_out_turn_was_talking_not_refusing(self) -> None:
+        script = "import time\nprint('please sign in again', flush=True)\ntime.sleep(30)"
+        agent = SubprocessAgent([sys.executable, "-c", script],
+                                timeout_s=1.0, capture=True, notices=False)
+        await collect(agent, "p")
+        assert agent.last_failed
+        assert "sign in" not in agent.last_diagnostic

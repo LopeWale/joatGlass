@@ -194,3 +194,15 @@ def test_status_parsers() -> None:
     assert parse_codex_status("Logged in using ChatGPT").state == "logged_in"
     assert parse_codex_status("Not logged in").state == "logged_out"
     assert parse_claude_status("garbage").state == "unknown"
+
+
+def test_a_saved_claude_account_does_not_run_as_an_inherited_login_token(tmp_path: Path) -> None:
+    """2026-10-06: CLAUDE_CODE_OAUTH_TOKEN in the brain's environment
+    outranks CLAUDE_CONFIG_DIR, so switching to a saved account did nothing."""
+    registry = AccountRegistry(tmp_path)
+    work = registry.add("claude", "Work")
+    overlay = registry.env_overlay("claude", work)
+    assert overlay["CLAUDE_CONFIG_DIR"] == work.home
+    assert overlay["CLAUDE_CODE_OAUTH_TOKEN"] is None and overlay["ANTHROPIC_AUTH_TOKEN"] is None
+    default = registry.env_overlay("claude", registry.get("claude", "default"))
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in default, "the Mac's own login is left as configured"

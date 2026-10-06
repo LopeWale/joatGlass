@@ -81,6 +81,10 @@ def clean_label(label: str) -> str:
     return text[:MAX_LABEL]
 
 
+AMBIENT_CLAUDE_LOGIN_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
+"""Claude credentials a spawn can inherit that bypass the account's own home."""
+
+
 class AccountRegistry:
     """Which accounts exist per CLI, and which one each seat runs as.
 
@@ -120,7 +124,13 @@ class AccountRegistry:
         even when the brain inherited a stray CLAUDE_CONFIG_DIR.
         """
         chosen = profile if profile is not None else self.active(provider)
-        return {HOME_ENV[provider]: chosen.home}
+        overlay: dict[str, str | None] = {HOME_ENV[provider]: chosen.home}
+        if provider == "claude" and chosen.home is not None:
+            # A login token in the environment outranks CLAUDE_CONFIG_DIR, so
+            # a saved account ran as whatever login the brain inherited and
+            # switching did nothing. The Mac's own (default) login keeps it.
+            overlay.update({key: None for key in AMBIENT_CLAUDE_LOGIN_ENV})
+        return overlay
 
     def env_provider(self, provider: Provider) -> Callable[[], Mapping[str, str | None]]:
         """A late-bound reader for seats constructed once at boot."""

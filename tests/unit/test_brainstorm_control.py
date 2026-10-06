@@ -68,6 +68,8 @@ class FakeSignIn:
         self.signed_out: list[str] = []
         self.current: LoginSnapshot | None = None
         self.statuses: dict[str, AccountStatus] = {}
+        self.sign_out_ok = True
+        self.cancels = 0
 
     def binary(self, provider: str) -> str | None:
         return f"/bin/{provider}"
@@ -77,7 +79,7 @@ class FakeSignIn:
 
     async def sign_out(self, profile: AccountProfile) -> bool:
         self.signed_out.append(profile.profile_id)
-        return True
+        return self.sign_out_ok
 
     def start(self, profile: AccountProfile) -> LoginSnapshot:
         self.started.append(profile)
@@ -90,6 +92,7 @@ class FakeSignIn:
         return True
 
     def cancel(self, *, publish: bool = True) -> None:
+        self.cancels += 1
         self.current = None
 
     def dismiss(self) -> None:
@@ -186,3 +189,98 @@ def test_unknown_account_is_a_notice_not_a_crash(tmp_path: Path) -> None:
     asyncio.run(h.control.apply(ControlAction(
         action="account.activate", provider="codex", profile_id="acct-00000000")))
     assert h.sent[-1].notice == "That account no longer exists."
+
+
+# ── 2026-10-06: races between a sign-in and the account it is for ────────────
+
+
+def test_remove_cancels_a_sign_in_still_running_for_that_account(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+
+    async def scenario() -> None:
+        await h.control.apply(ControlAction(action="account.add", provider="codex", label="Spare"))
+        spare = h.signin.started[-1]
+        assert h.signin.current is not None
+        await h.control.apply(ControlAction(
+            action="account.remove", provider="codex", profile_id=spare.profile_id))
+
+    asyncio.run(scenario())
+    assert h.signin.cancels == 1 and h.signin.current is None
+
+
+def test_remove_leaves_another_accounts_sign_in_alone(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    spare = h.registry.add("codex", "Spare")
+
+    async def scenario() -> None:
+        await h.control.apply(ControlAction(action="account.add", provider="claude", label="Work"))
+        await h.control.apply(ControlAction(
+            action="account.remove", provider="codex", profile_id=spare.profile_id))
+
+    asyncio.run(scenario())
+    assert h.signin.cancels == 0 and h.signin.current is not None
+
+
+def test_remove_keeps_an_account_whose_sign_out_failed(tmp_path: Path) -> None:
+    """Deleting the home of an account the CLI is still signed in to
+    orphaned that login where nothing could revoke it."""
+    h = Harness(tmp_path)
+    spare = h.registry.add("claude", "Spare")
+    h.signin.sign_out_ok = False
+    asyncio.run(h.control.apply(ControlAction(
+        action="account.remove", provider="claude", profile_id=spare.profile_id)))
+    assert h.registry.get("claude", spare.profile_id) == spare
+    assert spare.home is not None and Path(spare.home).exists()
+    assert "was kept" in h.sent[-1].notice
+
+
+def test_remove_proceeds_when_sign_out_failed_but_nobody_is_signed_in(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    spare = h.registry.add("claude", "Spare")
+    h.signin.sign_out_ok = False
+    h.signin.statuses[spare.profile_id] = AccountStatus("logged_out")
+    asyncio.run(h.control.apply(ControlAction(
+        action="account.remove", provider="claude", profile_id=spare.profile_id)))
+    assert all(p.profile_id != spare.profile_id for p in h.registry.profiles("claude"))
+
+
+def test_a_sign_in_finishing_for_a_removed_account_is_a_notice(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    spare = h.registry.add("codex", "Spare")
+
+    async def scenario() -> None:
+        await h.control.apply(ControlAction(
+            action="account.remove", provider="codex", profile_id=spare.profile_id))
+        h.control._on_signed_in(spare)
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert "was removed before its sign-in finished" in h.sent[-1].notice
+
+
+def test_a_change_during_a_slow_send_is_sent_after_it(tmp_path: Path) -> None:
+    """The snapshot is taken when a send starts; a change landing while the
+    phone is slow to take it used to be dropped (a device code with it)."""
+    h = Harness(tmp_path)
+    release = asyncio.Event()
+    notices: list[str] = []
+
+    async def slow_send(state: ControlState) -> None:
+        notices.append(state.notice)
+        await release.wait()
+
+    h.control._send = slow_send  # type: ignore[assignment]
+
+    async def scenario() -> None:
+        h.control._notice = "first"
+        h.control.publish_soon()
+        await asyncio.sleep(0)
+        h.control._notice = "second"
+        h.control.publish_soon()
+        release.set()
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert notices == ["first", "second"]
