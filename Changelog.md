@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-06 — Build JOAT 0.1.108
+
+- Packed from `fda926f` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.108 above the last recorded build (0.1.107); app.json, package.json and package-lock.json all 0.1.108. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1127 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 167555 bytes, SHA-256 `edbf5464f909a2c30f26ee2c3d13b352b281c6943cccb6278bd9e075de1a95d1`. Adds to 0.1.107 the readers in Even's font at 66% across the whole glass (the atlas adds about 9 KB). Plugin-only. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-06 — Readers in Even's font at 66%, spread across the whole glass
 
 The wearer: pages look cramped and sparse, and only Planning uses the full 576x288; "use the smaller font display", "space shit out", and keep a margin "so things are not getting cut off at the edge of the screen".
