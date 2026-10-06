@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-06 — Build JOAT 0.1.110
+
+- Packed from `34e0b42` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.110 above the last recorded build (0.1.109); app.json, package.json and package-lock.json all 0.1.110. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1137 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 169696 bytes, SHA-256 `8875ab7bd57c4e3fe0095148af4aab5e049c9627671db97831f484ecffb6b1df`. Adds to 0.1.109 Home's column in Even's font and the reader kept at 55% under JOAT's box. Plugin-only since 0.1.109: a brain restarted for 0.1.109 needs no restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-06 — Mixed rendering: Home's column in Even's font; the reader stays 55% under JOAT's box
 
 The wearer asked for sources on the font limits, and they are now confirmed:
