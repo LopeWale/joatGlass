@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ImageRawDataUpdateResult, StartUpPageCreateResult } from '@evenrealities/even_hub_sdk';
 import { BridgeClient } from './BridgeClient';
-import { HudPresenter } from './HudPresenter';
+import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudVisualSurface } from './HudVisualSurface';
+
+// These tests pin the IMAGE overview (VITE_NATIVE_OVERVIEW=0). The text
+// overview, which is Home by default, has its own: HudPresenter.textOverview.test.ts.
+setNativeOverviewForTest(false);
 
 vi.mock('@evenrealities/even_hub_sdk', async (importOriginal) => {
   const real = await importOriginal<typeof import('@evenrealities/even_hub_sdk')>();

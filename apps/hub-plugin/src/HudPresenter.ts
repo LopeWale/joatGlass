@@ -19,6 +19,7 @@ import {
 import { paginateMeasured } from './FirmwareText';
 import { ASSISTANT_ANSWER_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
 import { type HudStatusModel, nativeStatusLine } from './HudStatus';
+import { composeOverviewText } from './OverviewText';
 import { isRouteProgressView, navigationChip, pomodoroChip } from './ActivityChips';
 import { NativeTerminalSurface } from './NativeTerminalSurface';
 import { productivityActionHint, productivityPhaseLabel, usesActionPillLayout } from './HudCanvasRenderer';
@@ -213,6 +214,21 @@ type HudSurface =
   | { kind: 'navigation'; navigation: NavigationHudModel }
   | { kind: 'brainstorm'; brainstorm: BrainstormHudModel }
   | { kind: 'productivity'; productivity: ProductivityHudModel };
+
+/** Home as firmware text (OverviewText.ts) rather than four image tiles:
+ * opening it is one rebuild and a change is an in-place upgrade of the band
+ * that changed, where the image overview cost four tile uploads at
+ * 0.5-2 s each over BLE (everything-evenhub glasses-ui). ON by default;
+ * VITE_NATIVE_OVERVIEW=0 draws the image overview. */
+let nativeOverviewEnabled = String(import.meta.env.VITE_NATIVE_OVERVIEW ?? '1') !== '0';
+
+/** Tests that pin the IMAGE overview select it here. Never product code. */
+export function setNativeOverviewForTest(on: boolean): void {
+  nativeOverviewEnabled = on;
+}
+
+/** One band of the text overview as the glass last accepted it. */
+interface OverviewBand { name: string; content: string; textColor?: number }
 
 type DisplayPageOwner =
   | 'visual'
@@ -477,6 +493,7 @@ export class HudPresenter {
       if (replaced && displayCurrent()) {
         this.pageOwner = owner;
         this.nativeStatusPainted = statusShown;
+        this.overviewText = undefined;
       }
       return replaced && displayCurrent();
     }
@@ -487,6 +504,7 @@ export class HudPresenter {
         visual.forgetPage?.();
         this.pageOwner = owner;
         this.nativeStatusPainted = statusShown;
+        this.overviewText = undefined;
       }
       return replaced && displayCurrent();
     } catch {
@@ -499,7 +517,7 @@ export class HudPresenter {
     const visual = this.visual;
     const displayCurrent = this.captureDisplayGuard();
     if (!visual || !displayCurrent()) return false;
-    if (this.pageOwner === 'visual') return true;
+    if (this.pageOwner === 'visual' && !this.overviewTextOnGlass()) return true;
     if (!visual.withPageTransition) return false;
     try {
       const rebuilt = await visual.withPageTransition(
@@ -509,6 +527,7 @@ export class HudPresenter {
       if (!rebuilt || !displayCurrent()) return false;
       visual.forgetPage?.();
       this.pageOwner = 'visual';
+      this.overviewText = undefined;
       return true;
     } catch {
       return false;
@@ -518,6 +537,8 @@ export class HudPresenter {
   /** Restore the retained visual underlay only after its containers exist. */
   private async restoreVisualPage(): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
+    const home = this.plainOverviewFrame();
+    if (home) return this.paintOverviewAsText(home, true);
     if (!await this.rebuildVisualPage() || !displayCurrent() || !this.visual) return false;
     const painted = this.visual.paintExact
       ? await this.visual.paintExact(this.visualFrame(), displayCurrent)
@@ -596,8 +617,14 @@ export class HudPresenter {
    * next visual paint must replace it (text overview) or rebuild the image
    * page before painting tiles. */
   private visualPagePending(): boolean {
-    return this.pageOwner === 'terminal-list-native'
+    return NATIVE_CONTENT_OWNERS.has(this.pageOwner)
       && this.surface.kind === 'default' && this.visual !== undefined;
+  }
+
+  /** A firmware page is on the glass: JOAT content of its own, or the text
+   * overview. A receipt or an outcome over one is a firmware page too. */
+  private onFirmwarePage(): boolean {
+    return NATIVE_CONTENT_OWNERS.has(this.pageOwner) || this.overviewTextOnGlass();
   }
 
   private captureDisplayGuard(): () => boolean {
@@ -885,7 +912,7 @@ export class HudPresenter {
     // Over a firmware page the overlay is a firmware page too (see
     // usesNativeAnswerPage); the image rebuild would be four wasted tiles.
     const overNativePage = !this.nativeTerminal.isActive()
-      && (NATIVE_CONTENT_OWNERS.has(this.pageOwner) || this.pageOwner === 'overlay-native');
+      && (this.onFirmwarePage() || this.pageOwner === 'overlay-native');
     if (!overNativePage && !await this.prepareNativeTerminalHandoff()) return false;
     const current = this.assistantOverlay;
     if (current?.dismissTimer !== undefined) clearTimeout(current.dismissTimer);
@@ -990,9 +1017,13 @@ export class HudPresenter {
   }
 
   /** Quiesce a terminal body before a graphical page replaces its containers. */
-  private async prepareNativeTerminalHandoff(): Promise<boolean> {
+  private async prepareNativeTerminalHandoff(toHome = false): Promise<boolean> {
     if (!this.nativeTerminal.isActive()) {
-      if (!NATIVE_CONTENT_OWNERS.has(this.pageOwner)) return true;
+      if (!this.onFirmwarePage()) return true;
+      // Home is a text page itself: it replaces the firmware page in one
+      // rebuild. Recreating the image containers first was a second rebuild
+      // and a blank flash on every Back-to-Home.
+      if (toHome && nativeOverviewEnabled && this.visual) return true;
       if (!this.visual) {
         // The text compatibility surface replaces the firmware list with its
         // own rebuild; hand the page back so its text writes are not skipped.
@@ -1111,7 +1142,7 @@ export class HudPresenter {
     if (this.assistantOverlay.presentation === 'answer') return true;
     // A receipt over a page the firmware owns is a firmware page as well:
     // one rebuild in, and the retained page comes back on dismissal.
-    return NATIVE_CONTENT_OWNERS.has(this.pageOwner) || this.nativeOverlay !== undefined;
+    return this.onFirmwarePage() || this.nativeOverlay !== undefined;
   }
 
   private async paintNativeAnswerPage(): Promise<boolean> {
@@ -1875,7 +1906,7 @@ export class HudPresenter {
     // A firmware list or text page hands straight to the firmware page this
     // outcome becomes (a strip or a text page); recreating the four image
     // containers first was four tiles for nothing.
-    const stayNative = !this.nativeTerminal.isActive() && NATIVE_CONTENT_OWNERS.has(this.pageOwner);
+    const stayNative = !this.nativeTerminal.isActive() && this.onFirmwarePage();
     if (!stayNative && !await this.prepareNativeTerminalHandoff()) return false;
     if (usesActionPillLayout(productivity.phase)) {
       return this.showActionPill(productivity, onDeferredProductivityVisible);
@@ -1957,7 +1988,7 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (this.visual !== undefined && !this.confirmation
-      && this.surface.kind !== 'productivity' && NATIVE_CONTENT_OWNERS.has(this.pageOwner)) {
+      && this.surface.kind !== 'productivity' && this.onFirmwarePage()) {
       // The outcome over a firmware list (a saved reminder over the Planning
       // day) used to rebuild the four image containers and repaint the list
       // as pixels under a two-tile strip. It is one firmware page now, and
@@ -2263,7 +2294,7 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
-    if (!await this.prepareNativeTerminalHandoff()) return false;
+    if (!await this.prepareNativeTerminalHandoff(true)) return false;
     if (this.confirmation) {
       this.confirmation.surface = { kind: 'default' };
       if (this.focusReturn) {
@@ -3073,6 +3104,120 @@ export class HudPresenter {
     return true;
   }
 
+  /** The text overview the glass shows, and the page write that put it
+   * there: any later full-page write (a list, a reader, the image page)
+   * replaces it, and an upgrade must never land on that other page. */
+  private overviewText?: { epoch?: number; bands: Map<number, OverviewBand> };
+
+  private overviewTextOnGlass(): boolean {
+    const shown = this.overviewText;
+    if (!shown || this.pageOwner !== 'visual') return false;
+    const epoch = this.client.pageEpoch?.();
+    return epoch === undefined || shown.epoch === undefined || epoch === shown.epoch;
+  }
+
+  /** Home as the wearer would see it now, when it is a plain overview: no
+   * outcome strip or receipt composited over it, no gate or question. */
+  private plainOverviewFrame(): Extract<HudVisualFrame, { kind: 'overview' }> | undefined {
+    if (!nativeOverviewEnabled || !this.visual || this.confirmation || this.promptQuestion) return undefined;
+    if (this.surface.kind !== 'default' || this.conversationInFront()) return undefined;
+    const frame = this.visualFrame();
+    return frame.kind === 'overview' && !frame.actionOverlay && !frame.assistantOverlay ? frame : undefined;
+  }
+
+  /** The header line Home carries: the same live line as every firmware
+   * page, with the chips for what else is running (a Pomodoro chip only
+   * when its tab is not the one lit, ActivityChips). */
+  private overviewHeader(): string {
+    if (this.statusModel) {
+      return fitHeader(nativeStatusLine(this.withActivities(this.statusModel, { frame: 'overview' })));
+    }
+    return this.nativeHeader();
+  }
+
+  /**
+   * Home as six firmware text containers (HudPageBuilder.overviewTextLayout).
+   *
+   * Cost, by the everything-evenhub glasses-ui guidance: entering Home is
+   * one rebuildPageContainer; afterwards only the bands that changed are
+   * sent, each as a flicker-free textContainerUpgrade. A minute tick is the
+   * header (one upgrade); a rail swipe is the rail and the pane (two). Three
+   * or more changed bands are one rebuild, which is cheaper than three
+   * upgrades. No image tile is ever sent for Home.
+   *
+   * `taking`: Back from another page — the page on the glass is not Home's
+   * yet, and this rebuild replaces it.
+   */
+  private async paintOverviewAsText(
+    frame: Extract<HudVisualFrame, { kind: 'overview' }>,
+    taking = false,
+  ): Promise<boolean> {
+    // Taken BEFORE any await: a paint that started a moment before the
+    // wearer expanded a tab must not land over the list that replaced Home.
+    const current = this.captureDisplayGuard();
+    const stillOurs = (): boolean => current() && this.surface.kind === 'default'
+      && !this.confirmation && !this.promptQuestion && !this.conversationInFront()
+      && !this.nativeTerminal.isActive()
+      && (taking || this.pageOwner === 'visual' || this.visualPagePending());
+    if (!stillOurs()) return false;
+    const layout = this.layouts.overviewTextLayout(composeOverviewText(frame, this.overviewHeader()));
+    const bands = new Map<number, OverviewBand>((layout.textObject ?? []).map((t) => [
+      t.containerID ?? 0,
+      { name: t.containerName ?? '', content: t.content ?? '', ...(t.textColor !== undefined ? { textColor: t.textColor } : {}) },
+    ]));
+    const shown = !taking && this.overviewTextOnGlass() ? this.overviewText : undefined;
+    if (shown) {
+      const changed = [...bands].filter(([id, band]) => {
+        const was = shown.bands.get(id);
+        return was?.content !== band.content || was?.textColor !== band.textColor;
+      });
+      if (changed.length === 0) {
+        this.armPanelTicker();
+        return true;
+      }
+      if (changed.length <= 2) {
+        let upgraded = true;
+        for (const [containerID, band] of changed) {
+          if (!stillOurs() || !this.overviewTextOnGlass()) return false;
+          const previous = shown.bands.get(containerID)?.content ?? '';
+          const ok = await this.client.require().textContainerUpgrade(new TextContainerUpgrade({
+            containerID,
+            containerName: band.name,
+            contentOffset: 0,
+            contentLength: Math.max(previous.length, band.content.length),
+            content: band.content || ' ',
+            ...(band.textColor !== undefined ? { textColor: band.textColor } : {}),
+          }));
+          if (!ok) { upgraded = false; break; }
+          shown.bands.set(containerID, band);
+        }
+        if (!stillOurs()) return false;
+        if (upgraded) {
+          this.armPanelTicker();
+          return true;
+        }
+        // A refused upgrade means the container is not what we think it
+        // is: fall through and rebuild the page.
+      }
+    }
+    const replace = (): Promise<boolean> => (stillOurs()
+      ? this.client.require().rebuildPageContainer(layout)
+      : Promise.resolve(false));
+    let ok = false;
+    if (!this.visual?.withPageTransition) ok = await replace();
+    else {
+      try { ok = await this.visual.withPageTransition(replace, stillOurs); } catch { ok = false; }
+    }
+    if (!ok || !stillOurs()) return false;
+    this.overviewText = { epoch: this.client.pageEpoch?.(), bands };
+    // Home's page is the visual owner's page; the image painter must not
+    // assume any tile it drew before is still on the glass.
+    this.pageOwner = 'visual';
+    this.visual?.forgetPage?.();
+    this.armPanelTicker();
+    return true;
+  }
+
   private async paintVisual(): Promise<boolean> {
     this.removeRetiredNotifications();
     const displayCurrent = this.captureDisplayGuard();
@@ -3083,6 +3228,12 @@ export class HudPresenter {
     // A decision gate or a question on its way to the glass is a firmware
     // page: the image page beneath it is not repainted while it is pending.
     if (this.confirmation || this.promptQuestion) return true;
+    const home = this.plainOverviewFrame();
+    if (home) return this.paintOverviewAsText(home);
+    // An image frame over the text overview (or over a firmware page left
+    // under Home) needs the four image containers back first.
+    if ((this.overviewTextOnGlass() || this.visualPagePending()) && !await this.rebuildVisualPage()) return false;
+    if (!displayCurrent()) return false;
     const notificationId = this.hasVisibleNotification() ? this.notificationId : undefined;
     const ok = await this.visual.paint(this.visualFrame());
     if (ok && displayCurrent() && notificationId === this.notificationId) {
