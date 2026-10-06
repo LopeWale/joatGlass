@@ -15,7 +15,7 @@ import { PANEL_TAB_TITLES, panelTabForTitle, pomodoroBlockLabel, pomodoroRemaini
  * on one of them reaches the Mac as its row zero (the Navigation control,
  * a reader's "tap: continue" / "tap: confirm"). */
 const TEXT_PAGE_TITLES = new Set([
-  'MESSAGES · MESSAGE', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
+  'MESSAGES · CONVERSATION', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
   'NOTIFICATIONS · DETAIL', 'NAVIGATION', 'NEWS · ARTICLE', 'SEARCH · RESULT',
   'MESSAGES · REVIEW', 'MESSAGES · COMPOSE', 'MESSAGES · SETUP', 'MESSAGES · ACCESS',
   'MESSAGES · RETRY', 'MESSAGES · SENT', 'MESSAGES · FAILED', 'MESSAGES · CANCELLED',
@@ -72,13 +72,6 @@ function isQuickNotesReaderTitle(title: string): boolean {
   return normalized === 'QUICKNOTES · DETAIL' || normalized === 'QUICKNOTES · NOTE';
 }
 
-/** A thread's heading or instruction row: a tap on it does nothing. A
- * message row is "speaker · words"; a row without the separator, or with
- * nothing after it, is the Mac's own wording. */
-function conversationRowIsInstruction(row: string): boolean {
-  const marker = row.indexOf('·');
-  return marker < 0 || row.slice(marker + 1).trim().length === 0;
-}
 import { reminderDueCompleteFor } from './ReminderDueReceipt';
 import {
   CAPABILITIES,
@@ -417,6 +410,21 @@ export class CapabilityMenu {
     return true;
   }
 
+  /** Long-press on a draft: say it again. The draft stays this action's
+   * until the Mac ends it; its question then returns as a new action. */
+  retryMessageAction(actionId: string): boolean {
+    const selection = this.messageSelection;
+    const action = selection?.action;
+    if (!selection || !action || !this.messageSelectionIsCurrent(selection)
+      || action.message.actionId !== actionId || messageFinished(action.message.state)) return false;
+    try { if (!action.isCurrent()) return false; } catch { return false; }
+    this.link.send({ kind: 'input', event: {
+      containerName: 'message-retry', selectedName: actionId,
+      requestId: selection.requestId, traceId: selection.selectionId,
+    } });
+    return true;
+  }
+
   /** Disconnect retires locally; explicit departure also cancels its draft. */
   retireMessageUI(notifyMac = false): void {
     this.retireReviewReader();
@@ -520,15 +528,22 @@ export class CapabilityMenu {
     // Questions and confirmation own intermediate states. Only final receipts
     // replace the underlying feature, and Back retains its actual Mac rows.
     if (!messageFinished(accepted.state)) return true;
+    // A sent reply lands back on the thread, which the Mac repaints with the
+    // reply as its newest message; a cancelled one is simply the thread
+    // again. Neither is a page of its own.
+    if (accepted.state === 'sent' || accepted.state === 'cancelled') {
+      this.dataSelectionPending = false;
+      return true;
+    }
     let parent = this.dataSurface;
     let grandparent = this.dataReturn;
-    if (this.messagesScreen === 'message_detail' || this.messagesScreen === 'review' || this.messagesScreen === 'compose'
+    if (this.messagesScreen === 'review' || this.messagesScreen === 'compose'
       || this.messagesScreen === 'read_only') {
       parent = this.dataReturn;
       grandparent = this.dataGrandparent;
     }
     if (parent === this.dataSurface && parent) parent = { ...parent, selectedIndex: this.selectedIndex };
-    const rows = [`1/1 · ${accepted.state === 'sent' ? 'Submitted' : accepted.state}`, accepted.text];
+    const rows = [`1/1 · ${accepted.state}`, accepted.text];
     const title = `MESSAGES · ${accepted.state.toUpperCase()}`;
     const hint = 'left x2: back';
     const transition = this.beginTransition();
@@ -1188,15 +1203,6 @@ export class CapabilityMenu {
           this.requestQuickNotesListPage(eventType);
           return true;
         }
-        const messagesReader = this.messagesScreen === 'message_detail' || this.messagesScreen === 'review';
-        if (
-          (messagesReader || stayedAtBoundary)
-          && this.pendingTitle === 'MESSAGES'
-          && (this.messagesScreen === 'conversation' || messagesReader)
-          && this.canRequestMessagePage(eventType)
-        ) {
-          this.requestMessagePage(eventType);
-        }
         return true;
       }
       // The transport omits a zero index, so an absent one is row zero.
@@ -1264,14 +1270,6 @@ export class CapabilityMenu {
       }
       if (this.canRequestPanelPage(eventType)) {
         this.requestPanelPage(eventType);
-        return true;
-      }
-      if (
-        this.pendingTitle === 'MESSAGES'
-        && (this.messagesScreen === 'conversation' || this.messagesScreen === 'message_detail')
-        && this.canRequestMessagePage(eventType)
-      ) {
-        this.requestMessagePage(eventType);
         return true;
       }
       // Every remaining page is a firmware list, which moves its own
@@ -1428,20 +1426,13 @@ export class CapabilityMenu {
     if (this.dataSurface?.pageControls !== undefined) {
       if (this.dataPagePending) return true;
       const controls = this.dataSurface.pageControls;
-      const quickNotes = this.pendingTitle === 'QUICKNOTES';
       if (controls.newerIndex === this.selectedIndex) {
-        if (quickNotes) this.requestQuickNotesListPage(OsEventTypeList.SCROLL_TOP_EVENT);
-        else this.requestMessagePage(OsEventTypeList.SCROLL_TOP_EVENT);
+        this.requestQuickNotesListPage(OsEventTypeList.SCROLL_TOP_EVENT);
         return true;
       }
       if (controls.olderIndex === this.selectedIndex) {
-        if (quickNotes) this.requestQuickNotesListPage(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-        else this.requestMessagePage(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+        this.requestQuickNotesListPage(OsEventTypeList.SCROLL_BOTTOM_EVENT);
         return true;
-      }
-      if (this.messagesScreen === 'conversation') {
-        const row = this.dataSurface.items[this.selectedIndex];
-        if (row === undefined || conversationRowIsInstruction(row)) return true;
       }
     }
     this.dataSelectionPending = true;
@@ -1476,17 +1467,19 @@ export class CapabilityMenu {
     if (this.pendingTitle === 'QUICKNOTES' && this.dataSurface?.title.trim().toUpperCase() === 'QUICKNOTES') {
       this.noteReaderTraceId = traceId;
     }
-    const readingMessage = this.pendingTitle === 'MESSAGES'
+    // A tap on the thread replies to it — the one thing a tap does there.
+    // Only the tap travels: the Mac keeps which conversation it is.
+    const replyingToThread = this.pendingTitle === 'MESSAGES'
       && this.messagesScreen === 'conversation';
-    if (this.pendingTitle === 'MESSAGES' && !readingMessage && this.pendingRequestId) {
+    if (this.pendingTitle === 'MESSAGES' && !replyingToThread && this.pendingRequestId) {
       this.retireMessageUI(true);
       this.messageSelection = {
         requestId: this.pendingRequestId, selectionId: traceId, retiredActionIds: new Set(),
       };
       this.messageLifecycleBinding = { requestId: this.pendingRequestId, selectionId: traceId };
     }
-    const stage = readingMessage
-      ? 'message-read-requested'
+    const stage = replyingToThread
+      ? 'message-reply-requested'
       : this.pendingTitle === 'MESSAGES'
         ? 'message-selected'
       : 'capability-row-selected';
@@ -1494,7 +1487,7 @@ export class CapabilityMenu {
     this.link.send({
       kind: 'input',
       event: {
-        containerName: readingMessage ? 'capmessage' : 'capdata',
+        containerName: replyingToThread ? 'capmessage' : 'capdata',
         ...(this.pendingTitle === 'QUICKNOTES' && this.dataSurface?.quickNotesPage
           ? { quickNotesPageIndex: this.dataSurface.quickNotesPage.index } : {}),
         selectedIndex: this.selectedIndex - panelOffset,
@@ -2036,26 +2029,12 @@ export class CapabilityMenu {
       ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   }
 
-  /**
-   * The text and hint shown by the Mac are the wire contract for paging: the
-   * Hub must never fabricate an "older" action on a complete thread. Keeping
-   * the cursor and private chat identity Mac-side also prevents G2 input from
-   * choosing a different recipient.
-   */
-  private canRequestMessagePage(eventType: number, selectedIndex = this.selectedIndex): boolean {
+  /** A long draft's review pages by the Mac's own footer: the Hub never
+   * fabricates a page the Mac did not offer. (The thread is a reader and
+   * pages through `requestReaderPage`.) */
+  private canRequestMessagePage(eventType: number): boolean {
     if (this.dataPagePending || !this.pendingRequestId) return false;
-    const isReader = this.messagesScreen === 'message_detail' || this.messagesScreen === 'review';
-    if (this.messagesScreen !== 'conversation' && !isReader) return false;
-    if (isReader) return this.hintOffersPage(eventType);
-    const atTop = selectedIndex === 0;
-    const atBottom = selectedIndex === Math.max(0, this.dataItemCount - 1);
-    if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
-      return atTop && this.dataHint?.includes('up newer') === true;
-    }
-    if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-      return atBottom && this.dataHint?.includes('down older') === true;
-    }
-    return false;
+    return this.messagesScreen === 'review' && this.hintOffersPage(eventType);
   }
 
   private requestMessagePage(eventType: number): void {
@@ -2063,19 +2042,17 @@ export class CapabilityMenu {
     const surface = this.dataSurface;
     const direction = eventType === OsEventTypeList.SCROLL_TOP_EVENT ? -1 : 1;
     const reader = surface?.readerPage;
-    // Review uses the shared exact-reader contract. Conversation/history
-    // keeps its established request shape and selected-message owner.
-    if (this.messagesScreen === 'review' && !reader) return;
+    if (this.messagesScreen !== 'review' || !reader) return;
     this.messagePageDirection = direction;
     this.dataPagePending = true;
-    const traceId = reader?.id ?? `hud-${this.randomId()}`;
+    const traceId = reader.id;
     console.info(`[joat trace] trace=${traceId} stage=message-page-requested event=${eventType}`);
     this.link.send({
       kind: 'input',
       event: {
         containerName: 'cappage',
         selectedName: 'MESSAGES',
-        ...(reader ? { selectedIndex: reader.index } : {}),
+        selectedIndex: reader.index,
         eventType,
         traceId,
         requestId: this.pendingRequestId,

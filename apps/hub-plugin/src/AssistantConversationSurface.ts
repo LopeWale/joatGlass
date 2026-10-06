@@ -241,6 +241,25 @@ export function conversationViewport(
   };
 }
 
+/** A Messages reply drafted in JOAT's own conversation card: JOAT's
+ * question, then the wearer's words, under a footer naming the gestures.
+ * Only the page is shared with the assistant conversation; the draft keeps
+ * its own question and consent owners underneath. */
+export function replyDraftView(turns: AssistantConversationTurn[], hint: string): ConversationViewport {
+  const view = conversationViewport({
+    conversationId: 'message-reply',
+    revision: 0,
+    state: 'ready',
+    continueAfterMs: 120_000,
+    turns,
+    earlierTurnsOmitted: false,
+  });
+  return {
+    ...view,
+    footerText: centered(GesturePolicy.formatHint(hint), ASSISTANT_CONVERSATION_GEOMETRY.footerWidth),
+  };
+}
+
 export function validAssistantConversationSnapshot(value: AssistantConversationSnapshot): boolean {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(value.conversationId)) return false;
   if (!Number.isSafeInteger(value.revision) || value.revision < 0) return false;
