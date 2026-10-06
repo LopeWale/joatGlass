@@ -196,6 +196,8 @@ the words, "TAP · send   SWIPE · say it again". A swipe asks the question
 again, so a misheard reply is re-stated rather than sent; no answer sends
 nothing. A reply too long for that page (120 UTF-16 units with its
 "Send to …?") is shown whole on a reader instead: tap sends, Back drops.
+Like the Messages review, the reader sends only from its very last page:
+before that a tap turns the page, so no word goes out unread.
 
 The rail, the hairline and the pane all sit east of x=288. That is a
 latency rule, not a taste: the frame ships as four tiles and only changed

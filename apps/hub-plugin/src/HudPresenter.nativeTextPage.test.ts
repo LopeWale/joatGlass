@@ -96,8 +96,9 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     expect(r.hud.scrollTextPage('up')).toBe(false);
     expect(r.hud.scrollTextPage('down')).toBe(true);
     await vi.waitFor(() => expect(r.upgrades.some((u) => u.containerName === 'main' && u.content === pages[1])).toBe(true));
+    // From the second local page the swipe goes both ways.
     await vi.waitFor(() => expect(r.upgrades.some((u) => (
-      u.containerName === 'hint' && u.content === `2/${pages.length} · ${READER.hint}`
+      u.containerName === 'hint' && u.content === `2/${pages.length} · swipe: page · say reply · double-click: back`
     ))).toBe(true));
     expect(r.rebuilds).toHaveLength(rebuildsAfterOpen);
 
@@ -113,9 +114,56 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     expect(await r.hud.showList(longMessage, { ...READER, nativeTextPageFromEnd: true })).toBe(true);
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(text(page, 'main')).toBe(pages[pages.length - 1]);
-    expect(text(page, 'hint')).toBe(`${pages.length}/${pages.length} · ${READER.hint}`);
+    // Earlier local pages and the Mac's next page: the swipe goes both ways.
+    expect(text(page, 'hint')).toBe(`${pages.length}/${pages.length} · swipe: page · say reply · double-click: back`);
     expect(r.hud.scrollTextPage('down')).toBe(false);
     expect(r.hud.scrollTextPage('up')).toBe(true);
+  });
+
+  it('offers a review\'s tap only on its last local page, and promises the swipe for both layers', async () => {
+    const r = rig();
+    const pages = paginateAnswer(longMessage.join('\n'));
+    expect(pages.length).toBeGreaterThan(1);
+    // The Mac's last page of a review: it offers the tap and a previous page.
+    const REVIEW = {
+      title: 'MESSAGES · REVIEW', hint: 'up previous · tap: confirm · left x2: back',
+      selectable: true, nativeTextPage: true, reviewTapOnLastPage: true,
+    };
+    expect(await r.hud.showList(longMessage, REVIEW)).toBe(true);
+    expect(text(r.rebuilds[r.rebuilds.length - 1], 'hint'))
+      .toBe(`1/${pages.length} · swipe: page · double-click: back`);
+    expect(r.hud.isTextPageAtEnd()).toBe(false);
+
+    for (let page = 1; page < pages.length; page += 1) expect(r.hud.scrollTextPage('down')).toBe(true);
+    expect(r.hud.isTextPageAtEnd()).toBe(true);
+    await vi.waitFor(() => expect(r.upgrades.some((u) => u.containerName === 'hint'
+      && u.content === `${pages.length}/${pages.length} · swipe: previous · tap: confirm · double-click: back`)).toBe(true));
+  });
+
+  it('reads every swipe the Mac offers, and forgets an earlier page once another is on the glass', async () => {
+    const r = rig();
+    const pages = paginateAnswer(longMessage.join('\n'));
+    // The Mac's promises need not sit side by side to count.
+    expect(await r.hud.showList(longMessage, {
+      ...READER, title: 'BRAINSTORM · SAVED', hint: 'up previous · tap: continue · down more · left x2: back',
+    })).toBe(true);
+    expect(text(r.rebuilds[r.rebuilds.length - 1], 'hint'))
+      .toBe(`1/${pages.length} · swipe: page · tap: continue · double-click: back`);
+    expect(r.hud.isTextPageAtEnd()).toBe(false);
+    // A firmware list replaces the reader: its page state no longer counts.
+    expect(await r.hud.showList(['Latest messages', 'Dele · Hi'], {
+      title: 'MESSAGES · CONVERSATION', hint: 'tap read', selectable: true, nativeFirmwareList: true,
+    })).toBe(true);
+    expect(r.hud.isTextPageAtEnd()).toBe(true);
+  });
+
+  it('keeps the Mac\'s own footer on a reader that fits one local page', async () => {
+    const r = rig();
+    expect(await r.hud.showList(['1/1 · To work', 'open a PR'], {
+      ...READER, title: 'AGENT TERMINAL · CHECK', hint: 'tap: send · left x2: back', reviewTapOnLastPage: true,
+    })).toBe(true);
+    expect(text(r.rebuilds[r.rebuilds.length - 1], 'hint')).toBe('tap: send · double-click: back');
+    expect(r.hud.isTextPageAtEnd()).toBe(true);
   });
 
   it('accepts a bound reader on the rebuild receipt and refuses a retired one', async () => {

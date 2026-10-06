@@ -717,6 +717,110 @@ describe('CapabilityMenu', () => {
     });
   });
 
+  it('draws the spoken-reply check as a text page and asks the Mac for its next page past the local edge', async () => {
+    // Before, the check was not a text page title, so it drew as a firmware
+    // list: five rows of the reply showed, a swipe only moved the highlight,
+    // and a tap sent words the wearer had not reached.
+    const { menu, hud, listOptions, sent } = rig();
+    hud.scrollTextPage = vi.fn(() => false); // the local pages are all shown
+    const requestId = 'voice-check-1';
+    expect(await menu.presentList(
+      'AGENT TERMINAL · CHECK', ['1/2 · To work', 'fix the login test and open a PR'], requestId, false,
+      'down more · left x2: back', undefined, undefined, undefined, undefined, undefined,
+      { id: 'review-abc', index: 0, count: 2 },
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({
+      title: 'AGENT TERMINAL · CHECK', nativeTextPage: true, reviewTapOnLastPage: true,
+    });
+    expect(listOptions[listOptions.length - 1]).not.toHaveProperty('nativeFirmwareList');
+
+    sent.length = 0;
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);
+    expect(sent).toEqual([]); // there is no page before the first
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(sent).toEqual([{ kind: 'input', event: {
+      containerName: 'cappage', selectedName: 'AGENT TERMINAL', selectedIndex: 0,
+      eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId, traceId: 'review-abc',
+    } }]);
+    // One page request at a time.
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('pages a saved Brainstorm to its end and opens the previous page on its last local page', async () => {
+    // Before, nothing asked the Mac for a saved session's next page: the
+    // footer promised "swipe: more" and the swipe did nothing.
+    const { menu, hud, listOptions, sent } = rig();
+    hud.scrollTextPage = vi.fn(() => false);
+    const requestId = 'voice-brainstorm-1';
+    const show = (index: number, hint: string) => menu.presentList(
+      'BRAINSTORM · SAVED', [`${index + 1}/3 · session`, `Turn ${index + 1}`], requestId, true, hint,
+      undefined, undefined, undefined, undefined, undefined, { id: 'brainstorm', index, count: 3 },
+    );
+    expect(await show(0, 'down more · tap: continue · left x2: back')).toBe(true);
+    sent.length = 0;
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'cappage', selectedName: 'BRAINSTORM', selectedIndex: 0, traceId: 'brainstorm', requestId,
+    });
+
+    expect(await show(1, 'up previous · down more · tap: continue · left x2: back')).toBe(true);
+    expect(listOptions[listOptions.length - 1]).not.toHaveProperty('nativeTextPageFromEnd');
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'cappage', selectedName: 'BRAINSTORM', selectedIndex: 1,
+      eventType: OsEventTypeList.SCROLL_TOP_EVENT,
+    });
+    expect(await show(0, 'down more · tap: continue · left x2: back')).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ nativeTextPageFromEnd: true });
+  });
+
+  it.each([
+    ['AGENT TERMINAL · CHECK', 'AGENT TERMINAL', 'voice-check-2'],
+    ['MESSAGES · REVIEW', 'MESSAGES', 'voice-review-2'],
+  ])('sends a %s only from the last firmware page of the last Mac page; an earlier tap reads on', async (title, family, requestId) => {
+    // The last Mac page can span several firmware pages. Before, a tap on
+    // its first one sent the reply or the message unread to the end.
+    const { menu, hud, sent } = rig();
+    let atEnd = false;
+    hud.isTextPageAtEnd = vi.fn(() => atEnd);
+    hud.scrollTextPage = vi.fn((direction: 'up' | 'down') => {
+      if (direction !== 'down' || atEnd) return false;
+      atEnd = true;
+      return true;
+    });
+    expect(await menu.presentList(
+      title, ['2/2 · To work', 'and ask Wendy to review it tomorrow'], requestId, true,
+      'up previous · tap: confirm · left x2: back', undefined, undefined, undefined, undefined, undefined,
+      { id: 'review-def', index: 1, count: 2 },
+    )).toBe(true);
+    sent.length = 0;
+    expect(menu.handleClick()).toBe(true);
+    expect(hud.scrollTextPage).toHaveBeenCalledWith('down');
+    expect(sent).toEqual([]);
+
+    expect(menu.handleClick()).toBe(true);
+    expect(sent[sent.length - 1]?.event).toMatchObject({ containerName: 'capdata', selectedName: family, requestId });
+  });
+
+  it('turns an early tap on a review\'s earlier Mac page into the request for its next page', async () => {
+    const { menu, hud, sent } = rig();
+    hud.isTextPageAtEnd = vi.fn(() => true);
+    hud.scrollTextPage = vi.fn(() => false);
+    const requestId = 'voice-check-3';
+    expect(await menu.presentList(
+      'AGENT TERMINAL · CHECK', ['1/2 · To work', 'fix the login test'], requestId, false,
+      'down more · left x2: back', undefined, undefined, undefined, undefined, undefined,
+      { id: 'review-ghi', index: 0, count: 2 },
+    )).toBe(true);
+    sent.length = 0;
+    expect(menu.handleClick()).toBe(true);
+    expect(sent).toEqual([{ kind: 'input', event: {
+      containerName: 'cappage', selectedName: 'AGENT TERMINAL', selectedIndex: 0,
+      eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId, traceId: 'review-ghi',
+    } }]);
+  });
+
   it('draws a conversation with paging rows as a firmware list and turns their taps into page requests', async () => {
     const { menu, listOptions, sent } = rig();
     await menu.openFromContextualMenu(0); // Messages

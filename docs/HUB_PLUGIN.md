@@ -297,6 +297,14 @@ The levers that remain are design decisions, not code:
   the reply path is now firmware-drawn; the probe records zero image tiles
   from picker to result and back. `?joatTestPromptMic=1` (DEV) lets the
   simulator, which has no microphone, keep a question on screen.
+  2026-10-06: every reader the Mac pages asks for its neighbouring page
+  past the local edge (`requestReaderPage`: the title's family, the
+  reader's id and page), where only QuickNotes and the Messages review
+  could; the saved Brainstorm reader stopped at its first page. A review
+  (`REVIEW_READER_TITLES`: the Messages review, the terminal's
+  `AGENT TERMINAL · CHECK`) sends only from the last firmware page of the
+  Mac's last page; before it a tap reads on, and the footer offers the tap
+  only there.
 - ~~Native Brainstorm~~ — 2026-10-05: a `brainstorm.view` frame rides the
   Agent Terminal's two-text page (`NativeTerminalSurface`, owner
   `terminal-conversation-native`): head `JOAT · BRAINSTORM`, a status row with the state
