@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-06 — Build JOAT 0.1.101 terminal-checks package
+
+- Packed from `f014c9f` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.101 above the last recorded build (0.1.100), and the new three-file version check passed (app.json, package.json and package-lock.json all 0.1.101). `evenhub` CLI, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
+- Canonical `apps/hub-plugin/joat.ehpk`: 154724 bytes, SHA-256 `7b07d47831639401e61676fc26021fda321dcdf1c413ac6d7ba9ea1695864076`. Carries the terminal's long-press cancel and the "CHECK WHAT WAS HEARD" page, and drops the self-test's double press. The Mac side changed (phone-control fixes, the terminal check and cancel, the self-test removal), so the brain needs a restart from this revision; brain and plugin should move together, since the cancel and the check are new wire messages. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-06 — Terminal: long press cancels a running job; a spoken reply is checked before it goes
 
 - The wearer's call: "make long tap cancel a running terminal job … use tap for something like send spoken reply (a confirmation check to make sure the spoken words is what I meant so I can re-state it if it was transcribed incorrectly — I have a little accent from time to time)."
