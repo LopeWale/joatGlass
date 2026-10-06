@@ -286,6 +286,11 @@ class MessageReplyController:
         """Read an action without reissuing a confirmation or external send."""
         return self._known_action(action_id).status
 
+    def message_action_body(self, action_id: str) -> str | None:
+        """The body an action carries, once the wearer has said it."""
+        action = self._prepared.get(action_id)
+        return action.body if action is not None else None
+
     def message_prompt_field(self, action_id: str) -> Literal["recipient", "body"] | None:
         """The exact typed input this action can currently accept from speech."""
         action = self._known_action(action_id)
@@ -549,7 +554,12 @@ class MessageReplyController:
             self._set_status(action, "failed", "This conversation has no Messages send target. Open it again on your Mac.")
             return
         if action.body is None:
-            self._set_status(action, "awaiting_input", f"Recipient {action.recipient.sender} selected. Say the message.", needs_input="body")
+            question = (
+                f"What do you want to say back to {action.recipient.sender}?"
+                if action.origin_kind == "messages.selection"
+                else f"Recipient {action.recipient.sender} selected. Say the message."
+            )
+            self._set_status(action, "awaiting_input", question, needs_input="body")
             return
         self._set_status(action, "awaiting_confirmation", "Awaiting your confirmation on the glasses.")
         if action.expiry is not None:

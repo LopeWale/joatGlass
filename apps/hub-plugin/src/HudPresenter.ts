@@ -13,6 +13,7 @@ import type {
 import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
 import {
   AssistantConversationSurface,
+  replyDraftView,
   validAssistantConversationSnapshot,
   type ConversationExitResult,
 } from './AssistantConversationSurface';
@@ -278,6 +279,21 @@ interface NativeTextPageState {
 }
 
 /** The swipe promises a Mac reader writes for its own pages, formatted. */
+/** The reply card's footers. The wearer's own words come back for
+ * consent: tap sends them, long-press says them again, and Back cancels to
+ * the thread. Both fit the card's 458 px footer (pretext). */
+const MESSAGE_REPLY_LISTENING_HINT = 'listening · x2: cancel';
+const MESSAGE_REPLY_CONFIRM_HINT = 'tap: send · hold: retry · x2: cancel';
+
+/** The Mac's reply consent, `Send to Ada? “words”` (or, after a long
+ * draft's review, `Send to Ada? (reviewed) “opening…”`), split back into
+ * who and what. Anything else keeps the plain decision page. */
+export function parseMessageDraft(prompt: string): { recipient: string; body: string } | undefined {
+  const match = /^Send to ([\s\S]+?)\? (?:\(reviewed\) )?“([\s\S]*)”$/u.exec(prompt.trim());
+  if (!match?.[1] || !match[2]?.trim()) return undefined;
+  return { recipient: match[1], body: match[2] };
+}
+
 const PAGE_SWIPES = new Set(['swipe: previous', 'swipe: more', 'swipe: page']);
 
 function textPageHint(page: number, count: number, macHint: string, review = false): string {
@@ -342,6 +358,8 @@ interface AssistantOverlayState extends AssistantOverlayVisual {
 interface PromptQuestionState {
   terminalConversationId?: string;
   inlineTerminal?: boolean;
+  /** A Messages reply's question, drawn in JOAT's conversation card. */
+  messageReply?: boolean;
   id: string;
   question: string;
   isCurrent: () => boolean;
@@ -812,7 +830,10 @@ export class HudPresenter {
         ? existing.paint ?? Promise.resolve(false)
         : Promise.resolve(false);
     }
-    const prompt: PromptQuestionState = { id: promptId, question, isCurrent };
+    const prompt: PromptQuestionState = {
+      id: promptId, question, isCurrent,
+      ...(ownerKind === 'messages' ? { messageReply: true } : {}),
+    };
     this.promptQuestion = prompt;
     this.cancelAssistantOverlayPaintTimer();
     this.assistantOverlayPaintDirty = false;
@@ -839,7 +860,13 @@ export class HudPresenter {
       // writing into containers the question page has replaced.
       if (!await this.prepareNativeTerminalHandoff()) return false;
       if (!this.isPromptCurrent(prompt)) return false;
-      const layout = this.layouts.promptQuestionLayout(pages[0] ?? ' ', this.nativeHeader(this.nativePageTitle()));
+      const header = this.nativeHeader(this.nativePageTitle());
+      const layout = prompt.messageReply
+        ? this.layouts.assistantConversationLayout(
+          replyDraftView([{ role: 'assistant', text: prompt.question }], MESSAGE_REPLY_LISTENING_HINT),
+          header,
+        )
+        : this.layouts.promptQuestionLayout(pages[0] ?? ' ', header);
       painted = await this.replaceNativePage(layout, 'prompt-native');
       return painted && this.isPromptCurrent(prompt);
     } catch {
@@ -2475,10 +2502,16 @@ export class HudPresenter {
     // (~165 ms) instead of four forced image tiles at 0.2–2 s each, so
     // "Send to X?" is readable before the Mac's confirmation envelope has
     // been spent on pixels.
-    const layout = this.layouts.confirmationLayout(
-      current.prompt, this.visual ? this.nativeHeader(this.nativePageTitle()) : liveStatus?.text,
-      current.purpose,
-    );
+    const header = this.visual ? this.nativeHeader(this.nativePageTitle()) : liveStatus?.text;
+    const draft = current.diagnosticKind === 'messages' ? parseMessageDraft(current.prompt) : undefined;
+    // A reply's consent is the same gate in JOAT's conversation card: the
+    // question it answered, then the wearer's exact words, then the gestures.
+    const layout = draft
+      ? this.layouts.assistantConversationLayout(replyDraftView([
+        { role: 'assistant', text: `What do you want to say back to ${draft.recipient}?` },
+        { role: 'user', text: draft.body },
+      ], MESSAGE_REPLY_CONFIRM_HINT), header)
+      : this.layouts.confirmationLayout(current.prompt, header, current.purpose);
     const ok = this.visual
       ? await this.replaceNativePage(layout, 'confirmation-native')
       : await this.rebuildPage(layout);

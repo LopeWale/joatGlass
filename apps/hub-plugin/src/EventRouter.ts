@@ -126,6 +126,9 @@ export class EventRouter {
     private readonly assistantOverlay?: AssistantOverlayInputOwner,
     private readonly transcriptScroll?: (direction: 'up' | 'down') => boolean,
     private readonly promptedInput?: PromptInputOwner,
+    /** Long-press on a decision gate that offers it — a Messages reply's
+     * consent: say it again. True when the gate took the gesture. */
+    private readonly confirmationRetry?: () => boolean,
   ) {}
 
   attach(): void {
@@ -183,6 +186,16 @@ export class EventRouter {
     return true;
   }
 
+  /** A decision gate that offers "say it again" takes the long-press; any
+   * other gate consumes it, as before, so the mic never toggles behind it.
+   * Its release then finds no pending press and is consumed silently. */
+  private retryConfirmation(): void {
+    this.pendingMicLongPress = false;
+    if (this.confirmationRetry?.()) {
+      console.info('[EventRouter] long-press on a reply draft — saying it again');
+    }
+  }
+
   /** The one mute implementation, shared by the gesture and menu item 2. */
   private toggleMic(): void {
     if (this.audio.isOpen) {
@@ -230,6 +243,8 @@ export class EventRouter {
         const eventType = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
         if (eventType === OsEventTypeList.CLICK_EVENT) {
           this.imu.confirmByTap();
+        } else if (eventType === OsEventTypeList.LONG_PRESS_EVENT) {
+          this.retryConfirmation();
         } else if (
           eventType === OsEventTypeList.SCROLL_TOP_EVENT ||
           eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
@@ -273,6 +288,10 @@ export class EventRouter {
       // Confirmation owns long press too; it must not toggle the microphone
       // behind a decision or make the visible TAP/SWIPE contract incomplete.
       if (!this.imu.isPending() && this.handleLongPress(event.sysEvent.eventType, 'sysEvent')) {
+        return;
+      }
+      if (this.imu.isPending() && event.sysEvent.eventType === OsEventTypeList.LONG_PRESS_EVENT) {
+        this.retryConfirmation();
         return;
       }
       this.handleSys(event.sysEvent);
