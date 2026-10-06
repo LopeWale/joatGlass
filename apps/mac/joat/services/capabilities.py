@@ -1315,9 +1315,12 @@ class CapabilityRouter:
         page = history.pages[history.index]
         if index == history.reply_index and self._message_ui is not None:
             # The tapped "✎ Reply" row: the same prepared reply the spoken
-            # "reply" starts, with its question on the lens.
+            # "reply" starts, with its question on the lens. A refusal is
+            # shown: it used to be dropped, and the tap did nothing.
             self._message_selection_active = True
-            await self._message_ui.begin_reply()
+            refused = await self._message_ui.begin_reply()
+            if refused:
+                await self._hud.receipt(refused)
             return
         token = self._request_context.set(request_id)
         try:

@@ -130,3 +130,5 @@ async def test_the_sign_in_drops_the_list_and_any_inherited_login(
         assert_dropped(env)
         for name in _LOGINS:
             assert name not in env, f"a sign-in must not be short-circuited by {name}"
+        # The CLI opens nothing on the Mac: the phone's link is the only one.
+        assert env.get("BROWSER") == "true"

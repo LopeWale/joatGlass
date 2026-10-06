@@ -1491,6 +1491,8 @@ async def main() -> None:
         transport.request_confirmation,
         action_journal,
         begin_reply=lambda: message_ui.begin_reply(),
+        # A conversation still on the glass keeps its reply clock fresh.
+        selection_on_glass=lambda: message_ui.conversation_on_glass(),
         on_status=lambda status: message_ui.on_status(status),
         # "my wife" resolves only to a contact the wearer named as such.
         relationships=RelationshipBook(),
