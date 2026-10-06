@@ -34,6 +34,7 @@ import {
 } from './PanelRail';
 import {
   CANVAS,
+  HeaderImageId,
   PANEL_TABS,
   SPINE_LABEL_BOX,
   type HudContentKind,
@@ -1007,6 +1008,35 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       pixels[target] = Math.max(rgba[source] ?? 0, rgba[source + 1] ?? 0, rgba[source + 2] ?? 0);
     }
     return splitGrayscaleTiles(pixels);
+  }
+
+  /** The spine alone, as the two 288x24 halves of a firmware page's image
+   * header (HeaderImage.ts): the same drawing as the image pages' spine. */
+  async renderHeader(model: HudStatusModel, label: string): Promise<readonly HudImageTile[]> {
+    const icons = await this.icons;
+    const width = CANVAS.width;
+    const height = HUD_VISUAL_GEOMETRY.spineHeight;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) throw new Error('2D canvas is unavailable');
+    context.fillStyle = '#000000';
+    context.fillRect(0, 0, width, height);
+    context.imageSmoothingEnabled = true;
+    this.drawShell(context, model, icons, true, true, label);
+    const rgba = context.getImageData(0, 0, width, height).data;
+    const half = width / 2;
+    return [HeaderImageId.Left, HeaderImageId.Right].map((containerId, index) => {
+      const pixels = new Uint8Array(half * height);
+      for (let row = 0; row < height; row += 1) {
+        for (let column = 0; column < half; column += 1) {
+          const source = (row * width + index * half + column) * 4;
+          pixels[row * half + column] = Math.max(rgba[source] ?? 0, rgba[source + 1] ?? 0, rgba[source + 2] ?? 0);
+        }
+      }
+      return { containerId, pixels, width: half, height };
+    });
   }
 
   private drawShell(

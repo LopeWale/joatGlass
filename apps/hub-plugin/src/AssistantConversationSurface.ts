@@ -61,12 +61,14 @@ export interface AssistantConversationSurfaceState {
   indicatorFrame: number;
 }
 
-// Native text is the latency path. Keep one stable container geometry for the
-// whole visit so thinking, streamed answer chunks, scrolling, and the
-// continuation prompt use flicker-free textContainerUpgrade calls. Changing
-// the card height as lines arrive would turn every early chunk into a full
-// rebuildPageContainer and recreate the very redraw problem this path fixes.
-const NATIVE_LINE_STAGES = [7] as const;
+// Even AI's card hugs its content: two rows for the first exchange, growing
+// upward from a fixed bottom as requests and replies are added, and
+// scrolling to the latest reply once it reaches its height cap (the
+// wearer's ask, 2026-10-06; Even's product demo, frame-measured
+// 2026-09-24). The growth is BOUNDED to four stages so a stage crossing is
+// one rebuild and everything within a stage (streamed chunks, scrolling,
+// the indicator) stays a flicker-free textContainerUpgrade.
+const NATIVE_LINE_STAGES = [2, 3, 5, 7] as const;
 // Eight indicator phases in firmware glyphs, at the cadence Even AI uses.
 const INDICATOR_FRAMES = [
   '■ □', '□ ■', '■', '■ ■', '□ □', '■', '□', '■',
@@ -89,6 +91,9 @@ type TextMeasure = (text: string) => number;
 
 interface ConversationViewportOptions {
   lineStages?: readonly number[];
+  /** A footer sentence the card holds inside its border (a Messages draft's
+   * gestures), in place of the state glyph on the border. */
+  footerHint?: string;
   textWidth?: number;
   measureTextWidth?: TextMeasure;
 }
@@ -194,6 +199,13 @@ export function conversationViewport(
   options: ConversationViewportOptions = {},
 ): ConversationViewport {
   const all = conversationLines(snapshot, options);
+  // While JOAT works on a reply, the indicator stands on the row the
+  // answer will take, inside the box: a fresh question is two rows, the
+  // question and the working glyph, and the answer replaces the glyph.
+  const lastTurn = snapshot.turns[snapshot.turns.length - 1];
+  if (snapshot.state !== 'ready' && lastTurn?.role === 'user') {
+    all.push({ role: 'assistant', text: INDICATOR_FRAMES[indicatorFrame % INDICATOR_FRAMES.length]! });
+  }
   const lineCapacity = stageFor(all.length, options.lineStages ?? NATIVE_LINE_STAGES);
   const maximumScrollFromTail = Math.max(0, all.length - lineCapacity);
   const scrollFromTail = clamp(
@@ -213,23 +225,26 @@ export function conversationViewport(
     .map((line) => line.role === 'assistant' ? line.text : ' ')
     .join('\n');
   const geometry = ASSISTANT_CONVERSATION_GEOMETRY;
+  // The footer holds only a sentence (the continuation prompt, a draft's
+  // gestures), inside the box, which grows a row to hold it. The working
+  // indicator is not a footer: it stands on the answer's row (above).
+  const sentence = continuePrompt ? CONTINUE_COPY : options.footerHint;
+  const footer = sentence ?? ' ';
   const cardHeight = (
     lineCapacity * geometry.lineHeight
     + geometry.cardTopPadding
     + geometry.footerGap
-    + geometry.lineHeight
-    + geometry.footerBottomInset
+    + (sentence ? geometry.lineHeight + geometry.footerBottomInset : 0)
   );
-  const footer = continuePrompt
-    ? CONTINUE_COPY
-    : snapshot.state === 'ready'
-      ? '■'
-      : INDICATOR_FRAMES[indicatorFrame % INDICATOR_FRAMES.length]!;
+  const footerTop = sentence
+    ? geometry.cardBottom - geometry.footerBottomInset - geometry.lineHeight
+    : geometry.cardBottom - Math.round(geometry.lineHeight / 2);
   return {
     cardTop: geometry.cardBottom - cardHeight,
     cardHeight,
     transcriptTop: geometry.cardBottom - cardHeight + geometry.cardTopPadding,
     transcriptHeight: lineCapacity * geometry.lineHeight,
+    footerTop,
     dimText,
     brightText,
     footerText: centered(GesturePolicy.formatHint(footer), ASSISTANT_CONVERSATION_GEOMETRY.footerWidth),
@@ -246,18 +261,14 @@ export function conversationViewport(
  * Only the page is shared with the assistant conversation; the draft keeps
  * its own question and consent owners underneath. */
 export function replyDraftView(turns: AssistantConversationTurn[], hint: string): ConversationViewport {
-  const view = conversationViewport({
+  return conversationViewport({
     conversationId: 'message-reply',
     revision: 0,
     state: 'ready',
     continueAfterMs: 120_000,
     turns,
     earlierTurnsOmitted: false,
-  });
-  return {
-    ...view,
-    footerText: centered(GesturePolicy.formatHint(hint), ASSISTANT_CONVERSATION_GEOMETRY.footerWidth),
-  };
+  }, 0, 0, false, { footerHint: hint });
 }
 
 export function validAssistantConversationSnapshot(value: AssistantConversationSnapshot): boolean {
@@ -608,7 +619,11 @@ export class AssistantConversationSurface {
       current, requestedScroll, this.indicatorFrame, this.continuePrompt,
       this.viewportOptions,
     );
-    const needsRebuild = this.pageLineCapacity !== view.lineCapacity || this.lastView === undefined;
+    // A new stage grows the card; a footer that moved (glyph on the border
+    // <-> sentence inside the card) needs its container re-placed. Either is
+    // one rebuild; everything else upgrades in place.
+    const needsRebuild = this.pageLineCapacity !== view.lineCapacity || this.lastView === undefined
+      || this.lastView.footerTop !== view.footerTop;
     let painted = needsRebuild
       ? await this.rebuild(view)
       : await this.upgradeView(view);
@@ -636,6 +651,9 @@ export class AssistantConversationSurface {
       current, this.committedScroll, this.indicatorFrame, this.continuePrompt,
       this.viewportOptions,
     );
+    // The continuation prompt moves the footer inside the card and grows it
+    // a row: a rebuild, not an upgrade drawn at the old position.
+    if (view.footerTop !== this.lastView.footerTop) return this.paintSnapshot();
     const ok = await this.upgrade(
       AssistantConversationContainerId.Generation,
       'generation',
@@ -746,7 +764,8 @@ export class AssistantConversationSurface {
         this.indicatorTimer = undefined;
         if (!this.canWrite() || this.continuePrompt) return;
         this.indicatorFrame = (this.indicatorFrame + 1) % INDICATOR_FRAMES.length;
-        this.footerDirty = true;
+        // The glyph lives on the answer's row: a transcript upgrade.
+        this.snapshotDirty = true;
         void this.ensureDrain();
       }, interval);
       return;

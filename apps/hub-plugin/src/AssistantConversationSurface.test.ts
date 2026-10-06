@@ -135,13 +135,15 @@ describe('AssistantConversationSurface delivery', () => {
       { indicatorIntervalMs: 0, continuationPromptEnabled: false },
     );
 
+    // Question and answer fit the card's first size, two rows: the answer
+    // streams into it in place.
     await expect(surface.present(snapshot(1, [
-      { role: 'user', text: "What is France's\ncapital?" },
+      { role: 'user', text: "What is France's capital?" },
     ], 'thinking'))).resolves.toBe(true);
     expect(rebuildPageContainer).toHaveBeenCalledTimes(1);
 
     await surface.present(snapshot(2, [
-      { role: 'user', text: "What is France's\ncapital?" },
+      { role: 'user', text: "What is France's capital?" },
       { role: 'assistant', text: 'Paris.' },
     ], 'answering'));
     await surface.whenIdle();
@@ -150,11 +152,57 @@ describe('AssistantConversationSurface delivery', () => {
       ...rebuildPageContainer.mock.calls.flatMap(([page]) => page.textObject ?? []),
       ...textContainerUpgrade.mock.calls.map(([update]) => update),
     ].map((entry) => entry.content ?? '').join('\n');
-    expect(everyContent).toContain("What is France's");
-    expect(everyContent).toContain('capital?');
+    expect(everyContent).toContain("What is France's capital?");
     expect(everyContent).toContain('Paris.');
     expect(textContainerUpgrade).toHaveBeenCalled();
     expect(rebuildPageContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it('stands the working glyph on the answer\'s row inside the box, then the answer replaces it', () => {
+    const thinking = conversationViewport(snapshot(1, [{ role: 'user', text: 'What time is it?' }], 'thinking'));
+    expect(thinking.lineCapacity).toBe(2);
+    expect(thinking.visibleLines.map((line) => line.role)).toEqual(['user', 'assistant']);
+    expect(thinking.brightText.split('\n')[1]?.trim()).toMatch(/^[■□ ]+$/u);
+    expect(thinking.footerText.trim()).toBe('');
+    const answered = conversationViewport(snapshot(2, [
+      { role: 'user', text: 'What time is it?' },
+      { role: 'assistant', text: 'Half past two.' },
+    ], 'ready'));
+    expect(answered.lineCapacity).toBe(2);
+    expect(answered.brightText).toContain('Half past two.');
+    expect(answered.brightText).not.toMatch(/[■□]/u);
+  });
+
+  it('starts at two rows and grows upward from a fixed bottom, one rebuild per size', async () => {
+    const { client, rebuildPageContainer } = fakeClient();
+    const surface = new AssistantConversationSurface(
+      client as never,
+      new HudPageBuilder(),
+      async () => true,
+      { indicatorIntervalMs: 0, continuationPromptEnabled: false },
+    );
+    const frames = () => rebuildPageContainer.mock.calls.map(([page]) => (
+      page.textObject?.find((text: { containerName?: string }) => text.containerName === 'conversation')
+    ));
+    await surface.present(snapshot(1, [
+      { role: 'user', text: 'What time is my next meeting?' },
+      { role: 'assistant', text: 'Design review at 2:30.' },
+    ]));
+    await surface.whenIdle();
+    await surface.present(snapshot(2, [
+      { role: 'user', text: 'What time is my next meeting?' },
+      { role: 'assistant', text: 'Design review at 2:30.' },
+      { role: 'user', text: 'And after that?' },
+      { role: 'assistant', text: Array.from({ length: 40 }, (_, i) => `word${i}`).join(' ') },
+    ]));
+    await surface.whenIdle();
+    const [first, grown] = frames();
+    // Two rows, then the cap: the bottom edge stays put and the top rises.
+    expect(first?.height).toBe(2 * 27 + 8 + 5);
+    expect(grown?.height).toBe(7 * 27 + 8 + 5);
+    expect((first?.yPosition ?? 0) + (first?.height ?? 0))
+      .toBe((grown?.yPosition ?? 0) + (grown?.height ?? 0));
+    expect(rebuildPageContainer).toHaveBeenCalledTimes(2);
   });
 
   it('coalesces a fast final answer behind a slow native update instead of queuing every preview', async () => {
@@ -247,8 +295,8 @@ describe('AssistantConversationSurface delivery', () => {
     expect(surface.isActive()).toBe(false);
   });
 
-  it('overwrites the complete prior native value when the footer shrinks', async () => {
-    const { client, textContainerUpgrade } = fakeClient();
+  it('moves the continuation prompt inside the card and back, and a finished answer shows no glyph', async () => {
+    const { client, rebuildPageContainer } = fakeClient();
     const surface = new AssistantConversationSurface(
       client as never,
       new HudPageBuilder(),
@@ -264,17 +312,19 @@ describe('AssistantConversationSurface delivery', () => {
     await expect(surface.continueConversation()).resolves.toBe(true);
     await surface.whenIdle();
 
-    const footerUpdates = textContainerUpgrade.mock.calls
-      .map(([update]) => update)
-      .filter((update) => update.containerName === 'generation');
-    const prompt = footerUpdates.find(
-      (update) => update.content?.trim() === 'Continue? tap: stay · double-click: back',
+    const footers = rebuildPageContainer.mock.calls
+      .map(([page]) => page.textObject?.find(
+        (text: { containerName?: string }) => text.containerName === 'generation',
+      ));
+    const prompt = footers.find(
+      (footer) => footer?.content?.trim() === 'Continue? tap: stay · double-click: back',
     );
-    const ready = footerUpdates[footerUpdates.length - 1];
+    const ready = footers[footers.length - 1];
+    // A sentence sits inside the card; the state glyph rides on the border,
+    // and a finished answer has none.
     expect(prompt).toBeDefined();
-    expect(ready?.content?.trim()).toBe('■');
-    expect(ready?.contentOffset).toBe(0);
-    expect(ready?.contentLength).toBeGreaterThanOrEqual(prompt?.content?.length ?? 0);
+    expect(ready?.content?.trim()).toBe('');
+    expect(ready?.yPosition).toBeGreaterThan(prompt?.yPosition ?? Infinity);
   });
 
   it('does not report a continue or exit choice until its native frame succeeds', async () => {
@@ -334,6 +384,9 @@ describe('AssistantConversationSurface delivery', () => {
       { role: 'user', text: 'First prompt\nwith a second line' },
       { role: 'assistant', text: 'The completed answer' },
     ], 'ready'))).resolves.toBe(true);
+    // The first card (question and working glyph: the answer's row is
+    // already held, so the answer streams in place), and the card rebuilt
+    // after the handoff.
     expect(rebuildPageContainer).toHaveBeenCalledTimes(2);
     expect(surface.currentIdentity()).toEqual({ conversationId: 'conversation-1', revision: 3 });
   });

@@ -129,6 +129,7 @@ type VisualState =
   | 'overview'
   | 'live-concurrency'
   | 'confirmation'
+  | 'assistant-conversation'
   | 'message-reply-question'
   | 'message-reply-confirm'
   | 'assistant-overlay'
@@ -177,6 +178,7 @@ const VISUAL_STATE = ((): VisualState | undefined => {
   return requested === 'overview'
     || requested === 'live-concurrency'
     || requested === 'confirmation' || requested === 'assistant-overlay'
+    || requested === 'assistant-conversation'
     || requested === 'message-reply-question' || requested === 'message-reply-confirm'
     || requested === 'nav-receipt'
     || isProductivityVisualState(requested)
@@ -1300,6 +1302,11 @@ async function renderVisualState(
     );
   };
 
+  // The header the glasses draw, from the same structured model Chrome
+  // gives production: without it every fixture captured a placeholder
+  // line no wearer ever sees.
+  await hud.setStatusModel({ clock: '9:41', link: 'connected', mic: true, battery: 87, charging: false });
+
   if (state === 'live-concurrency') {
     await renderLiveConcurrency(hud);
     return;
@@ -1449,6 +1456,34 @@ async function renderVisualState(
     return;
   }
 
+  // A JOAT conversation long enough to scroll: the card at its 7-line cap.
+  if (state === 'assistant-conversation') {
+    await hud.showAssistantConversation({
+      conversationId: 'visual-conversation',
+      revision: 1,
+      // ?joatConvState=thinking shows the working indicator.
+      state: new URLSearchParams(window.location.search).get('joatConvState') === 'thinking'
+        ? 'thinking' : 'ready',
+      continueAfterMs: 120_000,
+      earlierTurnsOmitted: false,
+      // ?joatConvTurns=short: one short exchange, the card at its first size.
+      // ?joatConvTurns=question: a question JOAT is still working on.
+      turns: new URLSearchParams(window.location.search).get('joatConvTurns') === 'question' ? [
+        { role: 'user', text: 'What time is my next meeting?' },
+      ] : new URLSearchParams(window.location.search).get('joatConvTurns') === 'short' ? [
+        { role: 'user', text: 'What time is my next meeting?' },
+        { role: 'assistant', text: 'Design review at 2:30.' },
+      ] : [
+        { role: 'user', text: 'Why is the sky blue and the sunset red?' },
+        {
+          role: 'assistant',
+          text: "Sunlight holds every colour, and the air scatters short blue wavelengths far more than long red ones, so blue light reaches you from every part of the sky. At sunset the light crosses much more air, most of the blue is scattered away before it arrives, and the reds and oranges that remain paint the sun and the clouds near it.",
+        },
+      ],
+    });
+    return;
+  }
+
   if (state === 'confirmation') {
     if (imu) await runVisualConfirmationFixture(hud, imu);
     else await hud.showConfirmation(VISUAL_CONFIRMATION_PROMPT, 'browser-visual-confirmation');
@@ -1457,6 +1492,13 @@ async function renderVisualState(
 
   // A Messages reply in JOAT's conversation card: the question, then the
   // wearer's words for consent. Inert — nothing reaches the Mac.
+  if (state === 'message-reply-question' || state === 'message-reply-confirm') {
+    // Over the thread it was called on, as in production.
+    const thread = visualListFixture('messages-conversation');
+    await hud.showList(thread.items, {
+      title: thread.title, hint: thread.hint, selectable: thread.selectable, nativeTextPage: true,
+    });
+  }
   if (state === 'message-reply-question') {
     await hud.showPromptQuestion(
       'visual-reply-question', 'What do you want to say back to Adele?', () => true, 'messages',

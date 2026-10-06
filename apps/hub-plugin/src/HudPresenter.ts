@@ -18,8 +18,10 @@ import {
   type ConversationExitResult,
 } from './AssistantConversationSurface';
 import { paginateMeasured } from './FirmwareText';
+import { overlayConversation } from './ConversationOverlay';
+import { hasImageHeader, withImageHeader } from './HeaderImage';
 import { ASSISTANT_ANSWER_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
-import { type HudStatusModel, nativeStatusLine } from './HudStatus';
+import { type HudStatusModel, hudStatusLabel, nativeStatusLine } from './HudStatus';
 import { composeOverviewText } from './OverviewText';
 import { isRouteProgressView, navigationChip, pomodoroChip } from './ActivityChips';
 import { NativeTerminalSurface } from './NativeTerminalSurface';
@@ -222,6 +224,9 @@ type HudSurface =
  * 0.5-2 s each over BLE (everything-evenhub glasses-ui). ON by default;
  * VITE_NATIVE_OVERVIEW=0 draws the image overview. */
 let nativeOverviewEnabled = String(import.meta.env.VITE_NATIVE_OVERVIEW ?? '1') !== '0';
+/** Every firmware page carries the image spine as its header
+ * (HeaderImage.ts); `VITE_IMAGE_HEADER=0` keeps the firmware text line. */
+const imageHeaderEnabled = String(import.meta.env.VITE_IMAGE_HEADER ?? '1') !== '0';
 
 /** Tests that pin the IMAGE overview select it here. Never product code. */
 export function setNativeOverviewForTest(on: boolean): void {
@@ -464,6 +469,8 @@ export class HudPresenter {
   private displayActive = true;
   private displayRevision = 0;
   private readonly assistantConversation: AssistantConversationSurface;
+  /** The page on the glass carries the two header images. */
+  private imageHeaderShown = false;
   private readonly nativeTerminal: NativeTerminalSurface;
   private restoringAssistantConversation = false;
   /** Which set of SDK containers currently exists on the lenses. Content
@@ -482,7 +489,10 @@ export class HudPresenter {
       layouts,
       () => this.restoreAfterAssistantConversation(),
       {
-        replacePage: (page) => this.replaceNativePage(page, 'assistant-native'),
+        // The box floats over the page it was called on (Even AI's card).
+        replacePage: (page) => this.replaceNativePage(
+          overlayConversation(page, this.conversationUnderlay()), 'assistant-native',
+        ),
         statusText: () => this.nativeHeader(this.nativePageTitle()),
       },
     );
@@ -503,9 +513,11 @@ export class HudPresenter {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     const visual = this.visual;
-    const replace = () => this.client.require().rebuildPageContainer(page);
     const statusShown = page.textObject?.find((container) =>
       container.containerID === ContainerId.StatusBar)?.content;
+    page = this.withHeader(page);
+    const replace = () => this.client.require().rebuildPageContainer(page);
+    const header = hasImageHeader(page);
     if (!visual) {
       const replaced = await replace();
       if (replaced && displayCurrent()) {
@@ -523,6 +535,10 @@ export class HudPresenter {
         this.pageOwner = owner;
         this.nativeStatusPainted = statusShown;
         this.overviewText = undefined;
+        this.imageHeaderShown = header;
+        // The halves arrive just after the page's text, one send each, once
+        // the caller has recorded which page this is (the header names it).
+        if (header) setTimeout(() => { void this.paintImageHeader(); }, 0);
       }
       return replaced && displayCurrent();
     } catch {
@@ -546,6 +562,7 @@ export class HudPresenter {
       visual.forgetPage?.();
       this.pageOwner = 'visual';
       this.overviewText = undefined;
+      this.imageHeaderShown = false;
       return true;
     } catch {
       return false;
@@ -650,6 +667,57 @@ export class HudPresenter {
     const active = this.displayActive;
     const bridgeCurrent = this.client.captureDisplayGuard?.() ?? (() => true);
     return () => active && this.displayActive && revision === this.displayRevision && bridgeCurrent();
+  }
+
+  /** The page a JOAT box was called over, as its own layout would rebuild
+   * it now, for `overlayConversation` to cut beneath the box: Home, a
+   * firmware list, a text page or a native navigation page. The image pages
+   * (the Planning month, the live map) and the terminal return undefined;
+   * the box still stands alone over those. */
+  private conversationUnderlay(): RebuildPageContainer | undefined {
+    if (!this.visual) return undefined;
+    const surface = this.surface;
+    if (surface.kind === 'default') {
+      if (!nativeOverviewEnabled) return undefined;
+      const frame = this.visualFrame();
+      return frame.kind === 'overview'
+        ? this.layouts.overviewTextLayout(composeOverviewText(frame, this.overviewHeader()))
+        : undefined;
+    }
+    if (surface.kind === 'list' && surface.options.nativeFirmwareList) return this.nativeListLayout(surface);
+    const text = this.nativeTextPage;
+    if (text && ((surface.kind === 'list' && this.usesNativeTextPage(surface.options))
+      || (surface.kind === 'productivity' && !usesActionPillLayout(surface.productivity.phase)))) {
+      return this.layouts.textPageLayout(text.body, { status: '', hint: text.hint });
+    }
+    if (surface.kind === 'navigation') {
+      const native = navigationNativeBody(surface.navigation);
+      if (native !== undefined) return this.layouts.textPageLayout(native.body, { status: '', hint: native.hint });
+    }
+    return undefined;
+  }
+
+  /** A firmware page with the image spine in place of its status line. */
+  private withHeader(page: RebuildPageContainer): RebuildPageContainer {
+    return imageHeaderEnabled && this.visual?.paintHeader && this.visual.canPaintHeader?.()
+      ? withImageHeader(page) : page;
+  }
+
+  /** Draw the header for the page on the glass: the clock, the page's
+   * word, the running features' chips, the mic and the battery. The image
+   * lane sends only a half whose pixels changed. */
+  private paintImageHeader(): Promise<boolean> {
+    const visual = this.visual;
+    const model = this.statusModel;
+    if (!this.imageHeaderShown || !visual?.paintHeader || !model) return Promise.resolve(false);
+    const title = this.nativePageTitle();
+    const home = this.surface.kind === 'default' && !this.conversationInFront()
+      && !this.confirmation && !this.promptQuestion;
+    const headerModel = home
+      ? this.withActivities(model, { frame: 'overview' })
+      : this.withActivities(model, { title });
+    return visual.paintHeader(headerModel, hudStatusLabel(headerModel, title), this.captureDisplayGuard())
+      .catch(() => false);
   }
 
   /** A reader is Even's own text page over the visual HUD; the text
@@ -862,10 +930,10 @@ export class HudPresenter {
       if (!this.isPromptCurrent(prompt)) return false;
       const header = this.nativeHeader(this.nativePageTitle());
       const layout = prompt.messageReply
-        ? this.layouts.assistantConversationLayout(
+        ? overlayConversation(this.layouts.assistantConversationLayout(
           replyDraftView([{ role: 'assistant', text: prompt.question }], MESSAGE_REPLY_LISTENING_HINT),
           header,
-        )
+        ), this.conversationUnderlay())
         : this.layouts.promptQuestionLayout(pages[0] ?? ' ', header);
       painted = await this.replaceNativePage(layout, 'prompt-native');
       return painted && this.isPromptCurrent(prompt);
@@ -1415,6 +1483,12 @@ export class HudPresenter {
   async setStatusModel(model: HudStatusModel): Promise<boolean> {
     this.statusModel = { ...model };
     this.micOn = model.mic;
+    if (this.imageHeaderShown) {
+      // One header on every firmware page: redraw the spine and send only
+      // the half that changed.
+      this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
+      return this.paintImageHeader();
+    }
     if (this.assistantConversation.isActive()) {
       this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
       return this.assistantConversation.setStatus(this.nativeHeader(this.nativePageTitle()));
@@ -2507,10 +2581,10 @@ export class HudPresenter {
     // A reply's consent is the same gate in JOAT's conversation card: the
     // question it answered, then the wearer's exact words, then the gestures.
     const layout = draft
-      ? this.layouts.assistantConversationLayout(replyDraftView([
+      ? overlayConversation(this.layouts.assistantConversationLayout(replyDraftView([
         { role: 'assistant', text: `What do you want to say back to ${draft.recipient}?` },
         { role: 'user', text: draft.body },
-      ], MESSAGE_REPLY_CONFIRM_HINT), header)
+      ], MESSAGE_REPLY_CONFIRM_HINT), header), this.conversationUnderlay())
       : this.layouts.confirmationLayout(current.prompt, header, current.purpose);
     const ok = this.visual
       ? await this.replaceNativePage(layout, 'confirmation-native')
@@ -2717,6 +2791,7 @@ export class HudPresenter {
     if (!this.visual.withPageTransition) return false;
     try {
       const rebuilt = await this.visual.withPageTransition(replace, current);
+      if (rebuilt && current()) this.imageHeaderShown = false;
       return rebuilt && current();
     } catch { return false; }
   }
@@ -3193,7 +3268,10 @@ export class HudPresenter {
       && !this.nativeTerminal.isActive()
       && (taking || this.pageOwner === 'visual' || this.visualPagePending());
     if (!stillOurs()) return false;
-    const layout = this.layouts.overviewTextLayout(composeOverviewText(frame, this.overviewHeader()));
+    const layout = this.withHeader(
+      this.layouts.overviewTextLayout(composeOverviewText(frame, this.overviewHeader())),
+    );
+    const header = hasImageHeader(layout);
     const bands = new Map<number, OverviewBand>((layout.textObject ?? []).map((t) => [
       t.containerID ?? 0,
       { name: t.containerName ?? '', content: t.content ?? '', ...(t.textColor !== undefined ? { textColor: t.textColor } : {}) },
@@ -3205,6 +3283,7 @@ export class HudPresenter {
         return was?.content !== band.content || was?.textColor !== band.textColor;
       });
       if (changed.length === 0) {
+        if (header) void this.paintImageHeader();
         this.armPanelTicker();
         return true;
       }
@@ -3226,6 +3305,7 @@ export class HudPresenter {
         }
         if (!stillOurs()) return false;
         if (upgraded) {
+          if (header) void this.paintImageHeader();
           this.armPanelTicker();
           return true;
         }
@@ -3247,6 +3327,8 @@ export class HudPresenter {
     // assume any tile it drew before is still on the glass.
     this.pageOwner = 'visual';
     this.visual?.forgetPage?.();
+    this.imageHeaderShown = header;
+    if (header) void this.paintImageHeader();
     this.armPanelTicker();
     return true;
   }

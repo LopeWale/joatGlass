@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-10-06 — Build JOAT 0.1.107
+
+- Packed from `c10cb86` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.107 above the last recorded build (0.1.106); app.json, package.json and package-lock.json all 0.1.107. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1114 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 158434 bytes, SHA-256 `d650af5c7311cbae4c1ba2a18c16e49af7e6579991f8318de6ddbcbe575cc860`. Adds to 0.1.106 the one image header on every page and the working indicator inside JOAT's box. Plugin-only. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-06 — One header on every page; JOAT's working indicator inside its box
+
+The wearer: "Why are we not using a template for the top bar?… use images… for icons without slowing down rendering for things that are not needing to change very often". And the working indicator "is in the middle and half of it is in the box and the other half out".
+
+- **One header template.** The image pages (the Planning month, the live map) always drew the compact spine: the clock and the page's word in a small face, the mic and battery as icons. Every firmware page drew a line of the firmware font instead ("9:41 · MESSAGES · CONVERSATION · ● · ■"), bigger and different. Every firmware page (Home, lists, readers, the Messages thread, JOAT's box, the reply card, confirmations) now carries the same spine, drawn by the same renderer code (`HudCanvasRenderer.renderHeader`), as two 288x24 image containers (`HeaderImage.ts`; the SDK caps an image at 288 px wide).
+- **Images only where they rarely change.** The halves go on the image lane after the page's text, one send each after a page rebuild; afterwards only a half whose pixels changed is sent (the lane's existing pixel cache): a minute tick resends the clock's half, a mic or battery change the other. The page's text stays firmware text and keeps upgrading in place. `VITE_IMAGE_HEADER=0` keeps the old text line.
+- **The working indicator stands inside the box,** on the row the answer will take: a fresh question is a two-row box, the question and the animated glyph, and the answer replaces the glyph. Nothing straddles the border; the footer holds only a sentence (the continuation prompt).
+- **The simulator captures now show the real header.** The dev fixtures used to write a placeholder status line ("9:41 JOAT ready bat 87%") no wearer ever saw; they now set the same structured status model Chrome gives production.
+- Verified in the official simulator: the thread, Home, JOAT's box over Home and the reply card all carry the calendar's spine; the thread's header names its page; the indicator sits on the answer's row. Not verified on physical glasses.
+- Plugin 1114 passed; typecheck clean. Plugin-only.
+
+## 2026-10-06 — Build JOAT 0.1.106
+
+- Packed from `ba86a79` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.106 above the last recorded build (0.1.105); app.json, package.json and package-lock.json all 0.1.106. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1107 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 158161 bytes, SHA-256 `582559b8e8433df046a7527b087e78a9417169d949f467240616a45d63a87cbe`. Adds to 0.1.105 the JOAT box that floats over the page it was called on and grows from two rows, with the working indicator on its border. Plugin-only since 0.1.105: a brain restarted for 0.1.105 needs no restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-06 — JOAT's box floats over the page it was called on and grows as Even AI's does
+
+The wearer: "the JOAT AI interface is supposed to be an overlay box on whichever interface it was called on, not its own page… a box that is just two rows… grows in height as new requests and responses are added… once it has grown to the height of the glasses with some margin, the scrolling starts and shows the latest reply". And the box at the bottom centre "was supposed to be an animated visual indication of when JOAT is thinking or working".
+
+- **The box grows.** It opens at two rows and grows upward from a fixed bottom edge, in four sizes (2, 3, 5, 7 rows), as requests and replies are added. At seven rows it stops below the header and scrolls, showing the latest reply; a swipe up reads back. Each size step is one rebuild; streaming, scrolling and the indicator within a size stay in-place upgrades. This was built on 2026-09-24 (7e867a0) and lost when a later merge fixed the box at seven rows.
+- **The working indicator rides on the box's bottom border**, centred, and animates only while JOAT is thinking or answering. A finished answer shows none; it used to leave a solid ■. A sentence (the continuation prompt, a reply draft's gestures) sits inside the box instead, and the box grows a row to hold it.
+- **The box floats over the page it was called on** (`ConversationOverlay.ts`). The G2 has no fill colour (black is off, so a box cannot hide what is under it), so the page gives up the area under the box: each of its containers is cut to end above the box's top border, its text fitted to the rows left so nothing overflows, and the box takes the page's event capture and status line. Home, firmware lists, text pages (the Messages thread among them) and the native navigation page stay visible above the box; as the box grows, less of the page shows. The image pages (the Planning month, the live map) and the terminal still give the whole screen to the box: their tiles cannot be cut without resending them.
+- **The Messages reply card floats over the thread** the same way: the question and the draft sit in the box with the latest messages above it.
+- Scrolling was not lost with the scroll column: a swipe still scrolls the box (captured in the simulator).
+- Verified in the official simulator with the dev fixtures (`?joatVisual=assistant-conversation`, `&joatConvTurns=short`, `&joatConvState=thinking`, and `message-reply-question` / `message-reply-confirm` now drawn over the thread): a two-row box over Home, the box at its cap over Home's top line, the indicator on the border, and both reply cards over the thread. Not verified on physical glasses.
+- Plugin 1107 passed; typecheck clean. Plugin-only.
+
 ## 2026-10-06 — Build JOAT 0.1.105
 
 - Packed from `3bb653c` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.105 above the last recorded build (0.1.104); app.json, package.json and package-lock.json all 0.1.105. `evenhub` CLI, `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1099 tests passed.

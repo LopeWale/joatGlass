@@ -22,6 +22,9 @@ const TILE_HEIGHT = 144;
 export interface HudImageTile {
   containerId: number;
   pixels: Uint8Array;
+  /** A tile smaller than a quadrant (the header's 288x24 halves). */
+  width?: number;
+  height?: number;
 }
 
 /** Margin facts for the resting dashboard, resolved by the Mac. */
@@ -100,7 +103,17 @@ export type HudVisualFrame = HudVisualBaseFrame & {
 
 export interface HudFrameRenderer {
   render(frame: HudVisualFrame): Promise<readonly HudImageTile[]>;
+  /** The header band alone, as its two image halves. */
+  renderHeader?(model: HudStatusModel, label: string): Promise<readonly HudImageTile[]>;
 }
+
+/** A header repaint queued on the same single image lane as frames. */
+interface HeaderPaint {
+  kind: 'header';
+  model: HudStatusModel;
+  label: string;
+}
+type PaintWork = HudVisualFrame | HeaderPaint;
 
 export interface HudFramePainter {
   paint(frame: HudVisualFrame): Promise<boolean>;
@@ -109,6 +122,11 @@ export interface HudFramePainter {
   paintExact?(frame: HudVisualFrame, isCurrent: () => boolean): Promise<boolean>;
   /** The page on the glass was rebuilt: nothing painted before is on it. */
   forgetPage?(): void;
+  /** Paint the header halves of a firmware page; only a half whose pixels
+   * changed is sent. */
+  paintHeader?(model: HudStatusModel, label: string, isCurrent: () => boolean): Promise<boolean>;
+  /** Whether this painter can draw the header (its renderer has one). */
+  canPaintHeader?(): boolean;
   /** Wait for queued paints without cancelling their delivery receipts. */
   whenIdle?(timeoutMs?: number): Promise<boolean>;
   /** Hold image submissions while a bounded native-idle check and page
@@ -174,7 +192,7 @@ function settleWithin<T>(work: Promise<T>, ms: number, what: string): Promise<T>
 }
 
 interface PendingPaint {
-  frame: HudVisualFrame;
+  frame: PaintWork;
   isCurrent?: () => boolean;
   displayCurrent: () => boolean;
   resolve: Array<(painted: boolean) => void>;
@@ -220,16 +238,18 @@ export function splitGrayscaleTiles(pixels: Uint8Array): HudImageTile[] {
  * conversion itself. Encode the canvas tile rather than sending an invalid
  * byte-per-pixel Gray4 hybrid. */
 export async function encodeGray8TilePng(tile: HudImageTile): Promise<Uint8Array> {
-  const expectedLength = TILE_WIDTH * TILE_HEIGHT;
+  const width = tile.width ?? TILE_WIDTH;
+  const height = tile.height ?? TILE_HEIGHT;
+  const expectedLength = width * height;
   if (tile.pixels.length !== expectedLength) {
     throw new Error(`expected ${expectedLength} grayscale tile pixels, got ${tile.pixels.length}`);
   }
   const canvas = document.createElement('canvas');
-  canvas.width = TILE_WIDTH;
-  canvas.height = TILE_HEIGHT;
+  canvas.width = width;
+  canvas.height = height;
   const context = canvas.getContext('2d', { alpha: false });
   if (!context) throw new Error('2D canvas is unavailable for HUD tile encoding');
-  const image = context.createImageData(TILE_WIDTH, TILE_HEIGHT);
+  const image = context.createImageData(width, height);
   for (let source = 0, target = 0; source < tile.pixels.length; source += 1, target += 4) {
     const gray = tile.pixels[source] ?? 0;
     image.data[target] = gray;
@@ -359,25 +379,39 @@ export class HudVisualSurface implements HudFramePainter {
     return this.enqueue(frame, () => pageRevision === this.pageRevision && isCurrent());
   }
 
-  private enqueue(frame: HudVisualFrame, isCurrent?: () => boolean): Promise<boolean> {
+  canPaintHeader(): boolean {
+    return this.renderer.renderHeader !== undefined;
+  }
+
+  paintHeader(model: HudStatusModel, label: string, isCurrent: () => boolean): Promise<boolean> {
+    if (!this.renderer.renderHeader) return Promise.resolve(false);
+    const pageRevision = this.pageRevision;
+    return this.enqueue(
+      { kind: 'header', model, label },
+      () => pageRevision === this.pageRevision && isCurrent(),
+    );
+  }
+
+  private enqueue(frame: PaintWork, isCurrent?: () => boolean): Promise<boolean> {
     const displayRevision = this.displayRevision;
     const bridgeCurrent = this.client.captureDisplayGuard?.() ?? (() => true);
     const displayCurrent = () => this.displayActive && !this.replacingPage
       && this.displayRevision === displayRevision && bridgeCurrent();
     if (!displayCurrent()) return Promise.resolve(false);
-    const immediate = !!isCurrent || frame.kind !== 'overview'
+    const immediate = frame.kind === 'header' || !!isCurrent || frame.kind !== 'overview'
       || !!frame.assistantOverlay || !!frame.actionOverlay;
     return new Promise((resolve) => {
       const pending = this.queue[this.queue.length - 1];
       if (pending && pending.displayCurrent() && !isCurrent && !pending.isCurrent
-        && frame.kind !== 'navigation' && pending.frame.kind !== 'navigation') {
+        && frame.kind !== 'navigation' && pending.frame.kind !== 'navigation'
+        && frame.kind !== 'header' && pending.frame.kind !== 'header') {
         // A full frame supersedes every older not-yet-started frame. Keeping
         // only the latest prevents streamed text/countdown ticks from building
         // a stale multi-second BLE backlog while preserving one command lane.
         // Navigation is excluded: its caller emits a semantic receipt only
         // after this exact four-tile frame finishes, so acknowledging a newer
         // generation on behalf of an older one would corrupt HUD/input truth.
-        pending.frame = frame;
+        pending.frame = frame as HudVisualFrame;
         pending.immediate ||= immediate;
         pending.resolve.push(resolve);
       } else {
@@ -429,7 +463,7 @@ export class HudVisualSurface implements HudFramePainter {
     return bytes;
   }
 
-  private async paintNow(frame: HudVisualFrame, guard?: () => boolean, queuedAt = now()): Promise<boolean> {
+  private async paintNow(frame: PaintWork, guard?: () => boolean, queuedAt = now()): Promise<boolean> {
     const frameNumber = ++this.frameNumber;
     const pageRevision = this.pageRevision;
     const isCurrent = (): boolean => pageRevision === this.pageRevision && (guard?.() ?? true);
@@ -442,7 +476,9 @@ export class HudVisualSurface implements HudFramePainter {
       if (!isCurrent()) return false;
       if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'render-start', frame.kind, pageRevision);
       const renderStartedAt = now();
-      const rendered = await this.renderer.render(frame);
+      const rendered = frame.kind === 'header'
+        ? await this.renderer.renderHeader!(frame.model, frame.label)
+        : await this.renderer.render(frame);
       timing.renderMs = elapsedSince(renderStartedAt);
       // Retire prior choices/instructions outside the status region before
       // replacing its complete explanation. No native write is parallelized.
@@ -524,7 +560,7 @@ export class HudVisualSurface implements HudFramePainter {
           return false;
         }
         const outcome = result === ImageRawDataUpdateResult.success ? 'success' : 'failed';
-        this.diagnostics?.record({
+        if (frame.kind !== 'header') this.diagnostics?.record({
           type: 'tile_upload',
           frame: frameNumber,
           order,
@@ -569,11 +605,11 @@ export class HudVisualSurface implements HudFramePainter {
       // .ehpk — the only places the BLE hop is real. An unchanged frame sent
       // nothing: recording it floods a trace bounded at MAX_RETAINED_EVENTS
       // and buries the frames that did work.
-      if (timing.changedTiles > 0) {
+      if (timing.changedTiles > 0 && frame.kind !== 'header') {
         this.diagnostics?.record({
           type: 'frame_timing',
           frame: timing.frame,
-          kind: timing.kind,
+          kind: frame.kind,
           changedTiles: timing.changedTiles,
           queueMs: timing.queueMs,
           renderMs: timing.renderMs,
