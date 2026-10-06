@@ -263,7 +263,8 @@ export function nativeTerminalFooter(
     || model.state === 'blocked'
     || model.state === 'unavailable') action = 'tap: retry';
   else if (model.state === 'ready') action = model.inputRequired ? 'tap: reply' : 'tap: speak';
-  else if (model.state === 'running') action = 'say "terminal cancel"';
+  // "terminal cancel" still works spoken; the hint names the gesture.
+  else if (model.state === 'running') action = 'long-press: cancel';
 
   const parts = [
     ...(action ? [action] : []),

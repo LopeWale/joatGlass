@@ -80,6 +80,7 @@ from .channels.notifications import NotificationStore
 from .core.interfaces import NavigationProvider, ReplyEngine, SttEngine
 from .core.navigation import NavigationPoint
 from .core.protocol import (
+    CONFIRM_PROMPT_MAX_UTF16_UNITS,
     AudioControl,
     Device,
     BrainstormAction,
@@ -96,6 +97,7 @@ from .core.protocol import (
     NavigationState,
     NavigationViewAck,
     ProductivityHudView,
+    utf16_units,
 )
 from .navigation.mapbox import MapboxNavigationProvider
 from .navigation.policies import candidate_navigation_policies
@@ -194,6 +196,9 @@ from .verifier.nli import MiniCheckJudge, minicheck_available
 from .verifier.gate import VerifierGate
 
 log = logging.getLogger("joat")
+
+#: How long a spoken terminal reply waits on the glasses for its check.
+TERMINAL_CHECK_SECONDS = 20.0
 
 
 @dataclass(frozen=True)
@@ -1330,6 +1335,7 @@ async def main() -> None:
         starters=[make_navigation],
         navigation_factory=make_navigation_session,
         terminal_retry=retry_selected_terminal,
+        terminal_cancel=lambda: terminal_commands.cancel_from_glasses(),
         topic_capture_view=topic_capture_view,
         brainstorm_available=brainstorm_available,
         # "Send Claude's last reply to Hermes", spoken into a live
@@ -1723,6 +1729,24 @@ async def main() -> None:
         "joat", "jote", "jolt", "jokes", "joke", "choke", "jot",
     )
     voice_latency = VoiceLatencyStore() if args.voice_latency_diagnostics else None
+    async def check_terminal_input(lane: str, text: str) -> bool | None:
+        """Show what was heard before a work session gets it (2026-10-06).
+
+        The wearer's accent sometimes beats the transcription. Short input is
+        a confirmation: tap sends, swipe asks for it again. Input too long for
+        that prompt is shown whole on a reader first: tap sends, Back drops.
+        """
+        words = text.strip()
+        prompt = f"Send to {lane}? “{words}”"
+        if utf16_units(prompt) <= CONFIRM_PROMPT_MAX_UTF16_UNITS:
+            result = await transport.request_confirmation(
+                f"terminal-input-{uuid.uuid4().hex[:16]}", prompt, TERMINAL_CHECK_SECONDS,
+                purpose="terminal_input",
+            )
+            return None if result is None else result.accepted
+        reviewed = await capabilities.review_terminal_input(lane, words)
+        return True if reviewed else None
+
     prompted_speech = PromptedSpeechRuntime(
         hud, message_replies,
         sessions=lambda: sessions,
@@ -1732,6 +1756,7 @@ async def main() -> None:
         fence_audio=lambda: orchestrator.fence_prompt_audio(),
         capturing=lambda: audio_router.capturing,
         on_message_prompt_retired=lambda action_id: message_ui.cancel(action_id),
+        check_terminal_input=check_terminal_input,
     )
 
     async def start_route_from_tap(destination: str) -> str | None:

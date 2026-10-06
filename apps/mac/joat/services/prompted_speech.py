@@ -14,13 +14,16 @@ from typing import Protocol
 
 from ..core.protocol import AudioSource, Device
 from .hud import HudWriter
-from .agent_terminal import AgentTerminalCommands, TerminalCapture
+from .agent_terminal import AgentTerminalCommands, ClaimedTerminalInput, TerminalCapture
 from .message_prompts import ActivatePrompt, MessagePromptBridge, PromptPresentationAck
 from .message_reply import MessageActionStatus, MessageReplyController
 from .prompted_input import PromptedInputDispatcher, PromptTicket, RetirementReason
 from .session import SessionManager, TopicCapture
 
 log = logging.getLogger(__name__)
+
+TerminalInputCheck = Callable[[str, str], Awaitable[bool | None]]
+"""(lane, words) → True send, False say it again, None drop (timed out, left)."""
 
 #: How long a tapped page row's question stays open for an answer.
 CAPABILITY_QUESTION_TTL_S = 30.0
@@ -59,6 +62,7 @@ class PromptedSpeechRuntime:
         terminal: Callable[[], AgentTerminalCommands] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         on_message_prompt_retired: Callable[[str], None] | None = None,
+        check_terminal_input: TerminalInputCheck | None = None,
     ) -> None:
         self._hud = hud
         self._sessions = sessions
@@ -69,6 +73,8 @@ class PromptedSpeechRuntime:
         self._audio_source = audio_source
         self._monotonic = monotonic
         self._on_message_prompt_retired = on_message_prompt_retired
+        self._check_terminal_input = check_terminal_input
+        self._terminal_checks: set[asyncio.Task[None]] = set()
         self._closed = False
         self._captures: dict[str, tuple[OwnedCapture, Callable[[], None]]] = {}
         self._capability_capture: CapabilityCapture | None = None
@@ -116,13 +122,50 @@ class PromptedSpeechRuntime:
                 commands.clear_capture()
 
         async def consume(text: str) -> None:
-            await commands.consume_capture(capture, text)
+            if self._check_terminal_input is None:
+                await commands.consume_capture(capture, text)
+                return
+            claimed = commands.claim_capture(capture, text)
+            if claimed is None or self._closed:
+                return
+            # The check waits on the wearer; the dispatcher awaits this
+            # callback, so it must not hold speech admission while they read.
+            task = asyncio.get_running_loop().create_task(
+                self._check_then_send(commands, claimed))
+            self._terminal_checks.add(task)
+            task.add_done_callback(self._terminal_checks.discard)
 
         return await self._publish_owned_capture(
             capture, owner_kind="terminal", field="instruction",
             is_current=lambda: commands.capture_is_current(capture),
             clear=clear, consume=consume,
         )
+
+    async def _check_then_send(
+        self, commands: AgentTerminalCommands, claimed: ClaimedTerminalInput,
+    ) -> None:
+        """Show the words before they go: the transcription is a guess, and a
+        wrong one sent to a work session is a wrong instruction (2026-10-06,
+        the wearer: "so I can re-state it if it was transcribed incorrectly").
+        """
+        assert self._check_terminal_input is not None
+        try:
+            verdict = await self._check_terminal_input(claimed.lane_name, claimed.text)
+        except Exception:
+            log.exception("terminal input check failed; nothing was sent")
+            return
+        if self._closed:
+            return
+        if verdict is True:
+            if await commands.send_claimed(claimed) is None:
+                log.info("terminal input confirmed but its session moved on; not sent")
+            return
+        if verdict is False:
+            again = commands.begin_capture()
+            if again is not None:
+                await self.publish_terminal_capture(again)
+            return
+        log.info("terminal input not confirmed; nothing was sent")
 
     async def ask_capability(
         self, question: str, field: str, consume: Callable[[str], Awaitable[None]],
@@ -253,13 +296,15 @@ class PromptedSpeechRuntime:
             return
         self._closed = True
         self.revoke_current()
-        for task in tuple(self._publications.values()):
+        for task in (*self._publications.values(), *self._terminal_checks):
             if task is not asyncio.current_task():
                 task.cancel()
 
     async def aclose(self) -> None:
         """Drain owned publication and remote cancellation before transport stop."""
         self.begin_shutdown()
+        if self._terminal_checks:
+            await asyncio.gather(*self._terminal_checks, return_exceptions=True)
         while self._publications or self._cancellations:
             pending = tuple(self._publications.values()) + tuple(self._cancellations.values())
             await asyncio.gather(*pending, return_exceptions=True)

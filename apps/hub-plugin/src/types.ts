@@ -228,11 +228,19 @@ export type BrainstormAction =
   | 'show_brainstorm'
   | 'cancel'
   | 'retry_terminal'
+  /** Long-press on a running work session cancels it (2026-10-06): the
+   * gesture for "terminal cancel", which stays as the spoken form. */
+  | 'cancel_terminal'
   /** Answer the tool request the focused work session is blocked on.
    * Voice ("terminal approve") was the only way, so a wearer looking at a
    * blocked session had no gesture for the decision in front of them. */
   | 'approve_terminal'
   | 'deny_terminal';
+
+/** What a decision gate is for, when it is not a generic action: a spoken
+ * terminal reply is CHECKED, so the page says "send" and its swipe asks for
+ * the words again instead of cancelling (2026-10-06). */
+export type ConfirmationPurpose = 'terminal_input';
 
 /** A bounded lifecycle page for native Calendar and Reminders actions.
  * The interactive preview remains a separate `confirm.request` frame; this
@@ -621,7 +629,7 @@ export type DownlinkMessage =
   | { kind: 'imu.control'; open: boolean; paceMs?: number }
   /** Calibration only: relay every raw IMU sample uplink (~10/s at P100). */
   | { kind: 'imu.trace'; enabled: boolean }
-  | { kind: 'confirm.request'; actionId: string; prompt: string; challengeId: string; sessionId: string; payloadDigest: string; previewDigest: string; expiresAtMs: number; diagnosticKind?: 'messages'; messageUIActionId?: string }
+  | { kind: 'confirm.request'; actionId: string; prompt: string; challengeId: string; sessionId: string; payloadDigest: string; previewDigest: string; expiresAtMs: number; diagnosticKind?: 'messages'; messageUIActionId?: string; purpose?: ConfirmationPurpose }
   | { kind: 'policy.set'; resume: ResumePolicy }
   /** Explicit-window pairing: issued only after an auth frame with a null token. */
   | { kind: 'pairing.set'; token: string }

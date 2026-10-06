@@ -118,6 +118,8 @@ BRAINSTORM_ACTIONS: tuple[str, ...] = (
     "show_brainstorm",
     "cancel",
     "retry_terminal",
+    # Long-press on a running work session cancels it (2026-10-06).
+    "cancel_terminal",
     # An approval is answered ON the glass. It was voice-only ("terminal
     # approve"), so a wearer looking at a blocked work session had no
     # gesture for the decision in front of them — and the tap they DID have
@@ -1669,6 +1671,10 @@ class ConfirmRequest:
     expires_at_ms: int
     diagnostic_kind: Literal["messages"] | None = None
     message_ui_action_id: str | None = None
+    #: What the gate is for, when it is not a generic action. Only the
+    #: labels change: a spoken terminal reply is checked, and a swipe asks
+    #: for it again rather than cancelling (2026-10-06).
+    purpose: Literal["terminal_input"] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         wire = {
@@ -1687,6 +1693,10 @@ class ConfirmRequest:
             if self.diagnostic_kind != "messages" or not self.message_ui_action_id.startswith("messages-ui-"):
                 raise ProtocolError("invalid Messages confirmation owner")
             wire["messageUIActionId"] = _prompt_owner_identifier(self.message_ui_action_id, maximum=96)
+        if self.purpose is not None:
+            if self.purpose != "terminal_input":
+                raise ProtocolError("invalid confirmation purpose")
+            wire["purpose"] = self.purpose
         return wire
 
 

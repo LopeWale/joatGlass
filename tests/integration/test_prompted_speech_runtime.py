@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
@@ -126,6 +126,7 @@ class Rig:
         capturing: Callable[[], bool] | None = None,
         terminal: Callable[[], AgentTerminalCommands] | None = None,
         audio_source: Callable[[], AudioSource] | None = None,
+        check_terminal_input: Callable[[str, str], Awaitable[bool | None]] | None = None,
     ) -> None:
         self.hud = hud if hud is not None else ControlledHud()
         self.now = time.monotonic()
@@ -155,6 +156,7 @@ class Rig:
             fence_audio=lambda: self.fence(), capturing=capturing or (lambda: self.capturing),
             monotonic=lambda: self.now, terminal=terminal,
             **({"audio_source": audio_source} if audio_source is not None else {}),
+            check_terminal_input=check_terminal_input,
         )
         rig = self
 
@@ -1138,3 +1140,77 @@ async def test_authenticated_lifecycle_revokes_brainstorm_and_allows_a_new_captu
     finally:
         await fixture.aclose()
         await gateway.stop()
+
+
+# ── 2026-10-06: spoken terminal input is checked on the glasses first ────────
+
+
+class CheckedTerminal:
+    """A TerminalRig whose runtime shows the words before sending them."""
+
+    def __init__(self) -> None:
+        self.checked: list[tuple[str, str]] = []
+        self.verdicts: asyncio.Queue[bool | None] = asyncio.Queue()
+
+        async def check(lane: str, text: str) -> bool | None:
+            self.checked.append((lane, text))
+            return await self.verdicts.get()
+
+        self.rig = TerminalRig(check_terminal_input=check)
+
+    async def speak(self, words: str, publication: int) -> None:
+        rig = self.rig
+        await until(lambda: len(rig.hud.publications) > publication  # type: ignore[attr-defined]
+                    and rig.runtime.dispatcher.is_armed)
+        ticket = rig.hud.publications[publication].ticket  # type: ignore[attr-defined]
+        assert await rig.runtime.dispatcher.dispatch(Transcript(words, True), receipt(ticket))
+
+
+async def test_terminal_words_are_shown_before_sending_and_a_tap_sends_them() -> None:
+    fixture = CheckedTerminal()
+    rig = fixture.rig
+    try:
+        rig.launch(rig.publish_terminal(rig.begin_terminal()))
+        await fixture.speak("fix the login test", 0)
+        await until(lambda: fixture.checked == [("work", "fix the login test")])
+        await asyncio.sleep(0)
+        assert rig.work.scoped == [], "nothing reaches the session before the check"
+        fixture.verdicts.put_nowait(True)
+        await until(lambda: rig.work.scoped == [("fix the login test", 1)])
+    finally:
+        await rig.aclose()
+
+
+async def test_a_misheard_reply_is_asked_for_again_and_only_the_restatement_goes() -> None:
+    fixture = CheckedTerminal()
+    rig = fixture.rig
+    try:
+        rig.launch(rig.publish_terminal(rig.begin_terminal()))
+        await fixture.speak("fix the logging test", 0)
+        await until(lambda: len(fixture.checked) == 1)
+        fixture.verdicts.put_nowait(False)  # swipe: say it again
+        await fixture.speak("fix the login test", 1)
+        await until(lambda: len(fixture.checked) == 2)
+        fixture.verdicts.put_nowait(True)
+        await until(lambda: rig.work.scoped == [("fix the login test", 1)])
+        assert [text for _lane, text in fixture.checked] == [
+            "fix the logging test", "fix the login test",
+        ]
+    finally:
+        await rig.aclose()
+
+
+async def test_an_unanswered_check_sends_nothing_and_asks_nothing() -> None:
+    fixture = CheckedTerminal()
+    rig = fixture.rig
+    try:
+        rig.launch(rig.publish_terminal(rig.begin_terminal()))
+        await fixture.speak("delete the branch", 0)
+        await until(lambda: len(fixture.checked) == 1)
+        fixture.verdicts.put_nowait(None)  # timed out or left the page
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert rig.work.scoped == [] and rig.work.unscoped == []
+        assert len(rig.hud.publications) == 1  # type: ignore[attr-defined]
+    finally:
+        await rig.aclose()

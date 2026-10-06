@@ -76,6 +76,8 @@ function make(
     // False by default: only the topic-capture state claims a swipe as a
     // backout; every test that wants that behaviour flips it explicitly.
     handleSwipe: vi.fn(() => false),
+    // False by default: only a running work session claims a long-press.
+    handleLongPress: vi.fn(() => false),
     consumeAcceptedAction: vi.fn(() => brainstormActive ? {
       action: 'show_terminal' as const,
       surface: 'brainstorm' as const,
@@ -861,6 +863,24 @@ describe('EventRouter — long-press mutes the mic', () => {
     const r = make();
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
     r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
+    expect(r.audio.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels a running terminal job instead of muting (2026-10-06)', () => {
+    const r = make(false, undefined, false, true);
+    r.brainstorm.handleLongPress.mockReturnValue(true);
+    r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
+    r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
+    expect(r.brainstorm.handleLongPress).toHaveBeenCalledTimes(1);
+    expect(r.audio.stop).not.toHaveBeenCalled();
+    expect(r.audio.start).not.toHaveBeenCalled();
+  });
+
+  it('keeps long-press as the mic on a Brainstorm page that is not a running job', () => {
+    const r = make(false, undefined, false, true);
+    r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
+    r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
+    expect(r.brainstorm.handleLongPress).toHaveBeenCalledTimes(1);
     expect(r.audio.stop).toHaveBeenCalledTimes(1);
   });
 

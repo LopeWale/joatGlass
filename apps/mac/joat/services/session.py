@@ -237,6 +237,7 @@ class SessionManager:
         on_state: Callable[[str], None] | None = None,
         starters: Sequence[SessionStarter] = (),
         terminal_retry: Callable[[], Awaitable[None]] | None = None,
+        terminal_cancel: Callable[[], Awaitable[str]] | None = None,
         topic_capture_view: TopicCaptureView | None = None,
         brainstorm_available: BrainstormAvailable | None = None,
         route_reply: Callable[
@@ -277,6 +278,7 @@ class SessionManager:
         self._on_state = on_state
         self._starters = list(starters)
         self._terminal_retry = terminal_retry
+        self._terminal_cancel = terminal_cancel
         self._topic_capture_view = topic_capture_view
         self._brainstorm_available = brainstorm_available
         self._publish_topic_capture = publish_topic_capture
@@ -1213,6 +1215,26 @@ class SessionManager:
                         await self._say(sentence or "That answer did not go through.")
 
                 asyncio.get_running_loop().create_task(run_decision())
+            return
+        if action.action == "cancel_terminal":
+            # The long-press on a running work session (2026-10-06): the
+            # gesture for "terminal cancel", which stays as the spoken form.
+            if self._closed or self._terminal_cancel is None:
+                return
+            cancel_operation = self._terminal_cancel()
+
+            async def run_cancel() -> None:
+                try:
+                    receipt = await cancel_operation
+                except Exception as exc:
+                    reason = str(exc) or exc.__class__.__name__
+                    log.exception("terminal cancel failed")
+                    await self._say(f"Could not cancel — {reason}")
+                    return
+                if receipt:
+                    await self._say(receipt)
+
+            asyncio.get_running_loop().create_task(run_cancel())
             return
         if action.action == "retry_terminal":
             if self._closed:

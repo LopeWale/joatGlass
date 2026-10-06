@@ -17,7 +17,7 @@ import {
   type ConversationExitResult,
 } from './AssistantConversationSurface';
 import { paginateMeasured } from './FirmwareText';
-import { ASSISTANT_ANSWER_PAGE, fitHeader } from './HudPageBuilder';
+import { ASSISTANT_ANSWER_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
 import { type HudStatusModel, nativeStatusLine } from './HudStatus';
 import { isRouteProgressView, navigationChip, pomodoroChip } from './ActivityChips';
 import { NativeTerminalSurface } from './NativeTerminalSurface';
@@ -33,6 +33,7 @@ import {
   CONFIRM_PROMPT_MAX_UNITS,
   ContainerId,
   type BrainstormHudModel,
+  type ConfirmationPurpose,
   type AssistantConversationSnapshot,
   type HudContentKind,
   type PanelContentTab,
@@ -291,6 +292,7 @@ interface ConfirmationReturnState extends HudContentState {
   id: string;
   prompt: string;
   diagnosticKind?: 'messages';
+  purpose?: ConfirmationPurpose;
   isCurrent?: () => boolean;
   surface: HudSurface;
   onDeferredProductivityVisible?: () => void;
@@ -2331,6 +2333,7 @@ export class HudPresenter {
     id = 'hud:confirmation',
     diagnosticKind?: 'messages',
     isCurrent?: () => boolean,
+    purpose?: ConfirmationPurpose,
   ): Promise<boolean> {
     if (isCurrent) {
       try { if (!isCurrent()) return Promise.resolve(false); } catch { return Promise.resolve(false); }
@@ -2346,12 +2349,12 @@ export class HudPresenter {
     }
     if (this.assistantConversation.isActive()) {
       return this.prepareAssistantConversationHandoff().then((ready) => (
-        ready ? this.showConfirmation(prompt, id, diagnosticKind, isCurrent) : false
+        ready ? this.showConfirmation(prompt, id, diagnosticKind, isCurrent, purpose) : false
       ));
     }
     if (this.nativeTerminal.isActive() || this.pageOwner === 'terminal-list-native') {
       return this.prepareNativeTerminalHandoff().then((ready) => (
-        ready ? this.showConfirmation(prompt, id, diagnosticKind, isCurrent) : false
+        ready ? this.showConfirmation(prompt, id, diagnosticKind, isCurrent, purpose) : false
       ));
     }
     // Asking for text never survives a transition into write consent.
@@ -2364,6 +2367,7 @@ export class HudPresenter {
         id,
         prompt: safePrompt,
         ...(diagnosticKind ? { diagnosticKind } : {}),
+        ...(purpose ? { purpose } : {}),
         ...(isCurrent ? { isCurrent } : {}),
         surface: this.cloneSurface(this.surface),
         streams: new Map(content.streams),
@@ -2373,7 +2377,7 @@ export class HudPresenter {
     } else {
       // Claim ownership synchronously, before an awaited bridge call. A stale
       // result callback can now only enqueue a no-op dismissal for its old id.
-      this.confirmation = { ...this.confirmation, id, prompt: safePrompt, diagnosticKind, isCurrent };
+      this.confirmation = { ...this.confirmation, id, prompt: safePrompt, diagnosticKind, purpose, isCurrent };
     }
 
     const claimed = this.confirmation;
@@ -2413,6 +2417,7 @@ export class HudPresenter {
     // been spent on pixels.
     const layout = this.layouts.confirmationLayout(
       current.prompt, this.visual ? this.nativeHeader(this.nativePageTitle()) : liveStatus?.text,
+      current.purpose,
     );
     const ok = this.visual
       ? await this.replaceNativePage(layout, 'confirmation-native')
@@ -2433,8 +2438,9 @@ export class HudPresenter {
       return false;
     }
     this.resetAll();
-    this.streams.set(ContainerId.Main, `CONFIRM ACTION\n\n${current.prompt}`);
-    this.streams.set(ContainerId.Context, 'TAP · confirm   SWIPE · cancel');
+    const labels = confirmationLabels(current.purpose);
+    this.streams.set(ContainerId.Main, `${labels.title}\n\n${current.prompt}`);
+    this.streams.set(ContainerId.Context, labels.choices);
     this.streams.set(ContainerId.Tray, '');
     this.streams.set(ContainerId.Hint, '8 seconds · timeout cancels');
     this.brightness.set(ContainerId.Main, 4);
@@ -2637,7 +2643,9 @@ export class HudPresenter {
       const layout = this.visual
         ? this.layouts.visualLayout()
         : this.confirmation
-        ? this.layouts.confirmationLayout(this.confirmation.prompt, this.nativeHeader(this.nativePageTitle()))
+        ? this.layouts.confirmationLayout(
+          this.confirmation.prompt, this.nativeHeader(this.nativePageTitle()), this.confirmation.purpose,
+        )
         : this.surface.kind === 'list' && !this.nativeReplyPage
           ? this.layouts.listLayout(this.surface.items, {
             ...this.surface.options, status: this.nativeHeader(this.surface.options.title),

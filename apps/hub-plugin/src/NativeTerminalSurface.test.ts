@@ -148,7 +148,9 @@ describe('NativeTerminalSurface', () => {
     });
     expect(upgrades[0]?.content).toContain('OPENCLAW > WORKING');
     expect(upgrades[0]?.content).toContain('AGENT > Checking the live agent now.');
-    expect(upgrades[0]?.content).toContain('say "terminal cancel" · double-click: back');
+    // 2026-10-06: the running page names the gesture; "terminal cancel"
+    // still works spoken.
+    expect(upgrades[0]?.content).toContain('long-press: cancel · double-click: back');
     expect(imageWrites).not.toHaveBeenCalled();
   });
 

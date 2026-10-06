@@ -178,11 +178,24 @@ full-width, with the rail moved to the left margin so the wearer still
 sees where they are; inside, swipe scrolls rows, tap opens one, left
 double steps back one level. Long press refreshes ONLY at the top of an
 expanded NEWS or SEARCH tab — the two whose rows come from a feed that can
-have moved. Everywhere else it stays the microphone, the pomodoro page
-included: that tab has nothing to re-fetch, since the Mac pushes on every
-phase transition and the plugin ticks the countdown locally, so routing
-the hold there bought an invisible repaint and cost the wearer the mic on
-one page. Every footer names the hold it actually performs.
+have moved. The one other page where it is not the microphone is a
+RUNNING Agent Terminal job: there long press cancels the job (the
+wearer's choice, 2026-10-06; "terminal cancel" still works spoken), and
+the footer says "long-press: cancel". Everywhere else it stays the
+microphone, the pomodoro page included: that tab has nothing to re-fetch,
+since the Mac pushes on every phase transition and the plugin ticks the
+countdown locally, so routing the hold there bought an invisible repaint
+and cost the wearer the mic on one page. Every footer names the hold it
+actually performs.
+
+### Spoken terminal replies are checked before they are sent
+
+What the wearer says to a work session is shown back before it goes, on
+the confirmation page relabelled for the purpose: "CHECK WHAT WAS HEARD",
+the words, "TAP · send   SWIPE · say it again". A swipe asks the question
+again, so a misheard reply is re-stated rather than sent; no answer sends
+nothing. A reply too long for that page (120 UTF-16 units with its
+"Send to …?") is shown whole on a reader instead: tap sends, Back drops.
 
 The rail, the hairline and the pane all sit east of x=288. That is a
 latency rule, not a taste: the frame ships as four tiles and only changed

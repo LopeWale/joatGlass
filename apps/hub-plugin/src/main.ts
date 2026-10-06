@@ -957,7 +957,7 @@ async function boot(): Promise<void> {
           || menu.isMessageActionCurrent(msg.messageUIActionId));
         if (!ownerCurrent()) break;
         const rendered = hud.showConfirmation(msg.prompt, msg.actionId, msg.diagnosticKind,
-          msg.messageUIActionId === undefined ? undefined : ownerCurrent);
+          msg.messageUIActionId === undefined ? undefined : ownerCurrent, msg.purpose);
         if (msg.diagnosticKind === 'messages' && msg.messageUIActionId === undefined) {
           menu.stageLegacyReviewReturn(msg.actionId);
         }
