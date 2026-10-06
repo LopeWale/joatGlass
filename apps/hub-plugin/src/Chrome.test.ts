@@ -104,7 +104,29 @@ describe('Chrome', () => {
     chrome.start();
     await vi.advanceTimersByTimeAsync(1000);
     paints.length = 0;
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(wrote(ContainerId.StatusBar)).toHaveLength(1);
+    chrome.stop();
+  });
+
+  it('turns the clock as the minute begins, once a minute (2026-10-06)', async () => {
+    // A free-running 30 s interval turned the home clock up to 30 s late.
+    vi.setSystemTime(new Date(2026, 9, 6, 9, 41, 30, 0));
+    const hud = realPresenter();
+    const chrome = new Chrome(hud);
+    chrome.start();
+    await vi.advanceTimersByTimeAsync(0);
+    paints.length = 0;
+    await vi.advanceTimersByTimeAsync(29_000);       // 09:41:59
+    expect(wrote(ContainerId.StatusBar)).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1_100);        // 09:42:00.1
+    const turned = wrote(ContainerId.StatusBar);
+    expect(turned).toHaveLength(1);
+    expect(turned[0]?.content).toContain('9:42');
+    paints.length = 0;
+    await vi.advanceTimersByTimeAsync(59_000);       // 09:42:59.1
+    expect(wrote(ContainerId.StatusBar)).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1_000);        // 09:43:00.1
     expect(wrote(ContainerId.StatusBar)).toHaveLength(1);
     chrome.stop();
   });

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-06 — The home clock turns with the minute
+
+- Measured in the simulator with a host-call probe over an idle home screen: the clock repainted on a free-running 30-second interval, so it turned up to 30 s after the minute (14 s in the run) and the page was rendered twice a minute for one change. `Chrome` now schedules its repaint at each minute boundary (+50 ms) and once a minute after that. A test pins 09:41:30 → nothing until 09:42:00.1, which shows 9:42, then one repaint at 09:43:00.1.
+- The same probe priced the everyday journeys at the repository's measured G2 costs (≈83 ms a text upgrade, ≈165 ms a page rebuild, ≈104 ms+ an image tile): boot ≈1.0–1.4 s (9–13 tiles), a rail swipe ≈208 ms (two tiles), opening a tab ≈165 ms (one rebuild), back to home ≈685 ms (a rebuild and five tiles), an answer over home ≈165 ms, dismissing it ≈581 ms (a rebuild and four tiles), an idle home minute two tiles (the clock, the timer chip). Returning home is the costliest common step; recorded for the next rendering change.
+
 ## 2026-10-06 — Build JOAT 0.1.101 terminal-checks package
 
 - Packed from `f014c9f` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.101 above the last recorded build (0.1.100), and the new three-file version check passed (app.json, package.json and package-lock.json all 0.1.101). `evenhub` CLI, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.

@@ -26,9 +26,11 @@ import type { HudStatusModel } from './HudStatus';
 // menu is the firmware's (tap, then hold) and needs no line of its own.
 const HINT = 'tap: open \u00b7 swipe: tabs \u00b7 long-press: mic \u00b7 \u201cJOAT \u2026\u201d';
 const RESTING_WORDS = /^(?:listening|mic off|ready|online)$/i;
+/** Past the boundary, so the new minute has begun when the clock is read. */
+const CLOCK_EDGE_MS = 50;
 
 export class Chrome {
-  private timer?: ReturnType<typeof setInterval>;
+  private timer?: ReturnType<typeof setTimeout>;
   private link: LinkState = 'connecting';
   private mic = false;
   private battery?: number;
@@ -42,22 +44,35 @@ export class Chrome {
 
   /** Paint now, then keep the clock honest. */
   start(): void {
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
     this.paintGeneration += 1;
     this.active = true;
     // Claim the status bar: every setStatus() anywhere becomes this
     // Chrome's state word, so container 1 has exactly one writer.
     this.hud.onStatus = (text) => this.setMacState(text);
     void this.paint();
-    // 30s: the clock shows minutes, so this is never more than a minute
-    // stale, and it is far below any sane BLE budget.
-    this.timer = setInterval(() => void this.paint(), 30_000);
+    this.scheduleClock();
+  }
+
+  /** Repaint as each minute begins. The clock shows minutes; a free-running
+   * 30 s interval left it up to 30 s behind the wall (measured 2026-10-06:
+   * the home clock turned 14 s after the minute) and rendered the page
+   * twice a minute for one change. */
+  private scheduleClock(): void {
+    const delay = 60_000 - (Date.now() % 60_000) + CLOCK_EDGE_MS;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      if (!this.active) return;
+      void this.paint();
+      this.scheduleClock();
+    }, delay);
   }
 
   stop(): void {
     this.active = false;
     this.paintGeneration += 1;
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     if (this.macStateTimer) clearTimeout(this.macStateTimer);
     this.macStateTimer = undefined;
