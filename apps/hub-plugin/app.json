@@ -2,7 +2,7 @@
   "package_id": "com.akinwale.joat",
   "edition": "202601",
   "name": "JOAT",
-  "version": "0.1.98",
+  "version": "0.1.100",
   "min_sdk_version": "0.0.16",
   "min_app_version": "2.2.10",
   "entrypoint": "index.html",
