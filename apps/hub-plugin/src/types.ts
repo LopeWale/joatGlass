@@ -63,6 +63,9 @@ export const VisualContainerName: Readonly<Record<number, string>> = {
 export const HeaderImageId = { Left: 16, Right: 17 } as const;
 /** Home's left column as two images (HomeImages.ts). */
 export const HomeColumnId = { Top: 18, Bottom: 19 } as const;
+/** Home's pane label column (OverviewText.ts): the grid's left column,
+ * beside the value column that is ContainerId.Main. Page-local. */
+export const HomePaneLabelId = 20;
 
 /** Canvas constants from the SDK. Never hardcode these elsewhere. */
 export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;

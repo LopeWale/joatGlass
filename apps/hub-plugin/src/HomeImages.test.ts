@@ -17,6 +17,7 @@ const VIEW: OverviewTextView = {
     { label: 'POMODORO', active: false },
     { label: 'SEARCH', active: false },
   ],
+  paneLabels: ['', ''],
   pane: ['No new notifications', 'tap: open notifications'],
   paneBrightness: 4,
   hint: 'tap: open · swipe: tabs',

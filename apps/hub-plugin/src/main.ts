@@ -1368,14 +1368,18 @@ async function renderVisualState(
   if (isPanelVisualState(state)) {
     // The resting overview underneath, exactly as the 'overview' fixture
     // draws it, then the three pushes a connected Mac would have made.
-    await hud.showText('NEXT\nDesign review · 4:30', ContainerId.Main, 4);
-    await hud.showText(
-      'LAST QUERY\nWhere is the nearest coffee shop?', ContainerId.Context, 2,
-    );
-    await hud.showText(
-      'Calendar · 8m · Design review moved to 4:30\nMail · 23m · Q3 plan is ready for review',
-      ContainerId.Tray, 2,
-    );
+    // `&joatHomeRest=1` leaves Main empty, so the pane shows the lit tab's
+    // own card (its grid) instead of the newest notification.
+    if (new URLSearchParams(window.location.search).get('joatHomeRest') !== '1') {
+      await hud.showText('NEXT\nDesign review · 4:30', ContainerId.Main, 4);
+      await hud.showText(
+        'LAST QUERY\nWhere is the nearest coffee shop?', ContainerId.Context, 2,
+      );
+      await hud.showText(
+        'Calendar · 8m · Design review moved to 4:30\nMail · 23m · Q3 plan is ready for review',
+        ContainerId.Tray, 2,
+      );
+    }
     await hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
     for (const push of panelVisualPushes()) await hud.acceptPanel(push);
     const tab = panelVisualTab(state);

@@ -16,7 +16,7 @@
  * presenter can diff them and send only the bands that changed.
  */
 import { getTextWidth, pxTruncate } from '@evenrealities/pretext';
-import { resolveHudOverview } from './HudCanvasRenderer';
+import { parseHudListItem, resolveHudOverview } from './HudCanvasRenderer';
 import type { HudVisualFrame } from './HudVisualSurface';
 import {
   PANEL_TAB_TITLES,
@@ -38,20 +38,25 @@ const band = (lines: number): number => lines * OVERVIEW_LINE + 2 * OVERVIEW_PAD
  * Six text containers tile the canvas edge to edge:
  *
  *   y=0    h=31   header   1 line, full width   (clock · word · chips · ● · ▇)
- *   y=31   h=112  info     4 lines | pane  8 lines, x=158..576
- *   y=143  h=112  tabs     4 lines |                         -> 255
- *   y=257  h=31   hint     1 line, full width                -> 288
+ *   y=31   h=112  info     4 lines | labels 8 lines | pane 8 lines
+ *   y=143  h=112  tabs     4 lines |   x=158..254   |  x=254..576   -> 255
+ *   y=257  h=31   hint     1 line, full width                       -> 288
  *
- * plus a 2 px bordered rule in the 8 px gutter at x=153. The pane has no
+ * plus a 2 px bordered rule in the 8 px gutter at x=153. The pane is a
+ * grid of two containers, a label column and a value column, the way
+ * weather-even-g2 lays out its stats (feels · wind · humid beside their
+ * values): the font is proportional, so columns can only line up as two
+ * containers at fixed x, never as padded spaces in one. The pane has no
  * title line of its own: the rail's `>` already names the tab, so all eight
- * pane lines carry content, and a swipe changes two bands (rail + pane),
- * which is two flicker-free upgrades instead of a rebuild.
+ * rows carry content, and a swipe changes the bands that differ, each a
+ * flicker-free upgrade instead of a rebuild.
  */
 export const OVERVIEW_TEXT_GEOMETRY = {
   header: { x: 0, y: 0, width: CANVAS.width, height: band(1) },
   info: { x: 0, y: band(1), width: 150, height: band(4) },
   tabs: { x: 0, y: band(1) + band(4), width: 150, height: band(4) },
-  pane: { x: 158, y: band(1), width: CANVAS.width - 158, height: band(8) },
+  paneLabels: { x: 158, y: band(1), width: 96, height: band(8) },
+  pane: { x: 254, y: band(1), width: CANVAS.width - 254, height: band(8) },
   rule: { x: 153, y: band(1) + OVERVIEW_PAD, width: 2, height: band(8) - 2 * OVERVIEW_PAD },
   hint: { x: 0, y: CANVAS.height - band(1), width: CANVAS.width, height: band(1) },
 } as const;
@@ -67,7 +72,10 @@ export function bandBox(box: { width: number; height: number }, inset = OVERVIEW
 }
 
 export const PANE_LINES = bandBox(OVERVIEW_TEXT_GEOMETRY.pane).lines;       // 8
-export const PANE_TEXT_WIDTH = bandBox(OVERVIEW_TEXT_GEOMETRY.pane).innerWidth; // 414
+export const PANE_TEXT_WIDTH = bandBox(OVERVIEW_TEXT_GEOMETRY.pane).innerWidth; // 318
+
+/** One grid row: the label column's word and the value column's text. */
+export type PaneRow = readonly [label: string, value: string];
 
 export interface OverviewTextView {
   /** The same live header line every firmware page carries. */
@@ -75,7 +83,9 @@ export interface OverviewTextView {
   /** Left column, top: date, weather, unread. */
   info: string[];
   tabs: { label: string; active: boolean }[];
-  /** Right pane, one line per entry; the first may be a title. */
+  /** Right pane, the grid's label column, one entry per row ('' for none). */
+  paneLabels: string[];
+  /** Right pane, the grid's value column, one line per row. */
   pane: string[];
   /** 0-4; Mac urgency carries into the pane. */
   paneBrightness: number;
@@ -101,24 +111,55 @@ export function progressBar(fraction: number, width: number): string {
   return '━'.repeat(filled) + '─'.repeat(cells - filled);
 }
 
-/** The Pomodoro card: block, minutes left, a bar of the phase, the cycle. */
-export function pomodoroPaneRows(
+/** The Pomodoro card as grid rows: the block, minutes left, a bar of the
+ * phase, the cycle, then the tab's action rows. */
+export function pomodoroPaneGrid(
   pomodoro: HudPanelPomodoro | undefined, content: PanelContent | undefined, nowMs: number,
-): string[] {
-  if (content?.empty) return [content.headline ?? 'Timer unavailable', content.empty];
-  if (!pomodoro) return ['Focus timer', 'Say “JOAT, start a pomodoro”'];
+): PaneRow[] {
+  if (content?.empty) return [['', content.headline ?? 'Timer unavailable'], ['', content.empty]];
+  if (!pomodoro) return [['Timer', 'Focus timer'], ['', 'Say “JOAT, start a pomodoro”']];
   if (pomodoro.phase === 'idle') {
-    return [pomodoroBlockLabel(pomodoro), 'tap: start', pomodoroCycleDots(pomodoro.completed)];
+    return [['Timer', pomodoroBlockLabel(pomodoro)], ['', 'tap: start'], ['Cycle', pomodoroCycleDots(pomodoro.completed)]];
   }
   const remaining = pomodoroRemainingMs(pomodoro, nowMs);
   const done = pomodoro.lengthMs > 0 ? 1 - remaining / pomodoro.lengthMs : 0;
   return [
-    pomodoroBlockLabel(pomodoro),
-    `${formatMinutesLeft(remaining)}${pomodoro.running ? '' : ' · paused'}`,
-    progressBar(done, PANE_TEXT_WIDTH),
-    pomodoroCycleDots(pomodoro.completed),
-    ...(content?.rows ?? []),
+    ['Timer', pomodoroBlockLabel(pomodoro)],
+    ['Left', `${formatMinutesLeft(remaining)}${pomodoro.running ? '' : ' · paused'}`],
+    ['', progressBar(done, PANE_TEXT_WIDTH)],
+    ['Cycle', pomodoroCycleDots(pomodoro.completed)],
+    ...(content?.rows ?? []).map((row): PaneRow => ['', row]),
   ];
+}
+
+/** The Pomodoro card's value column alone. */
+export function pomodoroPaneRows(
+  pomodoro: HudPanelPomodoro | undefined, content: PanelContent | undefined, nowMs: number,
+): string[] {
+  return pomodoroPaneGrid(pomodoro, content, nowMs).map(([, value]) => value);
+}
+
+/** The resolver's kind words, in the label column's 92 px: measured with
+ * pretext, NOTIFICATION (116) and LAST QUERY (108) do not fit; the rest do. */
+function gridLabel(label: string): string {
+  if (label === 'NOTIFICATION') return 'NOTICE';
+  if (label === 'LAST QUERY') return 'QUERY';
+  return label;
+}
+
+/** A Mac row as a grid row: "[12m] Headline · BBC" puts its age in the
+ * label column; a row without one keeps the label column empty. */
+function listRow(row: string): PaneRow {
+  const parts = parseHudListItem(row, true);
+  return [parts.age, parts.primary];
+}
+
+/** A "Source · rest" line (the tray's "Calendar · 8m · moved") puts its
+ * source in the label column. */
+function sourceRow(line: string): PaneRow {
+  const marker = line.indexOf(' · ');
+  if (marker < 0) return ['', line.trim()];
+  return [line.slice(0, marker).trim(), line.slice(marker + 3).trim()];
 }
 
 /** Cut every line to the band's text width and the band's line count, so
@@ -162,34 +203,49 @@ export function composeOverviewText(
   const info = [overviewDate(now), weather, unread > 0 ? `${unread} unread` : ''].filter(Boolean);
   const content = rail?.content;
   // Each tab's resting card, with the image overview's own empty copy.
-  const tabRows = (): string[] => {
+  const tabRows = (): PaneRow[] => {
     switch (rail?.activeTab) {
       case 'pomodoro':
         return content?.pomodoro || content?.empty
-          ? pomodoroPaneRows(content?.pomodoro, content, now.getTime())
-          : ['Focus timer', 'tap: open the tab to start'];
+          ? pomodoroPaneGrid(content?.pomodoro, content, now.getTime())
+          : [['Timer', 'Focus timer'], ['', 'tap: open the tab to start']];
       case 'news':
-        if (!content) return ['Waiting for JOAT on your Mac…'];
-        if (content.rows.length === 0) return [content.empty ?? 'No headlines yet.', 'tap: open · long-press: refresh'];
-        return content.headline ? [content.headline, ...content.rows] : content.rows;
+        if (!content) return [['', 'Waiting for JOAT on your Mac…']];
+        if (content.rows.length === 0) {
+          return [['', content.empty ?? 'No headlines yet.'], ['', 'tap: open · long-press: refresh']];
+        }
+        return [
+          ...(content.headline ? [['', content.headline] as PaneRow] : []),
+          ...content.rows.map(listRow),
+        ];
       case 'search':
         if (!content || (!content.headline && content.rows.length === 0)) {
-          return [content?.empty ?? 'Say “JOAT, look up …”'];
+          return [['', content?.empty ?? 'Say “JOAT, look up …”']];
         }
-        return content.headline ? [content.headline, ...content.rows] : content.rows;
+        // Results are numbered: "open the second" names a row.
+        return [
+          ...(content.headline ? [['Query', content.headline] as PaneRow] : []),
+          ...content.rows.map((row, index): PaneRow => [String(index + 1), row]),
+        ];
       default:
         // Notifications: the Mac's newest is in Main (handled above); at rest
         // the pane says what Home is for.
         return overview.kind === 'empty'
-          ? [overview.primary, 'tap: open notifications']
-          : ['No new notifications', 'tap: open notifications'];
+          ? [['', overview.primary], ['', 'tap: open notifications']]
+          : [['', 'No new notifications'], ['', 'tap: open notifications']];
     }
   };
+  const grid = (rows: PaneRow[]): { paneLabels: string[]; pane: string[] } => ({
+    paneLabels: rows.map(([label]) => label),
+    pane: rows.map(([, value]) => value),
+  });
   const boot = overview.kind === 'empty' && overview.title !== 'Ready';
   if (boot) {
     return {
       header, info, tabs,
-      pane: [overview.title.toUpperCase(), overview.primary, overview.recovery],
+      // A boot title (RECONNECTING, 130 px) is wider than the label column:
+      // it heads the value column instead, as it did before the grid.
+      ...grid([['', overview.title.toUpperCase()], ['', overview.primary], ['', overview.recovery]]),
       paneBrightness: frame.mainBrightness,
       hint: overview.hint,
     };
@@ -197,7 +253,10 @@ export function composeOverviewText(
   if (overview.kind === 'content' && overview.main) {
     return {
       header, info, tabs,
-      pane: [overview.main.label, overview.main.value, ...(overview.tray ? [overview.tray] : [])],
+      ...grid([
+        [gridLabel(overview.main.label), overview.main.value],
+        ...(overview.tray ? overview.tray.split('\n').map(sourceRow) : []),
+      ]),
       paneBrightness: frame.mainBrightness,
       hint: frame.hint,
     };
@@ -206,7 +265,7 @@ export function composeOverviewText(
     header,
     info,
     tabs,
-    pane: tabRows(),
+    ...grid(tabRows()),
     paneBrightness: 4,
     // Home's own gesture line (Chrome's), else the resolver's.
     hint: frame.hint.trim() || (overview.kind === 'empty' ? overview.hint : ''),

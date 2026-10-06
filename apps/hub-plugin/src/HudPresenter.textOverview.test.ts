@@ -66,7 +66,7 @@ describe('Home as firmware text', () => {
     expect(pages).toHaveLength(1);
     const page = last();
     expect(page.imageObject ?? []).toHaveLength(0);
-    expect(page.textObject?.map((t) => t.containerName)).toEqual(['status', 'info', 'tabs', 'pane', 'rule', 'hint']);
+    expect(page.textObject?.map((t) => t.containerName)).toEqual(['status', 'info', 'tabs', 'pane-l', 'pane', 'rule', 'hint']);
     expect(page.textObject?.filter((t) => t.isEventCapture === 1).map((t) => t.containerName)).toEqual(['tabs']);
     expect(validateEvenHubPageContainer(page as never).valid).toBe(true);
     expect(canvas).toHaveLength(0);
@@ -108,14 +108,14 @@ describe('Home as firmware text', () => {
     expect(upgrades[0]!.content).toMatch(/^9:42 · /u);
   });
 
-  it('a rail swipe is two upgrades (rail and pane) and moves the > cursor', async () => {
+  it('a rail swipe is three upgrades (rail, labels, values), never a rebuild, and moves the > cursor', async () => {
     const { hud, pages, upgrades, canvas } = harness();
     await hud.acceptPanel({ kind: 'hud.panel', tab: 'news', revision: 1, rows: ['[1m] Fresh headline · BBC'] });
     await hud.setStatusModel(status('9:41'));
     const rebuilds = pages.length;
     expect(await hud.stepTab(1)).toBe('news');
     expect(pages).toHaveLength(rebuilds);
-    expect(upgrades.map((u) => u.containerName).sort()).toEqual(['pane', 'tabs']);
+    expect(upgrades.map((u) => u.containerName).sort()).toEqual(['pane', 'pane-l', 'tabs']);
     const rail = upgrades.find((u) => u.containerName === 'tabs')!.content!.split('\n');
     expect(rail[1]).toBe('> NEWS');
     // Proportional font: every label starts at the same x.
@@ -129,8 +129,10 @@ describe('Home as firmware text', () => {
     const { hud, last, named, upgrades } = harness();
     await hud.acceptPanel({ kind: 'hud.panel', tab: 'news', revision: 1, rows: ['[1m] A · BBC'] });
     await hud.showText('Marta: lunch at noon?', ContainerId.Main, undefined, 'notification');
+    // The grid: the kind in the label column, the words in the value column.
+    const labels = upgrades.filter((u) => u.containerName === 'pane-l').pop()?.content ?? named(last(), 'pane-l')?.content;
     const pane = upgrades.filter((u) => u.containerName === 'pane').pop()?.content ?? named(last(), 'pane')?.content;
-    expect(pane).toMatch(/^NOTIFICATION\n/u);
+    expect(labels).toMatch(/^NOTICE/u);
     expect(pane).toContain('Marta: lunch at noon?');
   });
 
