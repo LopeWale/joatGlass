@@ -52,10 +52,25 @@ CODE_CHECK_TIMEOUT_S = 90.0
 """How long "Checking the code…" may last before the phone says so."""
 PROBE_TIMEOUT_S = 20.0
 MAX_PASTED_CODE = 512
+NO_BROWSER = "true"
+"""The opener a sign-in hands the CLI (`BROWSER`): a command that opens
+nothing. `claude auth login` opens the Mac's browser on its own authorize
+page (a localhost redirect) AND prints the link the phone opens; both finish
+the same login. With the Mac's page open, a wearer who signs in on the phone
+found the Authorize step waiting on a Mac they were not at. The phone's link
+is now the only one, so the whole sign-in happens where the wearer is."""
+
 SIGN_IN_STRIP_ENV = tuple(key for keys in AMBIENT_LOGIN_ENV.values() for key in keys)
 """Dropped on top of the shared list (`cli_env.STRIP_ENV`): a sign-in must
 create a subscription login, never be short-circuited by one the brain
 inherited, the Mac's own login token included."""
+
+CLAUDE_STEPS = (
+    "Open the sign-in page and sign in, then tap Authorize. Claude shows a code: "
+    "copy it and paste it below. Signed in but no Authorize button? Open the page "
+    "again, or copy the link into Safari."
+)
+"""The three Claude steps, all on the phone."""
 
 CODEX_DEVICE_HINT = (
     "If Continue is greyed out, allow device code sign-in in ChatGPT → "
@@ -174,6 +189,7 @@ class CliSignIn:
                 env.pop(key, None)
             else:
                 env[key] = value
+        env["BROWSER"] = NO_BROWSER
         return env
 
     async def _run(self, argv: list[str], profile: AccountProfile) -> tuple[int | None, str]:
@@ -422,7 +438,7 @@ def _advance(snapshot: LoginSnapshot, text: str) -> LoginSnapshot:
         url = next((u for u in urls if "oauth/authorize" in u), urls[0] if urls else None)
         if url and "paste code" in text.lower():
             return replace(snapshot, stage="enter_code", url=url, needs_code=True,
-                           message="Open the link, sign in, then paste the code it shows.")
+                           message=CLAUDE_STEPS)
         if url:
             return replace(snapshot, stage="open_link", url=url,
                            message="Open the link and sign in.")
@@ -437,7 +453,9 @@ def _advance(snapshot: LoginSnapshot, text: str) -> LoginSnapshot:
 
 
 __all__ = [
+    "CLAUDE_STEPS",
     "CODEX_DEVICE_HINT",
+    "NO_BROWSER",
     "AccountState",
     "AccountStatus",
     "CliSignIn",

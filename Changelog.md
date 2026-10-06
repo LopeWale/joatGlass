@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-10-06 — Claude sign-in finishes on the phone
+
+The wearer signed in to Claude from the phone's plugin screen, and the sign-in stopped before the Authorize step. The Authorize page was waiting on the MacBook the brain runs on.
+
+- **Cause.** `claude auth login --claudeai` does two things at once:
+  - It opens the Mac's own browser on an authorize page that redirects to `localhost`.
+  - It prints a second link, which the phone opens, ending at Claude's code page.
+
+  Both links share one login, so the Mac's page was a second, competing copy of the flow. It sat on a Mac the wearer was not at. Checked against CLI 2.1.291 with a recording `BROWSER` script.
+- **Fix.** The sign-in now hands the CLI `BROWSER=true`, an opener that opens nothing, so nothing appears on the Mac and the phone's link is the only one.
+- **Instructions on the phone.** The phone now names all three steps:
+  1. Sign in.
+  2. Tap Authorize.
+  3. Paste the code Claude shows.
+
+  If the page comes back signed in without an Authorize button, the phone says to open it again or copy the link into Safari.
+- **Tests.** `test_cli_env.py` checks that the sign-in's real spawn receives `BROWSER=true`, and `test_cli_signin.py` checks the steps message.
+- **Not verified.** The phone side was not run on a device: the in-app browser, a universal link into the Claude app, or an emailed sign-in link opening in another browser could still split the flow.
+- Mac-only: restart the brain from this revision.
+
 ## 2026-10-06 — A Messages reply works after reading, and a refused tap says why
 
 The wearer asked why a reply to a message still could not be sent.
