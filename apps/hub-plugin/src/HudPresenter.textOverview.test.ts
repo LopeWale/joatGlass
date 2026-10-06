@@ -194,3 +194,50 @@ describe('Home as firmware text', () => {
     expect(pages.every((page) => (page.imageObject ?? []).length === 0)).toBe(true);
   });
 });
+
+
+describe('Home with its column as images (HomeImages.ts)', () => {
+  function columnHarness() {
+    const order: string[] = [];
+    const pages: Page[] = [];
+    const columns: unknown[] = [];
+    const client = {
+      pageEpoch: () => pages.length,
+      require: () => ({
+        textContainerUpgrade: async (u: TextContainerUpgrade) => { order.push(`upgrade:${u.containerName}`); return true; },
+        rebuildPageContainer: async (page: Page) => { order.push('rebuild'); pages.push(page); return true; },
+        updateImageRawData: async () => 'success',
+      }),
+    } as unknown as BridgeClient;
+    const visual = {
+      paint: async () => true,
+      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+      forgetPage: () => undefined,
+      paintHeader: async () => true,
+      canPaintHeader: () => true,
+      paintHomeColumn: async (view: unknown) => { order.push('column'); columns.push(view); return true; },
+      canPaintHomeColumn: () => true,
+    } as unknown as HudVisualSurface;
+    return { hud: new HudPresenter(client, new HudPageBuilder(), visual), order, pages, columns };
+  }
+
+  it('a tab swipe moves the pane in place first, then repaints the column; no rebuild', async () => {
+    const { hud, order, pages, columns } = columnHarness();
+    await hud.acceptPanel({ kind: 'hud.panel', tab: 'news', revision: 1, rows: ['[1m] Fresh headline · BBC'] });
+    await hud.setStatusModel(status('9:41'));
+    const page = pages[pages.length - 1]!;
+    expect(page.imageObject).toHaveLength(4);
+    expect(page.textObject?.map((t) => t.containerName)).not.toContain('tabs');
+    expect(page.textObject?.filter((t) => t.isEventCapture === 1).map((t) => t.containerName)).toEqual(['pane']);
+    const rebuilds = pages.length;
+    order.length = 0;
+
+    expect(await hud.stepTab(1)).toBe('news');
+    await vi.runAllTimersAsync();
+    expect(pages).toHaveLength(rebuilds);
+    expect(order.indexOf('upgrade:pane')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('column')).toBeGreaterThan(order.indexOf('upgrade:pane'));
+    const view = columns[columns.length - 1] as { tabs: { tab: string; active: boolean }[] };
+    expect(view.tabs.find((tab) => tab.active)?.tab).toBe('news');
+  });
+});

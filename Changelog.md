@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-10-06 — Mixed rendering: Home's column in Even's font; the reader stays 55% under JOAT's box
+
+The wearer asked for sources on the font limits, and they are now confirmed:
+- Even's display docs say "a single LVGL font baked into firmware. No font selection, no size control" (hub.evenrealities.com/docs/build/display).
+- App fonts are an open request, everything-evenhub#37.
+- `TextContainerProperty` in SDK 0.0.16 has 14 fields and no font.
+
+Every G2 plugin with other fonts draws that text as images; the fast ones mix the two (weather-even-g2, sandevistan, amap-hud). The wearer chose that mixed design: images in Even's font for what rarely changes, native text for what changes often.
+
+- **Home's left column** (the date, weather, unread count and tab rail) is now two image tiles in Even's font at 55%, with icons (`HomeImages.ts`, `HudCanvasRenderer.renderHomeColumn`).
+  - The right pane stays firmware text and keeps its in-place upgrade on every tab swipe; it now holds the page's input.
+  - A swipe moves the pane first, then resends only the rail's tile (26 ms in the simulator; one image send on the glasses).
+  - The weather or unread count resends the other tile. The clock is in the header, so nothing repaints on the minute.
+  - `VITE_HOME_IMAGES=0` keeps the text column.
+- **JOAT's box over a reader keeps the reader in Even's font.** The reply card used to rebuild the reader above it as a firmware text page, which jumped the thread back to the firmware's size. Now:
+  - The reader's four tiles stay beneath the box (`ConversationOverlay` keeps an image underlay's tiles and drops its input layer and the box's status line).
+  - The presenter repaints the reader with nothing below the box's top border (`clipBottom` on the reader frame).
+  - A status change repaints those tiles.
+  - Closing the box repaints the whole reader.
+- **The image lane gained a strip kind** for page parts that are images: Home's column, alongside the header. These are never superseded by a full frame, and only changed tiles are sent.
+- **Verified in the official simulator:** Home before and after, a tab swipe (rail tile only), and the reply box over the long thread with the thread at 55%. Not verified on physical glasses.
+- Plugin 1137 passed; typecheck and build clean. Plugin-only.
+
 ## 2026-10-06 — Build JOAT 0.1.109
 
 - Packed from `2a8d724` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.109 above the last recorded build (0.1.108); app.json, package.json and package-lock.json all 0.1.109. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1131 tests passed.
