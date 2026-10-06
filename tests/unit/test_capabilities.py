@@ -2763,6 +2763,13 @@ class TestMessageListRow:
         ))
         assert "●" not in row
 
+    def test_multi_line_preview_is_one_row_line(self) -> None:
+        # A line break in the preview wrapped the firmware row into the next.
+        row = CapabilityRouter._message_list_row(MessageThread(
+            "Adele", "handle-1", "Running late\n\nsee you  at 3", time.time(), True,
+        ))
+        assert row.endswith("· Running late see you at 3")
+
 
 class TestVoiceOpenChain:
     """The full Mac half of "JOAT, show my messages": real command router,

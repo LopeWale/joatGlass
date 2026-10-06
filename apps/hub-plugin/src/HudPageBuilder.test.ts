@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { utf8ByteLength, validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
-import { LIST_ROW_MAX_UTF8_BYTES, clampUtf8Bytes, fitHeader, HudPageBuilder } from './HudPageBuilder';
+import { LIST_ROW_MAX_UTF8_BYTES, clampUtf8Bytes, fitHeader, fitListRow, HudPageBuilder } from './HudPageBuilder';
+import { measureTextWrap } from '@evenrealities/pretext';
 import { firmwareLineCount } from './FirmwareText';
 import { CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId } from './types';
 
@@ -208,6 +209,22 @@ describe('HudPageBuilder invariants', () => {
   // The bug this file exists to prevent: the list draws, but capture stays on
   // the main TEXT container, so the firmware never moves the selection and
   // never emits listEvent — "menu shows but won't navigate".
+  it('keeps every firmware list row on one line, with room for the selection border', () => {
+    // A multi-line message preview: the firmware breaks the row at "\n"
+    // and draws two 27 px lines into a 40 px row, over the next one.
+    const multiLine = '[2m] ● Adele · Running late\nsee you at 3';
+    const long = '[1d] Maximilian Wolfeschlegel · WOW MEMBERSHIP WORKSHOP AT NOON';
+    const page = builder.listLayout([multiLine, long]) as Page;
+    const names = page.listObject?.[0]?.itemContainer?.itemName ?? [];
+    expect(names[0]).toBe('[2m] ● Adele · Running late see you at 3');
+    for (const row of names) {
+      expect(row).not.toMatch(/[\r\n\t]/u);
+      // 536 px of row, less the selection border's room: one line at 524.
+      expect(measureTextWrap(row, 524).lineCount).toBe(1);
+    }
+    expect(fitListRow('  a\r\n\tb  ')).toBe('a b');
+  });
+
   it('keeps every firmware list row under the host\'s 63-byte cap, on a code-point boundary', () => {
     // Measured in the official simulator: a 64-byte row fails the whole
     // rebuild. "·" is two bytes, so a 64-character Messages row overflows.
