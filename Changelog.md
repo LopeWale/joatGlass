@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-06 — Build JOAT 0.1.106
+
+- Packed from `ba86a79` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.106 above the last recorded build (0.1.105); app.json, package.json and package-lock.json all 0.1.106. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1107 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 158161 bytes, SHA-256 `582559b8e8433df046a7527b087e78a9417169d949f467240616a45d63a87cbe`. Adds to 0.1.105 the JOAT box that floats over the page it was called on and grows from two rows, with the working indicator on its border. Plugin-only since 0.1.105: a brain restarted for 0.1.105 needs no restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-06 — JOAT's box floats over the page it was called on and grows as Even AI's does
 
 The wearer: "the JOAT AI interface is supposed to be an overlay box on whichever interface it was called on, not its own page… a box that is just two rows… grows in height as new requests and responses are added… once it has grown to the height of the glasses with some margin, the scrolling starts and shows the latest reply". And the box at the bottom centre "was supposed to be an animated visual indication of when JOAT is thinking or working".
