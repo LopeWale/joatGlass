@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-10-06 — Messages is one thread you read and tap to reply; no scrollbar boxes on the conversation card
+
+The wearer: "why do I have to click to see a single message when I can see the thread and scroll through? The tap should be to reply." They also asked for the reply to happen in JOAT's own conversation card, and for the black boxes on the card's scrollbar to go.
+
+- **The thread is the only Messages reader.** `MESSAGES · CONVERSATION` is one Mac-paged text page, newest message first, each message whole ("Adele: …", "You: …"), fifteen read at a time. A swipe pages it; past the last page the Mac reads older messages from chat.db. The single-message reader (`MESSAGES · MESSAGE`), the "✎ Reply" row and the ▲/▼ paging rows are deleted.
+- **A tap on the thread replies.** JOAT's conversation card opens over it: "What do you want to say back to Adele?". The wearer speaks; the card shows their exact words with "tap: send · long-press: retry · double-click: cancel".
+  - Tap sends. The consent gate underneath is the same signed confirmation as before; only its page changed.
+  - Long-press says it again: the Hub declines the draft and asks the Mac for a retry (`message-retry`), and the Mac asks the question afresh once the draft has ended, whichever arrives first.
+  - Double-click cancels back to the thread.
+- **After the send the wearer is back on the thread**, the reply its newest message: read back from chat.db, or from the send itself if Messages has not written it within 3 s. Sent and cancelled no longer get receipt pages; failed and uncertain still do.
+- **The two-minute window** the wearer asked about is the Mac's expiry on the selected conversation, a guard against replying to a thread no longer in view. Since earlier today it restarts while the thread is on the glass, so a tap on the thread always replies; it still runs out once the wearer has left.
+- **Fixed on the way:** a status change cleared a sent reply's words before the Messages UI could read them, so the thread would never have shown the reply (caught by the new integration test). The words are now dropped right after the observers run. A tap that reaches a read-only thread says so instead of arming anything.
+- **The conversation card's scroll column is gone.** It was an 18 px text column of 20 px `│`/`█` glyphs, so the firmware wrapped each glyph onto its own line: black gaps and boxes down the card's right edge. 7e867a0 had removed it (Even AI draws no scrollbar); a later merge brought it back. Swipe still scrolls back.
+- Verified in the official simulator with the dev fixtures (`?joatVisual=messages-conversation`, `message-reply-question`, `message-reply-confirm`): the thread page, the question card and the consent card render as described. Not verified end to end against a live brain, and not on physical glasses.
+- Tests: plugin 1099 passed, typecheck clean. Mac 3448 passed, 1 skipped; the container's IPv6 test fails as before. mypy clean. Both sides change, so this needs a new package and a brain restart.
+
 ## 2026-10-06 — Claude sign-in finishes on the phone
 
 The wearer signed in to Claude from the phone's plugin screen, and the sign-in stopped before the Authorize step. The Authorize page was waiting on the MacBook the brain runs on.

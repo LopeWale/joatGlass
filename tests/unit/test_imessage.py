@@ -85,7 +85,10 @@ def test_marker_only_archives_use_attachment_metadata_or_unavailable_text(tmp_pa
     assert replacement.text == MESSAGE_TEXT_UNAVAILABLE
     assert attachment.text == ""
     assert attachment.attachment_count == 1
-    assert CapabilityRouter._message_history_row(thread, attachment).endswith(" · Attachment")
+    line = CapabilityRouter._message_thread_line(thread, attachment)
+    assert line.endswith(": [attachment]")
+    assert "￼" not in line and "Message unavailable" not in line
+    assert "�" not in CapabilityRouter._message_thread_line(thread, replacement)
     fresh, watermark = store.read_new(0)
     assert [row.body for row in fresh] == ["Attachment", MESSAGE_TEXT_UNAVAILABLE]
     assert watermark == 2

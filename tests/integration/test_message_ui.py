@@ -74,6 +74,8 @@ class Messages:
 class Rig:
     def __init__(self, *, contact_search: Callable[[str], list[tuple[str, str]]] | None = None) -> None:
         self.transport = Transport()
+        #: Bodies the controller reported as sent, in order.
+        self.sent_bodies: list[str] = []
         self.generation = 'ui-connection'
         self.fence = 10
         self.capturing = False
@@ -114,7 +116,8 @@ class Rig:
                 fence_audio=lambda: self.fence, capturing=lambda: self.capturing,
                 revoke_prompt=lambda action_id: self.runtime.dispatcher.revoke(self.runtime.dispatcher.current_ticket.prompt_id)
                 if self.runtime.dispatcher.current_ticket is not None
-                and self.runtime.dispatcher.current_ticket.owner_id == action_id else None)
+                and self.runtime.dispatcher.current_ticket.owner_id == action_id else None,
+                on_sent=self.on_sent)
         self.router = CapabilityRouter(self.hud, self.transport,
             SimpleNamespace(get=lambda key: ''), Messages(), CardLog(), replies=self.replies,
             message_ui=self.ui)
@@ -127,11 +130,16 @@ class Rig:
         self.router.on_input(InputEvent(container_name='capdata', selected_name='MESSAGES',
             selected_index=index, request_id='request-messages', trace_id=trace))
 
-    def tap_reply_row(self) -> None:
-        history = self.router._message_history
-        assert history is not None and history.reply_index is not None
+    def tap_thread(self, index: int = 1) -> None:
+        # Any tap on the conversation replies; the Hub's row index is ignored.
+        assert self.router._message_history is not None
         self.router.on_input(InputEvent(container_name='capmessage', selected_name='MESSAGES',
-            selected_index=history.reply_index, request_id='request-messages', trace_id='reply-row'))
+            selected_index=index, request_id='request-messages', trace_id='selection-message'))
+
+    async def on_sent(self, body: str) -> None:
+        # Production wires this to the router: the thread repaints with the reply.
+        self.sent_bodies.append(body)
+        await self.router.show_sent_reply(body)
 
     def receipts(self) -> list[str]:
         return [m.to_wire().get('text', '') for m in self.transport.sent
@@ -214,18 +222,19 @@ async def test_selected_conversation_reply_uses_fresh_acknowledged_body() -> Non
 
 
 @pytest.mark.asyncio
-async def test_reply_row_after_long_reading_still_asks_for_the_body() -> None:
+async def test_thread_tap_after_long_reading_still_asks_for_the_body() -> None:
     # The reply clock ran from the moment the conversation opened, so after
-    # two minutes of reading the tapped Reply row silently did nothing.
+    # two minutes of reading a tap on the thread silently did nothing.
     rig = Rig()
     try:
         await rig.select(1)
         await until(lambda: rig.ui._reply_fence is not None)
         rig.now += 300.0
         asked = len(rig.transport.questions)
-        rig.tap_reply_row()
+        rig.tap_thread()
         await until(lambda: len(rig.transport.questions) > asked)
         assert rig.transport.questions[-1].field == 'body'
+        assert rig.transport.questions[-1].question == 'What do you want to say back to Sam?'
         assert rig.receipts() == []
     finally:
         await rig.close()
@@ -245,17 +254,131 @@ async def test_off_the_glass_the_conversation_still_expires() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_refused_reply_row_says_why_on_the_glass() -> None:
+async def test_a_refused_thread_tap_says_why_on_the_glass() -> None:
     rig = Rig()
     try:
         await rig.select(1)
         await until(lambda: rig.ui._reply_fence is not None)
         rig.capturing = True
         asked = len(rig.transport.questions)
-        rig.tap_reply_row()
+        rig.tap_thread()
         await until(lambda: rig.receipts())
         assert rig.receipts() == ['Wait for the microphone to finish, then reply.']
         assert len(rig.transport.questions) == asked
+    finally:
+        await rig.close()
+
+
+@pytest.mark.asyncio
+async def test_a_forged_tap_on_a_read_only_group_asks_nothing_and_sends_nothing() -> None:
+    # A group without a Mac-side chat target is read-only: the page is not
+    # selectable, and a forged tap cannot arm a reply to one participant.
+    rig = Rig()
+
+    class GroupOnly(Messages):
+        def recent_threads(self, limit: int) -> list[MessageThread]:
+            return [MessageThread('Project team', 'synthetic-group-participant', 'Group', 2.0,
+                                  is_group=True)]
+
+    rig.router._messages = GroupOnly()
+    try:
+        await rig.select(1)
+        await until(lambda: rig.router._message_history is not None)
+        await until(lambda: any(getattr(m, 'title', None) == 'MESSAGES · CONVERSATION'
+                                for m in rig.transport.sent))
+        frame = [m for m in rig.transport.sent if getattr(m, 'title', None) == 'MESSAGES · CONVERSATION'][-1]
+        assert frame.selectable is False
+        assert 'read-only' in (frame.hint or '')
+        rig.tap_thread(0)
+        await until(lambda: rig.receipts())
+        assert rig.receipts() == ['This conversation is read-only on the glasses.']
+        assert not rig.replies.selected_reply_available()
+        assert rig.transport.questions == []
+        assert rig.confirmations == [] and rig.submitted == []
+    finally:
+        await rig.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_after_a_cancelled_draft_asks_the_question_again() -> None:
+    rig = Rig()
+    try:
+        await rig.select(1)
+        await until(lambda: rig.ui._reply_fence is not None)
+        rig.tap_thread()
+        await until(lambda: rig.transport.questions)
+        first = rig.transport.questions[-1]
+        assert first.field == 'body'
+        assert await rig.answer('Running late')
+        await until(lambda: rig.confirmations)
+        # Long-press on the draft: the Hub declines its confirmation itself.
+        rig.router.on_input(InputEvent(container_name='message-retry', selected_name=first.owner_id,
+            request_id='request-messages', trace_id='selection-message'))
+        rig.confirm_release.set()
+        await until(lambda: len(rig.transport.questions) > 1)
+        again = rig.transport.questions[-1]
+        assert again.field == 'body'
+        assert again.question == first.question == 'What do you want to say back to Sam?'
+        assert again.owner_id != first.owner_id
+        assert rig.replies.message_action_status(first.owner_id).state == 'cancelled'
+        assert rig.submitted == [] and rig.sent_bodies == []
+    finally:
+        await rig.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_for_another_or_unknown_draft_asks_nothing() -> None:
+    rig = Rig()
+    try:
+        await rig.select(1)
+        await until(lambda: rig.ui._reply_fence is not None)
+        rig.tap_thread()
+        await until(lambda: rig.transport.questions)
+        assert await rig.answer('Running late')
+        await until(lambda: rig.confirmations)
+        rig.ui.retry('messages-ui-forged')
+        # A retry from another selection is not this visit's.
+        rig.router.on_input(InputEvent(container_name='message-retry',
+            selected_name=rig.transport.questions[-1].owner_id,
+            request_id='request-messages', trace_id='another-selection'))
+        rig.confirm_release.set()
+        await until(lambda: any(m.to_wire().get('state') == 'cancelled' for m in rig.transport.sent))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert len(rig.transport.questions) == 1
+    finally:
+        await rig.close()
+
+
+@pytest.mark.asyncio
+async def test_a_sent_reply_reports_its_body_and_shows_on_the_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import joat.services.capabilities as capabilities
+    # The synthetic chat.db never records the send: the thread falls back to it.
+    monkeypatch.setattr(capabilities, '_SENT_REPLY_WAIT_S', 0.0)
+    rig = Rig()
+    try:
+        rig.confirm_result = True
+        await rig.select(1)
+        await until(lambda: rig.ui._reply_fence is not None)
+        rig.tap_thread()
+        await until(lambda: rig.transport.questions)
+        body = '  On my way!  '
+        assert await rig.answer(body)
+        await until(lambda: rig.confirmations)
+        assert rig.sent_bodies == []
+        rig.confirm_release.set()
+        await until(lambda: rig.sent_bodies)
+        assert rig.sent_bodies == [body]
+        assert rig.submitted == [('synthetic-contact', body)]
+        await until(lambda: [m for m in rig.transport.sent
+                             if getattr(m, 'title', None) == 'MESSAGES · CONVERSATION'][-1].items[1]
+                    .startswith('You: '))
+        frame = [m for m in rig.transport.sent if getattr(m, 'title', None) == 'MESSAGES · CONVERSATION'][-1]
+        assert frame.items == ['1/1 · Sam', f'You: {body}\n', 'Sam: Are you coming?']
+        assert frame.reader_page == ('selection-message', 0, 1)
+        assert frame.request_id == 'request-messages'
     finally:
         await rig.close()
 
