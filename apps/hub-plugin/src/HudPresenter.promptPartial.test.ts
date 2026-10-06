@@ -21,15 +21,23 @@ function rig() {
       textContainerUpgrade: vi.fn(async (update: TextContainerUpgrade) => { upgrades.push(update); return true; }),
     }),
   } as unknown as BridgeClient;
+  // A page replacement waits on `gate.current`, so a test can hold one.
+  const gate = { current: Promise.resolve() };
+  let replacing = false;
   const visual = {
     paint: vi.fn(async (_frame: HudVisualFrame) => true),
     paintExact: vi.fn(async (_frame: HudVisualFrame, current: () => boolean) => current()),
     forgetPage: vi.fn(),
     whenIdle: vi.fn(async () => true),
-    withPageTransition: vi.fn(async (replace: () => Promise<boolean>) => replace()),
+    withPageTransition: vi.fn(async (replace: () => Promise<boolean>) => {
+      // The real guard: a second replacement while one runs is refused.
+      if (replacing) return false;
+      replacing = true;
+      try { await gate.current; return await replace(); } finally { replacing = false; }
+    }),
   };
   const hud = new HudPresenter(client, new HudPageBuilder(), visual);
-  return { hud, rebuilds, upgrades };
+  return { hud, rebuilds, upgrades, gate };
 }
 
 function last<T>(items: readonly T[]): T | undefined {
@@ -58,6 +66,32 @@ describe('HudPresenter reply card words so far', () => {
     expect(r.rebuilds).toHaveLength(opened + 1);
     expect(last(r.upgrades)?.containerName).toBe('wearer-turns');
     expect(last(r.upgrades)?.content).toContain('Running late');
+  });
+
+  it('a cancel during a growing partial waits for it, then restores the page beneath', async () => {
+    // The page guard refuses a second replacement while one runs: a cancel
+    // that did not wait for the partial's rebuild was refused and left the
+    // cancelled card on the glass.
+    const r = rig();
+    await r.hud.showList(['1/1 · Adele', 'Adele: hi'], {
+      title: 'MESSAGES · CONVERSATION', hint: 'tap: reply', selectable: true, nativeTextPage: true,
+    });
+    await r.hud.showPromptQuestion('p1', QUESTION, () => true, 'messages');
+    let release: () => void = () => undefined;
+    r.gate.current = new Promise<void>((resolve) => { release = resolve; });
+    const partial = r.hud.showPromptPartial('p1', 'Running');  // grows the card: a rebuild, held
+    await Promise.resolve();
+    const dismissed = r.hud.dismissPromptQuestion('p1');
+    let settled = false;
+    void dismissed.then(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(settled).toBe(false);  // the cancel waits for the held rebuild
+    release();
+    expect(await partial).toBe(false);
+    expect(await dismissed).toBe(true);
+    const onGlass = last(r.rebuilds);
+    expect(onGlass?.textObject?.some((text) => text.containerName === 'conversation')).toBe(false);
+    expect(onGlass?.textObject?.some((text) => text.containerName === 'main')).toBe(true);
   });
 
   it('ignores words for another prompt or a non-Messages question', async () => {

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-06 — Live words: a cancel waits for the card, and another speaker's words never show
+
+A review of PR #17 found two defects in the live-transcription path, both confirmed in the code and fixed.
+
+- **A cancel or a consent card could lose to a growing partial.** The words so far can grow the reply card, which is a page replacement, and the page guard refuses a second replacement while one runs. `dismissPromptQuestion` waited only for the card's first paint, so a cancel arriving mid-growth tried to restore the page beneath, was refused, and the cancelled card stayed on the glass; a consent card could be refused the same way. Both now wait for every paint the prompt owns (`settlePromptPaints`) before replacing the page. Pinned by a test that holds the partial's rebuild while a cancel arrives.
+- **Another speaker's words could appear as the wearer's reply.** The partial publisher checked only the latest frame's prompt epoch and connection; a bystander talking for 0.9 s during an open prompt, with the host naming `speaker="other"`, was transcribed into the card. The final-transcript path already rejected such audio. The publisher now applies `dispatch`'s own eligibility over every buffered frame: no `other` speaker, the prompt's source, epoch and connection, nothing mixed.
+- **Provisional words come off the card when the final does not answer the prompt:** a rejected non-wearer utterance, a final with no text, or a final `dispatch` refuses now sends an empty `prompt.partial`, which shrinks the card back to the question. Before, somebody else's words could stay until the next update.
+- Tests: plugin 1138 passed, typecheck and build clean. Mac 3457 passed, 1 skipped; the container's IPv6 test fails as before. mypy clean. Both sides change: a new package and a brain restart.
+
 ## 2026-10-06 — Build JOAT 0.1.111
 
 - Packed from `bc5e305` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.111 above the last recorded build (0.1.110); app.json, package.json and package-lock.json all 0.1.111. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1137 tests passed.
