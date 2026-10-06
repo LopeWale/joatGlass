@@ -131,20 +131,11 @@ export type G2TraceEvent =
    * its fixed, prompt-free action. */
   | {
     type: 'brainstorm_action';
-    action: 'begin_acceptance' | 'begin_topic_capture' | 'begin_terminal_input' | 'show_terminal' | 'show_brainstorm' | 'cancel' | 'retry_terminal';
+    action: 'begin_topic_capture' | 'begin_terminal_input' | 'show_terminal' | 'show_brainstorm' | 'cancel' | 'retry_terminal';
     surface: 'brainstorm' | 'agent_terminal';
     source: 'left' | 'right' | 'ring';
     gesture: 'tap' | 'double_press';
     delivery: 'sys';
-  }
-  /** SHA-256 of the completed packed four-tile raster, never its pixels or
-   * text. This binds an accepted physical action to a rendered visual state. */
-  | {
-    type: 'visual_frame';
-    kind: 'brainstorm';
-    surface: 'brainstorm' | 'agent_terminal';
-    state: 'unavailable' | 'approval_required' | 'ready' | 'topic_capture' | 'acceptance_ready' | 'running' | 'settled' | 'cancelled' | 'failed' | 'blocked';
-    sha256: string;
   }
   /** A completed four-tile Messages state, bound only to its fixed surface
    * name and raster digest. The digest is not reversible HUD copy. */

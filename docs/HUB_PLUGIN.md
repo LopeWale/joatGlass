@@ -95,10 +95,10 @@ kept opening the exit confirmation), and a left SINGLE press on the
 resting overview drills into the notifications tray. The exit dialog is
 reachable only through the Mac's `shutdown` downlink. On a live Brainstorm
 the double press CANCELS the session; the firmware menu remains reachable
-mid-session for everything else. The one named press: while the Mac has
-ARMED a Brainstorm acceptance run, a right-temple or ring double press
-starts it (the Mac's contract names the source), and the ready frame says
-"right/ring x2: test" only then.
+mid-session for everything else. No press is named by source any more: the
+Brainstorm acceptance run that armed a right/ring double press was deleted
+on 2026-10-06 (its route had needed a raster receipt since Brainstorm became
+firmware text).
 
 ### Lifecycle events (all `sysEvent`)
 

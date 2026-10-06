@@ -37,8 +37,8 @@ from joat.core.protocol import (
 )
 from joat.services.orchestrator import VoiceOrchestrator
 from scripts.hud_visual_evidence import decode_rgba8_png
-from scripts.simulator_brainstorm_action_flow_acceptance import (
-    BrainstormActionFlowError,
+from scripts.simulator_harness import (
+    SimulatorFlowError,
     ManagedProcess,
     _http_bytes,
     _input,
@@ -172,7 +172,7 @@ def _inject_fixture_probe(root: Path) -> None:
     surface_source = surface.read_text(encoding="utf-8")
     surface_needle = """    const needsRebuild = this.pageLineCapacity !== view.lineCapacity || this.lastView === undefined;"""
     if surface_source.count(surface_needle) != 1:
-        raise BrainstormActionFlowError("could not place disposable native-view probe")
+        raise SimulatorFlowError("could not place disposable native-view probe")
     surface_probe = f"""    console.info('{VIEW_MARKER}' + JSON.stringify({{
       conversationId: current.conversationId,
       revision: current.revision,
@@ -193,7 +193,7 @@ def _inject_fixture_probe(root: Path) -> None:
     source = main.read_text(encoding="utf-8")
     needle = "  await client.init();"
     if source.count(needle) != 1:
-        raise BrainstormActionFlowError("could not place disposable SDK bridge probe")
+        raise SimulatorFlowError("could not place disposable SDK bridge probe")
     probe = f"""
   const fixtureRequire = client.require.bind(client);
   const fixtureBridge = fixtureRequire() as any;
@@ -284,10 +284,10 @@ async def _console_payloads(automation_base: str, marker: str) -> list[dict[str,
     try:
         decoded = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise BrainstormActionFlowError("official simulator returned invalid console JSON") from exc
+        raise SimulatorFlowError("official simulator returned invalid console JSON") from exc
     entries = decoded.get("entries") if isinstance(decoded, dict) else None
     if not isinstance(entries, list):
-        raise BrainstormActionFlowError("official simulator console has no entries")
+        raise SimulatorFlowError("official simulator console has no entries")
     ids = [
         entry.get("id") for entry in entries
         if isinstance(entry, dict) and isinstance(entry.get("id"), int)
@@ -307,7 +307,7 @@ async def _console_payloads(automation_base: str, marker: str) -> list[dict[str,
             try:
                 payload = json.loads(message[offset + len(known_marker):].strip())
             except json.JSONDecodeError as exc:
-                raise BrainstormActionFlowError(
+                raise SimulatorFlowError(
                     f"invalid fixture probe payload for {known_marker}"
                 ) from exc
             if isinstance(payload, dict):
@@ -334,7 +334,7 @@ async def _poll_native_view(
             if predicate(item):
                 return item
         await asyncio.sleep(0.05)
-    raise BrainstormActionFlowError(f"timed out waiting for {label}")
+    raise SimulatorFlowError(f"timed out waiting for {label}")
 
 
 async def _screenshot(automation_base: str) -> bytes:
@@ -368,7 +368,7 @@ def _assert_dashboard_underlay_restored(before: bytes, after: bytes) -> None:
     before_width, before_height, before_rgba = decode_rgba8_png(before)
     after_width, after_height, after_rgba = decode_rgba8_png(after)
     if (before_width, before_height) != (after_width, after_height):
-        raise BrainstormActionFlowError("restored underlay dimensions changed")
+        raise SimulatorFlowError("restored underlay dimensions changed")
     left, top, right, bottom = DASHBOARD_LIVE_CLOCK_REGION
     changed_outside_clock = 0
     for y in range(after_height):
@@ -379,7 +379,7 @@ def _assert_dashboard_underlay_restored(before: bytes, after: bytes) -> None:
             if before_rgba[offset:offset + 4] != after_rgba[offset:offset + 4]:
                 changed_outside_clock += 1
     if changed_outside_clock:
-        raise BrainstormActionFlowError(
+        raise SimulatorFlowError(
             "dismissal did not restore the exact dashboard outside its live clock: "
             f"{changed_outside_clock} pixels changed"
         )
@@ -390,7 +390,7 @@ def _assert_dashboard_underlay_restored(before: bytes, after: bytes) -> None:
         if after_rgba[(y * after_width + x) * 4 + 3] >= 100
     )
     if lit_clock_pixels < 1_000:
-        raise BrainstormActionFlowError("restored dashboard clock is blank or incomplete")
+        raise SimulatorFlowError("restored dashboard clock is blank or incomplete")
 
 
 async def _wait_dashboard_underlay_restored(
@@ -403,12 +403,12 @@ async def _wait_dashboard_underlay_restored(
 
     deadline = time.monotonic() + timeout_s
     matching_since: float | None = None
-    latest_error: BrainstormActionFlowError | None = None
+    latest_error: SimulatorFlowError | None = None
     while time.monotonic() < deadline:
         raw = await _screenshot(automation_base)
         try:
             _assert_dashboard_underlay_restored(baseline, raw)
-        except BrainstormActionFlowError as exc:
+        except SimulatorFlowError as exc:
             latest_error = exc
             matching_since = None
         else:
@@ -420,7 +420,7 @@ async def _wait_dashboard_underlay_restored(
         await asyncio.sleep(0.04)
     if latest_error is not None:
         raise latest_error
-    raise BrainstormActionFlowError("restored Overview never reached a stable framebuffer")
+    raise SimulatorFlowError("restored Overview never reached a stable framebuffer")
 
 
 async def _wait_visual_idle_after(
@@ -461,7 +461,7 @@ async def _wait_visual_idle_after(
         elif completed > 0 and starts == completed and now - stable_since >= stable_s:
             return latest or raw
         await asyncio.sleep(0.04)
-    raise BrainstormActionFlowError(
+    raise SimulatorFlowError(
         "Mac-connected Overview did not finish a post-connect visual frame"
     )
 
@@ -472,13 +472,13 @@ def _assert_context_menu_visible(raw: bytes) -> int:
     width, height, rgba = decode_rgba8_png(raw)
     divider_x = 227
     if width <= divider_x or height < 280:
-        raise BrainstormActionFlowError("context menu framebuffer dimensions changed")
+        raise SimulatorFlowError("context menu framebuffer dimensions changed")
     divider_pixels = sum(
         1 for y in range(height)
         if rgba[(y * width + divider_x) * 4 + 3] >= 100
     )
     if divider_pixels < 250:
-        raise BrainstormActionFlowError("context menu divider was not visibly drawn")
+        raise SimulatorFlowError("context menu divider was not visibly drawn")
     visible_row_bands = 0
     for top, bottom in ((28, 60), (78, 110), (128, 160), (178, 210), (228, 260)):
         lit = sum(
@@ -490,7 +490,7 @@ def _assert_context_menu_visible(raw: bytes) -> int:
         if lit >= 100:
             visible_row_bands += 1
     if visible_row_bands != 5:
-        raise BrainstormActionFlowError(
+        raise SimulatorFlowError(
             f"context menu showed {visible_row_bands} populated row bands instead of five"
         )
     return visible_row_bands
@@ -537,7 +537,7 @@ async def _changed_frame(
         elif now - candidate_since >= stable_s:
             return latest
         await asyncio.sleep(0.04)
-    raise BrainstormActionFlowError(f"{label}: framebuffer never changed")
+    raise SimulatorFlowError(f"{label}: framebuffer never changed")
 
 
 def _conversation_pixel_digest(raw: bytes) -> str:
@@ -643,10 +643,10 @@ class FramebufferLatencyProbe:
             await asyncio.wait_for(self._done.wait(), timeout=timeout_s)
         except TimeoutError as exc:
             self._task.cancel()
-            raise BrainstormActionFlowError("no stable transcript pixels after VAD closure") from exc
+            raise SimulatorFlowError("no stable transcript pixels after VAD closure") from exc
         await self._task
         if self.reference is None or self.first_changed_at is None or self.stable_at is None:
-            raise BrainstormActionFlowError("incomplete framebuffer latency span")
+            raise SimulatorFlowError("incomplete framebuffer latency span")
         return {
             "firstPixelsMs": round((self.first_changed_at - self.reference) * 1_000),
             "stablePixelsMs": round((self.stable_at - self.reference) * 1_000),
@@ -689,7 +689,7 @@ async def _drive_voice_turn(
     closed_unix_ms = time.time() * 1_000
     worker = orchestrator._utterance_worker
     if worker is None:
-        raise BrainstormActionFlowError("public audio ingress scheduled no utterance worker")
+        raise SimulatorFlowError("public audio ingress scheduled no utterance worker")
     return next_seq, worker, closed_monotonic, closed_unix_ms
 
 
@@ -708,10 +708,10 @@ async def _bridge_native_latency(
     )
     accepted = event.get("acceptedAtUnixMs")
     if not isinstance(accepted, int):
-        raise BrainstormActionFlowError("native bridge receipt has no timestamp")
+        raise SimulatorFlowError("native bridge receipt has no timestamp")
     elapsed = round(accepted - closed_unix_ms)
     if elapsed < 0:
-        raise BrainstormActionFlowError("native write preceded utterance closure")
+        raise SimulatorFlowError("native write preceded utterance closure")
     return elapsed
 
 
@@ -736,7 +736,7 @@ async def _poll_bridge_event(
             ):
                 return event
         await asyncio.sleep(0.04)
-    raise BrainstormActionFlowError(
+    raise SimulatorFlowError(
         f"timed out waiting for accepted bridge operation {sorted(operations)!r}"
     )
 
@@ -762,7 +762,7 @@ async def _scroll_to_boundary(
             await asyncio.sleep(0.3)
             after_frames = len(await _console_payloads(automation_base, VIEW_MARKER))
             if after_frames != before_frames:
-                raise BrainstormActionFlowError(f"{direction} repainted beyond its boundary")
+                raise SimulatorFlowError(f"{direction} repainted beyond its boundary")
             return steps, current, current_raw, reconstructed
         next_frame = await _poll_native_view(
             automation_base,
@@ -783,14 +783,14 @@ async def _scroll_to_boundary(
         next_rows = cast(list[dict[str, str]], next_frame["visibleLines"])
         if direction == "up":
             if next_rows[1:] != previous_rows[:-1]:
-                raise BrainstormActionFlowError("scroll up skipped or reordered a row")
+                raise SimulatorFlowError("scroll up skipped or reordered a row")
             reconstructed.insert(0, dict(next_rows[0]))
         elif next_rows[:-1] != previous_rows[1:]:
-            raise BrainstormActionFlowError("scroll down skipped or reordered a row")
+            raise SimulatorFlowError("scroll down skipped or reordered a row")
         current = next_frame
         current_raw = next_raw
         steps += 1
-    raise BrainstormActionFlowError(f"{direction} never reached a bounded scroll position")
+    raise SimulatorFlowError(f"{direction} never reached a bounded scroll position")
 
 
 async def _continue_after_inactivity(
@@ -820,7 +820,7 @@ async def _continue_after_inactivity(
     )
     prompt_frame = _save_frame(prompt_raw, output, f"{name}-continue-prompt")
     if len(gateway.inputs) != before_inputs:
-        raise BrainstormActionFlowError("inactivity prompt emitted an action without a tap")
+        raise SimulatorFlowError("inactivity prompt emitted an action without a tap")
     await _input(automation_base, "click")
     await _wait_for(
         lambda: gateway.inputs[-1]
@@ -839,7 +839,7 @@ async def _continue_after_inactivity(
     ) != _region_digest(
         prior_raw, left=36, top=50, right=541, bottom=235,
     ):
-        raise BrainstormActionFlowError(
+        raise SimulatorFlowError(
             f"{name} continuation did not restore the same conversation card"
         )
     return prompt_frame, {
@@ -853,11 +853,11 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
     _CONSOLE_LEDGERS.clear()
     for port in (args.ws_port, args.vite_port, args.automation_port):
         if _port_busy(port):
-            raise BrainstormActionFlowError(f"isolated acceptance port {port} is occupied")
+            raise SimulatorFlowError(f"isolated acceptance port {port} is occupied")
     if not args.simulator.is_file():
-        raise BrainstormActionFlowError("official evenhub-simulator is not installed")
+        raise SimulatorFlowError("official evenhub-simulator is not installed")
     if args.out.exists() and any(args.out.iterdir()):
-        raise BrainstormActionFlowError("output directory must be empty")
+        raise SimulatorFlowError("output directory must be empty")
     args.out.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     processes: list[ManagedProcess] = []
@@ -997,7 +997,7 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             boot_bridge_events = await _console_payloads(base, BRIDGE_MARKER)
             boot_pages = [item for item in boot_bridge_events if is_visual_layout(item)]
             if not boot_pages:
-                raise BrainstormActionFlowError("mounted Overview has no four-image SDK declaration")
+                raise SimulatorFlowError("mounted Overview has no four-image SDK declaration")
             journey_bridge_start = len(boot_bridge_events)
 
             next_seq = 0
@@ -1076,7 +1076,7 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                 )
                 for item in tick_events
             ):
-                raise BrainstormActionFlowError(
+                raise SimulatorFlowError(
                     "activity tick changed more than the native generation footer"
                 )
             activity_raw = await stable_after(
@@ -1090,7 +1090,7 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                 gateway, after=before, state="ready", answer=OPENING_ANSWER,
             )
             if opening_ready is None:
-                raise BrainstormActionFlowError("opening answer never reached ready")
+                raise SimulatorFlowError("opening answer never reached ready")
             ready_model = await _poll_native_view(
                 base,
                 lambda item: item.get("revision") == opening_ready["revision"]
@@ -1125,7 +1125,7 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             if not completed_continue or any(
                 item.get("containerName") != "generation" for item in completed_continue
             ):
-                raise BrainstormActionFlowError("continue prompt changed more than the native footer")
+                raise SimulatorFlowError("continue prompt changed more than the native footer")
 
             # Follow-up stream: retain the opening exchange and expose the partial
             # answer before the completed reply, all through text upgrades.
@@ -1177,7 +1177,7 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                 gateway, after=before, state="ready", answer=JOKE_ANSWER,
             )
             if joke_ready is None:
-                raise BrainstormActionFlowError("complete joke never reached ready")
+                raise SimulatorFlowError("complete joke never reached ready")
             joke_ready_model = await _poll_native_view(
                 base,
                 lambda item: item.get("revision") == joke_ready["revision"],
@@ -1223,7 +1223,7 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                 gateway, after=before, state="ready", answer=LONG_ANSWER,
             )
             if long_ready is None:
-                raise BrainstormActionFlowError("long answer never reached ready")
+                raise SimulatorFlowError("long answer never reached ready")
             long_model = await _poll_native_view(
                 base,
                 lambda item: item.get("revision") == long_ready["revision"]
@@ -1236,9 +1236,9 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                 name="10-long-tail-stable",
             )
             if cast(int, long_model["lineCapacity"]) != 7:
-                raise BrainstormActionFlowError("native conversation geometry changed from seven lines")
+                raise SimulatorFlowError("native conversation geometry changed from seven lines")
             if cast(int, long_model["maximumScrollFromTail"]) <= 0:
-                raise BrainstormActionFlowError("long native conversation has no scrollable overflow")
+                raise SimulatorFlowError("long native conversation has no scrollable overflow")
 
             scroll_bridge_start = len(await _console_payloads(base, BRIDGE_MARKER))
             up_steps, top_model, top_raw, reconstructed = await _scroll_to_boundary(
@@ -1248,16 +1248,16 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             expected_user = " ".join((OPENING_PROMPT, JOKE_PROMPT, LONG_PROMPT))
             expected_assistant = " ".join((OPENING_ANSWER, JOKE_ANSWER, LONG_ANSWER))
             if _normalized_role_text(reconstructed, "user") != expected_user:
-                raise BrainstormActionFlowError("native scrollback changed or omitted wearer text")
+                raise SimulatorFlowError("native scrollback changed or omitted wearer text")
             if _normalized_role_text(reconstructed, "assistant") != expected_assistant:
-                raise BrainstormActionFlowError("native scrollback changed or omitted assistant text")
+                raise SimulatorFlowError("native scrollback changed or omitted assistant text")
             down_steps, tail_model, restored_raw, _ = await _scroll_to_boundary(
                 base, direction="down", start_frame=top_model, start_raw=top_raw,
             )
             if up_steps != down_steps or cast(int, tail_model["scrollFromTail"]) != 0:
-                raise BrainstormActionFlowError("native scroll did not return through the same rows")
+                raise SimulatorFlowError("native scroll did not return through the same rows")
             if _conversation_pixel_digest(restored_raw) != _conversation_pixel_digest(long_raw):
-                raise BrainstormActionFlowError("native scroll cycle did not restore tail pixels")
+                raise SimulatorFlowError("native scroll cycle did not restore tail pixels")
             frames["longTailRestored"] = _save_frame(
                 restored_raw, args.out, "12-long-tail-restored-stable",
             )
@@ -1269,7 +1269,7 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                 item.get("containerName") not in {"wearer-turns", "joat-turns", "scroll-position"}
                 for item in scroll_text
             ):
-                raise BrainstormActionFlowError("native swipe updated an unrelated container")
+                raise SimulatorFlowError("native swipe updated an unrelated container")
 
             # First Back asks for confirmation through one footer update. Second
             # Back exits and recreates the visual Overview with its four images.
@@ -1293,7 +1293,7 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                 name="14-back-prompt-stable",
             )
             if len(gateway.inputs) != before_inputs:
-                raise BrainstormActionFlowError("first Back exited without confirmation")
+                raise SimulatorFlowError("first Back exited without confirmation")
             first_back_events = (
                 await _console_payloads(base, BRIDGE_MARKER)
             )[back_bridge_start:]
@@ -1303,7 +1303,7 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             if not completed_first_back or any(
                 item.get("containerName") != "generation" for item in completed_first_back
             ):
-                raise BrainstormActionFlowError("first Back changed more than the native footer")
+                raise SimulatorFlowError("first Back changed more than the native footer")
 
             exit_bridge_start = len(await _console_payloads(base, BRIDGE_MARKER))
             await _input(base, "double_click")
@@ -1335,7 +1335,7 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                 if len(exit_images) >= 4:
                     break
                 if time.monotonic() >= deadline:
-                    raise BrainstormActionFlowError("Overview did not restore all four visual tiles")
+                    raise SimulatorFlowError("Overview did not restore all four visual tiles")
                 await asyncio.sleep(0.04)
             overview_raw = await _changed_frame(
                 base,
@@ -1359,16 +1359,16 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
                 {"role": "assistant", "text": LONG_ANSWER},
             ]
             if long_ready["turns"] != expected_turns:
-                raise BrainstormActionFlowError("Mac transcript lost or rewrote a turn")
+                raise SimulatorFlowError("Mac transcript lost or rewrote a turn")
             states = [cast(str, item["state"]) for item in gateway.conversations]
             revisions = [cast(int, item["revision"]) for item in gateway.conversations]
             if states != EXPECTED_STATES or revisions != EXPECTED_REVISIONS:
-                raise BrainstormActionFlowError(
+                raise SimulatorFlowError(
                     f"conversation stream ledger drifted: {states!r}, {revisions!r}"
                 )
             identities = {cast(str, item["conversationId"]) for item in gateway.conversations}
             if identities != {cast(str, opening_ready["conversationId"])}:
-                raise BrainstormActionFlowError("follow-ups created detached conversation identities")
+                raise SimulatorFlowError("follow-ups created detached conversation identities")
 
             all_bridge_events = await _console_payloads(base, BRIDGE_MARKER)
             active_events = all_bridge_events[journey_bridge_start:exit_bridge_start]
@@ -1380,26 +1380,26 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
             active_images = [item for item in active_completed if item.get("operation") == "image"]
             active_text = [item for item in active_completed if item.get("operation") == "text"]
             if len(active_rebuilds) != 1 or active_rebuilds[0] != entry_rebuild:
-                raise BrainstormActionFlowError(
+                raise SimulatorFlowError(
                     f"active native conversation rebuilt {len(active_rebuilds)} times instead of once"
                 )
             if active_images:
-                raise BrainstormActionFlowError("active native conversation wrote raster images")
+                raise SimulatorFlowError("active native conversation wrote raster images")
             allowed_text = {"wearer-turns", "joat-turns", "scroll-position", "generation"}
             if not active_text or any(item.get("containerName") not in allowed_text for item in active_text):
-                raise BrainstormActionFlowError("active native conversation wrote an unknown text container")
+                raise SimulatorFlowError("active native conversation wrote an unknown text container")
             if any(item.get("containerID") == 11 for item in active_text):
-                raise BrainstormActionFlowError("native conversation rewrote its event-capture frame")
+                raise SimulatorFlowError("native conversation rewrote its event-capture frame")
             if any(item.get("result") not in {"true", "undefined"} for item in active_text):
-                raise BrainstormActionFlowError("native text upgrade was rejected by the SDK bridge")
+                raise SimulatorFlowError("native text upgrade was rejected by the SDK bridge")
 
             exit_events = all_bridge_events[exit_bridge_start:]
             exit_rebuilds = [item for item in exit_events if item.get("operation") == "rebuild"]
             exit_images = [item for item in exit_events if item.get("operation") == "image"]
             if len(exit_rebuilds) != 1 or not is_visual_layout(exit_rebuilds[0]):
-                raise BrainstormActionFlowError("Back did not perform one visual Overview rebuild")
+                raise SimulatorFlowError("Back did not perform one visual Overview rebuild")
             if [item.get("containerID") for item in exit_images] != [4, 8, 9, 10]:
-                raise BrainstormActionFlowError("Overview tiles were not restored once in serial order")
+                raise SimulatorFlowError("Overview tiles were not restored once in serial order")
 
             return {
                 "schemaVersion": 5,

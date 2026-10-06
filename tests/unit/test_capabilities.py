@@ -588,7 +588,6 @@ def make_router(
     voice_notes=None,
     voice_capture=None,
     actions=None,
-    acceptance_armed=False,
     brainstorm_recap=None,
     brainstorm_replay=None,
     brainstorm_sessions=None,
@@ -621,7 +620,6 @@ def make_router(
         voice_notes=voice_notes,
         voice_capture=voice_capture,
         actions=actions,
-        acceptance_armed=acceptance_armed,
         brainstorm_recap=brainstorm_recap,
         brainstorm_replay=brainstorm_replay,
         brainstorm_sessions=brainstorm_sessions,
@@ -728,9 +726,6 @@ class TestCapabilityViews:
         ]
         assert frames[-1].endpoint_host == "admins-mac-mini.tail3a3363.ts.net"
         assert frames[-1].no_tools_checked is True
-        # acceptance_armed is a BRAINSTORM field; the terminal frame has no
-        # such concept, which is the point of the split.
-        assert frames[0].acceptance_armed is False
         # The idle frame invites a tap; voice works from anywhere and the
         # frame no longer tells the wearer what to say.
         assert frames[0].state == "ready"
@@ -768,18 +763,6 @@ class TestCapabilityViews:
                      if isinstance(item, AgentTerminalHudView))
         assert frame.state == state
         assert reason not in frame.reason
-
-    async def test_brainstorm_acceptance_requires_an_explicit_mac_diagnostics_arm(
-        self, tmp_path,
-    ) -> None:  # type: ignore[no-untyped-def]
-        router, transport, status = make_router(tmp_path, acceptance_armed=True)
-        status.set_agent_terminal(state="ready", reason="")
-
-        await router.open("Brainstorm")
-
-        frame = next(item for item in transport.sent
-                     if isinstance(item, BrainstormHudView))
-        assert frame.acceptance_armed is True
 
     async def test_messages_view_lists_recent_conversations(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         now = time.time()

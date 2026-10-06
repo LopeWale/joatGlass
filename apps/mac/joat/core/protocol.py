@@ -112,7 +112,6 @@ NAVIGATION_ACTIONS: tuple[str, ...] = (
     "cancel",
 )
 BRAINSTORM_ACTIONS: tuple[str, ...] = (
-    "begin_acceptance",
     "begin_topic_capture",
     "begin_terminal_input",
     "show_terminal",
@@ -374,9 +373,7 @@ class BrainstormAction:
     """A bounded wearer gesture while the Brainstorm HUD owns input."""
 
     action: str
-    surface: Literal["brainstorm"] | None = None
-    source: Literal["right", "ring"] | None = None
-    gesture: Literal["double_press"] | None = None
+    surface: Literal["brainstorm", "agent_terminal"] | None = None
     # Set only by HubGatewayTransport after the authenticated WebSocket has
     # been selected as the current wearer connection.  It is deliberately not
     # a wire field: a plugin must never be able to nominate a generation.
@@ -943,7 +940,7 @@ class HudList:
 
 
 _BRAINSTORM_HUD_STATES = frozenset({
-    "unavailable", "approval_required", "ready", "topic_capture", "acceptance_ready", "running",
+    "unavailable", "approval_required", "ready", "topic_capture", "running",
     "settled", "cancelled", "failed", "blocked",
 })
 _PRODUCTIVITY_HUD_DOMAINS = frozenset({"calendar", "reminders"})
@@ -1048,9 +1045,6 @@ class BrainstormHudView:
     collaborators: list[str]
     activity: str
     active_speaker: str = ""
-    # The diagnostic acceptance gesture is never inferred from readiness.
-    # It is an explicit local-Mac opt-in and contains no wearer content.
-    acceptance_armed: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         if self.state not in _BRAINSTORM_HUD_STATES:
@@ -1073,7 +1067,6 @@ class BrainstormHudView:
                     self.activity, "activity", BRAINSTORM_ACTIVITY_MAX,
                     allow_empty=True,
                 ),
-                "acceptanceArmed": self.acceptance_armed,
             },
         }
 
@@ -2442,7 +2435,7 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             "type": "brainstorm_action",
             "action": _trace_enum(
                 event["action"], "action",
-                ("begin_acceptance", "begin_topic_capture", "begin_terminal_input",
+                ("begin_topic_capture", "begin_terminal_input",
                  "show_terminal", "show_brainstorm", "cancel", "retry_terminal"),
             ),
             "surface": _trace_enum(event["surface"], "surface", ("brainstorm", "agent_terminal")),
@@ -2452,12 +2445,9 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
         }
     if event_type == "visual_frame":
         kind = event.get("kind")
-        if kind == "brainstorm":
-            _trace_shape(event, {"type", "kind", "surface", "state", "sha256"})
-        elif kind == "messages":
-            _trace_shape(event, {"type", "kind", "surface", "sha256"})
-        else:
+        if kind != "messages":
             raise ProtocolError("g2 diagnostic visual frame kind is invalid")
+        _trace_shape(event, {"type", "kind", "surface", "sha256"})
         digest = event["sha256"]
         if (
             not isinstance(digest, str)
@@ -2465,20 +2455,6 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             or any(character not in "0123456789abcdef" for character in digest)
         ):
             raise ProtocolError("g2 diagnostic sha256 is invalid")
-        if kind == "brainstorm":
-            return {
-                "type": "visual_frame",
-                "kind": "brainstorm",
-                "surface": _trace_enum(event["surface"], "surface", ("brainstorm", "agent_terminal")),
-                "state": _trace_enum(
-                    event["state"], "state",
-                    (
-                        "unavailable", "approval_required", "ready", "topic_capture", "acceptance_ready",
-                        "running", "settled", "cancelled", "failed", "blocked",
-                    ),
-                ),
-                "sha256": digest,
-            }
         return {
             "type": "visual_frame",
             "kind": "messages",
@@ -2725,21 +2701,6 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
             action = payload.get("action")
             if not isinstance(action, str) or action not in BRAINSTORM_ACTIONS:
                 raise ProtocolError("brainstorm action is invalid")
-            if action == "begin_acceptance":
-                if set(payload) != {"kind", "action", "surface", "source", "gesture"}:
-                    raise ProtocolError("brainstorm action acceptance has unsupported fields")
-                surface = payload.get("surface")
-                source = payload.get("source")
-                gesture = payload.get("gesture")
-                if surface != "brainstorm" or source not in ("right", "ring") \
-                        or gesture != "double_press":
-                    raise ProtocolError("brainstorm action acceptance is invalid")
-                return BrainstormAction(
-                    action=action,
-                    surface="brainstorm",
-                    source=source,
-                    gesture="double_press",
-                )
             if set(payload) != {"kind", "action"}:
                 raise ProtocolError("brainstorm action has unsupported fields")
             return BrainstormAction(action=action)

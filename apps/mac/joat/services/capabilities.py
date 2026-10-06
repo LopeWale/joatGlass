@@ -349,7 +349,6 @@ class CapabilityRouter:
         voice_notes: VoiceNoteStore | None = None,
         voice_capture: VoiceCaptureControls | None = None,
         actions: ActionJournal | None = None,
-        acceptance_armed: bool = False,
         terminal_view: Callable[[], Awaitable[None]] | None = None,
         brainstorm_recap: Callable[[], DebateSnapshot] | None = None,
         brainstorm_replay: Callable[[], Awaitable[bool]] | None = None,
@@ -395,7 +394,6 @@ class CapabilityRouter:
         self._voice_notes = voice_notes
         self._voice_capture = voice_capture
         self._actions = actions
-        self._acceptance_armed = acceptance_armed
         self._terminal_view = terminal_view
         self._brainstorm_recap = brainstorm_recap
         # Restores a LIVE session's own frame — see _show_brainstorm.
@@ -884,7 +882,6 @@ class CapabilityRouter:
             else ["Codex", "Claude"],
             activity=("\n".join(rows) if rows
                       else "Tap to speak a topic."),
-            acceptance_armed=self._acceptance_armed,
         ))
 
     async def _show_agent_terminal(self) -> None:
@@ -1150,8 +1147,7 @@ class CapabilityRouter:
                 topic="Ready for a question",
                 collaborators=["Codex", "Claude"],
                 activity="Tap to speak a topic.",
-                acceptance_armed=self._acceptance_armed,
-            ))
+                ))
             return
         rows = self._brainstorm_rows
         picked = index - 1

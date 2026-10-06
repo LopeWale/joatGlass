@@ -491,8 +491,7 @@ that deliver the capturing-container event shape described by the SDK; unknown
 What still needs hardware confirmation is narrower: that a single press from
 each built-in temple reaches the same active confirmation gate, and that both
 swipe directions refuse exactly once. Outside confirmation, a double press
-means Back from every source; the one named press is the right-temple or
-ring double press that starts an ARMED Brainstorm acceptance run.
+means Back from every source.
 
 Run the probe to check:
 

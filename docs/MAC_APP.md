@@ -193,14 +193,15 @@ are deliberately cleared rather than replayed on another mini. The Hub stores
 pairing tokens by approved origin and remembers the last healthy candidate, so
 a rejected token for one mini cannot erase a healthy pairing for another.
 
-### Brainstorm acceptance diagnostics
+### Brainstorm diagnostics
 
 Brainstorm and Agent Terminal are everyday glasses-first features: use their
-G2 entries and gestures normally, with no Mac action. The separate physical-G2
-acceptance run is a support diagnostic, not a wearable control. It is refused
-unless the app-owned engine was deliberately launched with
-`--g2-diagnostics`; an unarmed or stale G2 action cannot start it. The
-dedicated simulator harness remains isolated and never changes normal use.
+G2 entries and gestures normally, with no Mac action. The physical-G2
+acceptance run that `--g2-diagnostics` used to arm was deleted on 2026-10-06:
+it waited for a raster frame receipt and a terminal-to-room tap, neither of
+which exists since Brainstorm became firmware text. `--g2-diagnostics` still
+turns on the content-free gesture and paint trace; the Brainstorm itself is
+checked by `scripts/simulator_brainstorm_native_probe.py` and on the glasses.
 
 ## Runtime layout
 
