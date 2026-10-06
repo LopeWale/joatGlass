@@ -51,6 +51,17 @@ if [[ -f "$changelog" ]]; then
 fi
 print -u2 "packaging version $version (last recorded build: ${last_built:-none})"
 
+# The number lives in three files and they move together. Only app.json
+# reaches the package, so nothing noticed when package.json stopped at
+# 0.1.90 while ten builds went out; npm then named every build 0.1.90.
+package_version=$(node -p "require('./package.json').version")
+lock_version=$(node -p "require('./package-lock.json').version")
+if [[ "$package_version" != "$version" || "$lock_version" != "$version" ]]; then
+  print -u2 "refusing to package: app.json is $version, package.json $package_version, package-lock.json $lock_version."
+  print -u2 "bump them together: npm version $version --no-git-tag-version"
+  exit 67
+fi
+
 # A deployable package must never inherit the ignored developer `.env` route.
 # The caller selects the reviewed, private WSS G2 gateway explicitly; the
 # validator then requires every candidate to be an exact app.json allowlist

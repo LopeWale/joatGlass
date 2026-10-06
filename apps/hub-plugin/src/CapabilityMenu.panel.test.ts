@@ -14,21 +14,17 @@ import type { PanelTab } from './types';
  * refreshes only at the top of an expanded tab.
  */
 
-function rig(activeTab: PanelTab = 'notifications', restorationResult: boolean | Promise<boolean> = true) {
+function rig(activeTab: PanelTab = 'notifications') {
   const rail = new PanelRail();
   rail.setActive(activeTab);
   const lists: Array<{ items: string[]; options?: Record<string, unknown> }> = [];
   const steps: number[] = [];
-  const selections: number[] = [];
   const sent: Array<Record<string, unknown>> = [];
   let defaults = 0;
   let listResult = true;
   /** Runs while a paint is in flight — how a push lands mid-transition. */
   let duringPaint: (() => void) | undefined;
   const hud = {
-    usesCustomListSelection: (next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }) => (
-      next ? next.nativeFirmwareList !== true && next.nativeTextPage !== true : true
-    ),
     rail,
     activeTab: () => rail.active(),
     stepTab: vi.fn(async (delta: number) => {
@@ -42,22 +38,13 @@ function rig(activeTab: PanelTab = 'notifications', restorationResult: boolean |
       hook?.();
       return listResult;
     }),
-    setSelection: vi.fn(async (index: number) => {
-      selections.push(index);
-      return true;
-    }),
-    restoreSelection: vi.fn(async (index: number) => {
-      selections.push(index);
-      return restorationResult;
-    }),
-    moveSelection: vi.fn(async () => true),
     setStatus: vi.fn(async () => true),
     showDefault: vi.fn(async () => { defaults += 1; return true; }),
   } as unknown as HudPresenter;
   const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
   const menu = new CapabilityMenu(hud, new Settings(), link);
   return {
-    menu, hud, rail, lists, steps, selections, sent,
+    menu, hud, rail, lists, steps, sent,
     // Surface announcements ("which page owns the glass") travel the same
     // uplink as content requests but mean the opposite thing: they RETIRE
     // ownership on the Mac. A test asking "did this gesture ask the Mac for
@@ -87,7 +74,7 @@ const pomodoroPush = (revision: number) => ({
 
 describe('CapabilityMenu — the overview tab rail', () => {
   it('expands News as a firmware list and returns to it from an article on row zero, with no cursor restoration', async () => {
-    const { menu, rail, lists, selections, requests, defaults } = rig('news');
+    const { menu, rail, lists, requests, defaults } = rig('news');
     rail.accept(newsPush(7, ['Story 01', 'Story 02']));
     await menu.openPanelTab('news');
     expect(lists[lists.length - 1]?.options).toMatchObject({ title: 'NEWS', nativeFirmwareList: true, railTab: 'news' });
@@ -99,10 +86,8 @@ describe('CapabilityMenu — the overview tab rail', () => {
     expect(lists[lists.length - 1]?.options).toMatchObject({ title: 'NEWS · ARTICLE', nativeTextPage: true });
 
     await menu.toggle();
-    // The firmware has no cursor-setting API: the list returns on row zero
-    // and nothing asks the painter to restore a row.
+    // The firmware has no cursor-setting API: the list returns on row zero.
     expect(lists[lists.length - 1]?.options).toMatchObject({ title: 'NEWS', nativeFirmwareList: true });
-    expect(selections).toEqual([]);
     expect(menu.isOpen()).toBe(true);
     expect(defaults()).toBe(0);
     await menu.toggle();
@@ -264,7 +249,7 @@ describe('CapabilityMenu — the overview tab rail', () => {
   });
 
   it('a fresh push rebuilds the expanded firmware tab in place', async () => {
-    const { menu, rail, lists, selections, sent } = rig('news');
+    const { menu, rail, lists, sent } = rig('news');
     rail.accept(newsPush(2, ['[2m] A · BBC', '[3m] B · BBC', '[4m] C · BBC']));
     await menu.openPanelTab('news');
     rail.accept(newsPush(3, ['[1m] New · NPR', '[3m] A · BBC']));
@@ -272,7 +257,6 @@ describe('CapabilityMenu — the overview tab rail', () => {
     const page = lists[lists.length - 1]!;
     expect(page.items).toEqual(['[1m] New · NPR', '[3m] A · BBC']);
     expect(page.options).toMatchObject({ nativeFirmwareList: true });
-    expect(selections).toEqual([]);
     // The next tap carries the revision that is on the glass now.
     sent.length = 0;
     menu.handleList({ eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: 1 } as never);
@@ -317,7 +301,7 @@ describe('CapabilityMenu — the overview tab rail', () => {
   });
 
   it('Back from an article lands on the rows the Mac pushed meanwhile, keeping the row', async () => {
-    const { menu, rail, lists, sent, selections } = rig('news');
+    const { menu, rail, lists, sent } = rig('news');
     rail.accept(newsPush(2, ['[2m] A · BBC', '[3m] B · BBC', '[4m] C · BBC']));
     await menu.openPanelTab('news');
     menu.handleList({ eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: 2 } as never);
@@ -331,7 +315,6 @@ describe('CapabilityMenu — the overview tab rail', () => {
     const back = lists[lists.length - 1]!;
     expect(back.options).toMatchObject({ title: 'NEWS', railTab: 'news', nativeFirmwareList: true });
     expect(back.items).toEqual(['[0m] Fresh · NPR', '[3m] A · BBC']);
-    expect(selections).toEqual([]); // the firmware list starts on row zero
     sent.length = 0;
     menu.handleList({ eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: undefined } as never);
     expect((sent[0]?.event as { requestId?: string; selectedIndex?: number })).toMatchObject({ requestId: 'panel-news-3', selectedIndex: 0 });
