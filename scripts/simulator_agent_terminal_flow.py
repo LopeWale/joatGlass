@@ -42,8 +42,8 @@ from joat.persistence.store import DurableStore
 from joat.persistence.terminal import TerminalCheckpointStore
 from joat.services.status import StatusPublisher
 from joat.services.terminal_opening import TerminalOpeningController
-from scripts.simulator_brainstorm_action_flow_acceptance import (
-    BrainstormActionFlowError,
+from scripts.simulator_harness import (
+    SimulatorFlowError,
     _prepare_simulator_plugin_root,
 )
 
@@ -393,7 +393,7 @@ def inject_bridge_probe(root: Path) -> None:
     source = main.read_text(encoding='utf-8')
     needle = '  await client.init();'
     if source.count(needle) != 1:
-        raise BrainstormActionFlowError('could not place disposable terminal SDK probe')
+        raise SimulatorFlowError('could not place disposable terminal SDK probe')
     probe = f"""
   const fixtureRequire = client.require.bind(client);
   const fixtureBridge = fixtureRequire() as any;

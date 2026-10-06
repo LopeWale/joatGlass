@@ -98,15 +98,11 @@ describe('MacG2DiagnosticTrace', () => {
     }]);
   });
 
-  it('forwards only the fixed Brainstorm action and completed-frame receipt', () => {
+  it('forwards only the fixed Brainstorm action receipt', () => {
     const sent: UplinkMessage[] = [];
     const trace = new MacG2DiagnosticTrace({ sendDiagnostic: (message) => sent.push(message) });
     trace.setEnabled(true);
 
-    trace.record({
-      type: 'brainstorm_action', action: 'begin_acceptance', surface: 'brainstorm',
-      source: 'ring', gesture: 'double_press', delivery: 'sys',
-    });
     trace.record({
       type: 'brainstorm_action', action: 'show_terminal', surface: 'brainstorm',
       source: 'right', gesture: 'tap', delivery: 'sys',
@@ -115,18 +111,8 @@ describe('MacG2DiagnosticTrace', () => {
       type: 'brainstorm_action', action: 'begin_terminal_input', surface: 'agent_terminal',
       source: 'right', gesture: 'tap', delivery: 'sys',
     });
-    trace.record({
-      type: 'visual_frame', kind: 'brainstorm', surface: 'agent_terminal', state: 'running',
-      sha256: 'a'.repeat(64),
-    });
 
     expect(sent).toEqual([{
-      kind: 'g2.diagnostic',
-      event: {
-        type: 'brainstorm_action', action: 'begin_acceptance', surface: 'brainstorm',
-        source: 'ring', gesture: 'double_press', delivery: 'sys',
-      },
-    }, {
       kind: 'g2.diagnostic',
       event: {
         type: 'brainstorm_action', action: 'show_terminal', surface: 'brainstorm',
@@ -137,12 +123,6 @@ describe('MacG2DiagnosticTrace', () => {
       event: {
         type: 'brainstorm_action', action: 'begin_terminal_input', surface: 'agent_terminal',
         source: 'right', gesture: 'tap', delivery: 'sys',
-      },
-    }, {
-      kind: 'g2.diagnostic',
-      event: {
-        type: 'visual_frame', kind: 'brainstorm', surface: 'agent_terminal', state: 'running',
-        sha256: 'a'.repeat(64),
       },
     }]);
   });

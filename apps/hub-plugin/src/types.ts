@@ -111,7 +111,6 @@ export type BrainstormHudState =
   | 'approval_required'
   | 'ready'
   | 'topic_capture'
-  | 'acceptance_ready'
   | 'running'
   | 'settled'
   | 'cancelled'
@@ -126,7 +125,7 @@ export type BrainstormHudState =
  * "JOAT · BRAINSTORM" across its spine, why a healthy terminal spent four
  * rows on connection chrome, and why a tap on the terminal was gated on the
  * BRAINSTORM lane's readiness. One frame, two features, three bugs. */
-/** The `brainstorm.view` WIRE payload — exactly the six fields
+/** The `brainstorm.view` WIRE payload — exactly the five fields
  * `core/protocol.py`'s BrainstormHudView.to_wire() emits, and nothing
  * else. docs/SESSION_MODEL.md:84-88: the Brainstorm frame "contains no
  * Agent Terminal, Hermes, OpenClaw, endpoint, approval, or tool-policy
@@ -140,9 +139,6 @@ export interface BrainstormViewPayload {
   collaborators: string[];
   activeSpeaker?: string;
   activity: string;
-  /** Default-off Mac diagnostics arm — a Brainstorm fact, not a terminal
-   * one: it gates the isolated G2 acceptance gesture. */
-  acceptanceArmed?: boolean;
 }
 
 export interface TerminalConversationMessage {
@@ -189,9 +185,6 @@ export interface BrainstormHudModel extends TerminalConversationFields {
    * AgentTerminalHudModel. A connection awaiting device approval is a
    * different problem with the opposite remedy, so the tap keys on this. */
   approvals?: number;
-  /** Default-off Mac diagnostics arm. Only this explicit state may expose the
-   * isolated G2 acceptance gesture; ordinary Brainstorm never does. */
-  acceptanceArmed?: boolean;
 }
 
 /** The Agent Terminal: Hermes and OpenClaw work sessions. Its own frame,
@@ -226,7 +219,6 @@ export interface AgentTerminalHudModel extends TerminalConversationFields {
  * sole topic source, while gestures only control the local session lifecycle.
  */
 export type BrainstormAction =
-  | 'begin_acceptance'
   | 'begin_topic_capture'
   /** Arm ONE utterance as input to the focused Agent Terminal session.
    * Distinct from begin_topic_capture: that starts a Brainstorm, which is
@@ -486,14 +478,7 @@ export type UplinkMessage =
   | { kind: 'g2.diagnostic'; event: G2DiagnosticEvent }
   | {
     kind: 'brainstorm.action';
-    action: Exclude<BrainstormAction, 'begin_acceptance'>;
-  }
-  | {
-    kind: 'brainstorm.action';
-    action: 'begin_acceptance';
-    surface: 'brainstorm';
-    source: 'right' | 'ring';
-    gesture: 'double_press';
+    action: BrainstormAction;
   }
   | {
     kind: 'navigation.action';

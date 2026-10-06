@@ -28,73 +28,6 @@ function make(accepted = true) {
 }
 
 describe('BrainstormController', () => {
-  it('does not start diagnostic acceptance from an ordinary ready Brainstorm', () => {
-    const { controller, sent } = make();
-    controller.present(model());
-
-    expect(controller.handleAcceptance('right')).toBe(false);
-    expect(sent).toEqual([]);
-    expect(controller.consumeAcceptedAction()).toBeUndefined();
-  });
-
-  it('starts the fixed acceptance only from an explicitly armed ready Brainstorm', () => {
-    const { controller, sent } = make();
-    controller.present({ ...model(), acceptanceArmed: true });
-
-    expect(controller.handleAcceptance('right')).toBe(true);
-    expect(sent).toEqual([{
-      kind: 'brainstorm.action',
-      action: 'begin_acceptance',
-      surface: 'brainstorm',
-      source: 'right',
-      gesture: 'double_press',
-    }]);
-    expect(controller.consumeAcceptedAction()).toEqual({
-      action: 'begin_acceptance', surface: 'brainstorm',
-    });
-  });
-
-  it('consumes pending and disconnected armed test gestures without leaking into capture or exit', () => {
-    const { controller, sent } = make();
-    controller.present({ ...model(), acceptanceArmed: true });
-    expect(controller.handleAcceptance('ring')).toBe(true);
-    expect(controller.handleAcceptance('ring')).toBe(true);
-    expect(controller.handleClick()).toBe(true);
-    expect(sent).toHaveLength(1);
-
-    controller.present(model({
-      state: 'acceptance_ready',
-      activity: 'Tap to start the Hermes acceptance run',
-    }));
-    expect(controller.handleAcceptance('right')).toBe(true);
-    expect(sent).toHaveLength(1);
-    expect(controller.handleClick()).toBe(true);
-    expect(sent[sent.length - 1]).toEqual({
-      kind: 'brainstorm.action', action: 'begin_topic_capture',
-    });
-    expect(controller.handleClick()).toBe(true);
-    expect(sent).toHaveLength(2);
-
-    const offline = make(false);
-    offline.controller.present({ ...model(), acceptanceArmed: true });
-    expect(offline.controller.handleAcceptance('right')).toBe(true);
-    expect(offline.sent).toEqual([]);
-  });
-
-  it('rejects acceptance outside the safe ready no-tool Brainstorm surface', () => {
-    const { controller, sent } = make();
-    for (const unsafe of [
-      model({ state: 'running' }),
-      model({ state: 'blocked' }),
-      model({ noToolsChecked: false }),
-      model({ screen: 'agent_terminal' }),
-    ]) {
-      controller.present(unsafe);
-      expect(controller.handleAcceptance('right')).toBe(false);
-    }
-    expect(sent).toEqual([]);
-  });
-
   it('arms spoken topic capture from the ready Brainstorm page', () => {
     const { controller, sent } = make();
     controller.present(model());
@@ -309,7 +242,6 @@ describe('native contextual menu input ownership', () => {
     expect(controller.handleClick()).toBe(false);
     expect(controller.handleCancel()).toBe(false);
     expect(controller.handleSwipe()).toBe(false);
-    expect(controller.handleAcceptance('right')).toBe(false);
     expect(sent).toEqual([]);
     controller.setSuspended(false);
     expect(controller.isActive()).toBe(true);

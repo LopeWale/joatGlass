@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-06 — The Brainstorm self-test is deleted
+
+- The physical-G2 Brainstorm acceptance run (`--g2-diagnostics`, a right/ring double press on an armed ready frame) could only ever end "inconclusive": it waited for `visual_frame` receipts that hashed the four-tile Brainstorm raster, which no longer exists since Brainstorm became firmware text, and for a tap on the terminal back to the room, removed on purpose on 2026-09-11. The wearer chose deletion over a rewrite: the simulator probe (`scripts/simulator_brainstorm_native_probe.py`) and real use cover the same ground.
+- Gone: `services/brainstorm_acceptance.py`, `scripts/real_g2_brainstorm_acceptance.py`, `scripts/simulator_brainstorm_action_flow_acceptance.py` and their tests; the `begin_acceptance` action, the `acceptance_ready` state and the `acceptanceArmed` field on both sides of the wire (protocol.py and types.ts in step); the Brainstorm `visual_frame` trace receipt; the plugin's armed right/ring double press and its "tap: start test" hint; the router's and main's `acceptance_armed` plumbing. A right double press on a live Brainstorm is the same Back as the left, cancelling the run.
+- The simulator helpers three other scripts imported from the deleted one (process management, waiting, framebuffer capture, the plugin snapshot) live in `scripts/simulator_harness.py`.
+- Kept: `--g2-diagnostics` still turns on the content-free gesture and paint trace; `show_brainstorm` stays on the wire with the Mac's handlers (no glasses gesture sends it today).
+- Plugin 1049 tests, Mac 3100 passed, typecheck and mypy clean.
+
 ## 2026-10-06 — The phone's Brainstorm and Accounts screen, fixed where it failed
 
 A review of the phone control screen (merged in 0.1.100) found these; each has a test that fails on the code before this change.

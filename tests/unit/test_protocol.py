@@ -267,27 +267,13 @@ class TestParseUplink:
         message = parse_uplink({"kind": "brainstorm.action", "action": "cancel"})
         assert message == BrainstormAction(action="cancel")
 
-        acceptance = parse_uplink({
-            "kind": "brainstorm.action",
-            "action": "begin_acceptance",
-            "surface": "brainstorm",
-            "source": "ring",
-            "gesture": "double_press",
-        })
-        assert acceptance == BrainstormAction(
-            action="begin_acceptance",
-            surface="brainstorm",
-            source="ring",
-            gesture="double_press",
-        )
-
     @pytest.mark.parametrize("payload", [
         {"kind": "brainstorm.action", "action": "invent"},
         {"kind": "brainstorm.action", "action": "cancel", "topic": "leak"},
+        # The deleted diagnostic self-test's action (2026-10-06) is gone.
         {"kind": "brainstorm.action", "action": "begin_acceptance"},
-        {"kind": "brainstorm.action", "action": "begin_acceptance", "surface": "brainstorm", "source": "left", "gesture": "double_press"},
-        {"kind": "brainstorm.action", "action": "begin_acceptance", "surface": "brainstorm", "source": "right", "gesture": "double_press", "topic": "leak"},
-        {"kind": "brainstorm.action", "action": "begin_acceptance", "surface": "brainstorm", "source": "right", "gesture": "double_press", "connectionGeneration": 9},
+        {"kind": "brainstorm.action", "action": "begin_acceptance", "surface": "brainstorm", "source": "right", "gesture": "double_press"},
+        {"kind": "brainstorm.action", "action": "cancel", "surface": "brainstorm"},
         {"kind": "brainstorm.action"},
     ])
     def test_brainstorm_action_rejects_freeform_or_unknown_fields(self, payload: object) -> None:
@@ -474,7 +460,7 @@ class TestParseUplink:
             "outcome": "failed",
         })
 
-    def test_g2_diagnostic_accepts_only_redacted_brainstorm_action_and_frame_receipts(self) -> None:
+    def test_g2_diagnostic_accepts_only_redacted_brainstorm_action_receipts(self) -> None:
         assert parse_uplink({
             "kind": "g2.diagnostic",
             "event": {
@@ -485,26 +471,16 @@ class TestParseUplink:
             "type": "brainstorm_action", "action": "show_terminal", "surface": "brainstorm",
             "source": "right", "gesture": "tap", "delivery": "sys",
         })
-        assert parse_uplink({
-            "kind": "g2.diagnostic",
-            "event": {
-                "type": "visual_frame", "kind": "brainstorm", "surface": "agent_terminal",
-                "state": "running", "sha256": "a" * 64,
-            },
-        }) == G2Diagnostic(event={
-            "type": "visual_frame", "kind": "brainstorm", "surface": "agent_terminal",
-            "state": "running", "sha256": "a" * 64,
-        })
-        assert parse_uplink({
-            "kind": "g2.diagnostic",
-            "event": {
-                "type": "visual_frame", "kind": "brainstorm", "surface": "brainstorm",
-                "state": "acceptance_ready", "sha256": "b" * 64,
-            },
-        }) == G2Diagnostic(event={
-            "type": "visual_frame", "kind": "brainstorm", "surface": "brainstorm",
-            "state": "acceptance_ready", "sha256": "b" * 64,
-        })
+        # The Brainstorm frame receipt hashed the four-tile raster, which no
+        # longer exists, and fed only the self-test deleted 2026-10-06.
+        with pytest.raises(ProtocolError, match="visual frame kind"):
+            parse_uplink({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "visual_frame", "kind": "brainstorm", "surface": "agent_terminal",
+                    "state": "running", "sha256": "a" * 64,
+                },
+            })
 
     @pytest.mark.parametrize("event", [
         {
@@ -880,7 +856,6 @@ class TestDownlinkWire:
             "collaborators": ["Codex", "Claude"],
             "activeSpeaker": "Claude · critic",
             "activity": "CLAUDE > Key it on the generation too.",
-            "acceptanceArmed": False,
         }
         # Structural, not aspirational: every forbidden field is simply
         # absent from the dataclass, so no producer can reintroduce one.
@@ -915,9 +890,8 @@ class TestDownlinkWire:
             "approvals": 0,
         }
 
-        acceptance_ready = BrainstormHudView(state="acceptance_ready", topic="Acceptance run", collaborators=["Hermes"], activity="Tap to start the Hermes acceptance run", acceptance_armed=True).to_wire()
-        assert acceptance_ready["brainstorm"]["state"] == "acceptance_ready"
-        assert acceptance_ready["brainstorm"]["acceptanceArmed"] is True
+        with pytest.raises(ProtocolError):
+            BrainstormHudView(state="acceptance_ready", topic="t", collaborators=[], activity="x").to_wire()
 
         topic_capture = BrainstormHudView(state="topic_capture", topic="Speak your question", collaborators=["Codex", "Claude", "Hermes"], activity="Your next spoken phrase starts this Brainstorm.").to_wire()
         assert topic_capture["brainstorm"]["state"] == "topic_capture"
@@ -1619,7 +1593,7 @@ class TestTheTwoLanguagesDescribeTheSameWire:
     def test_the_brainstorm_frame_matches_its_typescript_payload(self) -> None:
         view = BrainstormHudView(
             state="ready", topic="t", collaborators=["a"],
-            active_speaker="s", activity="x", acceptance_armed=True,
+            active_speaker="s", activity="x",
         )
         emitted = set(view.to_wire()["brainstorm"].keys())
         declared = self._ts_fields("BrainstormViewPayload")

@@ -17,7 +17,6 @@ function make(
   brainstormActive = false,
   assistantOverlayVisible = false,
   notificationVisible = false,
-  brainstormAcceptanceArmed = false,
   panelSwipeOwned = false,
   panelExpanded = false,
   // Refreshable implies expanded, never the reverse: the pomodoro page is
@@ -70,21 +69,15 @@ function make(
     handleScroll: vi.fn(async () => navigationActive),
     handleCancel: vi.fn(() => navigationActive),
   };
-  let acceptedBrainstormAction = 'show_terminal' as 'show_terminal' | 'begin_acceptance';
   const brainstorm = {
     isActive: vi.fn(() => brainstormActive),
-    isAcceptanceArmed: vi.fn(() => brainstormAcceptanceArmed),
     handleClick: vi.fn(() => brainstormActive),
     handleCancel: vi.fn(() => brainstormActive),
     // False by default: only the topic-capture state claims a swipe as a
     // backout; every test that wants that behaviour flips it explicitly.
     handleSwipe: vi.fn(() => false),
-    handleAcceptance: vi.fn(() => {
-      acceptedBrainstormAction = 'begin_acceptance';
-      return brainstormActive;
-    }),
     consumeAcceptedAction: vi.fn(() => brainstormActive ? {
-      action: acceptedBrainstormAction,
+      action: 'show_terminal' as const,
       surface: 'brainstorm' as const,
     } : undefined),
   };
@@ -263,7 +256,7 @@ describe('EventRouter — confirm gestures', () => {
   });
 
   it('a swipe on the resting overview moves along the tab rail and never reaches the Mac', () => {
-    const { fire, menu, sent } = make(false, undefined, false, false, false, false, false, true);
+    const { fire, menu, sent } = make(false, undefined, false, false, false, false, true);
     fire({ textEvent: { eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
     fire({ textEvent: { eventType: OsEventTypeList.SCROLL_TOP_EVENT } });
     expect(menu.handleOverviewSwipe).toHaveBeenCalledTimes(2);
@@ -272,7 +265,7 @@ describe('EventRouter — confirm gestures', () => {
 
   it('a live navigation keeps its swipes even when the rail would take them', () => {
     const { fire, menu, navigation } = make(
-      false, undefined, true, false, false, false, false, true,
+      false, undefined, true, false, false, false, true,
     );
     fire({ textEvent: { eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
     expect(navigation.handleScroll).toHaveBeenCalledWith('down');
@@ -478,34 +471,8 @@ describe('EventRouter — double press', () => {
     expect(sent).toEqual([]);
   });
 
-  it.each([
-    [EventSourceType.TOUCH_EVENT_FROM_GLASSES_R, 'right'],
-    [EventSourceType.TOUCH_EVENT_FROM_RING, 'ring'],
-  ])('uses a deliberate %s double press to start an explicitly armed Brainstorm test', (source, sourceName) => {
-    const events: unknown[] = [];
-    const { fire, brainstorm, shutDownPageContainer } = make(
-      false, { record: (event) => events.push(event) }, false, true, false, false, true,
-    );
-    fire({
-      sysEvent: {
-        eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
-        eventSource: source,
-      },
-    });
-
-    expect(brainstorm.handleAcceptance).toHaveBeenCalledWith(sourceName);
-    expect(shutDownPageContainer).not.toHaveBeenCalled();
-    expect(events).toContainEqual({
-      type: 'brainstorm_action', action: 'begin_acceptance', surface: 'brainstorm',
-      source: sourceName, gesture: 'double_press', delivery: 'sys',
-    });
-  });
-
-  it('does not route a right double press into acceptance on ordinary Brainstorm', () => {
-    const events: unknown[] = [];
-    const { fire, brainstorm, menu, sent, shutDownPageContainer } = make(
-      false, { record: (event) => events.push(event) }, false, true,
-    );
+  it('a right double press on a live Brainstorm cancels the run, never exits', () => {
+    const { fire, brainstorm, menu, sent, shutDownPageContainer } = make(false, undefined, false, true);
 
     fire({
       sysEvent: {
@@ -514,17 +481,12 @@ describe('EventRouter — double press', () => {
       },
     });
 
-    expect(brainstorm.isAcceptanceArmed).toHaveBeenCalledTimes(1);
-    expect(brainstorm.handleAcceptance).not.toHaveBeenCalled();
-    // Unarmed, the right double press is the same Back as the left: it
-    // cancels the live run and never reaches the OS exit dialog.
+    // The right double press is the same Back as the left: it cancels the
+    // live run and never reaches the OS exit dialog.
     expect(brainstorm.handleCancel).toHaveBeenCalledTimes(1);
     expect(menu.toggle).not.toHaveBeenCalled();
     expect(shutDownPageContainer).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
-    expect(events).not.toContainEqual(expect.objectContaining({
-      type: 'brainstorm_action', action: 'begin_acceptance',
-    }));
   });
 });
 
@@ -905,7 +867,7 @@ describe('EventRouter — long-press mutes the mic', () => {
   it('refreshes an expanded panel tab instead of muting — the one carve-out', () => {
     // Menu open (a data view owns input) AND that view is a panel tab's top
     // level: the wearer's ruling is that long press re-fetches it there.
-    const r = make(true, undefined, false, false, false, false, false, false, true);
+    const r = make(true, undefined, false, false, false, false, false, true);
     r.fire({ textEvent: { eventType: LONG_PRESS, containerName: 'main' } });
     r.fire({ textEvent: { eventType: RELEASE, containerName: 'main' } });
     expect(r.menu.refreshPanel).toHaveBeenCalledTimes(1);
@@ -917,7 +879,7 @@ describe('EventRouter — long-press mutes the mic', () => {
     // The defect the simulator sweep surfaced: POMODORO satisfies
     // isPanelExpanded, so the hold used to fire a refresh the wearer could
     // not see and swallow the mic, with the hint naming neither.
-    const r = make(true, undefined, false, false, false, false, false, false, true, false);
+    const r = make(true, undefined, false, false, false, false, false, true, false);
     r.fire({ textEvent: { eventType: LONG_PRESS, containerName: 'main' } });
     r.fire({ textEvent: { eventType: RELEASE, containerName: 'main' } });
     expect(r.menu.refreshPanel).not.toHaveBeenCalled();
@@ -1176,7 +1138,7 @@ describe('EventRouter — production Messages menu composition', () => {
 describe('EventRouter prompt ownership', () => {
   function question() {
     const owner = { isActive: vi.fn(() => true), cancel: vi.fn() };
-    return { owner, ...make(false, undefined, true, true, true, true, false, true, true, true, owner) };
+    return { owner, ...make(false, undefined, true, true, true, true, true, true, true, owner) };
   }
 
   it('Back cancels the question before touching its retained feature or overlay', () => {

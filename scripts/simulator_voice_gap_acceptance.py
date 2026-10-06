@@ -30,7 +30,7 @@ from joat.ble.hub_gateway import HubGatewayTransport
 from joat.core.interfaces import SttEngine, Transcript
 from joat.core.protocol import AssistantOverlay, Audio, DownlinkMessage
 from joat.services.orchestrator import VoiceOrchestrator
-from scripts.simulator_brainstorm_action_flow_acceptance import (
+from scripts.simulator_harness import (
     ManagedProcess,
     _capture,
     _http_bytes,

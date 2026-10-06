@@ -46,11 +46,6 @@ export interface BrainstormInputOwner {
   /** A swipe during topic capture backs out of the armed capture; every
    * other state lets the swipe fall through to transcript scrolling. */
   handleSwipe(): boolean;
-  /** True only when the Mac has explicitly armed the isolated diagnostic. */
-  isAcceptanceArmed(): boolean;
-  /** Right-temple/ring double press starts the fixed content-free test only
-   * after that arm is visible on the current Brainstorm frame. */
-  handleAcceptance(source: 'right' | 'ring'): boolean;
   /** Fixed receipt of a successfully handed-off action; never prompt content. */
   consumeAcceptedAction(): { action: BrainstormAction; surface: BrainstormHudScreen } | undefined;
 }
@@ -211,7 +206,7 @@ export class EventRouter {
     const gesture = this.gestures.resolve(event);
     if (gesture?.intent === 'back' && !this.contextualMenuOverlayOpen) {
       this.recordGesture('double_press', gesture.delivery);
-      this.handleBack(gesture.source);
+      this.handleBack();
       return;
     }
 
@@ -373,10 +368,8 @@ export class EventRouter {
   }
 
   /** One semantic Back action for every SDK delivery envelope and temple.
-   * The active owner determines what is left, never whether Back exits JOAT.
-   * `source` is only consulted by the explicitly armed Brainstorm diagnostic,
-   * whose Mac-side contract is a named right/ring double press. */
-  private handleBack(source?: GestureSource): void {
+   * The active owner determines what is left, never whether Back exits JOAT. */
+  private handleBack(): void {
     this.pendingMicLongPress = false;
     if (this.imu.isPending()) { this.imu.declineByTap(); return; }
     if (this.backPending) return;
@@ -384,18 +377,6 @@ export class EventRouter {
     if (this.handleAssistantConversation(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
     if (this.dismissAssistantOverlayFor(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
     if (this.navigation?.isActive() && this.navigation.handleCancel()) return;
-    // An armed acceptance frame is `ready`, a cancellable run is not, so the
-    // two owners never compete; the arm is off unless the Mac set it, and an
-    // ordinary Brainstorm falls through to the same Back as every surface.
-    if (
-      (source === 'right' || source === 'ring')
-      && this.brainstorm?.isActive()
-      && this.brainstorm.isAcceptanceArmed()
-      && this.brainstorm.handleAcceptance(source)
-    ) {
-      this.recordAcceptedBrainstormAction(source, 'double_press');
-      return;
-    }
     if (this.brainstorm?.isActive() && this.brainstorm.handleCancel()) return;
     this.backPending = true;
     void this.menu.toggle().finally(() => { this.backPending = false; });

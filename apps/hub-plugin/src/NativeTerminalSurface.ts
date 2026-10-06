@@ -63,7 +63,6 @@ function brainstormFooter(model: BrainstormHudModel, newer: number): string {
   }
   switch (model.state) {
     case 'running': return 'swipe: scroll · tap: terminal · double-click: cancel';
-    case 'acceptance_ready': return 'tap: start test · double-click: menu';
     case 'topic_capture': return 'speak your question · double-click: cancel';
     case 'ready': return 'tap: speak · double-click: menu';
     // The phone page's Brainstorm tab resets the room and switches accounts.
@@ -149,7 +148,6 @@ function stateName(model: BrainstormHudModel): string {
     case 'approval_required': return 'APPROVAL REQUIRED';
     case 'ready': return 'READY';
     case 'topic_capture': return 'LISTENING';
-    case 'acceptance_ready': return 'READY TO START';
     case 'running': return 'WORKING';
     case 'settled': return 'COMPLETE';
     case 'cancelled': return 'CANCELLED';

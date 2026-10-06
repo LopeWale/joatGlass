@@ -17,24 +17,16 @@ export class BrainstormController {
   private model?: BrainstormHudModel;
   private suspended = false;
   private acceptedAction?: AcceptedBrainstormAction;
-  private acceptancePending = false;
-  private acceptanceStartPending = false;
 
   constructor(private readonly link: BrainstormLink) {}
 
   present(model: BrainstormHudModel): void {
     this.model = { ...model, collaborators: [...model.collaborators],
       messages: model.messages?.map(message => ({...message})) };
-    // acceptance_ready is an explicit Mac acknowledgement. Keep the trigger
-    // consumed while that phase is visible, and accept exactly one start tap.
-    this.acceptancePending = model.state === 'acceptance_ready';
-    this.acceptanceStartPending = false;
   }
 
   clear(): void {
     this.model = undefined;
-    this.acceptancePending = false;
-    this.acceptanceStartPending = false;
   }
 
   isActive(): boolean {
@@ -45,27 +37,6 @@ export class BrainstormController {
    * until a real departure clears it. Closing the overlay cannot revive it. */
   setSuspended(suspended: boolean): void {
     this.suspended = suspended;
-  }
-
-  /** The Mac must explicitly arm the isolated diagnostic route. Absence is
-   * deliberately false so an older or ordinary engine can never expose a
-   * hidden right/ring acceptance gesture. */
-  isAcceptanceArmed(): boolean {
-    const model = this.model;
-    // Brainstorm facts only. This also required terminalState === 'ready'
-    // and noToolsChecked — fields a Brainstorm frame no longer carries,
-    // because gating a Brainstorm arm on TERMINAL readiness is exactly the
-    // coupling docs/SESSION_MODEL.md:74-75 forbids. Reading them off a
-    // split frame silently disarmed the diagnostic: the double press did
-    // nothing and said nothing, which the acceptance flow caught.
-    //
-    // The Mac remains the authority. `acceptanceArmed` is an explicit
-    // local opt-in that is off by default, and the acceptance controller
-    // refuses its own run when the terminal cannot carry it — the check
-    // belongs there, where the terminal's state actually lives.
-    return !this.suspended && model?.acceptanceArmed === true
-      && model.screen === 'brainstorm'
-      && model.state === 'ready';
   }
 
   /** Read once after the exact fixed action was handed to the live MacLink.
@@ -80,15 +51,6 @@ export class BrainstormController {
   handleClick(): boolean {
     const model = this.model;
     if (model === undefined || this.suspended) return false;
-    if (model.screen === 'brainstorm' && model.state === 'acceptance_ready') {
-      if (this.acceptanceStartPending) return true;
-      const accepted = this.send('begin_topic_capture');
-      if (accepted) this.acceptanceStartPending = true;
-      // Never let a disconnected acceptance tap leak into another surface.
-      return true;
-    }
-    if (this.acceptancePending) return true;
-
     if (model.screen === 'brainstorm') {
       // The Mac has armed exactly one next utterance. A second tap must not
       // re-arm or queue a duplicate capture while that promise is visible.
@@ -168,32 +130,7 @@ export class BrainstormController {
       : false;
   }
 
-  /** Isolated right-temple/ring double press from an explicitly armed surface.
-   * The fixed metadata proves the initiating G2 input without carrying a
-   * topic, prompt, endpoint, or any OpenClaw payload. */
-  handleAcceptance(source: 'right' | 'ring'): boolean {
-    if (this.suspended) return false;
-    const model = this.model;
-    if (this.acceptancePending || model?.state === 'acceptance_ready') return true;
-    if (!this.isAcceptanceArmed()) return false;
-    const action: BrainstormAction = 'begin_acceptance';
-    const accepted = this.link.sendBrainstorm({
-      kind: 'brainstorm.action',
-      action,
-      surface: 'brainstorm',
-      source,
-      gesture: 'double_press',
-    });
-    if (accepted) {
-      this.acceptancePending = true;
-      this.acceptedAction = { action, surface: 'brainstorm' };
-    }
-    // An eligible deliberate test gesture is always consumed locally. A
-    // reconnect must never turn it into the platform exit dialog.
-    return true;
-  }
-
-  private send(action: Exclude<BrainstormAction, 'begin_acceptance'>): boolean {
+  private send(action: BrainstormAction): boolean {
     // Never queue a stale G2 control across a reconnect. The current Mac
     // session must authenticate and receive the action while it is current.
     const accepted = this.link.sendBrainstorm({ kind: 'brainstorm.action', action });

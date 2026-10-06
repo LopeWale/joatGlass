@@ -121,9 +121,6 @@ from .services.brainstorm_history import (
     BrainstormHistory,
     BrainstormHistoryCommands,
 )
-from .services.brainstorm_acceptance import (
-    try_start_g2_gesture_acceptance,
-)
 from .services.status import StatusPublisher
 from .services.orchestrator import VoiceOrchestrator
 from .services.prompted_speech import PromptedSpeechRuntime
@@ -1150,7 +1147,6 @@ async def main() -> None:
                 topic="Brainstorm",
                 collaborators=[n.capitalize() for n, _r, _a in current_seated()],
                 activity=f"{gone} CLI missing on the Mac — install to enable.",
-                acceptance_armed=False,
             )
         labels = [name.capitalize() for name, _role, _agent in current_seated()]
         return BrainstormHudView(
@@ -1161,7 +1157,6 @@ async def main() -> None:
                 "Your next spoken phrase starts this Brainstorm."
                 if armed else "Tap to choose a question, then speak."
             ),
-            acceptance_armed=args.g2_diagnostics,
         )
 
     async def show_terminal_retry_view(activity: str) -> None:
@@ -1407,19 +1402,6 @@ async def main() -> None:
             and isinstance(sessions.active_session, DebateSession)
         ):
             capabilities.claim_brainstorm_view()
-        if action.action == "begin_acceptance":
-            rejection = try_start_g2_gesture_acceptance(
-                transport=transport,
-                terminal=lambda: openclaw_terminal,
-                trigger=action,
-                start_session=sessions.try_start_session,
-                acceptance_armed=args.g2_diagnostics,
-            )
-            if rejection is not None:
-                asyncio.get_running_loop().create_task(
-                    hud.show_brainstorm(rejection)
-                )
-            return
         sessions.handle_brainstorm_action(action)
 
     transport.on_brainstorm_action(on_brainstorm_action)
@@ -1889,7 +1871,6 @@ async def main() -> None:
         voice_notes=voice_note_store,
         voice_capture=voice_capture,
         actions=action_journal,
-        acceptance_armed=args.g2_diagnostics,
         # Opening the sidebar row shows the wearer's actual work sessions,
         # not a readiness card. Only configured lanes reach this: with no
         # terminal on the Mac, the router keeps its own fallback copy.
