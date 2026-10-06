@@ -18,7 +18,7 @@ import {
   type ConversationExitResult,
 } from './AssistantConversationSurface';
 import { paginateMeasured } from './FirmwareText';
-import { overlayConversation } from './ConversationOverlay';
+import { OVERLAY_GAP, cardTop, overlayConversation } from './ConversationOverlay';
 import { paginateEven, type EvenReaderLine } from './EvenFont';
 import { hasImageHeader, withImageHeader } from './HeaderImage';
 import { ASSISTANT_ANSWER_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
@@ -492,6 +492,9 @@ export class HudPresenter {
   /** What the native `status` container currently shows, so a live
    * refresh can size its in-place upgrade. Set by every native rebuild. */
   private nativeStatusPainted?: string;
+  /** Where JOAT's box begins over a reader's tiles (ConversationOverlay):
+   * the tiles draw the header, so a status change repaints them. */
+  private readerUnderBox?: number;
   private displayActive = true;
   private displayRevision = 0;
   private readonly assistantConversation: AssistantConversationSurface;
@@ -565,6 +568,8 @@ export class HudPresenter {
         // The halves arrive just after the page's text, one send each, once
         // the caller has recorded which page this is (the header names it).
         if (header) setTimeout(() => { void this.paintImageHeader(); }, 0);
+        this.readerUnderBox = undefined;
+        this.paintReaderUnderBox(page);
       }
       return replaced && displayCurrent();
     } catch {
@@ -589,6 +594,7 @@ export class HudPresenter {
       this.pageOwner = 'visual';
       this.overviewText = undefined;
       this.imageHeaderShown = false;
+      this.readerUnderBox = undefined;
       return true;
     } catch {
       return false;
@@ -711,6 +717,8 @@ export class HudPresenter {
         : undefined;
     }
     if (surface.kind === 'list' && surface.options.nativeFirmwareList) return this.nativeListLayout(surface);
+    // A reader in Even's font keeps its own tiles under the box.
+    if (this.evenFontReaderRetained()) return this.layouts.visualLayout();
     const text = this.nativeTextPage;
     if (text && ((surface.kind === 'list' && this.usesNativeTextPage(surface.options))
       || (surface.kind === 'productivity' && !usesActionPillLayout(surface.productivity.phase)))) {
@@ -761,10 +769,51 @@ export class HudPresenter {
   /** The reader on the glass is an Even-font image page. Derived, not
    * stored, so it cannot outlive the page. */
   private evenFontPageOnGlass(): boolean {
+    return this.pageOwner === 'visual' && this.evenFontReaderRetained();
+  }
+
+  /** The surface is an Even-font reader, on the glass or beneath JOAT's box. */
+  private evenFontReaderRetained(): boolean {
     const state = this.nativeTextPage;
-    return this.pageOwner === 'visual' && this.surface.kind === 'list'
+    return this.surface.kind === 'list'
       && this.usesEvenFontPage(this.surface.options)
       && state?.lines !== undefined && state.source === this.surface.items.join('\n');
+  }
+
+  /** The reader's page as an image frame; `clipBottom` leaves the area
+   * under JOAT's box dark. */
+  private readerFrame(clipBottom?: number): HudVisualFrame | undefined {
+    const reader = this.nativeTextPage;
+    if (this.surface.kind !== 'list' || !reader?.lines) return undefined;
+    const frame: HudVisualFrame = {
+      kind: 'reader',
+      status: this.streams.get(ContainerId.StatusBar) ?? '',
+      micOn: this.micOn,
+      title: this.surface.options.title,
+      lines: (reader.lines[reader.page] ?? []).map((line) => ({ ...line })),
+      hint: reader.hint,
+      ...(clipBottom !== undefined ? { clipBottom } : {}),
+    };
+    return this.statusModel
+      ? { ...frame, statusModel: this.withActivities(this.statusModel, { frame: frame.kind }) }
+      : frame;
+  }
+
+  /** A box page that kept the reader's tiles (ConversationOverlay) starts
+   * with them blank: paint the reader above the box. */
+  private paintReaderUnderBox(page: RebuildPageContainer): void {
+    const tiles = (page.imageObject ?? []).some((image) => image.containerID === ContainerId.Image);
+    const top = cardTop(page);
+    if (!tiles || top === undefined || !this.visual || !this.evenFontReaderRetained()) return;
+    const frame = this.readerFrame(top - OVERLAY_GAP);
+    if (!frame) return;
+    this.readerUnderBox = top - OVERLAY_GAP;
+    const displayCurrent = this.captureDisplayGuard();
+    const visual = this.visual;
+    setTimeout(() => {
+      if (!displayCurrent()) return;
+      void (visual.paintExact ? visual.paintExact(frame, displayCurrent) : visual.paint(frame)).catch(() => false);
+    }, 0);
   }
 
   /** Lay the reader out in Even's font and paint it as an image page. */
@@ -1633,6 +1682,12 @@ export class HudPresenter {
       // the half that changed.
       this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
       return this.paintImageHeader();
+    }
+    if (this.readerUnderBox !== undefined && this.visual && this.evenFontReaderRetained()) {
+      // The reader's tiles under JOAT's box carry the header.
+      this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
+      const frame = this.readerFrame(this.readerUnderBox);
+      return frame ? this.visual.paint(frame).catch(() => false) : Promise.resolve(false);
     }
     if (this.assistantConversation.isActive()) {
       this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));

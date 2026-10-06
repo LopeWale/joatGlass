@@ -297,7 +297,14 @@ const READER_ALPHA = { speaker: 1, body: 0.82, hint: 0.5 } as const;
  * exactly these, so the margin rule (16 px each side, 3 px top, 8 px
  * bottom) is checked here without a canvas.
  */
-export function readerLayout(lines: readonly EvenReaderLine[], hint: string): ReaderRun[] {
+export function readerLayout(lines: readonly EvenReaderLine[], hint: string, clipBottom?: number): ReaderRun[] {
+  const runs = readerRuns(lines, hint);
+  // Under JOAT's box nothing is drawn: a line that would reach past the
+  // box's top border goes, and so does the hint.
+  return clipBottom === undefined ? runs : runs.filter((run) => run.y + evenLineHeight() <= clipBottom);
+}
+
+function readerRuns(lines: readonly EvenReaderLine[], hint: string): ReaderRun[] {
   const runs: ReaderRun[] = [];
   const tops = readerLineTops(lines);
   lines.forEach((line, index) => {
@@ -1036,7 +1043,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         break;
       case 'reader': {
         const atlas = await loadEvenFont();
-        for (const run of readerLayout(frame.lines, frame.hint)) {
+        for (const run of readerLayout(frame.lines, frame.hint, frame.clipBottom)) {
           drawEvenText(context, atlas, run.text, run.x, run.y, { alpha: run.alpha, fallbackFont: TYPE.body });
         }
         break;
