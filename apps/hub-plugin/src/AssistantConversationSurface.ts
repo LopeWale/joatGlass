@@ -199,6 +199,13 @@ export function conversationViewport(
   options: ConversationViewportOptions = {},
 ): ConversationViewport {
   const all = conversationLines(snapshot, options);
+  // While JOAT works on a reply, the indicator stands on the row the
+  // answer will take, inside the box: a fresh question is two rows, the
+  // question and the working glyph, and the answer replaces the glyph.
+  const lastTurn = snapshot.turns[snapshot.turns.length - 1];
+  if (snapshot.state !== 'ready' && lastTurn?.role === 'user') {
+    all.push({ role: 'assistant', text: INDICATOR_FRAMES[indicatorFrame % INDICATOR_FRAMES.length]! });
+  }
   const lineCapacity = stageFor(all.length, options.lineStages ?? NATIVE_LINE_STAGES);
   const maximumScrollFromTail = Math.max(0, all.length - lineCapacity);
   const scrollFromTail = clamp(
@@ -218,14 +225,11 @@ export function conversationViewport(
     .map((line) => line.role === 'assistant' ? line.text : ' ')
     .join('\n');
   const geometry = ASSISTANT_CONVERSATION_GEOMETRY;
-  // The state glyph rides ON the card's bottom border, centred, as Even AI
-  // draws it, and only while JOAT is working: a finished answer shows none.
-  // A sentence (the continuation prompt, a draft's gestures) must not be
-  // struck through by the border, so it moves inside and the card grows one
-  // row to hold it.
+  // The footer holds only a sentence (the continuation prompt, a draft's
+  // gestures), inside the box, which grows a row to hold it. The working
+  // indicator is not a footer: it stands on the answer's row (above).
   const sentence = continuePrompt ? CONTINUE_COPY : options.footerHint;
-  const footer = sentence
-    ?? (snapshot.state === 'ready' ? ' ' : INDICATOR_FRAMES[indicatorFrame % INDICATOR_FRAMES.length]!);
+  const footer = sentence ?? ' ';
   const cardHeight = (
     lineCapacity * geometry.lineHeight
     + geometry.cardTopPadding
@@ -760,7 +764,8 @@ export class AssistantConversationSurface {
         this.indicatorTimer = undefined;
         if (!this.canWrite() || this.continuePrompt) return;
         this.indicatorFrame = (this.indicatorFrame + 1) % INDICATOR_FRAMES.length;
-        this.footerDirty = true;
+        // The glyph lives on the answer's row: a transcript upgrade.
+        this.snapshotDirty = true;
         void this.ensureDrain();
       }, interval);
       return;

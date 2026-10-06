@@ -52,7 +52,13 @@ export const VisualContainerName: Readonly<Record<number, string>> = {
   [ContainerId.VisualTopRight]: 'visual-tr',
   [ContainerId.VisualBottomLeft]: 'visual-bl',
   [ContainerId.VisualBottomRight]: 'visual-br',
+  16: 'hdr-left',
+  17: 'hdr-right',
 };
+
+/** The one header every firmware page carries: the image spine's two
+ * halves (HeaderImage.ts). Page-local ids; they never cross the wire. */
+export const HeaderImageId = { Left: 16, Right: 17 } as const;
 
 /** Canvas constants from the SDK. Never hardcode these elsewhere. */
 export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;

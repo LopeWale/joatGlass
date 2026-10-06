@@ -1302,6 +1302,11 @@ async function renderVisualState(
     );
   };
 
+  // The header the glasses draw, from the same structured model Chrome
+  // gives production: without it every fixture captured a placeholder
+  // line no wearer ever sees.
+  await hud.setStatusModel({ clock: '9:41', link: 'connected', mic: true, battery: 87, charging: false });
+
   if (state === 'live-concurrency') {
     await renderLiveConcurrency(hud);
     return;
@@ -1462,7 +1467,10 @@ async function renderVisualState(
       continueAfterMs: 120_000,
       earlierTurnsOmitted: false,
       // ?joatConvTurns=short: one short exchange, the card at its first size.
-      turns: new URLSearchParams(window.location.search).get('joatConvTurns') === 'short' ? [
+      // ?joatConvTurns=question: a question JOAT is still working on.
+      turns: new URLSearchParams(window.location.search).get('joatConvTurns') === 'question' ? [
+        { role: 'user', text: 'What time is my next meeting?' },
+      ] : new URLSearchParams(window.location.search).get('joatConvTurns') === 'short' ? [
         { role: 'user', text: 'What time is my next meeting?' },
         { role: 'assistant', text: 'Design review at 2:30.' },
       ] : [
