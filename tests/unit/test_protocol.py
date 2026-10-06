@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from pathlib import Path
+
 import pytest
 
 from joat.ble.hub_gateway import pack_pcm
@@ -266,6 +268,9 @@ class TestParseUplink:
     def test_brainstorm_action_is_bounded_and_typed(self) -> None:
         message = parse_uplink({"kind": "brainstorm.action", "action": "cancel"})
         assert message == BrainstormAction(action="cancel")
+        # The long-press on a running work session (2026-10-06).
+        assert parse_uplink({"kind": "brainstorm.action", "action": "cancel_terminal"}) == \
+            BrainstormAction(action="cancel_terminal")
 
     @pytest.mark.parametrize("payload", [
         {"kind": "brainstorm.action", "action": "invent"},
@@ -1249,6 +1254,19 @@ class TestDownlinkWire:
             "expiresAtMs": 1234,
             "diagnosticKind": "messages",
         }
+
+    def test_confirm_request_carries_a_terminal_input_purpose_only_when_set(self) -> None:
+        """2026-10-06: a spoken terminal reply is checked on the same gate,
+        whose labels then read send / say it again."""
+        base = dict(action_id="a1", prompt="Send to work? “fix it”", challenge_id="c1",
+                    session_id="s1", payload_digest="pd", preview_digest="vd", expires_at_ms=1)
+        assert "purpose" not in ConfirmRequest(**base).to_wire()  # type: ignore[arg-type]
+        assert ConfirmRequest(**base, purpose="terminal_input").to_wire()["purpose"] == "terminal_input"  # type: ignore[arg-type]
+        with pytest.raises(ProtocolError):
+            ConfirmRequest(**base, purpose="anything").to_wire()  # type: ignore[arg-type]
+        source = (Path(__file__).resolve().parents[2] / "apps/hub-plugin/src/types.ts").read_text()
+        assert "export type ConfirmationPurpose = 'terminal_input';" in source
+        assert "purpose?: ConfirmationPurpose" in source
 
     def test_shutdown_defaults_to_confirmation_dialog(self) -> None:
         # exitMode 1 = show a dialog. Defaulting to 0 would close the app out

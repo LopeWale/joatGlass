@@ -56,6 +56,16 @@ function text(page: RebuildPageContainer | undefined, name: string): string | un
 }
 
 describe('HudPresenter native confirmation over the visual HUD', () => {
+  it('labels a spoken terminal reply check as send / say it again', async () => {
+    const r = rig();
+    expect(await r.hud.showConfirmation(
+      'Send to work? “fix the login test”', 'terminal-input-1', undefined, undefined, 'terminal_input',
+    )).toBe(true);
+    const gate = r.rebuilds[r.rebuilds.length - 1];
+    expect(text(gate, 'main')).toBe('CHECK WHAT WAS HEARD\n\nSend to work? “fix the login test”');
+    expect(text(gate, 'context')).toBe('TAP · send   SWIPE · say it again');
+  });
+
   it('shows the gate as one firmware text page carrying the live status, with no image tiles', async () => {
     const r = rig();
     await r.hud.showText('12:34 JOAT listening bat 80%', ContainerId.StatusBar);

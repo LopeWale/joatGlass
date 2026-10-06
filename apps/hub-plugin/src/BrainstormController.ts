@@ -95,6 +95,19 @@ export class BrainstormController {
     return false;
   }
 
+  /** Long-press on a RUNNING work session cancels its job (2026-10-06).
+   *
+   * Everywhere else long-press is the microphone, so this claims it only
+   * on that one page; there it is consumed even when the link is down,
+   * because silently muting the mic is not what a cancel gesture means. */
+  handleLongPress(): boolean {
+    const model = this.model;
+    if (model === undefined || this.suspended) return false;
+    if (model.screen !== 'agent_terminal' || model.state !== 'running') return false;
+    this.send('cancel_terminal');
+    return true;
+  }
+
   /** A swipe during TOPIC CAPTURE backs out of the armed capture.
    *
    * Everywhere else a swipe pages the transcript — the wearer asked for

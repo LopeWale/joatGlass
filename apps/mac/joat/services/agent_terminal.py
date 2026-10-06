@@ -195,6 +195,21 @@ class TerminalCapture:
 
 
 @dataclass(frozen=True)
+class ClaimedTerminalInput:
+    """Admitted speech held for the wearer's check before it is sent.
+
+    The capture is spent when the words arrive; the target it bound at the
+    tap travels with them, so a confirmation that outlasts the capture's own
+    window still sends to that exact lane — and to nothing else if the
+    lane, its focus or its context moved meanwhile.
+    """
+
+    lane_name: str
+    text: str
+    target: "_TerminalCaptureTarget"
+
+
+@dataclass(frozen=True)
 class _CapturedContext:
     agent: CapturedTerminalAgentLike
     generation: int
@@ -1986,6 +2001,26 @@ class AgentTerminalCommands:
             return None
         # No await precedes owner removal or the roster's second target check.
         return await self._roster._send_captured(target, text)
+
+    def claim_capture(self, capture: TerminalCapture, text: str) -> ClaimedTerminalInput | None:
+        """Take admitted speech for a check on the glasses instead of sending it."""
+        if not self.capture_is_current(capture):
+            return None
+        target = self._capture_target
+        self.clear_capture()
+        if target is None or not isinstance(text, str) or not text.strip():
+            return None
+        return ClaimedTerminalInput(lane_name=capture.lane_name, text=text, target=target)
+
+    async def send_claimed(self, claimed: ClaimedTerminalInput) -> str | None:
+        """Send words the wearer confirmed; None when their lane moved on."""
+        return await self._roster._send_captured(claimed.target, claimed.text)
+
+    async def cancel_from_glasses(self) -> str:
+        """The long-press on a running work session: the gesture for
+        "terminal cancel", which stays as the spoken form."""
+        self._acquire_explicit_view()
+        return await self._roster.cancel()
 
     def arm(self) -> None:
         """A tap on the terminal promises the NEXT utterance as its input.

@@ -2774,6 +2774,38 @@ class TestTheSessionPicker:
         assert opened == ["bbb"], "resolved against what was DRAWN"
 
 
+class TestATerminalReplyTooLongForTheCheckIsReadWhole:
+    """2026-10-06: a spoken reply to a work session is checked before it
+    goes; one too long for the confirmation page is read in full first."""
+
+    async def test_it_is_sent_only_by_a_tap_on_its_last_page(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path)
+        words = " ".join(f"step{i} of the long instruction" for i in range(40))
+        decision = asyncio.create_task(router.review_terminal_input("work", words, timeout_s=5))
+        await wait_until(lambda: router._note_reader is not None)
+        reader = router._note_reader
+        assert reader is not None and len(reader.pages) > 1
+        first = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        # The Hub keys a page to its capability by the title's family.
+        assert first.title == "AGENT TERMINAL · CHECK"
+        assert first.selectable is False and "tap: send" not in first.hint
+
+        reader.index = len(reader.pages) - 1
+        await router._show_note_reader()
+        last = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert last.selectable is True and "tap: send" in last.hint
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="AGENT TERMINAL",
+            selected_index=reader.index, request_id=router._active_request_id,
+        ))
+        assert await asyncio.wait_for(decision, 2) is True
+
+    async def test_no_answer_is_none_and_sends_nothing(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, _transport, _ = make_router(tmp_path)
+        words = " ".join(f"step{i} of the long instruction" for i in range(40))
+        assert await router.review_terminal_input("work", words, timeout_s=0.3) is None
+
+
 class TestTheTerminalShowsItsSessions:
     """The idle terminal said: Say "terminal sessions" to choose a work
     session. The wearer's response: "why do I have to say something to

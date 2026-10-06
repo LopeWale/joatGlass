@@ -46,6 +46,9 @@ export interface BrainstormInputOwner {
   /** A swipe during topic capture backs out of the armed capture; every
    * other state lets the swipe fall through to transcript scrolling. */
   handleSwipe(): boolean;
+  /** Long-press on a running work session cancels its job; false elsewhere,
+   * where long-press stays the microphone. */
+  handleLongPress(): boolean;
   /** Fixed receipt of a successfully handed-off action; never prompt content. */
   consumeAcceptedAction(): { action: BrainstormAction; surface: BrainstormHudScreen } | undefined;
 }
@@ -150,6 +153,13 @@ export class EventRouter {
     if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT) {
       const toggleMic = this.pendingMicLongPress && !this.contextualMenuOverlayOpen;
       this.pendingMicLongPress = false;
+      if (toggleMic && !this.promptedInput?.isActive()
+        && this.brainstorm?.isActive() && this.brainstorm.handleLongPress()) {
+        // The second carve-out (2026-10-06): on a running work session the
+        // gesture cancels the job, the wearer's choice over "terminal cancel".
+        console.info(`[EventRouter] long-press via ${via} — cancelling the terminal job`);
+        return true;
+      }
       if (toggleMic && !this.promptedInput?.isActive() && this.menu.isPanelRefreshable()) {
         // The one carve-out from "long press is the mic": on the top level
         // of news or search it re-fetches that tab (the wearer's ruling,
@@ -430,6 +440,7 @@ export class EventRouter {
     if (
       accepted.action === 'approve_terminal'
       || accepted.action === 'deny_terminal'
+      || accepted.action === 'cancel_terminal'
     ) return;
     this.diagnostics?.record({
       type: 'brainstorm_action',

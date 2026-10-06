@@ -832,6 +832,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         payload_digest: str | None = None,
         diagnostic_kind: Literal["messages"] | None = None,
         message_ui_action_id: str | None = None,
+        purpose: Literal["terminal_input"] | None = None,
     ) -> ConfirmationResult | None:
         """Return durable evidence only for an explicit bound HUD decision."""
 
@@ -843,6 +844,9 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             return None
         if diagnostic_kind not in (None, "messages"):
             log.warning("confirm %s declined — diagnostic kind is invalid", action_id)
+            return None
+        if purpose not in (None, "terminal_input"):
+            log.warning("confirm %s declined — purpose is invalid", action_id)
             return None
         conn = self._conn
         session_id = self._session_id
@@ -896,6 +900,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 expires_at_ms=int(expires_at_s * 1000),
                 diagnostic_kind=diagnostic_kind,
                 message_ui_action_id=message_ui_action_id,
+                purpose=purpose,
             ).to_wire()))
             if self._conn is not conn or self._session_id != session_id:
                 return None

@@ -1166,6 +1166,29 @@ class TestSessionManager:
             wedged.release.set()
             await asyncio.sleep(0.02)
 
+    async def test_a_long_press_cancel_reaches_the_terminal_and_says_its_receipt(self) -> None:
+        """2026-10-06: long-press on a running work session cancels it — the
+        gesture for "terminal cancel", which stays as the spoken form."""
+        transport = SinkTransport()
+        cancels: list[str] = []
+
+        async def cancel() -> str:
+            cancels.append("cancel")
+            return "Cancelled work."
+
+        mgr = SessionManager(HudWriter(transport), lambda _topic: None,  # type: ignore[arg-type, return-value]
+                             terminal_cancel=cancel)
+        said: list[str] = []
+
+        async def say(text: str) -> None:
+            said.append(text)
+
+        mgr._say = say  # type: ignore[method-assign]
+        mgr.handle_brainstorm_action(BrainstormAction("cancel_terminal"))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert cancels == ["cancel"] and said == ["Cancelled work."]
+
     async def test_queued_cards_stay_bounded_during_a_long_session(self) -> None:
         """The queue was unbounded and only trimmed at drain, so a busy hour
         accumulated an hour of cards nobody would read — and each waiting

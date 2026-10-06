@@ -265,6 +265,11 @@ class _NoteReaderState:
     tap_hint: str | None = None
 
 
+_LAST_PAGE_TAP_TITLES = frozenset({"MESSAGES · REVIEW", "AGENT TERMINAL · CHECK"})
+"""Readers that are a review: the tap that sends is offered only on the last
+page, once the wearer has seen every word."""
+
+
 @dataclass(slots=True)
 class _MessageHistoryState:
     """Mac-private page stack for the currently selected conversation."""
@@ -1037,35 +1042,60 @@ class CapabilityRouter:
         then confirm. Back, Home, another selection or the timeout all
         return False and nothing is sent.
         """
+        reviewed = await self._review_draft(
+            "MESSAGES · REVIEW", f"To {recipient_label}", body,
+            capability="MESSAGES", tap_hint="tap: confirm", timeout_s=timeout_s,
+        )
+        return reviewed is True
+
+    async def review_terminal_input(self, lane: str, body: str, *, timeout_s: float = 90.0) -> bool | None:
+        """Show spoken terminal input too long for the confirmation prompt.
+
+        True when the wearer taps to send, False when they leave the page,
+        None when it timed out. The words go nowhere until the tap.
+        """
+        # The title's family must be the capability's: the Hub keys a page
+        # to its capability by the words before the first "·".
+        return await self._review_draft(
+            "AGENT TERMINAL · CHECK", f"To {lane}", body,
+            capability="AGENT TERMINAL", tap_hint="tap: send", timeout_s=timeout_s,
+        )
+
+    async def _review_draft(
+        self, title: str, heading: str, body: str, *,
+        capability: str, tap_hint: str, timeout_s: float,
+    ) -> bool | None:
         loop = asyncio.get_running_loop()
         decided: asyncio.Future[bool] = loop.create_future()
+        reader: _NoteReaderState | None = None
 
         async def confirm_from_review() -> None:
-            reader = self._note_reader
-            if (reader is not None and reader.title == "MESSAGES · REVIEW"
-                    and reader.index == len(reader.pages) - 1 and not decided.done()):
+            current = self._note_reader
+            if (current is not None and current is reader
+                    and current.index == len(current.pages) - 1 and not decided.done()):
                 decided.set_result(True)
 
         # Reviewing this draft is an internal step of the same action. A new
         # request ID makes the Hub retire its selected-message owner; clearing
         # selection here also cancels the prepared action calling this method.
-        request_id = (self._active_request_id if self._active_capability == "MESSAGES"
+        request_id = (self._active_request_id if self._active_capability == capability
                       and self._active_request_id else voice_request_id())
-        self._active_capability = "MESSAGES"
+        self._active_capability = capability
         self._active_request_id = request_id
         token = self._request_context.set(request_id)
-        reader: _NoteReaderState | None = None
         try:
             reader = _NoteReaderState(
-                "MESSAGES · REVIEW", f"To {recipient_label}", paginate_reader_text(body), f"review-{secrets.token_hex(16)}",
-                capability="MESSAGES", on_tap=confirm_from_review, tap_hint="tap: confirm",
+                title, heading, paginate_reader_text(body), f"review-{secrets.token_hex(16)}",
+                capability=capability, on_tap=confirm_from_review, tap_hint=tap_hint,
             )
             self._note_reader = reader
             await self._show_note_reader()
             deadline = loop.time() + timeout_s
             while not decided.done():
-                if (self._note_reader is not reader or loop.time() >= deadline
-                        or self._active_request_id != request_id or self._active_capability != "MESSAGES"):
+                if loop.time() >= deadline:
+                    return None
+                if (self._note_reader is not reader or self._active_request_id != request_id
+                        or self._active_capability != capability):
                     return False
                 await asyncio.sleep(0.2)
             return decided.result()
@@ -2459,7 +2489,7 @@ class CapabilityRouter:
             hint.append("up previous")
         if reader.index + 1 < len(reader.pages):
             hint.append("down more")
-        review = reader.title == "MESSAGES · REVIEW"
+        review = reader.title in _LAST_PAGE_TAP_TITLES
         review_complete = reader.index == len(reader.pages) - 1
         if reader.tap_hint and (not review or review_complete):
             hint.append(reader.tap_hint)

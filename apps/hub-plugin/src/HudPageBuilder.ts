@@ -18,6 +18,7 @@ import {
   CAPABILITY_MENU_ID_BASE,
   ContainerId,
   VisualContainerName,
+  type ConfirmationPurpose,
 } from './types';
 import {
   NATIVE_TERMINAL_GEOMETRY,
@@ -160,6 +161,14 @@ export interface AssistantConversationPage {
  *  - zOrderIndex is set on every container and is unique (all-or-nothing rule)
  *  - containerTotalNum matches the number of declared containers
  */
+/** The decision gate's words. A generic action is confirmed or cancelled;
+ * a spoken terminal reply is checked: tap sends it, swipe asks for it again. */
+export function confirmationLabels(purpose?: ConfirmationPurpose): { title: string; choices: string } {
+  return purpose === 'terminal_input'
+    ? { title: 'CHECK WHAT WAS HEARD', choices: 'TAP · send   SWIPE · say it again' }
+    : { title: 'CONFIRM ACTION', choices: 'TAP · confirm   SWIPE · cancel' };
+}
+
 export class HudPageBuilder {
   constructor(private readonly contextualMenu = true) {}
 
@@ -664,7 +673,8 @@ export class HudPageBuilder {
    * `measureTextWrap` (whole words, an ellipsis when cut) rather than by a
    * character count — a prompt of wide glyphs never overflows, one of
    * narrow glyphs is not cut short. */
-  confirmationLayout(prompt: string, status?: string): RebuildPageContainer {
+  confirmationLayout(prompt: string, status?: string, purpose?: ConfirmationPurpose): RebuildPageContainer {
+    const labels = confirmationLabels(purpose);
     const question = fitLines(
       prompt.trim() || 'Confirm requested action.', REGION_TEXT_WIDTH, CONFIRMATION_BODY_LINES - 2,
     );
@@ -675,10 +685,10 @@ export class HudPageBuilder {
         // Over the visual HUD this page is firmware-owned and the presenter
         // cannot upgrade its containers, so the live top line rides along.
         this.statusBar(status ?? ''),
-        this.main(CONFIRMATION_BODY_LINES * FIRMWARE_LINE + 2 * REGION_PAD + 1, 1, 4, `CONFIRM ACTION\n\n${question}`), // 144
+        this.main(CONFIRMATION_BODY_LINES * FIRMWARE_LINE + 2 * REGION_PAD + 1, 1, 4, `${labels.title}\n\n${question}`), // 144
         this.region(
           ContainerId.Context, 'context', 183, 35, 3, 3,
-          'TAP · confirm   SWIPE · cancel',
+          labels.choices,
         ),
         this.region(ContainerId.Tray, 'tray', 218, 35, 4, 3, ''),
         this.region(ContainerId.Hint, 'hint', 253, 35, 5, 1, '8 seconds · timeout cancels'),

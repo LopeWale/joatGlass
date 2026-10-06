@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { utf8ByteLength, validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
 import { LIST_ROW_MAX_UTF8_BYTES, clampUtf8Bytes, fitHeader, HudPageBuilder } from './HudPageBuilder';
+import { firmwareLineCount } from './FirmwareText';
 import { CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId } from './types';
 
 type Page = {
@@ -312,6 +313,16 @@ describe('HudPageBuilder invariants', () => {
     expect(byId(ContainerId.Hint)?.content).toBe('8 seconds · timeout cancels');
     expect(page.textObject?.map((container) => container.content).join(' '))
       .not.toMatch(/\b(?:left|right|ring|nod)\b/i);
+  });
+
+  it('a spoken terminal reply is a CHECK: tap sends it, swipe asks for it again (2026-10-06)', () => {
+    const page = builder.confirmationLayout('Send to work? “fix the login test”', undefined, 'terminal_input') as Page;
+    const byId = (id: number) => page.textObject?.find((c) => c.containerID === id);
+    expect(byId(ContainerId.Main)?.content).toBe('CHECK WHAT WAS HEARD\n\nSend to work? “fix the login test”');
+    expect(byId(ContainerId.Context)?.content).toBe('TAP · send   SWIPE · say it again');
+    const context = byId(ContainerId.Context) as unknown as { width: number; paddingLength: number };
+    expect(firmwareLineCount('TAP · send   SWIPE · say it again', context.width - 2 * context.paddingLength))
+      .toBe(1);
   });
 
   it('visual layout tiles the full canvas in front of one hardware-safe gesture layer', () => {

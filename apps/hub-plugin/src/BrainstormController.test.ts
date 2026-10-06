@@ -260,3 +260,35 @@ describe('native contextual menu input ownership', () => {
     expect(sent).toEqual([]);
   });
 });
+
+describe('long-press on a running work session (2026-10-06)', () => {
+  it('cancels the job: the gesture for "terminal cancel"', () => {
+    const { controller, sent } = make();
+    controller.present(model({ screen: 'agent_terminal', state: 'running' }));
+    expect(controller.handleLongPress()).toBe(true);
+    expect(sent).toEqual([{ kind: 'brainstorm.action', action: 'cancel_terminal' }]);
+  });
+
+  it('is consumed even when the Mac is unreachable, so it never mutes instead', () => {
+    const { controller, sent } = make(false);
+    controller.present(model({ screen: 'agent_terminal', state: 'running' }));
+    expect(controller.handleLongPress()).toBe(true);
+    expect(sent).toEqual([]);
+  });
+
+  it('leaves long-press to the microphone everywhere else', () => {
+    const { controller, sent } = make();
+    for (const other of [
+      model({ screen: 'agent_terminal', state: 'ready' }),
+      model({ screen: 'brainstorm', state: 'running' }),
+      model({ screen: 'brainstorm', state: 'ready' }),
+    ]) {
+      controller.present(other);
+      expect(controller.handleLongPress()).toBe(false);
+    }
+    controller.present(model({ screen: 'agent_terminal', state: 'running' }));
+    controller.setSuspended(true);
+    expect(controller.handleLongPress()).toBe(false);
+    expect(sent).toEqual([]);
+  });
+});
