@@ -22,6 +22,7 @@ import {
   ContainerId,
   VisualContainerName,
   type ConfirmationPurpose,
+  HomePaneLabelId,
 } from './types';
 import {
   NATIVE_TERMINAL_GEOMETRY,
@@ -356,12 +357,14 @@ export class HudPageBuilder {
       content: fitUtf8(content, TEXT_CONTAINER_MAX_BYTES),
     });
     return new RebuildPageContainer({
-      containerTotalNum: 6,
+      containerTotalNum: 7,
       ...this.menuConfig(),
       textObject: [
         text(ContainerId.StatusBar, 'status', g.header, 1, 2, fitBand([view.header], g.header)),
         text(ContainerId.Context, 'info', g.info, 2, 3, fitBand(view.info, g.info)),
         text(ContainerId.Tray, 'tabs', g.tabs, 3, 2, fitBand(railRows(view.tabs), g.tabs), 1),
+        // The pane's grid: labels dim in their own column, values beside them.
+        text(HomePaneLabelId, 'pane-l', g.paneLabels, 7, 2, fitBand(view.paneLabels, g.paneLabels)),
         text(ContainerId.Main, 'pane', g.pane, 4,
           Math.max(0, Math.min(4, Math.round(view.paneBrightness))), fitBand(view.pane, g.pane)),
         // The column rule: a 2 px box whose 1 px border draws one solid line.

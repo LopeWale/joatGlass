@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-10-06 — Home's pane is a label/value grid, as weather-even-g2 lays out its stats
+
+The wearer pointed at weather-even-g2's right panel. Read from its source and captured live in the official simulator: its Today screen's right half is two native text containers side by side, a label column (feels, wind, humid, press, rise, set, uv) and a value column, with no border, icon or list. Two containers because the firmware font is proportional: columns line up only at fixed x, never as padded spaces in one container.
+
+- **Home's pane is now that grid** (`OverviewText.ts`, `HudPageBuilder.overviewTextLayout`): a 96 px label column (`pane-l`, dim) beside the value column (`pane`, which stays `ContainerId.Main`, so replies still stream into it and it still holds the input).
+  - Notifications: `NEXT` / `Calendar` / `Mail` beside their lines.
+  - News: each headline's age (`12m`, `1h`) beside `headline · source`.
+  - Pomodoro: `Timer` / `Left` / `Cycle` beside the block, minutes left and the cycle dots; the bar and the action rows span the value column.
+  - Search: `Query` beside the question, then numbered results, so "open the second" names a row.
+  - `NOTIFICATION` (116 px) and `LAST QUERY` (108 px) are wider than the column and show as `NOTICE` and `QUERY`; a boot title (`RECONNECTING`, 130 px) heads the value column as before.
+- **A tab swipe is three in-place upgrades** (the rail, the labels, the values), never a rebuild; the presenter's in-place limit rose from two bands to three. A rebuild would also resend Home's four images.
+- Dev fixture: `?joatVisual=panel-news&joatHomeRest=1` (and `panel-pomodoro`, `panel-search`) shows the lit tab's own card instead of the newest notification.
+- Verified in the official simulator on all four tabs. Not verified on physical glasses.
+- Plugin 1137 passed; typecheck clean. Plugin-only.
+
 ## 2026-10-06 — Build JOAT 0.1.110
 
 - Packed from `34e0b42` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.110 above the last recorded build (0.1.109); app.json, package.json and package-lock.json all 0.1.110. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1137 tests passed.

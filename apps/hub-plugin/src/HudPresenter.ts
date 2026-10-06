@@ -3533,7 +3533,10 @@ export class HudPresenter {
         this.armPanelTicker();
         return true;
       }
-      if (changed.length <= 2) {
+      // A tab swipe changes three bands (the rail, the grid's labels and
+      // its values): three in-place upgrades, never a rebuild, which would
+      // also resend the page's images.
+      if (changed.length <= 3) {
         let upgraded = true;
         for (const [containerID, band] of changed) {
           if (!stillOurs() || !this.overviewTextOnGlass()) return false;
