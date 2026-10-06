@@ -1163,11 +1163,28 @@ export class HudPresenter {
     }
     // The old frame may already have one bridge write in flight. Its guard
     // prevents further writes; restore only after that owned work settles.
-    await prompt.paint?.catch(() => false);
+    await this.settlePromptPaints(prompt);
     if (!displayCurrent()) return false;
     if (this.promptQuestion || this.confirmation) return false;
     if (this.pageOwner === 'prompt-native') return this.restoreRetainedPage();
     return this.paintVisual();
+  }
+
+  /** Wait for everything a prompt is painting: its first page and the
+   * words-so-far paints (showPromptPartial). A partial that grows the card
+   * is a page replacement; the page guard refuses a second replacement
+   * while it runs, so a restore or a confirmation that did not wait was
+   * refused and the cancelled card stayed on the glass (review, 2026-10-06).
+   * Once the prompt is no longer current no new partial paint starts, so
+   * the loop ends. */
+  private async settlePromptPaints(prompt: PromptQuestionState): Promise<void> {
+    prompt.pendingPartial = undefined;
+    await prompt.paint?.catch(() => false);
+    while (prompt.partialPaint) {
+      const painting = prompt.partialPaint;
+      await painting.catch(() => false);
+      if (prompt.partialPaint === painting) prompt.partialPaint = undefined;
+    }
   }
 
   private isPromptCurrent(prompt: PromptQuestionState): boolean {
@@ -2740,8 +2757,16 @@ export class HudPresenter {
         ready ? this.showConfirmation(prompt, id, diagnosticKind, isCurrent, purpose) : false
       ));
     }
-    // Asking for text never survives a transition into write consent.
+    // Asking for text never survives a transition into write consent. The
+    // question's paints settle first: a words-so-far rebuild still running
+    // would make the page guard refuse the consent card's own rebuild.
+    const askedPrompt = this.promptQuestion;
     this.promptQuestion = undefined;
+    if (askedPrompt && !askedPrompt.inlineTerminal) {
+      return this.settlePromptPaints(askedPrompt).then(() => (
+        this.showConfirmation(prompt, id, diagnosticKind, isCurrent, purpose)
+      ));
+    }
     if (!this.confirmation) {
       const content = this.surface.kind !== 'default' && this.focusReturn
         ? this.focusReturn

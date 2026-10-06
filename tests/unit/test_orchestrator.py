@@ -2107,6 +2107,52 @@ class TestPromptPartials:
                 await drain()
             assert not any(isinstance(m, PromptPartial) for m in transport.sent)
 
+    async def test_another_speakers_words_are_never_shown(self) -> None:
+        dispatcher, prompt_id = self._prompt()
+        transport = FakeTransport()
+        orchestrator = VoiceOrchestrator(
+            transport, PartialEngine(), vad=TEST_VAD(), prompted_input=dispatcher, wake_words=("joat",),
+        )
+        # A bystander talks for 2.4 s while the prompt is open: the frames
+        # carry the prompt's epoch, and the host names another speaker.
+        for seq in range(12):
+            orchestrator._ingest_audio(
+                LOUD, seq, source="glasses", speaker="other",
+                connection_generation="g1", audio_epoch=prompt_id,
+            )
+            await drain()
+        assert not any(isinstance(m, PromptPartial) for m in transport.sent)
+
+    async def test_a_rejected_final_clears_the_words_shown(self) -> None:
+        dispatcher, prompt_id = self._prompt()
+        transport = FakeTransport()
+        orchestrator = VoiceOrchestrator(
+            transport, PartialEngine(), vad=TEST_VAD(), prompted_input=dispatcher, wake_words=("joat",),
+        )
+        seq = 0
+        for _ in range(6):  # 1.2 s of unlabelled speech: words shown
+            orchestrator._ingest_audio(
+                LOUD, seq, source="glasses", speaker=None, connection_generation="g1", audio_epoch=prompt_id,
+            )
+            seq += 1
+            await drain()
+        shown = [m for m in transport.sent if isinstance(m, PromptPartial)]
+        assert shown and shown[-1].text == "words 1"
+        for _ in range(6):  # then the host names another speaker
+            orchestrator._ingest_audio(
+                LOUD, seq, source="glasses", speaker="other", connection_generation="g1", audio_epoch=prompt_id,
+            )
+            seq += 1
+            await drain()
+        for _ in range(4):  # quiet closes the utterance: rejected as not the wearer's
+            orchestrator._ingest_audio(
+                QUIET, seq, source="glasses", speaker=None, connection_generation="g1", audio_epoch=prompt_id,
+            )
+            seq += 1
+            await drain()
+        partials = [m for m in transport.sent if isinstance(m, PromptPartial)]
+        assert [p.text for p in partials] == ["words 1", ""]
+
     def test_a_long_partial_keeps_its_newest_words(self) -> None:
         wire = PromptPartial("p1", "g1", "x " * 400 + "the end").to_wire()
         assert len(wire["text"]) <= 500
