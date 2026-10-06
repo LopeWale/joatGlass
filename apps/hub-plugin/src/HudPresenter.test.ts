@@ -137,174 +137,6 @@ describe('prompt question ownership', () => {
 
 });
 
-describe('custom News list recovery', () => {
-  it('paints ordinary and restored News selection consistently without switching page types', async () => {
-    const pages: RebuildPageContainer[] = [];
-    const frames: HudVisualFrame[] = [];
-    const client = {
-      require: () => ({
-        textContainerUpgrade: async () => true,
-        rebuildPageContainer: async (page: RebuildPageContainer) => { pages.push(page); return true; },
-      }),
-    } as unknown as BridgeClient;
-    const hud = new HudPresenter(client, new HudPageBuilder(), {
-      paint: async (frame) => { frames.push(frame); return true; },
-    });
-    const rows = ['Story 01', 'Story 02'];
-    const options = { title: 'NEWS', selectable: true, railTab: 'news' as const };
-    expect(await hud.showList(rows, options)).toBe(true);
-    expect(await hud.setSelection(1)).toBe(true);
-    expect(pages).toHaveLength(0);
-    expect(frames).toHaveLength(2);
-
-    expect(await hud.restoreSelection(1)).toBe(true);
-    expect(pages.map((page) => [page.listObject?.length ?? 0, page.imageObject?.length ?? 0]))
-      .toEqual([]);
-    expect(frames[frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 1 });
-    expect(await hud.setSelection(0)).toBe(true);
-    expect(pages).toHaveLength(0);
-    expect(frames[frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 0 });
-
-    // Reopening has exactly the same custom typography as the restored page.
-    expect(await hud.showList(rows, options)).toBe(true);
-    expect(pages).toHaveLength(0);
-    expect(frames[frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS', selectedIndex: 0 });
-  });
-
-  it('does not report cursor restoration when the selected-row paint and recovery fail', async () => {
-    const frames: HudVisualFrame[] = [];
-    let accepted = true;
-    const client = {
-      require: () => ({
-        textContainerUpgrade: async () => true,
-        rebuildPageContainer: async () => false,
-      }),
-    } as unknown as BridgeClient;
-    const hud = new HudPresenter(client, new HudPageBuilder(), {
-      paint: async (frame) => { frames.push(frame); return accepted; },
-    });
-    expect(await hud.showList(['Story 01', 'Story 02'], {
-      title: 'NEWS', selectable: true, railTab: 'news',
-    })).toBe(true);
-
-    accepted = false;
-    expect(await hud.restoreSelection(1)).toBe(false);
-    expect(frames.length).toBeGreaterThan(1);
-    expect(hud.exportBackgroundState().surface).toMatchObject({ kind: 'list', selectedIndex: 0 });
-  });
-
-  it('keeps Home when a selected-row paint completes after the list is abandoned', async () => {
-    const frames: HudVisualFrame[] = [];
-    let finishInstall!: (installed: boolean) => void;
-    const install = new Promise<boolean>((resolve) => { finishInstall = resolve; });
-    let selectionPaints = 0;
-    const client = {
-      require: () => ({
-        textContainerUpgrade: async () => true,
-        rebuildPageContainer: async () => true,
-      }),
-    } as unknown as BridgeClient;
-    const hud = new HudPresenter(client, new HudPageBuilder(), {
-      paint: async (frame) => {
-        frames.push(frame);
-        if (frame.kind === 'list' && frame.selectedIndex === 1) {
-          selectionPaints += 1;
-          return install;
-        }
-        return true;
-      },
-    });
-    await hud.showList(['Story 01', 'Story 02'], { title: 'NEWS', selectable: true, railTab: 'news' });
-    const restoring = hud.restoreSelection(1);
-    try {
-      await vi.waitFor(() => expect(selectionPaints).toBe(1));
-      expect(await hud.showDefault()).toBe(true);
-      finishInstall(true);
-      expect(await restoring).toBe(false);
-      expect(hud.exportBackgroundState().surface).toMatchObject({ kind: 'default' });
-      expect(frames[frames.length - 1]).toMatchObject({ kind: 'overview' });
-    } finally {
-      finishInstall(true);
-      await restoring;
-    }
-  });
-
-  it('keeps News selectable through reader and reopen even on a host that rejects native lists', async () => {
-    const pages: RebuildPageContainer[] = [];
-    const frames: HudVisualFrame[] = [];
-    const client = {
-      require: () => ({
-        textContainerUpgrade: async () => true,
-        rebuildPageContainer: async (page: RebuildPageContainer) => {
-          pages.push(page);
-          return !page.listObject?.length;
-        },
-      }),
-    } as unknown as BridgeClient;
-    const hud = new HudPresenter(client, new HudPageBuilder(), {
-      paint: async (frame) => { frames.push(frame); return true; },
-    });
-    const rows = ['First headline', 'Second headline'];
-    const options = {
-      title: 'NEWS', hint: 'tap: open · hold: refresh · left x2: back',
-      selectable: true, railTab: 'news' as const,
-    };
-    await hud.showText('9:41 JOAT ready', ContainerId.StatusBar);
-    await hud.showText('Retained overview', ContainerId.Main);
-
-    expect(await hud.showList(rows, options)).toBe(true);
-    expect(pages.map((page) => [page.listObject?.length ?? 0, page.imageObject?.length ?? 0]))
-      .toEqual([]);
-    expect(frames[frames.length - 1]).toMatchObject({
-      kind: 'list', title: 'NEWS', items: rows, selectedIndex: 0,
-      selectable: true, hint: options.hint, rail: { activeTab: 'news' },
-    });
-
-    const rebuildCount = pages.length;
-    expect(await hud.moveSelection(1)).toBe(true);
-    await hud.showText('9:42 JOAT ready', ContainerId.StatusBar);
-    expect(pages).toHaveLength(rebuildCount);
-    expect(frames[frames.length - 1]).toMatchObject({
-      kind: 'list', title: 'NEWS', items: rows, selectedIndex: 1, status: '9:42 JOAT ready',
-    });
-    expect(await hud.showList(['Second headline', 'Full article text'], {
-      title: 'NEWS · ARTICLE', railTab: 'news', hint: 'left x2: back',
-    })).toBe(true);
-    expect(frames[frames.length - 1]).toMatchObject({
-      kind: 'list', title: 'NEWS · ARTICLE', items: ['Second headline', 'Full article text'],
-    });
-
-    await hud.showDefault();
-    expect(frames[frames.length - 1]).toMatchObject({ kind: 'overview', main: 'Retained overview' });
-    const frameCount = frames.length;
-    expect(await hud.showList(rows, options)).toBe(true);
-    expect(pages).toHaveLength(rebuildCount);
-    expect(frames).toHaveLength(frameCount + 1);
-    expect(frames[frames.length - 1]).toMatchObject({ kind: 'list', title: 'NEWS' });
-  });
-
-  it('reports failure when the custom News frame and image recovery both fail', async () => {
-    const pages: RebuildPageContainer[] = [];
-    const frames: HudVisualFrame[] = [];
-    const client = {
-      require: () => ({
-        rebuildPageContainer: async (page: RebuildPageContainer) => { pages.push(page); return false; },
-      }),
-    } as unknown as BridgeClient;
-    const hud = new HudPresenter(client, new HudPageBuilder(), {
-      paint: async (frame) => { frames.push(frame); return false; },
-      // The self-heal rebuild runs under the surface's transition barrier.
-      withPageTransition: async (replace: () => Promise<boolean>) => replace(),
-    });
-
-    expect(await hud.showList(['A headline'], { title: 'NEWS', selectable: true, railTab: 'news' }))
-      .toBe(false);
-    expect(pages.map((page) => [page.listObject?.length ?? 0, page.imageObject?.length ?? 0]))
-      .toEqual([[0, 4]]);
-    expect(frames).toHaveLength(1);
-  });
-});
-
 it('shows streamed replies on the native text fallback and restores the retained page', async () => {
   const hud = new HudPresenter(fakeClient(), new HudPageBuilder());
   await hud.showText('Retained page', ContainerId.Main);
@@ -786,7 +618,7 @@ describe('HudPresenter modal surfaces', () => {
 
     // A different page supersedes it.
     await hud.showList(['[09:30] Design review'], { title: 'PLANNING', selectable: true });
-    expect(frames[frames.length - 1]?.actionOverlay).toBeUndefined();
+    expect(hud.isProductivityVisible(saved)).toBe(false);
   });
 
   it('supersedes the receipt strip when the next page arrives', async () => {
@@ -810,7 +642,6 @@ describe('HudPresenter modal surfaces', () => {
       kind: 'overview', actionOverlay: { productivity: saved },
     });
     await hud.showList(['[09:30] Design review'], { title: 'PLANNING', selectable: true });
-    expect(frames[frames.length - 1]?.actionOverlay).toBeUndefined();
     expect(hud.isProductivityVisible(saved)).toBe(false);
   });
 
@@ -892,7 +723,7 @@ describe('HudPresenter modal surfaces', () => {
     expect(frames[frames.length - 1]).toMatchObject({ micOn: true });
   });
 
-  it('passes an exact redacted Planning grid to the visual list and drops partial metadata', async () => {
+  it('passes an exact redacted Planning grid to the visual list; a partial grid is a firmware list', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
@@ -925,9 +756,8 @@ describe('HudPresenter modal surfaces', () => {
       selectable: true,
       planningGrid: planningGrid.slice(0, 41),
     });
-    const partial = frames[frames.length - 1]!;
-    expect(partial.kind).toBe('list');
-    if (partial.kind === 'list') expect(partial.planningGrid).toBeUndefined();
+    // Without a whole grid there is nothing to draw: the page is Even's list.
+    expect(frames[frames.length - 1]).toBe(complete);
   });
 
   it('keeps a plain Mac reply and its appended stream in the visual overview frame', async () => {
@@ -1483,21 +1313,6 @@ describe('an answer is not an interruption', () => {
   });
 });
 
-
-describe('complete compact action footers', () => {
-  it('retains all paging, read, reply and Back controls on the custom surface', async () => {
-    const frames: HudVisualFrame[] = [];
-    const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), {
-      paint: async (frame) => {frames.push(frame); return true;},
-    });
-    const hint = 'up newer · down older · tap read · say reply · left x2: back';
-    await hud.showList(['Latest messages', 'Dele · Ready'], {title: 'MESSAGES · CONVERSATION', hint});
-    const frame = frames[frames.length - 1];
-    expect(frame?.kind).toBe('list');
-    if (frame?.kind !== 'list') throw new Error('Expected conversation');
-    expect(frame.hint).toBe(hint);
-  });
-});
 
 describe('Terminal opening paint ownership', () => {
   const model = { screen: 'agent_terminal', state: 'ready', topic: 'work', collaborators: [], activity: 'Ready' } as const;

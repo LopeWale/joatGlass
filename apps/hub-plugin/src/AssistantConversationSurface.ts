@@ -11,14 +11,11 @@ import {
   type AssistantConversationPage,
   type HudPageBuilder,
 } from './HudPageBuilder';
-import type {
-  AssistantConversationSnapshot,
-  AssistantConversationTurn,
-} from './types';
 import {
-  ASSISTANT_CONVERSATION_VISUAL_GEOMETRY,
-  type AssistantConversationVisual,
-} from './HudVisualSurface';
+  ContainerId,
+  type AssistantConversationSnapshot,
+  type AssistantConversationTurn,
+} from './types';
 
 export type {
   AssistantConversationSnapshot,
@@ -48,14 +45,11 @@ export interface AssistantConversationIdentity {
 interface AssistantConversationSurfaceOptions {
   indicatorIntervalMs?: number;
   continuationPromptEnabled?: boolean;
-  paintView?: (
-    view: AssistantConversationVisual,
-    isCurrent: () => boolean,
-  ) => Promise<boolean>;
-  measureTextWidth?: (text: string) => number;
   /** Own the page-type transition when a visual HUD is mounted underneath.
    * Native text must never rebuild while an image upload is still in flight. */
   replacePage?: (page: RebuildPageContainer) => Promise<boolean>;
+  /** The page's live header line (HudPresenter.nativeHeader) at rebuild. */
+  statusText?: () => string;
 }
 
 export type ConversationExitResult = 'inactive' | 'prompted' | 'exited' | 'failed';
@@ -73,10 +67,7 @@ export interface AssistantConversationSurfaceState {
 // the card height as lines arrive would turn every early chunk into a full
 // rebuildPageContainer and recreate the very redraw problem this path fixes.
 const NATIVE_LINE_STAGES = [7] as const;
-const VISUAL_LINE_STAGES = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
-// The visual renderer has eight observed morph phases. The text-only
-// compatibility page cannot reproduce their geometry, but it keeps the same
-// cadence and phase count with safe firmware glyphs.
+// Eight indicator phases in firmware glyphs, at the cadence Even AI uses.
 const INDICATOR_FRAMES = [
   '■ □', '□ ■', '■', '■ ■', '□ □', '■', '□', '■',
 ] as const;
@@ -312,8 +303,12 @@ export class AssistantConversationSurface {
   private lastPaintSucceeded = false;
   private readonly indicatorIntervalMs: number;
   private readonly continuationPromptEnabled: boolean;
-  private readonly paintView?: AssistantConversationSurfaceOptions['paintView'];
   private readonly replacePage?: AssistantConversationSurfaceOptions['replacePage'];
+  private readonly statusText?: AssistantConversationSurfaceOptions['statusText'];
+  /** The header as the glass shows it, and the one it should show. */
+  private shownStatus = '';
+  private desiredStatus = '';
+  private statusDirty = false;
   private readonly viewportOptions: ConversationViewportOptions;
 
   constructor(
@@ -324,17 +319,9 @@ export class AssistantConversationSurface {
   ) {
     this.indicatorIntervalMs = Math.max(0, options.indicatorIntervalMs ?? 450);
     this.continuationPromptEnabled = options.continuationPromptEnabled ?? true;
-    this.paintView = options.paintView;
     this.replacePage = options.replacePage;
-    this.viewportOptions = options.paintView
-      ? {
-        lineStages: VISUAL_LINE_STAGES,
-        textWidth: ASSISTANT_CONVERSATION_VISUAL_GEOMETRY.width
-          - ASSISTANT_CONVERSATION_VISUAL_GEOMETRY.textInsetLeft
-          - ASSISTANT_CONVERSATION_VISUAL_GEOMETRY.textInsetRight,
-        ...(options.measureTextWidth ? { measureTextWidth: options.measureTextWidth } : {}),
-      }
-      : {};
+    this.statusText = options.statusText;
+    this.viewportOptions = {};
   }
 
   async present(value: AssistantConversationSnapshot): Promise<boolean> {
@@ -586,15 +573,18 @@ export class AssistantConversationSurface {
     const tracked = work.finally(() => {
       if (this.draining !== tracked) return;
       this.draining = undefined;
-      if ((this.snapshotDirty || this.footerDirty) && this.canWrite()) void this.ensureDrain();
+      if ((this.snapshotDirty || this.footerDirty || this.statusDirty) && this.canWrite()) void this.ensureDrain();
     });
     this.draining = tracked;
     return tracked;
   }
 
   private async drain(): Promise<void> {
-    while (this.canWrite() && (this.snapshotDirty || this.footerDirty)) {
-      if (this.snapshotDirty) {
+    while (this.canWrite() && (this.snapshotDirty || this.footerDirty || this.statusDirty)) {
+      if (this.statusDirty && !this.snapshotDirty && this.lastView !== undefined) {
+        this.statusDirty = false;
+        await this.paintStatus();
+      } else if (this.snapshotDirty) {
         this.snapshotDirty = false;
         this.footerDirty = false;
         this.lastPaintSucceeded = await this.paintSnapshot();
@@ -614,12 +604,10 @@ export class AssistantConversationSurface {
       this.viewportOptions,
     );
     const needsRebuild = this.pageLineCapacity !== view.lineCapacity || this.lastView === undefined;
-    let painted = this.paintView
-      ? await this.paintVisual(current, view)
-      : needsRebuild
-        ? await this.rebuild(view)
-        : await this.upgradeView(view);
-    if (!painted && !this.paintView && !needsRebuild && this.canWrite()) {
+    let painted = needsRebuild
+      ? await this.rebuild(view)
+      : await this.upgradeView(view);
+    if (!painted && !needsRebuild && this.canWrite()) {
       painted = await this.rebuild(view);
     }
     if (!painted) {
@@ -643,14 +631,12 @@ export class AssistantConversationSurface {
       current, this.committedScroll, this.indicatorFrame, this.continuePrompt,
       this.viewportOptions,
     );
-    const ok = this.paintView
-      ? await this.paintVisual(current, view)
-      : await this.upgrade(
-        AssistantConversationContainerId.Generation,
-        'generation',
-        view.footerText,
-        this.lastView.footerText,
-      );
+    const ok = await this.upgrade(
+      AssistantConversationContainerId.Generation,
+      'generation',
+      view.footerText,
+      this.lastView.footerText,
+    );
     if (ok) {
       this.lastView = { ...this.lastView, footerText: view.footerText };
       this.armStateTimers();
@@ -658,42 +644,43 @@ export class AssistantConversationSurface {
     return ok;
   }
 
-  private rebuild(view: ConversationViewport): Promise<boolean> {
-    const page = this.layouts.assistantConversationLayout(view);
-    return this.replacePage
-      ? this.replacePage(page)
-      : this.client.require().rebuildPageContainer(page);
+  private async rebuild(view: ConversationViewport): Promise<boolean> {
+    const status = this.statusText?.() ?? this.desiredStatus;
+    const page = this.layouts.assistantConversationLayout(view, status);
+    const rebuilt = this.replacePage
+      ? await this.replacePage(page)
+      : await this.client.require().rebuildPageContainer(page);
+    if (rebuilt) {
+      this.shownStatus = status;
+      this.desiredStatus = status;
+      this.statusDirty = false;
+    }
+    return rebuilt;
   }
 
-  private paintVisual(
-    snapshot: AssistantConversationSnapshot,
-    view: ConversationViewport,
-  ): Promise<boolean> {
-    const paint = this.paintView;
-    if (!paint) return Promise.resolve(false);
-    const indicatorFrame = this.indicatorFrame;
-    const continuePrompt = this.continuePrompt;
-    const expectedScroll = view.scrollFromTail;
-    const visual: AssistantConversationVisual = {
-      conversationId: snapshot.conversationId,
-      revision: snapshot.revision,
-      state: snapshot.state,
-      visibleLines: view.visibleLines.map((line) => ({ ...line })),
-      lineCapacity: view.lineCapacity,
-      totalLines: view.totalLines,
-      scrollFromTail: view.scrollFromTail,
-      maximumScrollFromTail: view.maximumScrollFromTail,
-      indicatorFrame,
-      continuePrompt,
-    };
-    return paint(visual, () => (
-      this.canWrite()
-      && this.snapshot === snapshot
-      && this.snapshot.revision === snapshot.revision
-      && this.desiredScroll === expectedScroll
-      && this.indicatorFrame === indicatorFrame
-      && this.continuePrompt === continuePrompt
-    ));
+  /**
+   * The header line changed (the clock, the mic, the battery, a running
+   * Pomodoro or route): one in-place upgrade, serialized with the
+   * transcript writes so the two never race on the bridge.
+   */
+  setStatus(text: string): Promise<boolean> {
+    this.desiredStatus = text;
+    if (!this.canWrite() || this.lastView === undefined) return Promise.resolve(true);
+    if (text === this.shownStatus) {
+      this.statusDirty = false;
+      return Promise.resolve(true);
+    }
+    this.statusDirty = true;
+    return this.ensureDrain().then(() => this.shownStatus === text);
+  }
+
+  private async paintStatus(): Promise<boolean> {
+    const text = this.desiredStatus;
+    if (text === this.shownStatus) return true;
+    const previous = this.shownStatus;
+    const ok = await this.upgrade(ContainerId.StatusBar, 'status', text, previous);
+    if (ok) this.shownStatus = text;
+    return ok;
   }
 
   private async upgradeView(view: ConversationViewport): Promise<boolean> {

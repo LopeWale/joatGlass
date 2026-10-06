@@ -1,3 +1,4 @@
+import { firmwareLineWidth } from './FirmwareText';
 import type { LinkState } from './MacLink';
 
 /**
@@ -23,6 +24,9 @@ export interface HudStatusModel {
   /** The Mac's transient state word ("hearing you…"), already stripped of
    * any leading "JOAT". Absent at rest. */
   macState?: string;
+  /** The other features still running, as chips ("Focus 12m", "→ 80 m"),
+   * composed by the presenter for the page on the glass (ActivityChips). */
+  activities?: readonly string[];
 }
 
 /** DeviceMonitor's warning threshold; the header also prints the number
@@ -40,13 +44,6 @@ const BATTERY_BLOCKS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'] 
 
 function upper(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toUpperCase();
-}
-
-/** Resting: the link is up and the Mac has nothing transient to say. The
- * microphone is NOT part of this — its glyph and icon carry it, so a page
- * no longer loses its name in the spine the moment the mic opens. */
-export function hudStatusResting(model: HudStatusModel): boolean {
-  return model.link === 'connected' && !model.macState?.trim();
 }
 
 /**
@@ -90,18 +87,39 @@ export function batteryGlyph(level: number | undefined, charging = false): strin
   return clamped <= HUD_LOW_BATTERY_PCT ? `${block} ${clamped}%` : block;
 }
 
+/** Inner width of the full-width header container (576 − 2×4 padding). */
+export const HEADER_TEXT_WIDTH = 568;
+
 /**
- * The one-line firmware header: clock · label · mic · battery, in the same
- * order the raster spine lays them out left to right. On native pages this
- * replaces the two lines they used to spend (a status line in words plus a
- * separate title line), which is where every firmware list's fifth row
- * came from.
+ * The one-line firmware header: clock · label · activities · mic · battery,
+ * in the same order the raster spine lays them out left to right. On native
+ * pages this replaces the two lines they used to spend (a status line in
+ * words plus a separate title line), which is where every firmware list's
+ * fifth row came from.
+ *
+ * Fitted by the firmware's own measurement (`measureTextWrap`, via
+ * FirmwareText): when the line would wrap, the page's word is shortened
+ * and then dropped — never the clock, the activity chips or the glyphs,
+ * which are the facts the line exists to carry.
  */
-export function nativeStatusLine(model: HudStatusModel, pageTitle?: string): string {
-  const parts = [model.clock || '--:--', hudStatusLabel(model, pageTitle), micGlyph(model.mic)];
+export function nativeStatusLine(
+  model: HudStatusModel, pageTitle?: string, width = HEADER_TEXT_WIDTH,
+): string {
+  const head = model.clock || '--:--';
+  const word = hudStatusLabel(model, pageTitle);
+  const tail = [...(model.activities ?? []).filter((chip) => chip.trim().length > 0), micGlyph(model.mic)];
   const battery = batteryGlyph(model.battery, model.charging);
-  if (battery) parts.push(battery);
-  return parts.join(' · ');
+  if (battery) tail.push(battery);
+  const compose = (label: string) => [head, ...(label ? [label] : []), ...tail].join(' · ');
+  const fits = (line: string) => firmwareLineWidth(line) <= width;
+  const full = compose(word);
+  if (fits(full)) return full;
+  const points = Array.from(word);
+  for (let keep = points.length - 1; keep >= 1; keep -= 1) {
+    const candidate = compose(`${points.slice(0, keep).join('').trimEnd()}…`);
+    if (fits(candidate)) return candidate;
+  }
+  return compose('');
 }
 
 /**

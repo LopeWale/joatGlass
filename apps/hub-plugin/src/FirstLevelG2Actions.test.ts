@@ -256,8 +256,6 @@ describe('wearer G2 actions through Settings', () => {
     harness.fire(rightPress());
 
     // No cursor to move, no policy to apply, no page to leave.
-    expect(harness.hud.setSelection).not.toHaveBeenCalled();
-    expect(harness.hud.moveSelection).not.toHaveBeenCalled();
     expect(harness.settings.resumePolicy).toBe('confirm');
     expect(harness.hud.showDefault).not.toHaveBeenCalled();
     expect(harness.menu.isOpen()).toBe(true);
