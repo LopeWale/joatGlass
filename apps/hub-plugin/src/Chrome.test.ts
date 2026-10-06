@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Chrome } from './Chrome';
-import { HudPresenter } from './HudPresenter';
+import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import type { BridgeClient } from './BridgeClient';
 import type { TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import { hudSpineLabel } from './HudCanvasRenderer';
 import type { HudVisualFrame } from './HudVisualSurface';
 import { ContainerId } from './types';
+
+// These tests pin the IMAGE overview (VITE_NATIVE_OVERVIEW=0). The text
+// overview, which is Home by default, has its own: HudPresenter.textOverview.test.ts.
+setNativeOverviewForTest(false);
 
 /**
  * This file did not exist while Chrome shipped three regressions, which is

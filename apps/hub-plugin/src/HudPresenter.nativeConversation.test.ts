@@ -2,9 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
-import { HudPresenter } from './HudPresenter';
+import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
 import type { AssistantConversationSnapshot } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
+
+// These tests pin the IMAGE overview (VITE_NATIVE_OVERVIEW=0). The text
+// overview, which is Home by default, has its own: HudPresenter.textOverview.test.ts.
+setNativeOverviewForTest(false);
 
 function snapshot(revision: number, answer?: string): AssistantConversationSnapshot {
   return {

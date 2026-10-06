@@ -56,6 +56,10 @@ export class BridgeClient {
   private displayActive = true;
   private displayRevision = 0;
   private started = false;
+  /** Bumped by every full-page write (startup page or rebuild) as it goes
+   * to the host, so a caller can tell whether the page it drew is still the
+   * page on the glass before it upgrades one of its containers. */
+  private pageEpochValue = 0;
   private readonly unsubscribes: Unsubscribe[] = [];
   private launchSource?: string;
 
@@ -123,6 +127,11 @@ export class BridgeClient {
     return this.require();
   }
 
+  /** The number of full-page writes sent so far (see pageEpochValue). */
+  pageEpoch(): number {
+    return this.pageEpochValue;
+  }
+
   require(): EvenAppBridge {
     if (!this.bridge) throw new Error('bridge not initialized; call init() first');
     if (!this.displayBridge) {
@@ -134,11 +143,16 @@ export class BridgeClient {
         'createStartUpPageContainer' | 'rebuildPageContainer' | 'textContainerUpgrade' | 'updateImageRawData'
       > = {
         createStartUpPageContainer: (page) => this.writeDisplay(
-          () => { hostCall('createStartUpPageContainer'); return native.createStartUpPageContainer(page); },
+          () => {
+            this.pageEpochValue += 1;
+            hostCall('createStartUpPageContainer');
+            return native.createStartUpPageContainer(page);
+          },
           StartUpPageCreateResult.invalid,
         ),
         rebuildPageContainer: (page) => this.writeDisplay(
           async () => {
+            this.pageEpochValue += 1;
             hostCall('rebuildPageContainer', page.textObject?.length);
             const accepted = await native.rebuildPageContainer(page);
             if (!accepted) reportRejectedPage(page);

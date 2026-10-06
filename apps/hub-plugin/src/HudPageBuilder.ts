@@ -13,6 +13,9 @@ import { pxTruncate } from '@evenrealities/pretext';
 import { TEXT_CONTAINER_MAX_BYTES, fitUtf8 } from './FirmwareLimits';
 import { FIRMWARE_LINE_HEIGHT, containerLineCapacity, fitLines } from './FirmwareText';
 import {
+  OVERVIEW_PAD, OVERVIEW_TEXT_GEOMETRY, type OverviewTextView, fitBand, railRows,
+} from './OverviewText';
+import {
   CANVAS,
   CAPABILITIES,
   CAPABILITY_MENU_ID_BASE,
@@ -318,6 +321,48 @@ export class HudPageBuilder {
         itemID: CAPABILITY_MENU_ID_BASE + index,
         itemName: name,
       })),
+    });
+  }
+
+  /**
+   * Home as six firmware text containers: no image containers, so opening
+   * it is one rebuild and every later change is an in-place upgrade of the
+   * band that changed (OverviewText.ts has the geometry and its sources).
+   * The rail is the capture container: it never overflows, so every swipe
+   * reaches the plugin and steps the rail.
+   */
+  overviewTextLayout(view: OverviewTextView): RebuildPageContainer {
+    const g = OVERVIEW_TEXT_GEOMETRY;
+    const text = (
+      containerID: number, containerName: string,
+      box: { x: number; y: number; width: number; height: number },
+      zOrderIndex: number, textColor: number, content: string, capture: 0 | 1 = 0,
+    ): TextContainerProperty => new TextContainerProperty({
+      containerID, containerName,
+      xPosition: box.x, yPosition: box.y, width: box.width, height: box.height,
+      paddingLength: OVERVIEW_PAD, borderWidth: 0,
+      isEventCapture: capture, zOrderIndex, textColor,
+      content: fitUtf8(content, TEXT_CONTAINER_MAX_BYTES),
+    });
+    return new RebuildPageContainer({
+      containerTotalNum: 6,
+      ...this.menuConfig(),
+      textObject: [
+        text(ContainerId.StatusBar, 'status', g.header, 1, 2, fitBand([view.header], g.header)),
+        text(ContainerId.Context, 'info', g.info, 2, 3, fitBand(view.info, g.info)),
+        text(ContainerId.Tray, 'tabs', g.tabs, 3, 2, fitBand(railRows(view.tabs), g.tabs), 1),
+        text(ContainerId.Main, 'pane', g.pane, 4,
+          Math.max(0, Math.min(4, Math.round(view.paneBrightness))), fitBand(view.pane, g.pane)),
+        // The column rule: a 2 px box whose 1 px border draws one solid line.
+        // No padding and a single space, so its text area never overflows.
+        new TextContainerProperty({
+          containerID: ContainerId.Image, containerName: 'rule',
+          xPosition: g.rule.x, yPosition: g.rule.y, width: g.rule.width, height: g.rule.height,
+          paddingLength: 0, borderWidth: 1, borderColor: 6, borderRadius: 0,
+          isEventCapture: 0, zOrderIndex: 5, textColor: 1, content: ' ',
+        }),
+        text(ContainerId.Hint, 'hint', g.hint, 6, 2, fitBand([GesturePolicy.formatHint(view.hint)], g.hint)),
+      ],
     });
   }
 
