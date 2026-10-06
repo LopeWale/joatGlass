@@ -20,8 +20,18 @@ const TEXT_PAGE_TITLES = new Set([
   'MESSAGES · REVIEW', 'MESSAGES · COMPOSE', 'MESSAGES · SETUP', 'MESSAGES · ACCESS',
   'MESSAGES · RETRY', 'MESSAGES · SENT', 'MESSAGES · FAILED', 'MESSAGES · CANCELLED',
   'MESSAGES · UNCERTAIN', 'BRAINSTORM · SAVED', 'ACTIVITY · EMPTY',
-  'PLANNING · REFRESH', 'PLANNING · REMINDER',
+  'PLANNING · REFRESH', 'PLANNING · REMINDER', 'AGENT TERMINAL · CHECK',
 ]);
+
+/** Readers that are a review: the tap sends what the wearer has just read,
+ * so it counts only on the very last page — the Mac's last page and the
+ * last firmware page cut from it (the Mac's `_LAST_PAGE_TAP_TITLES`). */
+const REVIEW_READER_TITLES = new Set(['MESSAGES · REVIEW', 'AGENT TERMINAL · CHECK']);
+
+/** The capability a page belongs to: its title before the first "·". */
+function titleFamily(title: string): string {
+  return title.trim().toUpperCase().split(' · ')[0] ?? '';
+}
 
 /** The expanded Pomodoro's first row on the firmware list: the raster page
  * drew a seconds countdown that cost one image tile every second over BLE.
@@ -881,6 +891,7 @@ export class CapabilityMenu {
       ...(firmwareList ? { nativeFirmwareList: true } : {}),
       ...(nativeTextPage ? { nativeTextPage: true } : {}),
       ...(textPageFromEnd ? { nativeTextPageFromEnd: true } : {}),
+      ...(nativeTextPage && REVIEW_READER_TITLES.has(normalized) ? { reviewTapOnLastPage: true } : {}),
     });
     if (
       !this.isCurrentTransition(transition)
@@ -1243,6 +1254,10 @@ export class CapabilityMenu {
         this.requestQuickNotesPage(eventType);
         return true;
       }
+      if (this.isMacPagedReader()) {
+        this.requestReaderPage(eventType);
+        return true;
+      }
       if (this.dashboard) {
         this.dashboardScroll(delta);
         return true;
@@ -1395,6 +1410,13 @@ export class CapabilityMenu {
       void this.openCapability('Messages', 0);
       return true;
     }
+    // A review sends what the wearer read, and its last Mac page may span
+    // several firmware pages. Before the very last page a tap reads on, as
+    // Even's own reader turns the page on a tap, and never sends unread words.
+    if (this.isReviewReader() && !this.reviewOnLastPage()) {
+      this.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+      return true;
+    }
     if (!this.dataRowsSelectable || this.dataItemCount === 0) return true;
     if (this.dataSurface?.quickNotesPage && this.dataPagePending) return true;
     if (this.dataSelectionPending) return true;
@@ -1427,7 +1449,7 @@ export class CapabilityMenu {
       // This is the current draft's review action, not a new recipient row.
       // Retain the original selection/action binding for its confirmation.
       const reader = this.dataSurface?.readerPage;
-      if (!reader || reader.index !== reader.count - 1) {
+      if (!reader) {
         this.dataSelectionPending = false;
         return true;
       }
@@ -1778,6 +1800,47 @@ export class CapabilityMenu {
       eventType, requestId: this.pendingRequestId, traceId: this.noteReaderTraceId,
     }});
     this.armResponseTimeout('QUICKNOTES', this.pendingRequestId);
+  }
+
+  /** A reader the Mac pages that has no request of its own above (a saved
+   * Brainstorm, a spoken terminal reply under check): QuickNotes and the
+   * Messages review keep theirs. */
+  private isMacPagedReader(): boolean {
+    return this.dataSurface?.nativeTextPage === true
+      && this.dataSurface.readerPage !== undefined
+      && !this.isQuickNotesReader();
+  }
+
+  /** Past the reader's local edge, ask the Mac for its neighbouring page.
+   * The request names the reader the Mac opened (its id and current page)
+   * and the capability that owns it, the title's family. */
+  private requestReaderPage(eventType: number): void {
+    const surface = this.dataSurface;
+    const reader = surface?.readerPage;
+    if (!surface || !reader || this.dataPagePending || !this.pendingRequestId) return;
+    const direction = eventType === OsEventTypeList.SCROLL_TOP_EVENT ? -1
+      : eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT ? 1 : 0;
+    const target = reader.index + direction;
+    if (direction === 0 || target < 0 || target >= reader.count) return;
+    // Swiping back lands on the end of the previous page, as it reads.
+    this.messagePageDirection = direction;
+    this.dataPagePending = true;
+    this.link.send({kind: 'input', event: {
+      containerName: 'cappage', selectedName: titleFamily(surface.title),
+      selectedIndex: reader.index, eventType, requestId: this.pendingRequestId, traceId: reader.id,
+    }});
+    if (this.pendingTitle) this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
+  }
+
+  private isReviewReader(): boolean {
+    return REVIEW_READER_TITLES.has(this.dataSurface?.title.trim().toUpperCase() ?? '');
+  }
+
+  /** The Mac's last page, shown to its last firmware page. */
+  private reviewOnLastPage(): boolean {
+    const reader = this.dataSurface?.readerPage;
+    return reader !== undefined && reader.index === reader.count - 1
+      && (this.hud.isTextPageAtEnd?.() ?? true);
   }
 
   private retireQuickNotesReader(destination: 'list' | 'home'): void {

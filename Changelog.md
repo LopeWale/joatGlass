@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-10-06 — Readers page to their end, and a review sends only from its last page
+
+The wearer asked where the plugin re-implements scrolling the firmware already does. Readers are paged twice: the Mac pages a text into ten-row pages, and the plugin pages each of those again for the firmware font. Three readers failed in that seam. Each failure reproduced in the official simulator, each fix is plugin-only, and each has a test that fails on the code before it.
+
+- **The spoken-reply check drew as a list.** `AGENT TERMINAL · CHECK` (0.1.101, for replies too long for the confirmation page) was not a text-page title, so the plugin drew it as a firmware list. Five of its ten rows showed, a swipe moved a highlight, and a tap on the fourth row sent the reply. It is a text page now.
+- **A saved Brainstorm stopped at its first page.** Only QuickNotes and the Messages review asked the Mac for a reader's next page. `BRAINSTORM · SAVED` promised "swipe: more", and six swipes left it on the same page.
+  - Every reader the Mac pages now asks past the local edge, naming the reader's id and page.
+  - A swipe back opens the previous page on its end.
+- **A review could be confirmed unread.** The Mac offers a review's tap only on its last page, but that page can span two firmware pages. On the first of them "tap: confirm" was offered, and a tap sent the message with its last two sentences unseen.
+  - A review (the Messages review, the terminal check) now sends only from the last firmware page of the Mac's last page.
+  - Before that page, a tap reads on (Even's text-heavy template also turns the page on a tap), and the footer offers the tap only on that page.
+- **The footer's swipe promise covers both layers.** It now reads "swipe: page" when a page lies either way. Before, a page with more below it could say "swipe: previous", because only the Mac's pages were counted.
+- **Deleted `AssistantAnswerPager.ts`.** It was a copy of Even's template pager that nothing had imported since `FirmwareText.paginateMeasured` replaced it.
+- **What the firmware scrolls by itself**, measured with a probe page in simulator 0.9.5 and recorded in `docs/EVEN_RESEARCH_QUESTIONS.md`:
+  - An overflowing capture text container scrolls one line per swipe and draws its own 4 px scrollbar.
+  - Only boundary swipes reach the app.
+  - Any upgrade of its text resets it to the top.
+  - JOAT never lets a text page overflow, so every swipe turns seven lines, the pattern of Even's own text-heavy template ("On G2 you can't scroll. You turn pages.").
+- Plugin 1065 tests; typecheck and the production build are clean.
+
 ## 2026-10-06 — The home clock turns with the minute
 
 - Measured in the simulator with a host-call probe over an idle home screen: the clock repainted on a free-running 30-second interval, so it turned up to 30 s after the minute (14 s in the run) and the page was rendered twice a minute for one change. `Chrome` now schedules its repaint at each minute boundary (+50 ms) and once a minute after that. A test pins 09:41:30 → nothing until 09:42:00.1, which shows 9:42, then one repaint at 09:43:00.1.

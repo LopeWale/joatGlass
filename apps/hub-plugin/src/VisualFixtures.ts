@@ -487,7 +487,7 @@ export function panelVisualTab(state: PanelVisualState): PanelContentTab {
 
 /** The three pushes a connected Mac would have made, content-free. News
  * rows follow "[age] title · source" within HudList's 64-character cap;
- * twelve of them, so the expanded page shows its scrollbar. */
+ * twelve of them, more than the firmware list shows at once. */
 export function panelVisualPushes(nowMs = Date.now()): HudPanelMessage[] {
   const focusLeftMs = 14 * 60_000 + 37_000;
   return [

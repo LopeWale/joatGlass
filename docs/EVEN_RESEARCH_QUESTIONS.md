@@ -55,14 +55,42 @@ of the four templates, and nowhere in even-g2-notes.
 - What do levels 0-4 actually render as on hardware? (Measured off the
   simulator: level 1 -> 179/255, level 2 -> 197/255, level 4 -> 255.)
 
-### 5. Scroll indicators and firmware scrolling
-even-g2-notes states that a text container with `isEventCapture: 1` scrolls
-its overflow internally and shows its own scrollbar, with the app receiving
-only `SCROLL_TOP_EVENT` / `SCROLL_BOTTOM_EVENT` boundary events. Confirm
-against Even's own docs, then delete any hand-rolled scrollbar that
-duplicates it.
+### 5. How far one swipe scrolls on the glasses
+Answered for the simulator below ("What the firmware scrolls by itself").
+Still open on hardware: does one swipe move an overflowing text container
+by one line, as the 0.9.5 simulator does, or further? That one number
+decides whether a reader should keep turning pages or hand its text to the
+firmware.
 
 ## Answered
+
+### What the firmware scrolls by itself — ANSWERED (2026-10-06)
+Sources: hub.evenrealities.com/docs/build/display ("If content overflows
+and the container has `isEventCapture: 1`, the firmware scrolls it"), the
+official text-heavy template (`even-realities/evenhub-templates`, README:
+"On G2 you can't scroll. You turn pages." — it pre-paginates with
+`@evenrealities/pretext`, turns pages with `textContainerUpgrade` and keeps
+a page counter), and a probe page measured in the official simulator 0.9.5:
+- An overflowing capture text container scrolls ONE line (27 px) per
+  swipe; the last step only aligns the final line. Mid-scroll swipes never
+  reach the app. At the bottom every further swipe arrives as
+  `SCROLL_BOTTOM_EVENT`, at the top as `SCROLL_TOP_EVENT`.
+- The firmware draws its own scrollbar: 4 px wide at the container's right
+  edge, a thumb proportional to the visible share (81 px for 8 of 20 lines),
+  moving with each line.
+- `textContainerUpgrade` of the scrolling container resets it to the top;
+  an upgrade of another container leaves it; a rebuild resets it.
+- A capture container whose text fits shows no scrollbar, and every swipe
+  arrives as a boundary event.
+What JOAT does with it: no text page is allowed to overflow
+(`paginateMeasured` cuts each page to fit), so every swipe reaches the
+plugin and turns seven lines — Even's own pattern. Two pages scroll by
+themselves on purpose: the conversation (one line a swipe, because its dim
+and bright text layers must move together and no firmware scroll moves
+two containers) and the Agent Terminal (six rows a swipe; an upgrade per
+streamed line would reset a firmware scroll to the top). No hand-rolled
+scrollbar remains on a text page; the conversation's position column is
+the only one.
 
 ### 2. The Even AI agent interface — ANSWERED (2026-09-24)
 Source: Even's own product-page demo video (the wearer-supplied screen
@@ -121,7 +149,10 @@ the card and none reached the plugin; the tab rail never moved. The rail
 (which never overflows) is now the capture container and the pane is a
 six-row, one-line-per-row preview. Firmware paging inside the opened
 article works the same way in our favour: swipes scroll the page for free
-and only the boundary swipe reaches the Mac to turn the page.
+and only the boundary swipe reaches the Mac to turn the page. (No longer
+so: since 2026-10-05 the opened article is a text page measured to fit,
+so it never overflows and every swipe turns a page; see "What the
+firmware scrolls by itself".)
 
 ### Why Even's Dashboard is cheap and our overview is not — ANSWERED
 

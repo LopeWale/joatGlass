@@ -168,6 +168,8 @@ export interface ListSurfaceOptions {
   nativeTextPage?: boolean;
   /** Open the text page on its last local page: the Mac answered a swipe up. */
   nativeTextPageFromEnd?: boolean;
+  /** A review: its tap is offered only on the last local page. */
+  reviewTapOnLastPage?: boolean;
 }
 
 interface ResolvedListSurfaceOptions {
@@ -185,6 +187,7 @@ interface ResolvedListSurfaceOptions {
   /** This page is a firmware text page when the visual surface can hand over. */
   nativeTextPage?: boolean;
   nativeTextPageFromEnd?: boolean;
+  reviewTapOnLastPage?: boolean;
 }
 
 interface HudContentState {
@@ -258,10 +261,26 @@ interface NativeTextPageState {
   hint: string;
 }
 
-function textPageHint(page: number, count: number, macHint: string): string {
+/** The swipe promises a Mac reader writes for its own pages, formatted. */
+const PAGE_SWIPES = new Set(['swipe: previous', 'swipe: more', 'swipe: page']);
+
+function textPageHint(page: number, count: number, macHint: string, review = false): string {
   // The Mac still writes "left x2"; every page says "double-click".
   const hint = GesturePolicy.formatHint(macHint);
-  return count > 1 ? `${page + 1}/${count} · ${hint}` : hint;
+  if (count <= 1) return hint;
+  // Two layers page this text: the Mac's pages, and the firmware pages cut
+  // from each. The swipe promise covers both, and a review offers its tap
+  // only on the last firmware page (the Mac offers it only on its last).
+  const clauses = hint.split(' · ');
+  const swipes = clauses.filter((clause) => clause.startsWith('swipe:'));
+  if (swipes.some((clause) => !PAGE_SWIPES.has(clause))) return `${page + 1}/${count} · ${hint}`;
+  const back = page > 0 || swipes.some((clause) => clause !== 'swipe: more');
+  const more = page < count - 1 || swipes.some((clause) => clause !== 'swipe: previous');
+  const swipe = back && more ? 'swipe: page' : more ? 'swipe: more' : back ? 'swipe: previous' : undefined;
+  const last = page === count - 1;
+  const rest = clauses.filter((clause) => !clause.startsWith('swipe:')
+    && (last || !review || !clause.startsWith('tap:')));
+  return [`${page + 1}/${count}`, ...(swipe ? [swipe] : []), ...rest].join(' · ');
 }
 
 /** Every list is Even's own list unless it is a reader (a text page) or
@@ -1453,7 +1472,7 @@ export class HudPresenter {
       ? Math.min(this.nativeTextPage.page, pages.length - 1)
       : surface.options.nativeTextPageFromEnd ? pages.length - 1 : 0;
     const body = pages[page] ?? ' ';
-    const hint = textPageHint(page, pages.length, surface.options.hint);
+    const hint = textPageHint(page, pages.length, surface.options.hint, surface.options.reviewTapOnLastPage);
     const ok = await this.replaceNativePage(
       this.layouts.textPageLayout(body, { status: this.nativeHeader(surface.options.title), hint }),
       'text-page-native',
@@ -1484,6 +1503,15 @@ export class HudPresenter {
     return true;
   }
 
+  /** Whether the firmware text page shows its last local page, where a
+   * review's tap counts. True when no text page is on the glass: the state
+   * of an earlier one must never hold a later page's tap back. */
+  isTextPageAtEnd(): boolean {
+    const state = this.nativeTextPage;
+    if (!state || this.pageOwner !== 'text-page-native') return true;
+    return state.page >= state.pages.length - 1;
+  }
+
   /** Page the firmware text page locally. False at an edge, so the caller
    * can ask the Mac for its neighbouring page. */
   scrollTextPage(direction: 'up' | 'down'): boolean {
@@ -1495,9 +1523,10 @@ export class HudPresenter {
     const page = direction === 'down' ? state.page + 1 : state.page - 1;
     if (page < 0 || page >= state.pages.length) return false;
     const previous = { body: state.body, hint: state.hint };
+    const review = this.surface.kind === 'list' && this.surface.options.reviewTapOnLastPage === true;
     state.page = page;
     state.body = state.pages[page] ?? ' ';
-    state.hint = textPageHint(page, state.pages.length, macHint);
+    state.hint = textPageHint(page, state.pages.length, macHint, review);
     void (async () => {
       await this.upgradeNativeText(ContainerId.Main, 'main', state.body, previous.body);
       if (this.nativeTextPage !== state) return;
@@ -2876,6 +2905,7 @@ export class HudPresenter {
       ...(isFirmwareList(options, this.visual !== undefined) ? { nativeFirmwareList: true } : {}),
       ...(options.nativeTextPage ? { nativeTextPage: true } : {}),
       ...(options.nativeTextPage && options.nativeTextPageFromEnd ? { nativeTextPageFromEnd: true } : {}),
+      ...(options.nativeTextPage && options.reviewTapOnLastPage ? { reviewTapOnLastPage: true } : {}),
       ...(options.railTab ? { railTab: options.railTab } : {}),
       ...(planningGrid ? { planningGrid } : {}),
       ...(planningEntries ? { planningEntries } : {}),
