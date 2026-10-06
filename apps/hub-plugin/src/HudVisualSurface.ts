@@ -3,7 +3,7 @@ import {
   ImageRawDataUpdateResult,
 } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
-import type { G2DiagnosticTrace, G2TraceEvent } from './G2DiagnosticTrace';
+import type { G2DiagnosticTrace } from './G2DiagnosticTrace';
 import type { HudStatusModel } from './HudStatus';
 import { isNavigationSetupStatus, type NavigationHudModel } from './NavigationHud';
 import type { PanelRailVisual } from './PanelRail';
@@ -11,10 +11,8 @@ import {
   CANVAS,
   ContainerId,
   VisualContainerName,
-  type BrainstormHudModel,
   type HudContentKind,
   type PlanningGridCell,
-  type ProductivityHudDomain,
   type ProductivityHudModel,
 } from './types';
 
@@ -43,48 +41,10 @@ export interface AssistantOverlayVisual {
   revision?: number;
 }
 
-/** The retained Even-style conversation composited into JOAT's existing
- * four image tiles.  The controller resolves wrapping and scroll position;
- * the renderer owns only the approved type, brightness, and panel geometry. */
-export interface AssistantConversationVisual {
-  conversationId: string;
-  revision: number;
-  state: 'thinking' | 'answering' | 'ready';
-  visibleLines: Array<{
-    role: 'user' | 'assistant' | 'separator';
-    text: string;
-  }>;
-  lineCapacity: number;
-  totalLines: number;
-  scrollFromTail: number;
-  maximumScrollFromTail: number;
-  indicatorFrame: number;
-  continuePrompt: boolean;
-}
-
-/** Geometry shared by wrapping and painting the raster conversation.  The
- * fixed lower edge and one-row-at-a-time height are the observable Even AI
- * behavior; the insets keep JOAT's 14px proportional face fully readable. */
-export const ASSISTANT_CONVERSATION_VISUAL_GEOMETRY = {
-  x: 36,
-  width: 504,
-  bottom: 260,
-  textInsetLeft: 18,
-  textInsetRight: 20,
-  lineHeight: 18,
-  maximumLines: 9,
-  topPadding: 13,
-  footerHeight: 28,
-} as const;
-
+/** The pages that are pixels: the dashboard, the Planning month (a
+ * calendar grid has no firmware template) and live guidance with its map.
+ * Every other page is a firmware text page or list (HudPresenter). */
 type HudVisualBaseFrame =
-  | {
-    kind: 'prompt_question';
-    status: string;
-    micOn: boolean;
-    promptId: string;
-    question: string;
-  }
   | {
     kind: 'overview';
     status: string;
@@ -120,32 +80,10 @@ type HudVisualBaseFrame =
     rail?: PanelRailVisual;
   }
   | {
-    kind: 'confirmation';
-    status: string;
-    micOn: boolean;
-    prompt: string;
-    reviewDomain?: ProductivityHudDomain;
-    /** Explicit Mac-provided diagnostic category; never inferred from the
-     * private confirmation prompt. */
-    diagnosticKind?: 'messages';
-  }
-  | {
     kind: 'navigation';
     status: string;
     micOn: boolean;
     navigation: NavigationHudModel;
-  }
-  | {
-    kind: 'brainstorm';
-    status: string;
-    micOn: boolean;
-    brainstorm: BrainstormHudModel;
-  }
-  | {
-    kind: 'productivity';
-    status: string;
-    micOn: boolean;
-    productivity: ProductivityHudModel;
   };
 
 /** Overlays composite into the same four G2 images, not a fifth container.
@@ -157,32 +95,18 @@ export type HudVisualFrame = HudVisualBaseFrame & {
    * parsing `status` only for frames built without it. */
   statusModel?: HudStatusModel;
   assistantOverlay?: AssistantOverlayVisual;
-  assistantConversation?: AssistantConversationVisual;
   actionOverlay?: { productivity: ProductivityHudModel };
 };
 
 export interface HudFrameRenderer {
-  measureAssistantConversationText?(text: string): number;
-  scrollTranscript?(direction: 'up' | 'down'): boolean;
-  transcriptIsThinking?(): boolean;
   render(frame: HudVisualFrame): Promise<readonly HudImageTile[]>;
 }
 
 export interface HudFramePainter {
-  /** `localTick`: this repaint carries no new information from the Mac —
-   * only a device-side clock digit moved. It draws normally but is NOT
-   * recorded as a wearer-visible frame receipt. */
-  paint(frame: HudVisualFrame, localTick?: boolean): Promise<boolean>;
+  paint(frame: HudVisualFrame): Promise<boolean>;
   /** Receipt for this frame only. Cancellation and a page rebuild invalidate
    * the result; accepted identical pixels on the same page may be reused. */
   paintExact?(frame: HudVisualFrame, isCurrent: () => boolean): Promise<boolean>;
-  /** Measure JOAT's authored assistant face, so controller wrapping and
-   * rendered pixels use one width contract rather than firmware text metrics. */
-  measureAssistantConversationText?(text: string): number;
-  /** Move the brainstorm/terminal transcript window; true if it moved. */
-  scrollTranscript?(direction: 'up' | 'down'): boolean;
-  /** The transcript tail is a silent "Thinking…" marker awaiting tokens. */
-  transcriptIsThinking?(): boolean;
   /** The page on the glass was rebuilt: nothing painted before is on it. */
   forgetPage?(): void;
   /** Wait for queued paints without cancelling their delivery receipts. */
@@ -190,9 +114,6 @@ export interface HudFramePainter {
   /** Hold image submissions while a bounded native-idle check and page
    * replacement run. A wait timeout must never invoke replacePage. */
   withPageTransition?(replacePage: () => Promise<boolean>, isCurrent: () => boolean): Promise<boolean>;
-  /** Cancel queued work and wait for native settlement. For page replacement,
-   * use withPageTransition so submissions stay paused during the native call. */
-  preparePageTransition?(): Promise<void>;
   suspendDisplay?(): void;
   resumeDisplay?(): void;
 }
@@ -200,61 +121,6 @@ export interface HudFramePainter {
 /** Converts one raw raster tile into an image format the native bridge and
  * the official simulator both decode. */
 export type HudImageEncoder = (tile: HudImageTile) => Promise<Uint8Array>;
-
-function messagesDiagnosticSurface(frame: HudVisualFrame): Extract<G2TraceEvent, {
-  type: 'visual_frame'; kind: 'messages';
-}>['surface'] | undefined {
-  if (frame.kind === 'confirmation') {
-    return frame.diagnosticKind === 'messages' ? 'confirmation' : undefined;
-  }
-  if (frame.kind !== 'list') return undefined;
-  switch (frame.title.trim().toUpperCase()) {
-    case 'MESSAGES': return 'picker';
-    case 'MESSAGES · CONVERSATION': return 'conversation';
-    case 'MESSAGES · COMPOSE': return 'compose';
-    case 'MESSAGES · ACCESS': return 'access';
-    case 'MESSAGES · SETUP': return 'setup';
-    case 'MESSAGES · RETRY': return 'retry';
-    case 'MESSAGES · EMPTY': return 'empty';
-    case 'MESSAGES · READ ONLY': return 'read_only';
-    default: return undefined;
-  }
-}
-
-async function completedVisualFrameReceipt(
-  frame: HudVisualFrame,
-  tiles: readonly HudImageTile[],
-): Promise<Extract<G2TraceEvent, { type: 'visual_frame' }> | undefined> {
-  const messagesSurface = messagesDiagnosticSurface(frame);
-  if ((frame.kind !== 'brainstorm' && messagesSurface === undefined)
-    || tiles.length !== 4 || !globalThis.crypto?.subtle) {
-    return undefined;
-  }
-  const rasterLength = tiles.reduce((total, tile) => total + tile.pixels.length, 0);
-  const raster = new Uint8Array(rasterLength);
-  let offset = 0;
-  for (const tile of tiles) {
-    raster.set(tile.pixels, offset);
-    offset += tile.pixels.length;
-  }
-  const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', raster));
-  const sha256 = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
-  if (frame.kind === 'brainstorm') {
-    return {
-      type: 'visual_frame',
-      kind: 'brainstorm',
-      surface: frame.brainstorm.screen,
-      state: frame.brainstorm.state,
-      sha256,
-    };
-  }
-  return {
-    type: 'visual_frame',
-    kind: 'messages',
-    surface: messagesSurface!,
-    sha256,
-  };
-}
 
 /**
  * Only an idle background overview burst waits for this window. Explicit
@@ -309,7 +175,6 @@ function settleWithin<T>(work: Promise<T>, ms: number, what: string): Promise<T>
 
 interface PendingPaint {
   frame: HudVisualFrame;
-  localTick: boolean;
   isCurrent?: () => boolean;
   displayCurrent: () => boolean;
   resolve: Array<(painted: boolean) => void>;
@@ -485,52 +350,23 @@ export class HudVisualSurface implements HudFramePainter {
     }
   }
 
-  async preparePageTransition(): Promise<void> {
-    if (!this.displayActive) {
-      if (!await this.whenIdle(this.uploadTimeoutMs || 8000)) {
-        throw new Error('Native display did not become quiescent; page transition aborted');
-      }
-      return;
-    }
-    const bridgeCurrent = this.client.captureDisplayGuard?.() ?? (() => true);
-    if (!await this.withPageTransition(async () => true, bridgeCurrent)) {
-      throw new Error('Native display did not become quiescent; page transition aborted');
-    }
-  }
-
-  scrollTranscript(direction: 'up' | 'down'): boolean {
-    return this.renderer.scrollTranscript?.(direction) ?? false;
-  }
-
-  measureAssistantConversationText(text: string): number {
-    // A custom renderer may omit measurement. Eight pixels per code point is
-    // a conservative approximation for JOAT's 14px proportional body face;
-    // returning zero would disable wrapping and let a long turn overrun.
-    return this.renderer.measureAssistantConversationText?.(text)
-      ?? Array.from(text).length * 8;
-  }
-
-  transcriptIsThinking(): boolean {
-    return this.renderer.transcriptIsThinking?.() ?? false;
-  }
-
-  paint(frame: HudVisualFrame, localTick = false): Promise<boolean> {
-    return this.enqueue(frame, localTick);
+  paint(frame: HudVisualFrame): Promise<boolean> {
+    return this.enqueue(frame);
   }
 
   paintExact(frame: HudVisualFrame, isCurrent: () => boolean): Promise<boolean> {
     const pageRevision = this.pageRevision;
-    return this.enqueue(frame, false, () => pageRevision === this.pageRevision && isCurrent());
+    return this.enqueue(frame, () => pageRevision === this.pageRevision && isCurrent());
   }
 
-  private enqueue(frame: HudVisualFrame, localTick: boolean, isCurrent?: () => boolean): Promise<boolean> {
+  private enqueue(frame: HudVisualFrame, isCurrent?: () => boolean): Promise<boolean> {
     const displayRevision = this.displayRevision;
     const bridgeCurrent = this.client.captureDisplayGuard?.() ?? (() => true);
     const displayCurrent = () => this.displayActive && !this.replacingPage
       && this.displayRevision === displayRevision && bridgeCurrent();
     if (!displayCurrent()) return Promise.resolve(false);
     const immediate = !!isCurrent || frame.kind !== 'overview'
-      || !!frame.assistantConversation || !!frame.assistantOverlay || !!frame.actionOverlay;
+      || !!frame.assistantOverlay || !!frame.actionOverlay;
     return new Promise((resolve) => {
       const pending = this.queue[this.queue.length - 1];
       if (pending && pending.displayCurrent() && !isCurrent && !pending.isCurrent
@@ -542,12 +378,10 @@ export class HudVisualSurface implements HudFramePainter {
         // after this exact four-tile frame finishes, so acknowledging a newer
         // generation on behalf of an older one would corrupt HUD/input truth.
         pending.frame = frame;
-        // A real frame superseding a queued tick is a real frame.
-        pending.localTick = pending.localTick && localTick;
         pending.immediate ||= immediate;
         pending.resolve.push(resolve);
       } else {
-        this.queue.push({ frame, localTick, isCurrent, displayCurrent, resolve: [resolve], queuedAt: now(), immediate });
+        this.queue.push({ frame, isCurrent, displayCurrent, resolve: [resolve], queuedAt: now(), immediate });
       }
       if (immediate) this.wakeCoalescing?.();
       if (!this.painting) {
@@ -575,7 +409,7 @@ export class HudVisualSurface implements HudFramePainter {
       const next = this.queue.shift();
       if (!next) break;
       const painted = await this.paintNow(
-        next.frame, next.localTick, () => next.displayCurrent() && (next.isCurrent?.() ?? true), next.queuedAt,
+        next.frame, () => next.displayCurrent() && (next.isCurrent?.() ?? true), next.queuedAt,
       );
       next.resolve.forEach((resolve) => resolve(painted));
     }
@@ -595,7 +429,7 @@ export class HudVisualSurface implements HudFramePainter {
     return bytes;
   }
 
-  private async paintNow(frame: HudVisualFrame, localTick = false, guard?: () => boolean, queuedAt = now()): Promise<boolean> {
+  private async paintNow(frame: HudVisualFrame, guard?: () => boolean, queuedAt = now()): Promise<boolean> {
     const frameNumber = ++this.frameNumber;
     const pageRevision = this.pageRevision;
     const isCurrent = (): boolean => pageRevision === this.pageRevision && (guard?.() ?? true);
@@ -621,11 +455,9 @@ export class HudVisualSurface implements HudFramePainter {
       if (!isCurrent()) return false;
       // Navigation acknowledges the complete desired pixel state: unchanged
       // regions already confirmed on this page remain valid. Page rebuild,
-      // cancellation and failed uploads invalidate that cache below. A
-      // confirmation still explicitly replaces every decision-surface region.
-      const requiresCompleteTransfer = frame.kind === 'confirmation';
+      // cancellation and failed uploads invalidate that cache below.
       const changed = tiles.map((tile, order) => ({ tile, order }))
-        .filter(({ tile }) => requiresCompleteTransfer || !pixelsEqual(this.deliveredTiles.get(tile.containerId), tile.pixels));
+        .filter(({ tile }) => !pixelsEqual(this.deliveredTiles.get(tile.containerId), tile.pixels));
       timing.changedTiles = changed.length;
       // Finish all preparation before exposing the first changed tile. Only
       // encoding is parallel: SDK writes below keep their single-owner lane.
@@ -707,21 +539,8 @@ export class HudVisualSurface implements HudFramePainter {
         }
         this.deliveredTiles.set(tile.containerId, tile.pixels.slice());
       }
-      // This opt-in receipt binds the accepted G2 action to the completed
-      // four-tile output without retaining a frame, text, topic, or device
-      // identifier. Hashing is detached: it must not delay a visual ack or a
-      // generation-bound navigation action after the changed regions succeed.
-      // A clock tick is not a new wearer-visible frame. Recording one
-      // every second floods the acceptance trace — which is bounded at
-      // MAX_RETAINED_EVENTS — and the whole receipt collapses to an empty
-      // "fail" that names no cause. The counter still DRAWS; it just does
-      // not claim the Mac told the lens anything new.
       if (!isCurrent()) return false;
       timing.accepted = true;
-      if (localTick) return true;
-      void completedVisualFrameReceipt(frame, tiles)
-        .then((receipt) => { if (receipt) this.diagnostics?.record(receipt); })
-        .catch(() => undefined);
       return true;
     } catch (error) {
       this.deliveredTiles.clear();

@@ -417,12 +417,16 @@ The levers that remain are design decisions, not code:
   barrier that production always passes, and `CapabilityMenu` kept the
   prose pagers, the plugin-owned cursor and the title allowlist that
   decided which list went native. All of it is gone: `HudCanvasRenderer`
-  draws the overview, the Planning month and dashboard, the live map, the
-  receipt strip and the conversation card and nothing else (2,300 lines,
-  from 4,500); the presenter has one path per page; a list is Even's own
-  unless it is the month grid (`usesFirmwareList`); the browser preview
-  hands pages over like the glass. The tests that pinned the pixel versions
-  went with them; the native pages keep theirs.
+  draws the overview, the Planning month and dashboard, the live map and
+  the receipt strip over those, and nothing else (2,157 lines, from 4,513);
+  the presenter has one path per page; a list is Even's own unless it is
+  the month grid (`usesFirmwareList`, and the presenter itself defaults any
+  unflagged list to a firmware list); the browser preview hands pages over
+  like the glass. The first pass (0.1.98) missed the raster frame kinds,
+  the conversation card (the presenter only ever built the native one),
+  and the plugin-owned list cursor; a second pass with export and method
+  sweeps removed them. The tests that pinned the pixel versions went with
+  them; the native pages keep theirs.
 - ~~Text measured by hand~~ — 2026-10-05: the plugin wrapped and paged
   native text with its own word-wrap over `getTextWidth` and sized the
   confirmation body by a 120-character guess. `FirmwareText.ts` measures
@@ -434,6 +438,23 @@ The levers that remain are design decisions, not code:
   it has, by glyph width rather than character count; a terminal row is one
   line when the firmware's own width says so. Tests pin that no page
   exceeds its container under that model.
+- ~~Three features at once~~ — 2026-10-05, the reason the wearer built
+  their own plugin: Even's Navigate, Conversate and a timer cannot share the
+  lens, JOAT's features can. Two changes. A route keeps running behind any
+  other page: `NavigationController` sends progress through
+  `HudPresenter.updateNavigation`, which repaints only while the route owns
+  the glass (its page or Home) and otherwise updates the retained page and
+  the header chip; before, every frame went through `showNavigation`, which
+  hands off whatever is on the glass, so a conversation or a Pomodoro page
+  lasted until the next step. And every header carries the other running
+  features as chips (`ActivityChips`: "Focus 12m", "→ 80 m"), in the
+  firmware header line and in the image spine, refreshed in place; the
+  conversation page gained the header line (`assistantConversationLayout`,
+  written through the conversation surface's own serialized lane). Verified
+  in the official simulator with the `joatVisual=live-concurrency` dev
+  state: the map with the timer in the spine, a conversation whose header
+  carries the timer and the turn, two route updates behind it written in
+  place, and the map back at the newest frame.
 - ~~The due page completes by tap~~ — 2026-10-05: the pushed due Reminder
   page was the last page whose hint named a word to say. Its tap now sends
   `reminder_due.complete` with exactly the opaque occurrence and attempt

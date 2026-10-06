@@ -82,14 +82,6 @@ export function pomodoroRemainingMs(pomodoro: HudPanelPomodoro, nowMs: number): 
   return Math.max(0, pomodoro.remainingMs);
 }
 
-/** "24:59" — what a timer looks like, everywhere. */
-export function formatCountdown(ms: number): string {
-  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-}
-
 /** "24 min left" — the overview's minute-granular line. A running timer
  * rounds UP so it never reads "0 min left" while seconds remain. */
 export function formatMinutesLeft(ms: number): string {

@@ -113,7 +113,10 @@ export const ASSISTANT_ANSWER_PAGE = {
 export const ASSISTANT_CONVERSATION_GEOMETRY = {
   cardLeft: 36,
   cardWidth: 504,
-  cardBottom: 260,
+  /** The card's lower edge. The live header line sits above the card, so
+   * the card sits 14 px off the bottom (the lens margin HUD_EDGE keeps)
+   * rather than 28: seven transcript lines still fit under the header. */
+  cardBottom: 274,
   transcriptLeft: 52,
   transcriptWidth: 458,
   footerLeft: 52,
@@ -168,7 +171,7 @@ export class HudPageBuilder {
    * battery (HudStatus.nativeStatusLine), composed by the presenter. It
    * replaced a status line in words plus a separate title line, so each
    * page below it starts 42 px higher than it did — a fifth list row. */
-  private statusBar(content = ''): TextContainerProperty {
+  private statusBar(content = '', zOrderIndex = 1): TextContainerProperty {
     return new TextContainerProperty({
       containerID: ContainerId.StatusBar,
       containerName: 'status',
@@ -179,7 +182,7 @@ export class HudPageBuilder {
       paddingLength: REGION_PAD,
       borderWidth: 0,
       isEventCapture: 0,
-      zOrderIndex: 1,
+      zOrderIndex,
       textColor: 2,
       content: fitHeader(content),
     });
@@ -424,15 +427,6 @@ export class HudPageBuilder {
   }
 
   /**
-   * Kept as a named alias for older focused fixtures. The transparent text
-   * layer remains the sole gesture owner; the OS-owned contextual overlay is
-   * independently declared on the page when the negotiated host supports it.
-   */
-  visualCompatibilityLayout(): RebuildPageContainer {
-    return this.visualLayout();
-  }
-
-  /**
    * One Even-style native conversation card. Wearer and JOAT text occupy
    * aligned transparent layers so the fixed firmware font can express role
    * hierarchy with brightness even though it exposes no bold font weight.
@@ -440,13 +434,17 @@ export class HudPageBuilder {
    * together on scroll instead of asking one firmware container to scroll
    * independently of the other.
    */
-  assistantConversationLayout(view: AssistantConversationPage): RebuildPageContainer {
+  assistantConversationLayout(view: AssistantConversationPage, status = ''): RebuildPageContainer {
     const geometry = ASSISTANT_CONVERSATION_GEOMETRY;
     const content = (value: string): string => value || ' ';
     return new RebuildPageContainer({
-      containerTotalNum: 5,
+      containerTotalNum: 6,
       ...this.menuConfig(),
       textObject: [
+        // The live header line every page carries: clock, the other running
+        // features (Pomodoro, next turn), mic and battery. A conversation
+        // used to have none, so a timer or a route vanished behind it.
+        this.statusBar(status, 6),
         new TextContainerProperty({
           containerID: AssistantConversationContainerId.Frame,
           containerName: 'conversation',

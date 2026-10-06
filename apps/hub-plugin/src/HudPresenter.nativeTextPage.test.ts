@@ -81,8 +81,6 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     expect(text(page, 'status')).toBe('12:34 · MESSAGES · MESSAGE · ○ · ▆');
     expect(text(page, 'hint')).toBe(READER.hint);
     expect(r.frames).toHaveLength(framesBefore);
-    expect(r.hud.usesCustomListSelection()).toBe(false);
-    expect(r.hud.usesCustomListSelection({ nativeTextPage: true })).toBe(false);
   });
 
   it('pages a long Mac page in place and hands the edge swipe back to the caller', async () => {
@@ -145,7 +143,7 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     expect(text(r.rebuilds[r.rebuilds.length - 1], 'main')).toBe(pages[1]);
   });
 
-  it('returns to the image page when the next list is raster', async () => {
+  it('hands the reader straight to a firmware list, with no image page between', async () => {
     const r = rig();
     await r.hud.showText('home card', ContainerId.Main);
     expect(await r.hud.showList(['1/1 · From Dele', 'Hi'], READER)).toBe(true);
@@ -153,7 +151,9 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     expect(await r.hud.showList(['Latest messages', 'Dele · Hi'], {
       title: 'MESSAGES · CONVERSATION', hint: 'tap read', selectable: true,
     })).toBe(true);
-    expect(r.operations.slice(before)).toEqual(['rebuild:4:1:0', 'forget', 'visual:list']);
+    const since = r.operations.slice(before);
+    expect(since.filter((op) => op.startsWith('visual:') || op.startsWith('rebuild:4:'))).toEqual([]);
+    expect(since.filter((op) => /^rebuild:0:\d+:1$/.test(op))).toHaveLength(1);
   });
 });
 

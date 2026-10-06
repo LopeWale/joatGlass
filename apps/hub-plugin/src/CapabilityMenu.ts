@@ -44,9 +44,16 @@ function usesTextPage(normalized: string): boolean {
 /** Every list is Even's own list except the Planning month, whose calendar
  * grid has no firmware template, and a reader, which is a text page. */
 export function usesFirmwareList(
-  surface: { title: string; planningGrid?: readonly unknown[]; nativeTextPage?: boolean },
+  surface: { title: string; planningGrid?: readonly unknown[]; selectable: boolean; nativeTextPage?: boolean },
 ): boolean {
-  return !surface.planningGrid && !(surface.nativeTextPage ?? usesTextPage(surface.title.trim().toUpperCase()));
+  return !isImageMonth(surface.title, surface.planningGrid, surface.selectable)
+    && !(surface.nativeTextPage ?? usesTextPage(surface.title.trim().toUpperCase()));
+}
+
+/** The Planning month drawn as the image dashboard: a month title, its full
+ * six-week grid, and rows the wearer can choose. Anything else is a list. */
+function isImageMonth(title: string, grid: readonly unknown[] | undefined, selectable: boolean): boolean {
+  return parsePlanningMonthTitle(title) !== undefined && grid?.length === 42 && selectable;
 }
 
 /** The QuickNotes reader pages: a note the Mac pages, shown as a text page. */
@@ -212,22 +219,8 @@ export class CapabilityMenu {
   private dataItemCount = 0;
   private dataRowsSelectable = false;
   private dataSelectionPending = false;
-  private rowSelection?: {
-    surface: DataSurfaceSnapshot;
-    requestId: string | undefined;
-    transition: number;
-    desired: number;
-    painted: number;
-    rows: number[];
-    tap: boolean;
-    boundary?: number;
-  };
   private dashboardSelectionPaint?: Promise<boolean>;
   private dashboardFailedPaint?: object;
-  /** Some supported hosts emit a scroll while retaining the prior native-list
-   * index. Preserve the locally mirrored row for that gesture's following
-   * click; a later credible native index still takes precedence. */
-  private dataSelectionUsesStaleNativeIndex = false;
   private messagesRetry = false;
   /** The Mac owns conversation pagination. The Hub only forwards a boundary
    * gesture when the currently visible, Mac-authored hint says that page exists. */
@@ -461,7 +454,7 @@ export class CapabilityMenu {
     this.messagesScreen = parent.messagesScreen;
     this.dataHint = parent.hint;
     this.dataPagePending = false;
-    this.selectedIndex = parent.selectedIndex;
+    this.selectedIndex = parentFirmwareList ? 0 : parent.selectedIndex;
     this.dataSurface = parent;
   }
 
@@ -793,8 +786,7 @@ export class CapabilityMenu {
     // A month with a full grid becomes the split dashboard: grid left, the
     // hovered day's items right. Hover starts on today when the month shows
     // it, else the first in-month day.
-    const month = parsePlanningMonthTitle(title);
-    if (month && planningGrid?.length === 42 && effectiveSelectable) {
+    if (planningGrid && isImageMonth(title, planningGrid, effectiveSelectable)) {
       const todayIso = new Date().toLocaleDateString('en-CA');
       let dateIndex = planningGrid.findIndex(
         (cell) => cell.inMonth && cell.day === todayIso,
@@ -832,7 +824,7 @@ export class CapabilityMenu {
     // hovered day's items right). A thread or an archive that pages by
     // tappable rows (`pageControls`) is a firmware list like any other.
     const nativeTextPage = usesTextPage(normalized);
-    const firmwareList = !planningGrid && !nativeTextPage;
+    const firmwareList = !this.dashboard && !nativeTextPage;
     // The Mac answered a swipe up with its previous page: open on its last
     // local page, as the raster prose pager did.
     const textPageFromEnd = nativeTextPage && this.messagePageDirection < 0
@@ -866,8 +858,13 @@ export class CapabilityMenu {
       && archivePage.index < previousArchivePage.index ? Math.max(0, items.length - 1) : undefined;
     const authoritativePlanningIndex = planningOwner && !this.dashboard
       ? Math.max(0, Math.min(planningOwner.selectedIndex, items.length - 1)) : undefined;
-    const initialSelection = archiveSelection ?? restoredPlanningIndex ?? authoritativePlanningIndex
-      ?? (refreshSelection === undefined ? 0 : Math.max(0, Math.min(refreshSelection, items.length - 1)));
+    // A firmware list always opens with row one highlighted (the firmware has
+    // no cursor-setting API), so the menu's cursor starts there too: a tap
+    // reporting row zero is row zero, never the Mac's remembered row. Only
+    // the image dashboard draws a cursor of its own.
+    const initialSelection = firmwareList ? 0
+      : archiveSelection ?? restoredPlanningIndex ?? authoritativePlanningIndex
+        ?? (refreshSelection === undefined ? 0 : Math.max(0, Math.min(refreshSelection, items.length - 1)));
     if (refreshSelection !== undefined) this.notificationRefreshSelection = undefined;
     const shown = await this.hud.showList(items, {
       title,
@@ -900,7 +897,6 @@ export class CapabilityMenu {
     this.dataItemCount = items.length;
     this.dataRowsSelectable = effectiveSelectable;
     this.dataSelectionPending = false;
-    this.dataSelectionUsesStaleNativeIndex = false;
     this.messagesScreen = messagesState?.screen;
     this.dataHint = effectiveHint;
     this.dataPagePending = false;
@@ -1037,8 +1033,6 @@ export class CapabilityMenu {
    * firmware contextual menu (tap, then long-press); this gesture never
    * draws a second one. On the overview there is no level left to leave. */
   async toggle(): Promise<void> {
-    // Back retires any queued tap/page intent before awaiting another paint.
-    this.rowSelection = undefined;
     if (this.dashboardSelectionPaint) {
       const dashboard = this.dashboard;
       await this.dashboardSelectionPaint;
@@ -1158,13 +1152,6 @@ export class CapabilityMenu {
         );
         return true;
       }
-      if (this.usesOrderedSelection()) {
-        // Some hosts wrap custom-surface gestures in a native List event.
-        // Its hidden index does not own the selection visible on this HUD.
-        if (eventType !== OsEventTypeList.CLICK_EVENT) return this.handleScroll(eventType);
-        this.dataSelectionUsesStaleNativeIndex = false;
-        return this.selectDataRow();
-      }
       if (this.dataSurface?.quickNotesPage && this.dataPagePending) return true;
       const maximum = this.messagesRetry ? 0 : Math.max(0, this.dataItemCount - 1);
       if (eventType !== OsEventTypeList.CLICK_EVENT) {
@@ -1172,11 +1159,10 @@ export class CapabilityMenu {
           this.requestQuickNotesPage(eventType);
           return true;
         }
-        // Native List containers move their own highlight before reporting a
-        // scroll. Mirror that index so a second swipe at an actual endpoint
-        // reaches the Mac-owned conversation pager. This is intentionally
-        // different from text-capture scrolls, where handleScroll() moves our
-        // custom selection itself.
+        // The firmware list moves its own highlight before reporting a scroll.
+        // Mirror its index so a second swipe at an actual endpoint reaches
+        // the Mac-owned pager. Never repaint the list: a rebuild would put
+        // its highlight back on row one.
         const before = this.selectedIndex;
         const delta = eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
           ? 1
@@ -1184,20 +1170,7 @@ export class CapabilityMenu {
             ? -1
             : 0;
         const expected = Math.max(0, Math.min(maximum, before + delta));
-        const reported = list.currentSelectItemIndex;
-        // Hidden custom-list cursors can keep reporting zero even at the
-        // endpoint. Preserve the mirrored boundary too, or the next Down
-        // resets the controller to row zero without moving the visible HUD.
-        const staleNativeIndex = delta !== 0
-          && (
-            reported === before
-            || (this.dataSelectionUsesStaleNativeIndex && reported === 0)
-          );
-        this.selectedIndex = staleNativeIndex
-          ? expected
-          : Math.max(0, Math.min(maximum, reported ?? expected));
-        this.dataSelectionUsesStaleNativeIndex = staleNativeIndex;
-        if (staleNativeIndex) void this.hud.setSelection(this.selectedIndex);
+        this.selectedIndex = Math.max(0, Math.min(maximum, list.currentSelectItemIndex ?? expected));
         const stayedAtBoundary = before === this.selectedIndex
           && (this.selectedIndex === 0 || this.selectedIndex === maximum);
         if (stayedAtBoundary && this.canRequestQuickNotesListPage(eventType)) {
@@ -1215,14 +1188,8 @@ export class CapabilityMenu {
         }
         return true;
       }
-      const reported = list.currentSelectItemIndex;
-      const preserveMirroredSelection = this.dataSelectionUsesStaleNativeIndex
-        && reported === 0
-        && this.selectedIndex !== 0;
-      this.selectedIndex = preserveMirroredSelection
-        ? this.selectedIndex
-        : Math.max(0, Math.min(maximum, reported ?? this.selectedIndex));
-      this.dataSelectionUsesStaleNativeIndex = false;
+      // The transport omits a zero index, so an absent one is row zero.
+      this.selectedIndex = Math.max(0, Math.min(maximum, list.currentSelectItemIndex ?? 0));
       return this.selectDataRow();
     }
 
@@ -1263,10 +1230,6 @@ export class CapabilityMenu {
       // footer decides whether a neighbouring page exists, as before.
       if (this.dataSurface?.nativeTextPage
         && this.hud.scrollTextPage?.(delta > 0 ? 'down' : 'up')) return true;
-      if (this.usesOrderedSelection()) {
-        this.moveRowSelection(delta, eventType);
-        return true;
-      }
       if (this.dataSurface?.quickNotesPage && this.dataPagePending) return true;
       if (this.canRequestQuickNotesListPage(eventType)) {
         this.requestQuickNotesListPage(eventType);
@@ -1296,89 +1259,12 @@ export class CapabilityMenu {
         this.requestMessagePage(eventType);
         return true;
       }
-      // Access/setup has one real G2 action: retry. Keep its first row
-      // highlighted while the second row remains Mac Settings guidance.
-      const maximum = this.messagesRetry ? 0 : Math.max(0, this.dataItemCount - 1);
-      const next = Math.max(0, Math.min(maximum, this.selectedIndex + delta));
-      const applied = next - this.selectedIndex;
-      this.selectedIndex = next;
-      if (applied !== 0) void this.hud.moveSelection(applied);
+      // Every remaining page is a firmware list, which moves its own
+      // highlight and reports it with the tap.
       return true;
     }
     // Retired Settings links show phone guidance, with no local choices.
     return true;
-  }
-
-  private usesOrderedSelection(): boolean {
-    if (this.view !== 'data' || this.dashboard || !this.dataRowsSelectable
-      || !this.dataSurface?.selectable || !this.hud.usesCustomListSelection()
-      || this.dataSurface.pageControls !== undefined) return false;
-    if (this.pendingTitle === 'PLANNING') return true;
-    if (this.pendingTitle === 'QUICKNOTES') return !!this.dataSurface.quickNotesPage;
-    return this.pendingTitle === 'MESSAGES' && this.messagesScreen !== 'review'
-      && this.messagesScreen !== 'message_detail';
-  }
-
-  private rowSelectionCurrent(driver: NonNullable<CapabilityMenu['rowSelection']>): boolean {
-    return this.rowSelection === driver && this.view === 'data'
-      && this.dataSurface === driver.surface && this.pendingRequestId === driver.requestId
-      && this.transitionId === driver.transition;
-  }
-
-  private moveRowSelection(delta: number, eventType: number): void {
-    const surface = this.dataSurface;
-    if (!surface || !this.usesOrderedSelection() || this.dataSelectionPending || this.dataPagePending) return;
-    let driver = this.rowSelection;
-    const start = !driver || !this.rowSelectionCurrent(driver);
-    if (start) {
-      const rows = this.messagesRetry ? [0]
-        : Array.from({ length: this.dataItemCount }, (_, index) => index);
-      if (!rows.length) return;
-      driver = {
-        surface, requestId: this.pendingRequestId, transition: this.transitionId,
-        desired: this.selectedIndex, painted: this.selectedIndex, rows, tap: false,
-      };
-      this.rowSelection = driver;
-    }
-    if (!driver || driver.tap || driver.boundary !== undefined) return;
-    const position = Math.max(0, driver.rows.indexOf(driver.desired));
-    const next = driver.rows[Math.max(0, Math.min(driver.rows.length - 1, position + delta))]!;
-    if (next === driver.desired && (this.canRequestQuickNotesListPage(eventType, next)
-      || this.canRequestMessagePage(eventType, next))) {
-      // Preserve the first endpoint gesture, but let its row finish painting
-      // before the existing Mac-owned pager advances the source snapshot.
-      driver.boundary = eventType;
-    }
-    driver.desired = next;
-    if (start) void this.paintRowSelection(driver);
-  }
-
-  private async paintRowSelection(driver: NonNullable<CapabilityMenu['rowSelection']>): Promise<void> {
-    let success = false;
-    try {
-      while (this.rowSelectionCurrent(driver) && driver.painted !== driver.desired) {
-        const target = driver.desired;
-        const painted = await this.hud.restoreSelection(target);
-        if (!this.rowSelectionCurrent(driver)) return;
-        if (!painted) return;
-        driver.painted = target;
-        this.selectedIndex = target;
-      }
-      success = this.rowSelectionCurrent(driver);
-    } catch {
-      // Failed or superseded paints cannot authorize a tap or page request.
-    } finally {
-      if (this.rowSelectionCurrent(driver)) {
-        this.selectedIndex = driver.painted;
-        this.rowSelection = undefined;
-        if (success && driver.boundary !== undefined) {
-          if (this.canRequestQuickNotesListPage(driver.boundary)) this.requestQuickNotesListPage(driver.boundary);
-          else if (this.canRequestMessagePage(driver.boundary)) this.requestMessagePage(driver.boundary);
-        } else if (success && driver.tap) this.selectDataRow();
-      } else if (this.rowSelection === driver) {
-        this.rowSelection = undefined;
-      }
-    }
   }
 
   /** Right temple/ring click selects the highlighted custom-rendered row. */
@@ -1500,11 +1386,6 @@ export class CapabilityMenu {
   }
 
   private selectDataRow(): true {
-    if (this.usesOrderedSelection() && this.dataPagePending) return true;
-    if (this.rowSelection && this.rowSelectionCurrent(this.rowSelection)) {
-      if (this.rowSelection.boundary === undefined) this.rowSelection.tap = true;
-      return true;
-    }
     if (this.dashboard) {
       this.dashboardTap();
       return true;
@@ -1784,7 +1665,6 @@ export class CapabilityMenu {
     this.dataItemCount = shownItems.length;
     this.dataRowsSelectable = selectable;
     this.dataSelectionPending = false;
-    this.dataSelectionUsesStaleNativeIndex = false;
     this.messagesScreen = undefined;
     this.dataHint = hint;
     this.dataPagePending = false;
@@ -2013,7 +1893,6 @@ export class CapabilityMenu {
     this.dataItemCount = 0;
     this.dataRowsSelectable = false;
     this.dataSelectionPending = false;
-    this.dataSelectionUsesStaleNativeIndex = false;
     this.dataHint = undefined;
     this.dataPagePending = false;
     this.dataSurface = undefined;
@@ -2251,17 +2130,6 @@ export class CapabilityMenu {
       await this.close();
       return;
     }
-    // Rebuilding a list resets its visible cursor. Restore that cursor before
-    // accepting a tap, so the highlighted row and the target stay identical.
-    if (parent.selectedIndex > 0 && !this.dashboard && !parentFirmwareList && !parent.nativeTextPage
-      && !this.hud.usesCustomListSelection()) {
-      const selected = await this.hud.setSelection(parent.selectedIndex);
-      if (!this.isCurrentTransition(transition)) return;
-      if (!selected) {
-        await this.close();
-        return;
-      }
-    }
     this.view = 'data';
     this.dataItemCount = parent.items.length;
     this.dataRowsSelectable = parent.selectable;
@@ -2270,7 +2138,8 @@ export class CapabilityMenu {
     this.messagesScreen = parent.messagesScreen;
     this.dataHint = parent.hint;
     this.dataPagePending = false;
-    this.selectedIndex = parent.selectedIndex;
+    // A firmware list comes back with row one highlighted; so does the cursor.
+    this.selectedIndex = parentFirmwareList ? 0 : parent.selectedIndex;
     this.dataSurface = parent;
     if (this.pendingTitle === 'MESSAGES') {
       const returnedTitle = parent.title.trim().toUpperCase();

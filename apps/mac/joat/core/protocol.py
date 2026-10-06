@@ -913,12 +913,15 @@ _PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000  # 3000-01-01T00:00:00Z
 
 
 HUD_TEXT_MEAN_ADVANCE_PX = 5.18
-"""Mean advance of the transcript face, measured on the real renderer.
+"""Mean advance of the old raster transcript face, kept as a size bound.
 
-Mirrors HUD_TEXT_MEAN_ADVANCE_PX in the plugin's HudCanvasRenderer, which
-is measured against HudTypography's TYPE.transcript. Every character budget
-for a PROPORTIONAL surface below divides a pixel width by this — the
-2026-09-05 audit found 96, 48 and 60 sitting beside it as folklore."""
+It was measured on the plugin's canvas renderer, whose transcript is gone:
+the Agent Terminal and Brainstorm are the firmware's own text page now
+(NativeTerminalSurface), which wraps every row by the firmware's measured
+glyph widths. The character budgets below are therefore WIRE bounds, not a
+layout; test_sinks pins that a full row stays inside the page's per-row
+unit cap, so nothing here can split a Mac row into more lines than the
+page expects."""
 
 HUD_CONTENT_WIDTH_PX = 548
 """The lens content width the plugin draws into (576 less 14px per edge)."""
