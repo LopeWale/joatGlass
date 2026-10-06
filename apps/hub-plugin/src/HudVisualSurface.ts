@@ -90,7 +90,7 @@ type HudVisualBaseFrame =
     navigation: NavigationHudModel;
   }
   | {
-    /** A reader set in Even's font at 66% across the whole canvas
+    /** A reader set in Even's font at 55% across the whole canvas
      * (EvenFont.ts): the Messages thread and every Mac-paged reader. */
     kind: 'reader';
     status: string;
@@ -141,7 +141,7 @@ export interface HudFramePainter {
   paintHeader?(model: HudStatusModel, label: string, isCurrent: () => boolean): Promise<boolean>;
   /** Whether this painter can draw the header (its renderer has one). */
   canPaintHeader?(): boolean;
-  /** Whether this painter draws a reader page in Even's font at 66%. A
+  /** Whether this painter draws a reader page in Even's font at 55%. A
    * painter without it keeps readers as firmware text pages. */
   canPaintReader?(): boolean;
   /** Wait for queued paints without cancelling their delivery receipts. */

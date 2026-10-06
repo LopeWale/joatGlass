@@ -1,6 +1,7 @@
 import { GesturePolicy } from './GesturePolicy';
 import {
-  EVEN_READER, drawEvenText, evenLineHeight, evenTextWidth, loadEvenFont, readerHint, readerLineTops,
+  EVEN_READER, drawEvenText, evenLineHeight, evenTextWidth, fitOneLineEven, loadEvenFont, readerHint,
+  readerLineTops,
   type EvenReaderLine,
 } from './EvenFont';
 import chatCircleSvg from '@phosphor-icons/core/regular/chat-circle-dots.svg?raw';
@@ -1051,6 +1052,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       usesFlatHudShell(frame.kind),
       frame.kind !== 'overview',
       hudSpineLabel(frame),
+      await loadEvenFont(),
     );
     if (frame.actionOverlay) {
       this.drawActionPill(context, frame.actionOverlay.productivity, icons);
@@ -1084,7 +1086,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = '#000000';
     context.fillRect(0, 0, width, height);
     context.imageSmoothingEnabled = true;
-    this.drawShell(context, model, icons, true, true, label);
+    this.drawShell(context, model, icons, true, true, label, await loadEvenFont());
     const rgba = context.getImageData(0, 0, width, height).data;
     const half = width / 2;
     return [HeaderImageId.Left, HeaderImageId.Right].map((containerId, index) => {
@@ -1110,6 +1112,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
      * puts it, rather than stacking it on top of the big clock. */
     showTime = true,
     label = hudStatusLabel(status),
+    /** Even's font (EvenFont.ts): the spine's words are set in it, the
+     * mic and battery are the only icons (the wearer's ask, 2026-10-06). */
+    atlas?: HTMLImageElement,
   ): void {
     if (!flat) {
       context.strokeStyle = gray(HAIRLINE);
@@ -1124,20 +1129,16 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // smaller"); the cell's fill carries the level, the slash carries the
     // closed mic, and the number comes back only when the battery is low.
     const baseline = HUD_VISUAL_GEOMETRY.statusBaselineY;
+    // The words sit centred on the band's middle line, in Even's font.
+    const top = baseline - evenLineHeight() / 2;
+    const words = (text: string, x: number) => this.drawSpineWords(context, atlas, text, x, top);
     context.textBaseline = 'middle';
     context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.statusClock;
     context.textAlign = 'left';
-    context.fillText(
-      showTime ? (status.clock || '--:--') : hudDateLabel(new Date()),
-      30,
-      baseline,
-    );
-    // Same compact face as the clock. The label box is measured
-    // (types.ts SPINE_LABEL_BOX) and ends on the tile seam, so the changing
-    // word stays inside the top-left tile.
-    context.font = TYPE.statusMeta;
-    this.fitText(context, label, SPINE_LABEL_BOX.x, baseline, SPINE_LABEL_BOX.width);
+    words(showTime ? (status.clock || '--:--') : hudDateLabel(new Date()), 30);
+    // The label box is measured (types.ts SPINE_LABEL_BOX) and ends on the
+    // tile seam, so the changing word stays inside the top-left tile.
+    words(fitOneLineEven(label, SPINE_LABEL_BOX.width), SPINE_LABEL_BOX.x);
     this.drawIcon(
       context,
       status.mic ? icons.microphone : icons.microphoneSlash,
@@ -1150,10 +1151,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         SPINE_ICONS.batteryX, SPINE_ICONS.batteryY, SPINE_ICONS.batterySize, SUPPORT,
       );
       if (!status.charging && status.battery <= HUD_LOW_BATTERY_PCT) {
-        context.font = TYPE.statusMeta;
-        context.textAlign = 'right';
-        context.fillText(`${Math.round(status.battery)}%`, SPINE_ICONS.lowBatteryTextRightX, baseline);
-        context.textAlign = 'left';
+        const level = `${Math.round(status.battery)}%`;
+        words(level, SPINE_ICONS.lowBatteryTextRightX - evenTextWidth(level));
       }
     }
 
@@ -1161,22 +1160,20 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // Pomodoro's minutes on the map, the next turn on the dashboard.
     const chips = (status.activities ?? []).filter((chip) => chip.trim().length > 0);
     if (chips.length > 0) {
-      context.font = TYPE.statusMeta;
-      context.fillStyle = gray(SUPPORT);
-      context.textAlign = 'right';
-      const room = SPINE_ICONS.activityRightX - SPINE_ICONS.activityLeftX;
-      let text = chips.join(' · ');
-      if (context.measureText(text).width > room) {
-        while (text.length > 1 && context.measureText(`${text}…`).width > room) text = text.slice(0, -1);
-        text = `${text.trimEnd()}…`;
-      }
-      context.fillText(text, SPINE_ICONS.activityRightX, baseline);
-      context.textAlign = 'left';
+      const text = fitOneLineEven(chips.join(' · '), SPINE_ICONS.activityRightX - SPINE_ICONS.activityLeftX);
+      words(text, SPINE_ICONS.activityRightX - evenTextWidth(text));
     }
 
     // No rule under the spine. It separated nothing that the gap below it
     // does not already separate, and it lit 540 pixels to do it (the
     // wearer's ruling: another waste).
+  }
+
+  /** One run of the spine's words in Even's font, its cell top at `top`. */
+  private drawSpineWords(
+    context: CanvasRenderingContext2D, atlas: HTMLImageElement | undefined, text: string, x: number, top: number,
+  ): void {
+    drawEvenText(context, atlas, text, x, top, { alpha: SUPPORT / 255, fallbackFont: TYPE.statusMeta });
   }
 
   /** A receipt strip over an image page (the dashboard, the month, the live

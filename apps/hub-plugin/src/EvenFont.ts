@@ -7,7 +7,7 @@ import atlasData from './assets/even-font.json';
  *
  * The firmware gives a plugin one font at one size (a 27 px line: seven
  * lines of body on a page), and no SDK through 0.0.16 offers a size. The
- * wearer asked for that font at 66% across the whole 576x288, the way the
+ * wearer asked for that font smaller (55%) across the whole 576x288, the way the
  * Planning month already fills it. The glyphs were cut from the official
  * simulator (scripts/build_even_font.py) at exactly the positions pretext
  * gives them, so a line set here measures as `getTextWidth × scale`: the
@@ -22,8 +22,9 @@ import atlasData from './assets/even-font.json';
  *     the part that must stay whole (the page count).
  */
 
-/** The wearer's choice of the four scales shown (2026-10-06): 66%. */
-export const EVEN_FONT_SCALE = 0.66;
+/** The wearer's choice of the four scales shown (2026-10-06): first 66%,
+ * then the smallest row, 55% ("the fonts are still too big"). */
+export const EVEN_FONT_SCALE = 0.55;
 /** The firmware's line, which the atlas cells keep. */
 export const EVEN_FONT_LINE = 27;
 const ELLIPSIS = '…';
@@ -43,8 +44,8 @@ export function hasEvenGlyph(char: string): boolean {
   return point !== undefined && ATLAS.glyphs[String(point)] !== undefined;
 }
 
-/** Extra space after each word at 66%. The firmware's space shrinks with
- * the glyphs to under 4 px, which runs words together on the glass. */
+/** Extra space after each word. The firmware's space shrinks with the
+ * glyphs to about 3 px at 55%, which runs words together on the glass. */
 export const EVEN_WORD_SPACE = 1.5;
 
 /** The width of one line of text in Even's font at `scale`: pretext's
@@ -177,11 +178,11 @@ export const EVEN_READER = {
   marginX: 18,
   width: 540,
   bodyTop: 30,
-  bodyBottom: 256,
-  /** The 66% glyph line is 18 px; 4 px of leading keeps lines apart. */
-  pitch: 22,
+  bodyBottom: 258,
+  /** The 55% glyph line is 15 px; 3 px of leading keeps lines apart. */
+  pitch: 18,
   /** Between messages, so they never run together. */
-  gap: 6,
+  gap: 5,
   hintTop: 262,
   hintBottom: 280,
 } as const;

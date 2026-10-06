@@ -1,3 +1,4 @@
+import { evenTextWidth } from './EvenFont';
 import { describe, expect, it } from 'vitest';
 import * as HudCanvas from './HudCanvasRenderer';
 import type { HudVisualFrame } from './HudVisualSurface';
@@ -454,6 +455,8 @@ describe('the spine\'s left slot', () => {
     };
     stub.drawIcon = () => {};
     stub.fitText = (c, t) => { c.fillText(t, 0, 0); };
+    (stub as never as { drawSpineWords(c: CanvasRenderingContext2D, a: unknown, t: string): void })
+      .drawSpineWords = (c, _a, t) => { c.fillText(t, 0, 0); };
     stub.drawShell(
       context, { clock: '9:41', link: 'connected', mic: false, battery: 87, charging: false },
       {} as unknown, true, showTime,
@@ -497,6 +500,9 @@ describe('the compact JOAT banner uses the existing canvas font', () => {
       ): void;
     };
     stub.drawIcon = (_c, i, x, y, size) => { icons.push({ name: String(i), x, y, size }); };
+    // The spine's words are Even's font now: record each run whole.
+    (stub as never as { drawSpineWords(c: unknown, a: unknown, t: string, x: number): void })
+      .drawSpineWords = (_c, _a, text, x) => { texts.push({ text, x, font: 'even' }); };
     // Named stand-ins, so the assertions can tell which cell was drawn.
     const iconSet = Object.fromEntries(
       ['microphone', 'microphoneSlash', 'batteryFull', 'batteryHigh', 'batteryMedium',
@@ -514,11 +520,12 @@ describe('the compact JOAT banner uses the existing canvas font', () => {
     const { texts } = shell({ ...hearing, macState: undefined, activities: ['Focus 12m', '→ 80 m'] });
     const chips = texts.find((entry) => entry.text === 'Focus 12m · → 80 m');
     expect(chips).toBeDefined();
-    expect(chips!.x).toBe(SPINE_ICONS.activityRightX);
+    // Right-aligned: the run ends on the right edge of the chip room.
+    expect(chips!.x + evenTextWidth(chips!.text)).toBeCloseTo(SPINE_ICONS.activityRightX);
     expect(SPINE_ICONS.activityLeftX).toBeGreaterThanOrEqual(SEAM);
     expect(SPINE_ICONS.activityRightX).toBeLessThan(SPINE_ICONS.micX);
     // Without running features nothing is drawn there.
-    expect(shell({ ...hearing, macState: undefined }).texts.some((entry) => entry.x === SPINE_ICONS.activityRightX)).toBe(false);
+    expect(shell({ ...hearing, macState: undefined }).texts.some((entry) => entry.x >= SPINE_ICONS.activityLeftX)).toBe(false);
   });
 
   it('paints the state word in the compact banner and keeps the icons east of the seam', () => {
@@ -527,11 +534,10 @@ describe('the compact JOAT banner uses the existing canvas font', () => {
     // word, and two icons.
     expect(texts.map((entry) => entry.text)).toEqual(['9:41', 'JOAT · HEARING YOU…']);
     const label = texts.find((entry) => entry.text === 'JOAT · HEARING YOU…');
-    expect(label?.font).toContain('10px');
-    expect(label?.font).toContain('SF Mono');
-    const spineClock = texts.find((entry) => entry.text === '9:41');
-    expect(spineClock?.font).toContain('11px');
-    expect((label?.x ?? 0) + 'JOAT · HEARING YOU…'.length * 6).toBeLessThan(SEAM);
+    // Set in Even's font (the wearer's ask): only the mic and battery are icons.
+    expect(label?.font).toBe('even');
+    expect(texts.find((entry) => entry.text === '9:41')?.font).toBe('even');
+    expect((label?.x ?? 0) + evenTextWidth('JOAT · HEARING YOU…')).toBeLessThan(SEAM);
     expect(icons.map((icon) => icon.name)).toEqual(['microphone', 'batteryHigh']);
     for (const icon of icons) {
       expect(icon.x).toBeGreaterThanOrEqual(SEAM);
@@ -540,7 +546,7 @@ describe('the compact JOAT banner uses the existing canvas font', () => {
     }
     // Clock and changing label remain separate inside the top-left tile.
     const clock = texts.find((entry) => entry.text === '9:41');
-    expect((clock?.x ?? 0) + '9:41'.length * 7.2).toBeLessThan(SPINE_LABEL_BOX.x);
+    expect((clock?.x ?? 0) + evenTextWidth('9:41')).toBeLessThan(SPINE_LABEL_BOX.x);
   });
 
   it('draws the slashed mic when closed, the level-correct cell, and the number only when low', () => {

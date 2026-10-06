@@ -228,7 +228,7 @@ let nativeOverviewEnabled = String(import.meta.env.VITE_NATIVE_OVERVIEW ?? '1') 
 /** Every firmware page carries the image spine as its header
  * (HeaderImage.ts); `VITE_IMAGE_HEADER=0` keeps the firmware text line. */
 const imageHeaderEnabled = String(import.meta.env.VITE_IMAGE_HEADER ?? '1') !== '0';
-/** Readers set in Even's font at 66% across the whole canvas (the wearer's
+/** Readers set in Even's font at 55% across the whole canvas (the wearer's
  * ask, 2026-10-06); `VITE_EVEN_FONT_PAGES=0` keeps firmware text pages. */
 const evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '1') !== '0';
 
@@ -733,7 +733,7 @@ export class HudPresenter {
     return options.nativeTextPage === true && this.visual !== undefined;
   }
 
-  /** A reader drawn in Even's font at 66% on the four image tiles, where
+  /** A reader drawn in Even's font at 55% on the four image tiles, where
    * the painter can draw one; otherwise it stays a firmware text page. */
   private usesEvenFontPage(options: { nativeTextPage?: boolean }): boolean {
     return evenFontPagesEnabled && this.usesNativeTextPage(options) && this.visual?.canPaintReader?.() === true;
