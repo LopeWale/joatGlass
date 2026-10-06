@@ -146,8 +146,8 @@ changing the durable conversation identity.
 
 ```
 G2 voice -> JOAT session/controller -> next collaborator selected from:
-       - codex exec -s read-only  (subscription auth; OPENAI_API_KEY stripped)
-       - claude -p                (subscription auth; ANTHROPIC_API_KEY stripped)
+       - codex exec -s read-only  (subscription auth; cli_env.STRIP_ENV dropped)
+       - claude -p                (subscription auth; cli_env.STRIP_ENV dropped)
      -> wearer-directed or continued collaborator turns
      -> JOAT VERIFY / bounded repair -> JOAT synthesis -> G2 HUD
 ```

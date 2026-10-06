@@ -133,9 +133,9 @@ stands now:
   --include-partial-messages`, streamed; `--session-id` then `--resume` for
   memory; `--tools ""` so the mind never holds a shell on the Mac) and
   `CodexCliReplyEngine` (`codex exec --json`, `resume <thread>` for memory).
-  Both spawn through the Brainstorm seats' `SubprocessAgent`, stripping
-  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` and
-  `OPENAI_API_KEY`, in their own working directory so the repo's CLAUDE.md
+  Both spawn through the Brainstorm seats' `SubprocessAgent`, dropping the
+  shared credential list every CLI launch drops (`agents/cli_env.py`
+  `STRIP_ENV`), in their own working directory so the repo's CLAUDE.md
   is not project context. `--bare` is not used: it ignores the OAuth login.
 - `SeatSwitch` — the Assistant slot chooses the seat per turn ("use codex
   for the assistant"; `--agent claude|codex|mlx` sets the boot seat). A

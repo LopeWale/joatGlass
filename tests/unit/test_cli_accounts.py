@@ -117,7 +117,7 @@ def test_add_activate_persist_and_reload(tmp_path: Path) -> None:
     assert work.home is not None and Path(work.home).is_dir()
     assert stat.S_IMODE(Path(work.home).stat().st_mode) == 0o700
     registry.activate("codex", work.profile_id)
-    assert registry.env_provider("codex")() == {"CODEX_HOME": work.home}
+    assert registry.env_provider("codex")() == {"CODEX_HOME": work.home, "CODEX_ACCESS_TOKEN": None}
     reloaded = AccountRegistry(tmp_path)
     assert reloaded.active("codex") == work
     saved = json.loads((tmp_path / "accounts.json").read_text())
@@ -206,3 +206,15 @@ def test_a_saved_claude_account_does_not_run_as_an_inherited_login_token(tmp_pat
     assert overlay["CLAUDE_CODE_OAUTH_TOKEN"] is None and overlay["ANTHROPIC_AUTH_TOKEN"] is None
     default = registry.env_overlay("claude", registry.get("claude", "default"))
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in default, "the Mac's own login is left as configured"
+
+
+def test_a_saved_codex_account_does_not_run_as_an_inherited_access_token(tmp_path: Path) -> None:
+    """Codex reads CODEX_ACCESS_TOKEN before the login stored in CODEX_HOME,
+    so the same switch did nothing for a saved Codex account."""
+    registry = AccountRegistry(tmp_path)
+    work = registry.add("codex", "Work")
+    overlay = registry.env_overlay("codex", work)
+    assert overlay["CODEX_HOME"] == work.home
+    assert overlay["CODEX_ACCESS_TOKEN"] is None
+    default = registry.env_overlay("codex", registry.get("codex", "default"))
+    assert "CODEX_ACCESS_TOKEN" not in default, "the Mac's own login is left as configured"

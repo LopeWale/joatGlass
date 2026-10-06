@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-10-06 — Every CLI launch drops the same credential list
+
+- Each launch path kept its own list of variables to drop before starting `claude` or `codex`:
+  - the assistant seats and the sign-in dropped a bearer token and a base URL;
+  - the Brainstorm critic dropped only `ANTHROPIC_API_KEY`, and the proposer only `OPENAI_API_KEY`;
+  - the QuickNote completer dropped two names.
+
+  An inherited token, endpoint or provider switch therefore moved those turns off the subscription without anyone choosing it (RULES.md #9, #10).
+- One list now lives in `agents/cli_env.py` (`STRIP_ENV`), and every launch drops it: the assistant seats and their auth probes, both Brainstorm seats, the QuickNote completer and the phone's sign-in. A path can add names (the sign-in also drops the Mac's own login tokens) but can no longer narrow the list.
+- The list follows the vendors' own sources:
+  - **Claude Code's documented authentication precedence.** These rank above a `/login` subscription:
+    - the cloud-provider switches (`CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`, `_ANTHROPIC_AWS`);
+    - `ANTHROPIC_AUTH_TOKEN`;
+    - `ANTHROPIC_API_KEY`, always used under `-p`;
+    - an Anthropic profile or federation credential (`ANTHROPIC_PROFILE`, `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`).
+
+    `ANTHROPIC_BASE_URL` sends every request, login and all, to another server.
+  - **Codex's source.** `codex exec` takes `CODEX_API_KEY` over the ChatGPT login ("API key via env var takes precedence over any other auth method"), and no launch dropped it. Codex no longer reads `OPENAI_BASE_URL`, so it is not listed.
+- **Saved Codex accounts.** A saved Codex account no longer runs as an inherited `CODEX_ACCESS_TOKEN`, which Codex reads before the login stored in `CODEX_HOME`. This is the same switching bug fixed earlier today for Claude's `CLAUDE_CODE_OAUTH_TOKEN`. The default account keeps the Mac's own login.
+- **Tests.** Each launch path is spawned against a probe that records the environment it received. On the code before this change, every one of those tests failed, naming what leaked.
+- **Results.** Mac: 3430 passed, 1 skipped; the container's IPv6 test fails as before. mypy is clean.
+
 ## 2026-10-06 — Build JOAT 0.1.102 reader-fixes package
 
 - Packed from `c1cf4c7` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.102 above the last recorded build (0.1.101), and app.json, package.json and package-lock.json all say 0.1.102. `evenhub` CLI, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
