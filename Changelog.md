@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-06 — Build JOAT 0.1.105
+
+- Packed from `3bb653c` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.105 above the last recorded build (0.1.104); app.json, package.json and package-lock.json all 0.1.105. `evenhub` CLI, `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1099 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 156924 bytes, SHA-256 `d01c25db1c625f52a6b5f6c9ee7bb5ec777d79f87731431ef8ac27a25448eaf7`. Carries the Messages thread reader with tap-to-reply in JOAT's conversation card, and the conversation card without its scroll column. The Mac side changed too: restart the brain from this revision. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-06 — Messages is one thread you read and tap to reply; no scrollbar boxes on the conversation card
 
 The wearer: "why do I have to click to see a single message when I can see the thread and scroll through? The tap should be to reply." They also asked for the reply to happen in JOAT's own conversation card, and for the black boxes on the card's scrollbar to go.
