@@ -126,8 +126,6 @@ export const ASSISTANT_CONVERSATION_GEOMETRY = {
   transcriptWidth: 458,
   footerLeft: 52,
   footerWidth: 458,
-  scrollbarLeft: 516,
-  scrollbarWidth: 18,
   lineHeight: 27,
   cardTopPadding: 8,
   footerGap: 5,
@@ -140,7 +138,6 @@ export const AssistantConversationContainerId = {
   Frame: 11,
   WearerTurns: 12,
   JoatTurns: 13,
-  ScrollPosition: 14,
   Generation: 15,
 } as const;
 
@@ -151,7 +148,6 @@ export interface AssistantConversationPage {
   transcriptHeight: number;
   dimText: string;
   brightText: string;
-  scrollbarText: string;
   footerText: string;
 }
 
@@ -493,7 +489,10 @@ export class HudPageBuilder {
     const geometry = ASSISTANT_CONVERSATION_GEOMETRY;
     const content = (value: string): string => value || ' ';
     return new RebuildPageContainer({
-      containerTotalNum: 6,
+      // No scrollbar: Even AI draws none, and the old column of 20 px
+      // glyphs in an 18 px container wrapped every glyph onto its own
+      // line, leaving black boxes down the card's right edge.
+      containerTotalNum: 5,
       ...this.menuConfig(),
       textObject: [
         // The live header line every page carries: clock, the other running
@@ -543,20 +542,6 @@ export class HudPageBuilder {
           zOrderIndex: 3,
           textColor: 4,
           content: fitUtf8(content(view.brightText), TEXT_CONTAINER_MAX_BYTES),
-        }),
-        new TextContainerProperty({
-          containerID: AssistantConversationContainerId.ScrollPosition,
-          containerName: 'scroll-position',
-          xPosition: geometry.scrollbarLeft,
-          yPosition: view.transcriptTop,
-          width: geometry.scrollbarWidth,
-          height: view.transcriptHeight,
-          paddingLength: 0,
-          borderWidth: 0,
-          isEventCapture: 0,
-          zOrderIndex: 4,
-          textColor: 2,
-          content: content(view.scrollbarText),
         }),
         new TextContainerProperty({
           containerID: AssistantConversationContainerId.Generation,
