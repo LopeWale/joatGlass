@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-05 — Build JOAT 0.1.103 text Home
+
+- Packed from `38b9abb` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.103 above the last recorded build (0.1.102); app.json, package.json and package-lock.json all 0.1.103. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
+- Canonical `apps/hub-plugin/joat.ehpk`: 164939 bytes, SHA-256 `a43cf1ac577838ecd64710ec28853b90cb3c84c63202bbb2f2daf088c63a9e1d`. Home is firmware text again (six text containers, no image tile): one rebuild to enter, then only changed bands as in-place upgrades — a minute tick is one upgrade, a tab swipe two. Carries 0.1.102 and the cloud session's credential-list fix (`693b632`). Plugin 1076 tests, Mac 3105 passed. The Mac side changed in `693b632`, so restart the brain from this revision. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-06 — Every CLI launch drops the same credential list
 
 - Each launch path kept its own list of variables to drop before starting `claude` or `codex`:
