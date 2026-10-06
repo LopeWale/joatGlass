@@ -63,6 +63,62 @@ def find_claude_binary() -> str | None:
     return bundles[-1] if bundles else None
 
 
+def _is_json_line(line: str) -> bool:
+    try:
+        json.loads(line)
+    except (ValueError, UnicodeError):
+        return False
+    return True
+
+
+def _complaint(line: str) -> str | None:
+    """A stdout line as the CLI's own complaint, or None for answer text.
+
+    Prose is a complaint (an answer in plain mode is prose too, which is why
+    only the tail is read). A JSON line is the CLI's structured stream:
+    only its error events count — `codex exec --json` reports a failed
+    turn as `{"type": "error"|"turn.failed", ...}` or an `error` item,
+    while its `agent_message` items carry the answer.
+    """
+    try:
+        event = json.loads(line)
+    except (ValueError, UnicodeError):
+        return line
+    if not isinstance(event, dict):
+        return None
+    kind = event.get("type")
+    item = event.get("item")
+    if kind == "item.completed" and isinstance(item, dict) and item.get("type") == "error":
+        return str(item.get("message", ""))
+    if kind in ("error", "turn.failed"):
+        error = event.get("error")
+        message = error.get("message") if isinstance(error, dict) else event.get("message")
+        return str(message or "")
+    return None
+
+
+def _diagnostic_text(stderr: list[str], stdout_errors: list[str], plain_stdout: list[str],
+                     *, timed_out: bool) -> str:
+    """What a failed turn said about ITSELF, without the model's answer.
+
+    The failure classifier looks for "sign in" and "usage limit", and a
+    model's answer is free to contain both: a Brainstorm about login flows
+    that timed out used to mark a working seat signed out, and every later
+    turn was refused until the wearer tapped Refresh. So the answer never
+    reaches it. stderr is the CLI's own; in stream-json mode the CLI's
+    complaints are the lines that are not JSON and a result flagged
+    `is_error`; in plain mode an answer and a complaint share stdout, and
+    a CLI that refuses a turn says so last and exits, so only the last
+    lines count, and none at all after a timeout (a hung turn was talking,
+    not refusing).
+    """
+    parts = [*stderr, *stdout_errors]
+    if plain_stdout and not timed_out:
+        complaints = (_complaint(ln) for ln in "".join(plain_stdout).splitlines() if ln.strip())
+        parts.append("\n".join([c for c in complaints if c][-3:]))
+    return "\n".join(part for part in parts if part)[-4000:]
+
+
 def _stream_json_event(line: str) -> tuple[str, str | None, bool]:
     """One `--output-format stream-json` line, read for what it carries.
 
@@ -147,6 +203,9 @@ class SubprocessAgent:
         self.last_returncode: int | None = None
         self.last_failed = False
         self.last_output = ""
+        #: The CLI's own complaints from the last turn, never the answer:
+        #: what the failure classifier reads (see `_diagnostic_text`).
+        self.last_diagnostic = ""
 
     def _argv(self, prompt: str) -> list[str]:
         chosen = self._model() if self._model is not None else None
@@ -169,6 +228,7 @@ class SubprocessAgent:
         self.last_returncode = None
         self.last_failed = False
         self.last_output = ""
+        self.last_diagnostic = ""
         proc = await asyncio.create_subprocess_exec(
             *self._argv(prompt),
             stdout=asyncio.subprocess.PIPE,
@@ -179,6 +239,9 @@ class SubprocessAgent:
         )
         assert proc.stdout is not None
         captured: list[str] = []
+        stderr_text: list[str] = []
+        stdout_errors: list[str] = []
+        plain_stdout: list[str] = []
 
         async def drain_stderr() -> None:
             # Bounded: a chatty child must neither deadlock on a full pipe
@@ -190,8 +253,11 @@ class SubprocessAgent:
                 if not chunk:
                     return
                 captured.append(chunk.decode(errors="replace"))
+                stderr_text.append(captured[-1])
                 if sum(len(c) for c in captured) > 16_000:
                     del captured[:-2]
+                if sum(len(c) for c in stderr_text) > 8_000:
+                    del stderr_text[:-2]
 
         stderr_task = asyncio.ensure_future(drain_stderr()) if self._capture else None
         loop = asyncio.get_running_loop()
@@ -220,6 +286,10 @@ class SubprocessAgent:
                     captured.append(decoded)
                     if sum(len(c) for c in captured) > 16_000:
                         del captured[:-2]
+                    if not self._stream_json:
+                        plain_stdout.append(decoded)
+                        if sum(len(c) for c in plain_stdout) > 8_000:
+                            del plain_stdout[:-2]
                 # Emit complete lines (noise-filtered); keep the tail fragment.
                 *lines, pending = pending.split("\n")
                 if self._stream_json:
@@ -234,6 +304,9 @@ class SubprocessAgent:
                         text, final, failed = _stream_json_event(line)
                         if final is not None:
                             final_answer, result_failed = final, failed
+                        elif self._capture and line.strip() and not _is_json_line(line):
+                            stdout_errors.append(line[-1_000:])
+                            del stdout_errors[:-8]
                         if text:
                             batch.append(text)
                     if batch:
@@ -252,6 +325,8 @@ class SubprocessAgent:
                     text, final, failed = _stream_json_event(pending)
                     if final is not None:
                         final_answer, result_failed = final, failed
+                    elif self._capture and not _is_json_line(pending):
+                        stdout_errors.append(pending[-1_000:])
                     if text:
                         streamed = True
                         yield text
@@ -291,7 +366,12 @@ class SubprocessAgent:
                         yield "\n" + failure_notice(
                             self._name,
                             self._failure_detail(
-                                "".join(captured) + final_answer, proc.returncode,
+                                _diagnostic_text(
+                                    stderr_text,
+                                    [*stdout_errors, *([final_answer] if result_failed else [])],
+                                    plain_stdout, timed_out=False,
+                                ),
+                                proc.returncode,
                             ),
                         ) + "\n"
         finally:
@@ -305,6 +385,11 @@ class SubprocessAgent:
             self.last_returncode = proc.returncode
             self.last_failed = timed_out or bool(proc.returncode) or result_failed
             self.last_output = "".join(captured)[-4000:]
+            self.last_diagnostic = _diagnostic_text(
+                stderr_text,
+                [*stdout_errors, *([final_answer] if result_failed else [])],
+                plain_stdout, timed_out=timed_out,
+            )
             # Bounded, because asyncio completes wait() only once the stdout
             # PIPE closes — and a killed agent's own children inherit that
             # pipe and keep it open. `codex exec` spawns children, so an

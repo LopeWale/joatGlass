@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-10-06 — The phone's Brainstorm and Accounts screen, fixed where it failed
+
+A review of the phone control screen (merged in 0.1.100) found these; each has a test that fails on the code before this change.
+
+- **A seat could be marked signed out by its own answer.** A failed or timed-out turn was classified from everything the CLI printed, the model's answer included, so a Brainstorm about logins that failed marked a working seat signed out, and every later turn was refused without starting the CLI until the wearer tapped Refresh. The classifier now reads only the CLI's own complaints (`SubprocessAgent.last_diagnostic`): stderr, the non-JSON lines and `is_error` result of stream-json, the error events of `codex exec --json`, and the last lines of plain output — none after a timeout.
+- **A web page on the Mac could control the accounts.** Loopback peers skip pairing so the simulator and the harnesses can connect, and a page open in a browser on the Mac also arrives from loopback. With the account controls it could sign the wearer out, remove accounts, or finish a sign-in with an account of its own and receive the wearer's turns. The exemption now also requires no `Origin` (a native client) or a loopback one (the simulator's dev server); a foreign page pairs like any network peer.
+- **A wrong pasted Claude code left the phone on "Checking the code…" for 15 minutes.** When the CLI asks again the phone asks again ("That code didn't work"), and a code the CLI never answers fails after 90 s.
+- **Remove and Sign out raced a sign-in.** They now stop a sign-in still running for that account; Remove keeps an account whose sign-out failed while the CLI still reports it signed in (deleting its home orphaned the login where nothing could revoke it); a sign-in finishing for a removed account is a notice, not an unhandled task error.
+- **A phone update could be dropped.** A change landing while the previous state was still being sent is now sent after it, so a device code can no longer go missing behind a slow send.
+- **The sign-in CLI outlived the brain** (it runs in its own session); shutdown now closes the control screen and stops it.
+- **Reset said "reset" while the room was still active** until the 8 s cancel watchdog, refusing a new Brainstorm; after its grace it now releases the room.
+- **A saved Claude account could run as an inherited login.** `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_AUTH_TOKEN` in the brain's environment outranks `CLAUDE_CONFIG_DIR`, so switching accounts did nothing; a saved account's spawns no longer inherit them (the Mac's own login is left as configured).
+- `CliSignIn` had no tests; it has three now, against a scripted `claude` in a real pty. Mac unit suite and the gateway integration suites pass; mypy clean. One integration test (`test_wildcard_host_accepts_both_families`) fails in the cloud container with or without this change: the container has no IPv6.
+
 ## 2026-10-06 — What the merge left behind
 
 - `HudPageBuilder.overviewTextLayout` is gone with its four tests. The 0.1.100 merge dropped the text overview's presenter path and kept the layout with no caller; it stays in history at `e5a5a3b`.

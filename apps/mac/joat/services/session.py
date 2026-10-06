@@ -1454,6 +1454,11 @@ class SessionManager:
                 await asyncio.wait_for(asyncio.shield(task), grace_s)
             except (TimeoutError, asyncio.CancelledError, Exception):
                 pass
+            if not task.done() and self._task is task:
+                # The wearer asked for a reset, so release the room now rather
+                # than at the cancel watchdog's 8 s: until then a new
+                # Brainstorm was refused while the phone already said "reset".
+                self._release(task)
         return True
 
     def _cancel_active(self) -> None:
@@ -1483,6 +1488,11 @@ class SessionManager:
             "session did not end within %.0fs of cancel; releasing the wearer",
             CANCEL_GRACE_S,
         )
+        self._release(task)
+
+    def _release(self, task: asyncio.Task[None]) -> None:
+        if self._task is not task:
+            return
         self._active = None
         self._task = None
         if self._on_state is not None:

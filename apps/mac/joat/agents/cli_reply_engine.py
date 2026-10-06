@@ -345,8 +345,9 @@ class _CliSeat(ReplyEngine):
         return "\n\n".join(parts)
 
     def _failure(self, agent: SubprocessAgent, resuming: bool) -> str:
-        kind = classify_cli_failure(agent.last_output)
-        notice = _classify_failure(self.title, self.login_command, agent.last_output)
+        # The CLI's own complaints only: a model's answer may say "sign in".
+        kind = classify_cli_failure(agent.last_diagnostic)
+        notice = _classify_failure(self.title, self.login_command, agent.last_diagnostic)
         if kind == "signed_out":
             self._set_account("logged_out")
         elif kind == "limit":

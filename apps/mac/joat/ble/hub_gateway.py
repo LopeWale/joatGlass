@@ -959,13 +959,39 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         except (ValueError, IndexError, TypeError):
             return False
 
+    @staticmethod
+    def _origin_is_local(conn: ServerConnection) -> bool:
+        """No Origin (a native client: the harnesses, speak_test.py) or a page
+        served from this Mac itself (the simulator loads the dev server)."""
+        request = conn.request
+        origin = request.headers.get("Origin") if request is not None else None
+        if origin is None:
+            return True
+        parts = urlsplit(origin)
+        if parts.scheme not in ("http", "https") or parts.hostname is None:
+            return False
+        if parts.hostname == "localhost":
+            return True
+        try:
+            return bool(ip_address(parts.hostname).is_loopback)
+        except ValueError:
+            return False
+
     def _peer_is_exempt(self, conn: ServerConnection) -> bool:
         """Loopback peers skip pairing: the simulator and test harnesses run
         on this Mac, and a local process could read the token file anyway —
-        the boundary being enforced is the network, not the machine."""
+        the boundary being enforced is the network, not the machine.
+
+        A browser is the exception the network boundary misses: any web page
+        open on this Mac can dial ws://127.0.0.1:8787 and its socket arrives
+        from loopback. Since the phone screen can sign accounts in and out
+        (2026-10-05), an exempt page could finish a sign-in with its own
+        account and receive the wearer's turns. A browser always names the
+        page in Origin, so a foreign Origin pairs like any other peer.
+        """
         if not self._trust_loopback:
             return False
-        return self._peer_is_loopback(conn)
+        return self._peer_is_loopback(conn) and self._origin_is_local(conn)
 
     def forget_pairing(self) -> bool:
         """Open an explicit, time-bounded local pairing window.

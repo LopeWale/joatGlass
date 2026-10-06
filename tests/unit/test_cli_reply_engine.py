@@ -208,6 +208,58 @@ async def test_claude_usage_limit_becomes_a_lens_notice(tmp_path: Path, record_d
     assert await drain(engine, "hi") == [LIMIT_NOTICE.format(name="Claude")]
 
 
+CLAUDE_ANSWER_THEN_FAIL = r"""#!/bin/sh
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Most users sign in with a passkey and log in again when it expires."}}}'
+exit 1
+"""
+
+CLAUDE_TURN_SIGNED_OUT = r"""#!/bin/sh
+echo 'Failed to authenticate: OAuth session expired and could not be refreshed'
+exit 1
+"""
+
+CODEX_ANSWER_THEN_FAIL = r"""#!/bin/sh
+echo '{"type": "item.completed", "item": {"id": "item_2", "type": "agent_message", "text": "Tell them to sign in again."}}'
+exit 1
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_failed_turn_that_talked_about_signing_in_keeps_the_seat(
+    tmp_path: Path, record_dir: Path,
+) -> None:
+    """2026-10-06: the classifier read the model's own answer, so a failed
+    turn about logins marked a working seat signed out and every later turn
+    was refused without trying."""
+    states: list[tuple[str, str]] = []
+    claude = ClaudeCliReplyEngine(
+        script(tmp_path, "claude", CLAUDE_ANSWER_THEN_FAIL), workdir=tmp_path / "c",
+        on_account=lambda seat, state: states.append((seat, state)),
+    )
+    await drain(claude, "how do logins work?")
+    codex = CodexCliReplyEngine(
+        script(tmp_path, "codex", CODEX_ANSWER_THEN_FAIL), workdir=tmp_path / "x",
+        on_account=lambda seat, state: states.append((seat, state)),
+    )
+    await drain(codex, "how do logins work?")
+    assert ("claude", "logged_out") not in states and ("codex", "logged_out") not in states
+    assert claude.available and codex.available
+
+
+@pytest.mark.asyncio
+async def test_a_turn_refused_for_an_expired_login_still_marks_the_seat(
+    tmp_path: Path, record_dir: Path,
+) -> None:
+    states: list[tuple[str, str]] = []
+    engine = ClaudeCliReplyEngine(
+        script(tmp_path, "claude", CLAUDE_TURN_SIGNED_OUT), workdir=tmp_path,
+        on_account=lambda seat, state: states.append((seat, state)),
+    )
+    notice = SIGNED_OUT_NOTICE.format(name="Claude", command="claude auth login")
+    assert await drain(engine, "hi") == [notice]
+    assert states == [("claude", "logged_out")]
+
+
 @pytest.mark.asyncio
 async def test_claude_warm_reads_the_auth_status_json(tmp_path: Path, record_dir: Path) -> None:
     states: list[tuple[str, str]] = []

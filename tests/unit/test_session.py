@@ -1135,6 +1135,37 @@ class TestSessionManager:
         wedged.release.set()
         await asyncio.sleep(0.02)
 
+    async def test_a_phone_reset_releases_a_wedged_room_before_reporting_it(self) -> None:
+        """2026-10-06: Reset waited its grace and said "reset" while the room
+        stayed active until the 8 s watchdog, refusing a new Brainstorm."""
+        transport = SinkTransport()
+
+        class WedgedDebate(DebateSession):
+            def __init__(self) -> None:  # noqa: D107 — no table: never speaks
+                self.release = asyncio.Event()
+
+            async def run(self) -> None:
+                while not self.release.is_set():
+                    try:
+                        await asyncio.wait_for(self.release.wait(), 0.005)
+                    except (TimeoutError, asyncio.CancelledError):
+                        continue
+
+            def cancel(self) -> None:
+                return None
+
+        wedged = WedgedDebate()
+        mgr = SessionManager(HudWriter(transport), lambda _topic: wedged)
+        try:
+            assert mgr.handle_transcript("brainstorm something") is True
+            await asyncio.sleep(0)
+            assert mgr.active
+            assert await mgr.reset_brainstorm(grace_s=0.05) is True
+            assert not mgr.active, "released when Reset reports it, not 8 s later"
+        finally:
+            wedged.release.set()
+            await asyncio.sleep(0.02)
+
     async def test_queued_cards_stay_bounded_during_a_long_session(self) -> None:
         """The queue was unbounded and only trimmed at drain, so a busy hour
         accumulated an hour of cards nobody would read — and each waiting
