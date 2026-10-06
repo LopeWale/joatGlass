@@ -363,6 +363,15 @@ export interface PromptCancelMessage {
   connectionGeneration: string;
 }
 
+/** The wearer's words so far while they answer this prompt (Mac partial
+ * transcript). Display only; the final transcript alone answers. */
+export interface PromptPartialMessage {
+  kind: 'prompt.partial';
+  promptId: string;
+  connectionGeneration: string;
+  text: string;
+}
+
 export interface PromptAckMessage {
   kind: 'prompt.ack';
   promptId: string;
@@ -579,6 +588,7 @@ export type DownlinkMessage =
   | PromptPresentMessage
   | MessageUIMessage
   | PromptCancelMessage
+  | PromptPartialMessage
   /** The socket is usable only after this frame. */
   | { kind: 'auth.accepted' }
   | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean; textColor?: number; contentKind?: HudContentKind; traceId?: string }

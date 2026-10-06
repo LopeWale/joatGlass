@@ -368,3 +368,39 @@ class TestReaderSurvivesABackgroundRefresh:
         sent = len(transport.sent)
         await publisher.page("NEWS", EventType.SCROLL_BOTTOM, "panel-news-1")
         assert len(transport.sent) == sent
+
+
+class StatusRowProvider(Provider):
+    """News with a failed feed: the "[!]" row sits above the headlines."""
+
+    status_rows = 1
+
+    def __init__(self) -> None:
+        super().__init__(("[!] Some feeds unavailable · partial list", "[1m] A · BBC", "[2m] B · NPR"))
+
+    async def open(self, index: int) -> Reader | None:
+        self.opened.append(index)
+        return Reader(tab="news", title="NEWS · ARTICLE", metadata="m", pages=("one",)) if index < 2 else None
+
+
+class TestStatusRowTaps:
+    """2026-10-06: with a feed down, every tap opened the story below it and
+    the last row opened nothing ("tap to open the news does not work")."""
+
+    async def test_a_tap_opens_the_headline_on_that_row(self) -> None:
+        transport = Transport()
+        provider = StatusRowProvider()
+        publisher, _ = panels(transport, provider)
+        await publisher.publish("news")
+        await publisher.select("NEWS", 2, publisher.request_id("news"))  # the last row: B
+        assert provider.opened == [1]
+        assert last_list(transport).title == "NEWS · ARTICLE"
+
+    async def test_the_status_row_opens_nothing(self) -> None:
+        transport = Transport()
+        provider = StatusRowProvider()
+        publisher, _ = panels(transport, provider)
+        await publisher.publish("news")
+        await publisher.select("NEWS", 0, publisher.request_id("news"))
+        assert provider.opened == []
+        assert isinstance(transport.sent[-1], HudPanel)

@@ -40,6 +40,7 @@ import {
   type BrainstormHudModel,
   type ConfirmationPurpose,
   type AssistantConversationSnapshot,
+  type AssistantConversationTurn,
   type HudContentKind,
   type PanelContentTab,
   type PanelTab,
@@ -308,6 +309,17 @@ export function parseMessageDraft(prompt: string): { recipient: string; body: st
 
 const PAGE_SWIPES = new Set(['swipe: previous', 'swipe: more', 'swipe: page']);
 
+/** Whether two pages have the same containers in the same places, so the
+ * second can be reached by upgrading text in place instead of a rebuild. */
+function sameGeometry(left: RebuildPageContainer, right: RebuildPageContainer): boolean {
+  const shape = (page: RebuildPageContainer) => JSON.stringify([
+    ...(page.textObject ?? []).map((item) => [item.containerID, item.xPosition, item.yPosition, item.width, item.height, item.zOrderIndex]),
+    ...(page.listObject ?? []).map((item) => [item.containerID, item.xPosition, item.yPosition, item.width, item.height, item.zOrderIndex]),
+    ...(page.imageObject ?? []).map((item) => [item.containerID, item.xPosition, item.yPosition, item.width, item.height]),
+  ]);
+  return shape(left) === shape(right);
+}
+
 function textPageHint(page: number, count: number, macHint: string, review = false): string {
   // The Mac still writes "left x2"; every page says "double-click".
   const hint = GesturePolicy.formatHint(macHint);
@@ -376,6 +388,13 @@ interface PromptQuestionState {
   question: string;
   isCurrent: () => boolean;
   paint?: Promise<boolean>;
+  /** The wearer's words so far, while they speak a reply (prompt.partial). */
+  partial?: string;
+  /** The reply card as last built, so a partial can upgrade it in place. */
+  layout?: RebuildPageContainer;
+  /** The newest partial waiting for the one in flight to land. */
+  pendingPartial?: string;
+  partialPaint?: Promise<boolean>;
 }
 
 interface ActionOverlayState {
@@ -993,13 +1012,10 @@ export class HudPresenter {
       // writing into containers the question page has replaced.
       if (!await this.prepareNativeTerminalHandoff()) return false;
       if (!this.isPromptCurrent(prompt)) return false;
-      const header = this.nativeHeader(this.nativePageTitle());
       const layout = prompt.messageReply
-        ? overlayConversation(this.layouts.assistantConversationLayout(
-          replyDraftView([{ role: 'assistant', text: prompt.question }], MESSAGE_REPLY_LISTENING_HINT),
-          header,
-        ), this.conversationUnderlay())
-        : this.layouts.promptQuestionLayout(pages[0] ?? ' ', header);
+        ? this.replyCardLayout(prompt)
+        : this.layouts.promptQuestionLayout(pages[0] ?? ' ', this.nativeHeader(this.nativePageTitle()));
+      prompt.layout = layout;
       painted = await this.replaceNativePage(layout, 'prompt-native');
       return painted && this.isPromptCurrent(prompt);
     } catch {
@@ -1010,6 +1026,70 @@ export class HudPresenter {
         await this.restoreRetainedPage().catch(() => false);
       }
     }
+  }
+
+  /** The Messages reply card over the thread: JOAT's question and, while
+   * the wearer speaks, their words so far. */
+  private replyCardLayout(prompt: PromptQuestionState): RebuildPageContainer {
+    const turns: AssistantConversationTurn[] = [{ role: 'assistant', text: prompt.question }];
+    if (prompt.partial?.trim()) turns.push({ role: 'user', text: prompt.partial });
+    return overlayConversation(this.layouts.assistantConversationLayout(
+      replyDraftView(turns, MESSAGE_REPLY_LISTENING_HINT),
+      this.nativeHeader(this.nativePageTitle()),
+    ), this.conversationUnderlay());
+  }
+
+  /**
+   * The wearer's words so far, in the reply card while they speak (the
+   * wearer, 2026-10-06: it "does not show my speech as I am speaking").
+   * Display only: the final transcript alone answers the question. While
+   * the card keeps its size the words are upgraded in place; a card that
+   * must grow is rebuilt. One paint at a time, the newest words win.
+   */
+  showPromptPartial(promptId: string, text: string): Promise<boolean> {
+    const prompt = this.promptQuestion;
+    if (!prompt || prompt.id !== promptId || !prompt.messageReply || !this.isPromptCurrent(prompt)) {
+      return Promise.resolve(false);
+    }
+    prompt.pendingPartial = text;
+    if (prompt.partialPaint) return prompt.partialPaint;
+    const run = async (): Promise<boolean> => {
+      let painted = false;
+      try {
+        await prompt.paint?.catch(() => false);
+        while (prompt.pendingPartial !== undefined && this.isPromptCurrent(prompt)) {
+          const words = prompt.pendingPartial;
+          prompt.pendingPartial = undefined;
+          if (words === prompt.partial) continue;
+          prompt.partial = words;
+          const previous = prompt.layout;
+          const next = this.replyCardLayout(prompt);
+          prompt.layout = next;
+          painted = previous && sameGeometry(previous, next)
+            ? await this.upgradeChangedTexts(previous, next)
+            : await this.replaceNativePage(next, 'prompt-native');
+        }
+        return painted && this.isPromptCurrent(prompt);
+      } catch {
+        return false;
+      } finally {
+        prompt.partialPaint = undefined;
+      }
+    };
+    prompt.partialPaint = run();
+    return prompt.partialPaint;
+  }
+
+  /** Upgrade, in place, each text container whose words changed. */
+  private async upgradeChangedTexts(previous: RebuildPageContainer, next: RebuildPageContainer): Promise<boolean> {
+    let ok = true;
+    for (const text of next.textObject ?? []) {
+      if (text.containerID === ContainerId.StatusBar && this.imageHeaderShown) continue;
+      const before = previous.textObject?.find((item) => item.containerID === text.containerID)?.content ?? '';
+      if (before === text.content) continue;
+      ok = await this.upgradeNativeText(text.containerID ?? 0, text.containerName ?? '', text.content ?? ' ', before) && ok;
+    }
+    return ok;
   }
 
   async dismissPromptQuestion(promptId: string): Promise<boolean> {

@@ -209,7 +209,16 @@ class PanelPublisher:
         if parsed != (tab, self._tabs[tab].revision):
             log.info("dropping stale panel tap tab=%s request=%s", tab, request_id)
             return
-        await self._open(tab, index)
+        # A tap counts the tab's rows; a provider opens its items. News puts
+        # a "[!] feeds unavailable" row above its headlines whenever a feed
+        # fails, and until 2026-10-06 that shifted every tap down a story
+        # and made the last row open nothing (the wearer: "tap to open news
+        # does not work"). The status row itself opens nothing.
+        offset = int(getattr(self._providers[tab], "status_rows", 0))
+        if index < offset:
+            await self.publish(tab)
+            return
+        await self._open(tab, index - offset)
 
     async def refresh(self, name: str | None, request_id: str | None) -> None:
         """Long press at the top of an expanded tab: fetch again, push again."""

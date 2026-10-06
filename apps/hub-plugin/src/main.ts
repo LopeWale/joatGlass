@@ -704,6 +704,11 @@ async function boot(): Promise<void> {
       case 'prompt.cancel':
         await awaitCurrent(promptedInput.handle(msg, context));
         break;
+      case 'prompt.partial':
+        // Not awaited: the words so far must never hold the downlink queue
+        // behind a card paint (the next partial supersedes this one).
+        void promptedInput.partial(msg, context);
+        break;
       case 'g2.diagnostic.control':
         g2Diagnostics.setEnabled(msg.enabled);
         if (msg.enabled && !firstLightReceiptDelivered) {
@@ -1509,6 +1514,10 @@ async function renderVisualState(
     await hud.showPromptQuestion(
       'visual-reply-question', 'What do you want to say back to Adele?', () => true, 'messages',
     );
+    // `&joatReplyWords=...`: the words so far, as the Mac's prompt.partial
+    // would deliver them while the wearer speaks (the simulator has no mic).
+    const words = new URLSearchParams(location.search).get('joatReplyWords');
+    if (words) await hud.showPromptPartial('visual-reply-question', words);
     return;
   }
   if (state === 'message-reply-confirm') {
