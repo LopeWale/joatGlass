@@ -5,9 +5,8 @@ official `claude` binary (RULES.md #9: never third-party clients, never
 reused OAuth tokens). Both stream stdout incrementally so the wearer SEES
 the debate happen — the Phase-2 requirement is visibility, not verdicts.
 
-Safety parity with .claude/bin/codex-bridge.sh: OPENAI_API_KEY is stripped
-from the child env so Codex always uses subscription auth, and the sandbox
-is read-only.
+Every launch drops the shared credential list (`cli_env.STRIP_ENV`) so both
+CLIs always run on the subscription login, and Codex's sandbox is read-only.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 
 from ..services.models import DEFAULT_CODEX_MODEL
 from ..services.roundtable import LIMIT_DETAIL, SIGNED_OUT_DETAIL, failure_notice
+from .cli_env import cli_env
 from .cli_failures import classify_cli_failure
 from .cli_locate import find_codex_binary
 
@@ -177,6 +177,8 @@ class SubprocessAgent:
         self._stream_json = stream_json
         self._command = command
         self._name = name or os.path.basename(command[0])
+        # Dropped on top of the shared list (`cli_env.STRIP_ENV`), which
+        # every launch drops: a seat can add names, never let one through.
         self._env_strip = env_strip
         self._timeout_s = timeout_s
         self._noise = noise
@@ -216,8 +218,7 @@ class SubprocessAgent:
         return [*self._command, *flag, *([prompt] if prompt else [])]
 
     async def stream(self, prompt: str) -> AsyncIterator[str]:
-        env = {k: v for k, v in os.environ.items() if k not in self._env_strip}
-        env["OTEL_SDK_DISABLED"] = "true"
+        env = cli_env(self._env_strip)
         env.update(self._env_extra)
         if self._env_provider is not None:
             for key, value in self._env_provider().items():
@@ -436,7 +437,6 @@ def proposer(
         model = lambda: pinned  # noqa: E731 - a constant provider reads clearer here
     return SubprocessAgent(
         [binary, "exec", "-s", "read-only"],
-        env_strip=("OPENAI_API_KEY",),
         noise=_CODEX_NOISE,
         name="codex",
         model=model,
@@ -458,10 +458,12 @@ def critic(
 ) -> SubprocessAgent | None:
     """Claude critiques, via the official binary only (RULES.md #9).
 
-    ANTHROPIC_API_KEY is stripped so the critic always runs on the
-    subscription login — RULES #9 makes metered API an explicit config
-    choice (AuthStrategy, with --max-budget-usd), never an accident of
-    whatever the shell happened to export."""
+    The shared credential list is dropped, as on every launch, so the critic
+    always runs on the subscription login — RULES #9 makes metered API an
+    explicit config choice (AuthStrategy, with --max-budget-usd), never an
+    accident of whatever the shell happened to export. Until 2026-10-06 the
+    critic dropped only ANTHROPIC_API_KEY, so an inherited bearer token or
+    base URL still moved its turns off the subscription."""
     binary = find_claude_binary()
     if binary is None:
         return None
@@ -472,7 +474,6 @@ def critic(
     # print mode; both were verified against the installed binary.
     return SubprocessAgent([binary, "-p", "--output-format", "stream-json",
                             "--include-partial-messages", "--verbose"],
-                           env_strip=("ANTHROPIC_API_KEY",),
                            noise=_CLAUDE_NOISE, name="claude",
                            model=model, model_flag="--model",
                            stream_json=True, capture=True,
