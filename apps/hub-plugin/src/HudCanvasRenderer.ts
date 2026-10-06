@@ -1,4 +1,5 @@
 import { GesturePolicy } from './GesturePolicy';
+import { HOME_COLUMN, type HomeColumnView } from './HomeImages';
 import {
   EVEN_READER, drawEvenText, evenLineHeight, evenTextWidth, fitOneLineEven, loadEvenFont, readerHint,
   readerLineTops,
@@ -40,6 +41,7 @@ import {
 import {
   CANVAS,
   HeaderImageId,
+  HomeColumnId,
   PANEL_TABS,
   SPINE_LABEL_BOX,
   type HudContentKind,
@@ -286,6 +288,58 @@ export interface ReaderRun {
   y: number;
   width: number;
   alpha: number;
+}
+
+/** One mark of Home's column: words in Even's font, or an icon. */
+export interface HomeColumnMark {
+  tile: 0 | 1;
+  x: number;
+  /** Top, within the tile. */
+  y: number;
+  width: number;
+  height: number;
+  alpha: number;
+  text?: string;
+  icon?: HudIconName;
+}
+
+/** Inside each column tile: 16 px from the screen's edge, 16 px short of
+ * the column's right edge, so nothing meets the rule or the edge. */
+const COLUMN_LEFT = 16;
+const COLUMN_RIGHT = HOME_COLUMN.width - 16;
+const COLUMN_ICON = 13;
+const COLUMN_TEXT_X = COLUMN_LEFT + COLUMN_ICON + 6;
+
+/**
+ * Where Home's column draws each mark. The top tile: the date, the weather
+ * with its icon, the unread count with the Messages icon. The bottom tile:
+ * the tab rail, one row per tab with its icon, the lit tab bright and the
+ * others dim. Pure, so the margins are tested without a canvas.
+ */
+export function homeColumnLayout(view: HomeColumnView): HomeColumnMark[] {
+  const line = evenLineHeight();
+  const marks: HomeColumnMark[] = [];
+  const words = (tile: 0 | 1, x: number, y: number, text: string, alpha: number) => {
+    const fitted = fitOneLineEven(text, COLUMN_RIGHT - x);
+    if (fitted) marks.push({ tile, x, y, width: evenTextWidth(fitted), height: line, alpha, text: fitted });
+  };
+  const icon = (tile: 0 | 1, y: number, name: HudIconName, alpha: number) => {
+    marks.push({ tile, x: COLUMN_LEFT, y: y + (line - COLUMN_ICON) / 2, width: COLUMN_ICON, height: COLUMN_ICON, alpha, icon: name });
+  };
+  let y = 10;
+  if (view.info.date) { words(0, COLUMN_LEFT, y, view.info.date, 0.9); y += 26; }
+  if (view.info.weather) { icon(0, y, 'weather', 0.8); words(0, COLUMN_TEXT_X, y, view.info.weather, 0.8); y += 24; }
+  if (view.info.unread > 0) {
+    icon(0, y, 'messages', 0.8);
+    words(0, COLUMN_TEXT_X, y, `${view.info.unread} unread`, 0.8);
+  }
+  view.tabs.forEach((tab, index) => {
+    const rowY = 8 + index * 26;
+    const alpha = tab.active ? 1 : 0.4;
+    icon(1, rowY, tab.tab, alpha);
+    words(1, COLUMN_TEXT_X, rowY, tab.label, alpha);
+  });
+  return marks;
 }
 
 /** Brightness of a reader's parts: the speaker over the words, the hint
@@ -1077,6 +1131,37 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       pixels[target] = Math.max(rgba[source] ?? 0, rgba[source + 1] ?? 0, rgba[source + 2] ?? 0);
     }
     return splitGrayscaleTiles(pixels);
+  }
+
+  /** Home's left column as its two images (HomeImages.ts). */
+  async renderHomeColumn(view: HomeColumnView): Promise<readonly HudImageTile[]> {
+    const icons = await this.icons;
+    const atlas = await loadEvenFont();
+    const width = HOME_COLUMN.width;
+    const height = HOME_COLUMN.tileHeight;
+    const marks = homeColumnLayout(view);
+    return [HomeColumnId.Top, HomeColumnId.Bottom].map((containerId, tile) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d', { alpha: false });
+      if (!context) throw new Error('2D canvas is unavailable');
+      context.fillStyle = '#000000';
+      context.fillRect(0, 0, width, height);
+      context.imageSmoothingEnabled = true;
+      for (const mark of marks.filter((item) => item.tile === tile)) {
+        if (mark.icon) this.drawIcon(context, icons[mark.icon], mark.x, mark.y, mark.width, Math.round(mark.alpha * 255));
+        else if (mark.text) {
+          drawEvenText(context, atlas, mark.text, mark.x, mark.y, { alpha: mark.alpha, fallbackFont: TYPE.statusMeta });
+        }
+      }
+      const rgba = context.getImageData(0, 0, width, height).data;
+      const pixels = new Uint8Array(width * height);
+      for (let source = 0, target = 0; source < rgba.length; source += 4, target += 1) {
+        pixels[target] = Math.max(rgba[source] ?? 0, rgba[source + 1] ?? 0, rgba[source + 2] ?? 0);
+      }
+      return { containerId, pixels, width, height };
+    });
   }
 
   /** The spine alone, as the two 288x24 halves of a firmware page's image

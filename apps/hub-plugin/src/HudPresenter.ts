@@ -21,6 +21,7 @@ import { paginateMeasured } from './FirmwareText';
 import { OVERLAY_GAP, cardTop, overlayConversation } from './ConversationOverlay';
 import { paginateEven, type EvenReaderLine } from './EvenFont';
 import { hasImageHeader, withImageHeader } from './HeaderImage';
+import { hasHomeImages, homeColumnView, withHomeImages, type HomeColumnView } from './HomeImages';
 import { ASSISTANT_ANSWER_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
 import { type HudStatusModel, hudStatusLabel, nativeStatusLine } from './HudStatus';
 import { composeOverviewText } from './OverviewText';
@@ -232,6 +233,9 @@ const imageHeaderEnabled = String(import.meta.env.VITE_IMAGE_HEADER ?? '1') !== 
 /** Readers set in Even's font at 55% across the whole canvas (the wearer's
  * ask, 2026-10-06); `VITE_EVEN_FONT_PAGES=0` keeps firmware text pages. */
 const evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '1') !== '0';
+/** Home's left column as images in Even's font (HomeImages.ts);
+ * `VITE_HOME_IMAGES=0` keeps it firmware text. */
+const homeImagesEnabled = String(import.meta.env.VITE_HOME_IMAGES ?? '1') !== '0';
 
 /** Tests that pin the IMAGE overview select it here. Never product code. */
 export function setNativeOverviewForTest(on: boolean): void {
@@ -729,6 +733,13 @@ export class HudPresenter {
       if (native !== undefined) return this.layouts.textPageLayout(native.body, { status: '', hint: native.hint });
     }
     return undefined;
+  }
+
+  /** Home's column images; the image lane sends only a changed tile. */
+  private paintHomeColumn(view: HomeColumnView, current: () => boolean): Promise<boolean> {
+    const visual = this.visual;
+    if (!visual?.paintHomeColumn) return Promise.resolve(false);
+    return visual.paintHomeColumn(view, current).catch(() => false);
   }
 
   /** A firmware page with the image spine in place of its status line. */
@@ -3490,10 +3501,22 @@ export class HudPresenter {
       && !this.nativeTerminal.isActive()
       && (taking || this.pageOwner === 'visual' || this.visualPagePending());
     if (!stillOurs()) return false;
-    const layout = this.withHeader(
-      this.layouts.overviewTextLayout(composeOverviewText(frame, this.overviewHeader())),
-    );
+    const view = composeOverviewText(frame, this.overviewHeader());
+    let layout = this.withHeader(this.layouts.overviewTextLayout(view));
+    const column = homeImagesEnabled && this.visual?.paintHomeColumn && this.visual.canPaintHomeColumn?.()
+      ? homeColumnView(
+        view,
+        frame.ambient ? `${frame.ambient.temperature} ${frame.ambient.condition}`.trim() : '',
+        frame.ambient?.unread ?? 0,
+      )
+      : undefined;
+    if (column) layout = withHomeImages(layout);
     const header = hasImageHeader(layout);
+    // The column's images follow the page's text: a tab swipe moves the
+    // pane first (an in-place upgrade), then the rail's one tile.
+    const paintColumn = (): void => {
+      if (column && hasHomeImages(layout)) void this.paintHomeColumn(column, stillOurs);
+    };
     const bands = new Map<number, OverviewBand>((layout.textObject ?? []).map((t) => [
       t.containerID ?? 0,
       { name: t.containerName ?? '', content: t.content ?? '', ...(t.textColor !== undefined ? { textColor: t.textColor } : {}) },
@@ -3506,6 +3529,7 @@ export class HudPresenter {
       });
       if (changed.length === 0) {
         if (header) void this.paintImageHeader();
+        paintColumn();
         this.armPanelTicker();
         return true;
       }
@@ -3528,6 +3552,7 @@ export class HudPresenter {
         if (!stillOurs()) return false;
         if (upgraded) {
           if (header) void this.paintImageHeader();
+          paintColumn();
           this.armPanelTicker();
           return true;
         }
@@ -3551,6 +3576,7 @@ export class HudPresenter {
     this.visual?.forgetPage?.();
     this.imageHeaderShown = header;
     if (header) void this.paintImageHeader();
+    paintColumn();
     this.armPanelTicker();
     return true;
   }
