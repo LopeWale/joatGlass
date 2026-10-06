@@ -129,6 +129,7 @@ type VisualState =
   | 'overview'
   | 'live-concurrency'
   | 'confirmation'
+  | 'assistant-conversation'
   | 'message-reply-question'
   | 'message-reply-confirm'
   | 'assistant-overlay'
@@ -177,6 +178,7 @@ const VISUAL_STATE = ((): VisualState | undefined => {
   return requested === 'overview'
     || requested === 'live-concurrency'
     || requested === 'confirmation' || requested === 'assistant-overlay'
+    || requested === 'assistant-conversation'
     || requested === 'message-reply-question' || requested === 'message-reply-confirm'
     || requested === 'nav-receipt'
     || isProductivityVisualState(requested)
@@ -1445,6 +1447,25 @@ async function renderVisualState(
       hint: fixture.hint,
       selectable: fixture.selectable,
       ...(nativeTextPage ? { nativeTextPage: true } : {}),
+    });
+    return;
+  }
+
+  // A JOAT conversation long enough to scroll: the card at its 7-line cap.
+  if (state === 'assistant-conversation') {
+    await hud.showAssistantConversation({
+      conversationId: 'visual-conversation',
+      revision: 1,
+      state: 'ready',
+      continueAfterMs: 120_000,
+      earlierTurnsOmitted: false,
+      turns: [
+        { role: 'user', text: 'Why is the sky blue and the sunset red?' },
+        {
+          role: 'assistant',
+          text: "Sunlight holds every colour, and the air scatters short blue wavelengths far more than long red ones, so blue light reaches you from every part of the sky. At sunset the light crosses much more air, most of the blue is scattered away before it arrives, and the reds and oranges that remain paint the sun and the clouds near it.",
+        },
+      ],
     });
     return;
   }
