@@ -1319,6 +1319,11 @@ class CapabilityRouter:
         if self._message_ui is None:
             await self._hud.receipt("Replying is unavailable in this session.")
             return
+        if self._message_history.thread.reply_target is None or self._replies is None:
+            # A read-only thread is drawn untappable; a tap that arrives
+            # anyway arms nothing.
+            await self._hud.receipt("This conversation is read-only on the glasses.")
+            return
         self._message_selection_active = True
         refused = await self._message_ui.begin_reply()
         if refused:

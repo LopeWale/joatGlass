@@ -469,8 +469,8 @@ class MessageReplyController:
             needs_input=needs_input, candidates=candidates,
             verification_level="delivery_unverified" if state == "sent" else None,
         )
-        if state not in {"awaiting_input", "awaiting_confirmation", "sending"}:
-            action.body = None
+        terminal = state not in {"awaiting_input", "awaiting_confirmation", "sending"}
+        if terminal:
             action.recipient = None
             action.candidates.clear()
             if action.expiry is not None:
@@ -485,6 +485,11 @@ class MessageReplyController:
                 # Publication observes a committed receipt. Its failure must
                 # never alter that result or retry an external submission.
                 log.warning("message status observer failed error=%s", type(exc).__name__)
+        if terminal:
+            # Dropped only after the observers ran: the Messages UI reads a
+            # sent reply's words in that callback to show it on the thread.
+            # Nothing keeps them past it.
+            action.body = None
         return action.status
 
     async def _resolve_prepared_recipient(self, action: _PreparedMessage, query: str) -> None:
