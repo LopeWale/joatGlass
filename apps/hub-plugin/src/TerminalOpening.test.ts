@@ -33,7 +33,6 @@ function rig() {
   let paintAccepted = true;
   let onSend: ((event: InputEventPayload) => void) | undefined;
   const hud = {
-    usesCustomListSelection: () => true,
     showList: vi.fn(async (_items: string[], options?: { title?: string }) => {
       const hold = listHold;
       if (hold) await hold.promise;
@@ -42,7 +41,6 @@ function rig() {
     }),
     showDefault: vi.fn(async () => { screen = 'home'; return true; }),
     setStatus: vi.fn(async () => true),
-    setSelection: vi.fn(async () => true),
     showBrainstorm: vi.fn(async (
       model: BrainstormHudModel, _status?: string, isCurrent?: () => boolean,
     ) => {

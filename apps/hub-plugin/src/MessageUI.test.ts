@@ -50,7 +50,6 @@ function rig() {
   } = {};
   let visible = 'Overview';
   const hud = {
-    usesCustomListSelection: () => true,
     showList: vi.fn(async (items: string[], options?: { title?: string; selectable?: boolean; hint?: string }, current?: () => boolean) => {
       guards.push(current);
       await hooks.paint?.(options?.title);
@@ -59,8 +58,6 @@ function rig() {
       visible = options?.title ?? '';
       return true;
     }),
-    setSelection: vi.fn(async () => true),
-    moveSelection: vi.fn(async () => true),
     showDefault: vi.fn(async () => { visible = 'Overview'; return true; }),
     setStatus: vi.fn(async () => true),
   } as unknown as HudPresenter;
