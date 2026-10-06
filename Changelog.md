@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-05 — Build JOAT 0.1.104
+
+- Packed from `8c727f3` (GitHub main at PR #13 plus the version bump) with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.104 above the last recorded build (0.1.103); app.json, package.json and package-lock.json all 0.1.104. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1076 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 164940 bytes, SHA-256 `c2dd1705ecb58ead5c6e4f84024aea8a76d6c6825c84b28491927a64d576c5a6`. Same plugin and Mac code as 0.1.103 (the commits since are merges and the simulator captures); a brain restarted for 0.1.103 needs no restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-05 — Build JOAT 0.1.103 text Home
 
 - Packed from `38b9abb` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.103 above the last recorded build (0.1.102); app.json, package.json and package-lock.json all 0.1.103. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
