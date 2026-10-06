@@ -104,6 +104,22 @@ describe('HudPresenter Even-font reader page', () => {
     expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
   });
 
+  it('keeps the reader in Even font above JOAT\'s box, and whole again after it', async () => {
+    const r = rig();
+    await r.hud.showList(THREAD, OPTIONS);
+    expect(await r.hud.showPromptQuestion('p1', 'What do you want to say back to Adele?', () => true, 'messages')).toBe(true);
+    const page = r.rebuilds[r.rebuilds.length - 1];
+    // The thread's four tiles stay beneath the box; the box takes input.
+    expect(page?.imageObject).toHaveLength(4);
+    expect(page?.textObject?.filter((text) => text.isEventCapture === 1)).toHaveLength(1);
+    await vi.waitFor(() => expect(lastReader(r.frames).clipBottom).toBeDefined());
+    const top = page?.textObject?.find((text) => text.containerName === 'conversation')?.yPosition ?? 0;
+    expect(lastReader(r.frames).clipBottom).toBeLessThan(top);
+
+    await r.hud.dismissPromptQuestion('p1');
+    await vi.waitFor(() => expect(lastReader(r.frames).clipBottom).toBeUndefined());
+  });
+
   it('resumes the same page after the background migration', async () => {
     const r = rig();
     await r.hud.showList(THREAD, OPTIONS);

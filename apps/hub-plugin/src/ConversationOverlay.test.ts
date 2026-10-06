@@ -119,8 +119,21 @@ describe('overlayConversation', () => {
     expect(validateEvenHubPageContainer(page)).toEqual({ valid: true });
   });
 
-  it('leaves an image page to the box alone: tiles cannot be cut without resending them', () => {
+  it('keeps an image page\'s tiles beneath the box; the box takes input and drops its status line', () => {
+    // A reader in Even's font: the presenter repaints the tiles above the box.
     const box = card(1);
-    expect(overlayConversation(box, builder.visualLayout())).toBe(box);
+    const page = overlayConversation(box, builder.visualLayout());
+    expect(page.imageObject).toHaveLength(4);
+    const texts = page.textObject ?? [];
+    expect(texts.some((text) => text.containerName === 'visual-input')).toBe(false);
+    expect(texts.some((text) => text.containerID === ContainerId.StatusBar)).toBe(false);
+    expect(texts.filter((text) => text.isEventCapture === 1)).toHaveLength(1);
+    // Tiles beneath, the box above, every z unique.
+    const tileZ = page.imageObject!.map((image) => image.zOrderIndex ?? 0);
+    const boxZ = texts.map((text) => text.zOrderIndex ?? 0);
+    expect(Math.min(...boxZ)).toBeGreaterThan(Math.max(...tileZ));
+    expect(new Set([...tileZ, ...boxZ]).size).toBe(tileZ.length + boxZ.length);
+    expect(page.containerTotalNum).toBe(texts.length + 4);
+    expect(validateEvenHubPageContainer(page)).toEqual({ valid: true });
   });
 });

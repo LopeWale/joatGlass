@@ -99,6 +99,9 @@ type HudVisualBaseFrame =
     lines: EvenReaderLine[];
     /** The page's hint, its first clause the page count ("2/3"). */
     hint: string;
+    /** JOAT's box covers the page from here down: nothing is drawn below
+     * it (ConversationOverlay keeps these tiles under the box). */
+    clipBottom?: number;
   };
 
 /** Overlays composite into the same four G2 images, not a fifth container.
