@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-06 — Build JOAT 0.1.109
+
+- Packed from `2a8d724` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.109 above the last recorded build (0.1.108); app.json, package.json and package-lock.json all 0.1.109. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1131 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 168065 bytes, SHA-256 `cf33ba02a80a1f2cacfb777635f2277ab849cc0c6af2081b3bf968b00ae0e304`. Adds to 0.1.108 Even's font at 55% and in the header, one-line list rows, your words in the reply card while you speak, and News taps that open the right story. **The Mac side changed too: restart the brain from this revision** (live words and the News fix are Mac-side). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-06 — Your words while you reply; News taps open the right story; smaller font, header in Even's font
 
 The wearer reported five things:
