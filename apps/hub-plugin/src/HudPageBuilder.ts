@@ -146,6 +146,9 @@ export interface AssistantConversationPage {
   cardHeight: number;
   transcriptTop: number;
   transcriptHeight: number;
+  /** Top of the one-line footer: on the bottom border for the state glyph,
+   * inside the card for a sentence. */
+  footerTop: number;
   dimText: string;
   brightText: string;
   footerText: string;
@@ -547,7 +550,7 @@ export class HudPageBuilder {
           containerID: AssistantConversationContainerId.Generation,
           containerName: 'generation',
           xPosition: geometry.footerLeft,
-          yPosition: geometry.cardBottom - geometry.footerBottomInset - geometry.lineHeight,
+          yPosition: view.footerTop,
           width: geometry.footerWidth,
           height: geometry.lineHeight,
           paddingLength: 0,

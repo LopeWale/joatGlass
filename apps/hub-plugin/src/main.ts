@@ -1461,7 +1461,11 @@ async function renderVisualState(
         ? 'thinking' : 'ready',
       continueAfterMs: 120_000,
       earlierTurnsOmitted: false,
-      turns: [
+      // ?joatConvTurns=short: one short exchange, the card at its first size.
+      turns: new URLSearchParams(window.location.search).get('joatConvTurns') === 'short' ? [
+        { role: 'user', text: 'What time is my next meeting?' },
+        { role: 'assistant', text: 'Design review at 2:30.' },
+      ] : [
         { role: 'user', text: 'Why is the sky blue and the sunset red?' },
         {
           role: 'assistant',
@@ -1480,6 +1484,13 @@ async function renderVisualState(
 
   // A Messages reply in JOAT's conversation card: the question, then the
   // wearer's words for consent. Inert — nothing reaches the Mac.
+  if (state === 'message-reply-question' || state === 'message-reply-confirm') {
+    // Over the thread it was called on, as in production.
+    const thread = visualListFixture('messages-conversation');
+    await hud.showList(thread.items, {
+      title: thread.title, hint: thread.hint, selectable: thread.selectable, nativeTextPage: true,
+    });
+  }
   if (state === 'message-reply-question') {
     await hud.showPromptQuestion(
       'visual-reply-question', 'What do you want to say back to Adele?', () => true, 'messages',

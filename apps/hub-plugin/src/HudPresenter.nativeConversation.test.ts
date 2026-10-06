@@ -96,8 +96,10 @@ describe('HudPresenter native assistant conversation', () => {
     expect(await hud.requestAssistantConversationExit()).toBe('exited');
 
     expect(rebuilds[rebuilds.length - 1]?.imageObject).toHaveLength(4);
-    expect(visual.withPageTransition).toHaveBeenCalledTimes(2);
-    expect(visual.forgetPage).toHaveBeenCalledTimes(2);
+    // The card, the card holding the continuation prompt inside it, and
+    // the four-tile page on the way out.
+    expect(visual.withPageTransition).toHaveBeenCalledTimes(3);
+    expect(visual.forgetPage).toHaveBeenCalledTimes(3);
     expect(frames[frames.length - 1]?.kind).toBe('overview');
     expect(operations.slice(-3)).toEqual(['rebuild:4:1', 'forget', 'visual:overview']);
   });

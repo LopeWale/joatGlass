@@ -60,6 +60,7 @@ const LAYOUTS: ReadonlyArray<[string, Page]> = [
     cardHeight: 132,
     transcriptTop: 140,
     transcriptHeight: 81,
+    footerTop: 247,
     dimText: 'Tell me a joke.\n \n ',
     brightText: ' \nWhy did the byte cross the bus?\n ',
     footerText: '■ □',
@@ -107,6 +108,8 @@ describe('HudPageBuilder invariants', () => {
       cardHeight: 132,
       transcriptTop: 154,
       transcriptHeight: 81,
+      // The state glyph rides on the bottom border (274), centred on it.
+      footerTop: 261,
       dimText: 'Tell me a joke.\n \n ',
       brightText: ' \nWhy did the byte cross the bus?\n ',
       footerText: '■ □',
@@ -135,8 +138,9 @@ describe('HudPageBuilder invariants', () => {
     const footer = byName('generation')!;
     expect((transcript.yPosition ?? 0) + (transcript.height ?? 0))
       .toBeLessThanOrEqual(footer.yPosition ?? 0);
-    expect((footer.yPosition ?? 0) + (footer.height ?? 0))
-      .toBeLessThan((frame.yPosition ?? 0) + (frame.height ?? 0));
+    const frameBottom = (frame.yPosition ?? 0) + (frame.height ?? 0);
+    expect(footer.yPosition ?? 0).toBeLessThan(frameBottom);
+    expect((footer.yPosition ?? 0) + (footer.height ?? 0)).toBeGreaterThan(frameBottom);
   });
 
   it('keeps every visual container name within the packaged-host limit', () => {
