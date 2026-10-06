@@ -1519,7 +1519,9 @@ class CapabilityRouter:
             # No " · " inside the label: that token is the primary/secondary
             # split on the lens. Group identity is independent of reply support.
             label += " (group)"
-        preview = thread.text
+        # One line: a multi-line message's breaks would wrap the firmware
+        # row into the row below it. The thread reader keeps them.
+        preview = " ".join(thread.text.split())
         if thread.attachment_count:
             attachment = (
                 "Attachment" if thread.attachment_count == 1
