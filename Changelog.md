@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-06 — Build JOAT 0.1.111
+
+- Packed from `bc5e305` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.111 above the last recorded build (0.1.110); app.json, package.json and package-lock.json all 0.1.111. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1137 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 169876 bytes, SHA-256 `c5313c7b0fa5a9f2bebc15aa3c3687a56cea7d6ffa6077bb7115ddbd976e7796`. Adds to 0.1.110 Home's label/value grid. Plugin-only since 0.1.109: a brain restarted for 0.1.109 needs no restart. The package is gitignored (`*.ehpk`): it lives only where `npm run pack` ran, and this entry is its record. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-06 — Home's pane is a label/value grid, as weather-even-g2 lays out its stats
 
 The wearer pointed at weather-even-g2's right panel. Read from its source and captured live in the official simulator: its Today screen's right half is two native text containers side by side, a label column (feels, wind, humid, press, rise, set, uv) and a value column, with no border, icon or list. Two containers because the firmware font is proportional: columns line up only at fixed x, never as padded spaces in one container.
