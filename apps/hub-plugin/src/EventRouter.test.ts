@@ -23,6 +23,7 @@ function make(
   // expanded but excluded from the carve-out, so it keeps the mic.
   panelRefreshable = panelExpanded,
   promptedInput?: { isActive(): boolean; cancel(reason?: string): void },
+  confirmationRetry?: () => boolean,
 ) {
   let dispatch: (e: EvenHubEvent) => void = () => {};
   const sent: UplinkMessage[] = [];
@@ -138,6 +139,7 @@ function make(
     assistantOverlay,
     transcriptScroll,
     promptedInput,
+    confirmationRetry,
   ).attach();
   return {
     fire: (e: unknown) => dispatch(e as EvenHubEvent),
@@ -350,6 +352,65 @@ describe('EventRouter — confirm gestures', () => {
     expect(audio.stop).not.toHaveBeenCalled();
     expect(audio.start).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
+  });
+
+  const withRetry = (retry: () => boolean) => make(
+    false, undefined, false, false, false, false, false, false, false, undefined, retry,
+  );
+
+  it.each(['textEvent', 'sysEvent'] as const)('a long-press (%s) on a reply consent asks to say it again, never the mic', (via) => {
+    const retry = vi.fn(() => true);
+    const { fire, imu, audio, sent } = withRetry(retry);
+    imu.isPending.mockReturnValue(true);
+
+    fire({ [via]: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+    expect(retry).toHaveBeenCalledTimes(1);
+    fire({ [via]: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(audio.stop).not.toHaveBeenCalled();
+    expect(audio.start).not.toHaveBeenCalled();
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('consumes a long-press the gate declines, without toggling the mic', () => {
+    const retry = vi.fn(() => false);
+    const { fire, imu, audio, sent } = withRetry(retry);
+    imu.isPending.mockReturnValue(true);
+
+    fire({ textEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+    fire({ textEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(audio.stop).not.toHaveBeenCalled();
+    expect(audio.start).not.toHaveBeenCalled();
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
+    expect(imu.declineByTap).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('does not toggle the mic when the gate closes between a retry press and its release', () => {
+    const retry = vi.fn(() => true);
+    const { fire, imu, audio } = withRetry(retry);
+    imu.isPending.mockReturnValue(true);
+    fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+    imu.isPending.mockReturnValue(false);
+    fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(audio.stop).not.toHaveBeenCalled();
+    expect(audio.start).not.toHaveBeenCalled();
+  });
+
+  it('leaves long-press as the mic when no decision is pending', () => {
+    const retry = vi.fn(() => true);
+    const { fire, audio } = withRetry(retry);
+    fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+    fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+
+    expect(retry).not.toHaveBeenCalled();
+    expect(audio.stop).toHaveBeenCalledTimes(1);
   });
 
   it('an explicit eventType 0 also confirms, for hosts that do send it', () => {
