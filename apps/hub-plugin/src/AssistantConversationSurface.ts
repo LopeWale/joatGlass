@@ -186,19 +186,6 @@ function centered(text: string, width: number): string {
   return `${' '.repeat(Math.floor(room / space / 2))}${text}`;
 }
 
-function scrollbar(total: number, capacity: number, scrollFromTail: number): string {
-  if (total <= capacity) return ' ';
-  const slots = capacity;
-  const thumbSize = Math.max(1, Math.round((capacity / total) * slots));
-  const maximum = total - capacity;
-  const startFromTop = maximum - scrollFromTail;
-  const travel = Math.max(0, slots - thumbSize);
-  const thumbStart = maximum === 0 ? 0 : Math.round((startFromTop / maximum) * travel);
-  return Array.from({ length: slots }, (_, index) => (
-    index >= thumbStart && index < thumbStart + thumbSize ? '█' : '│'
-  )).join('\n');
-}
-
 export function conversationViewport(
   snapshot: AssistantConversationSnapshot,
   requestedScrollFromTail = 0,
@@ -245,13 +232,31 @@ export function conversationViewport(
     transcriptHeight: lineCapacity * geometry.lineHeight,
     dimText,
     brightText,
-    scrollbarText: scrollbar(all.length, lineCapacity, scrollFromTail),
     footerText: centered(GesturePolicy.formatHint(footer), ASSISTANT_CONVERSATION_GEOMETRY.footerWidth),
     visibleLines,
     lineCapacity,
     totalLines: all.length,
     scrollFromTail,
     maximumScrollFromTail,
+  };
+}
+
+/** A Messages reply drafted in JOAT's own conversation card: JOAT's
+ * question, then the wearer's words, under a footer naming the gestures.
+ * Only the page is shared with the assistant conversation; the draft keeps
+ * its own question and consent owners underneath. */
+export function replyDraftView(turns: AssistantConversationTurn[], hint: string): ConversationViewport {
+  const view = conversationViewport({
+    conversationId: 'message-reply',
+    revision: 0,
+    state: 'ready',
+    continueAfterMs: 120_000,
+    turns,
+    earlierTurnsOmitted: false,
+  });
+  return {
+    ...view,
+    footerText: centered(GesturePolicy.formatHint(hint), ASSISTANT_CONVERSATION_GEOMETRY.footerWidth),
   };
 }
 
@@ -691,9 +696,6 @@ export class AssistantConversationSurface {
     }
     if (prior?.brightText !== view.brightText) {
       updates.push([AssistantConversationContainerId.JoatTurns, 'joat-turns', view.brightText, prior?.brightText ?? '']);
-    }
-    if (prior?.scrollbarText !== view.scrollbarText) {
-      updates.push([AssistantConversationContainerId.ScrollPosition, 'scroll-position', view.scrollbarText, prior?.scrollbarText ?? '']);
     }
     if (prior?.footerText !== view.footerText) {
       updates.push([AssistantConversationContainerId.Generation, 'generation', view.footerText, prior?.footerText ?? '']);

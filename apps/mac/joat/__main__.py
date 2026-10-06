@@ -1787,6 +1787,7 @@ async def main() -> None:
         connection_generation=lambda: transport.audio_connection_generation,
         fence_audio=lambda: orchestrator.fence_prompt_audio(),
         capturing=lambda: audio_router.capturing, revoke_prompt=revoke_message_prompt,
+        on_sent=lambda body: capabilities.show_sent_reply(body),
     )
     orchestrator = VoiceOrchestrator(
         transport, stt, stt_available=stt_available, replier=replier,

@@ -185,11 +185,11 @@ other three, so a swipe shipped three tiles.
 | Mic on/off, battery | 2 / 1 | **1** (top-right) on an image page; **0** on a firmware page — one in-place upgrade of its header line (2026-10-05; it used to be dropped there) |
 | Swipe between resting tabs | 3 (rail, pane, footer) | **2** |
 | Open MESSAGES, ACTIVITY or the AGENT TERMINAL picker | 4 | **0** — one `rebuildPageContainer` to a firmware list page |
-| Open a Messages conversation thread from the picker | 4 | **0** — one rebuild to a firmware list; its first row names the page ("Latest messages", "Older messages") |
-| Page an older or newer slice of the thread | 2-4 | **0** — tap the Mac-appended "▲ Newer messages" / "▼ Older messages" row; the Mac answers with the next `hud.list` (0.2 s in the simulator) |
-| Open a message from the thread (`MESSAGES · MESSAGE`) | 4 | **0** — one rebuild to a firmware text page; a swipe pages it in place (`textContainerUpgrade`), and past its edge asks the Mac for its next page as before |
-| Back from the message to the thread | 4 | **0** — the thread returns as the firmware list it was |
-| The question page ("What should I say?") | 4 (`paintExact`) | **0** — one rebuild to a firmware text page; dismissal returns the retained page (image, firmware list or terminal) |
+| Open a Messages conversation thread from the picker | 4 | **0** — one rebuild to a firmware text page: the thread as one reader, newest message first, every message whole (2026-10-06) |
+| Page the thread, older messages included | 2-4 | **0** — a swipe pages it in place; past its edge the menu asks the Mac for its next reader page, and past the last page the Mac reads older messages from chat.db |
+| Reply: tap anywhere on the thread | 4 | **0** — the question ("What do you want to say back to Adele?") and then the wearer's words for consent draw in JOAT's conversation card (one rebuild each); tap sends, long-press says it again, double-click cancels to the thread |
+| After the send | 4 | **0** — no receipt page: the thread is repainted with the reply as its newest message |
+| Any other question page ("What should I note?") | 4 (`paintExact`) | **0** — one rebuild to a firmware text page; dismissal returns the retained page (image, firmware list or terminal) |
 | Open Brainstorm (the idle picker) | 4 | **0** — one rebuild to a firmware list of past sessions plus NEW |
 | A Brainstorm frame (ready, listening, running, settled, unavailable) | 1-2 per revision, plus 1-2 **every second** while thinking | **0** — the Agent Terminal's two-text page; each revision is one `textContainerUpgrade`, and the per-second counter is gone |
 | Open QuickNotes or Notifications | 4 | **0** — firmware lists; the archive pages by its own "▲ Newer notes" / "▼ Older notes" rows (18 notes a page, so both rows fit the list's 20) |
@@ -286,8 +286,10 @@ The levers that remain are design decisions, not code:
   HUD is `assistantAnswerLayout` (owner `overlay-native`): status, a
   seven-line body paged in place with `textContainerUpgrade`, a hint line.
   Receipts stay on the image page (two tiles beat a page swap).
-- ~~Native message reader and question page~~ — 2026-10-05: a `hud.list`
-  titled `MESSAGES · MESSAGE` (`TEXT_PAGE_TITLES` in `CapabilityMenu`)
+- ~~Native message reader and question page~~ — 2026-10-05 (the
+  single-message reader was folded into the thread reader on 2026-10-06,
+  `MESSAGES · CONVERSATION`): a `hud.list` titled as a reader
+  (`TEXT_PAGE_TITLES` in `CapabilityMenu`)
   opts into `nativeTextPage`: the presenter joins the Mac's rows, pages
   them for the firmware font with `paginateAnswer`, draws `textPageLayout`
   (owner `text-page-native`) and pages in place on swipe; a swipe past
@@ -371,9 +373,9 @@ The levers that remain are design decisions, not code:
   "Where to?" and starts the route; QUICKNOTES leads every page with
   "● Record a voice note" (a tap-started capture titled by the clock) and
   "✎ Dictate a note" ("What should I note?", saved as exact text; the page
-  size dropped to 16 so both fit under the 20-row cap); the Messages
-  conversation ends in "✎ Reply", the same prepared reply the spoken word
-  starts; the SEARCH tab's last row "⌕ Look something up" asks for the
+  size dropped to 16 so both fit under the 20-row cap); a tap on the Messages
+  conversation is the reply, the same prepared reply the spoken word
+  starts (the "✎ Reply" row went with the list, 2026-10-06); the SEARCH tab's last row "⌕ Look something up" asks for the
   query and republishes the tab; the expanded POMODORO shows its controls
   and, while idle, the three lengths as rows that cycle presets on tap and
   persist. Brainstorm's idle frame says "Tap to speak a topic." and its

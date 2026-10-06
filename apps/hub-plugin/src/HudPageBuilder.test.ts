@@ -62,7 +62,6 @@ const LAYOUTS: ReadonlyArray<[string, Page]> = [
     transcriptHeight: 81,
     dimText: 'Tell me a joke.\n \n ',
     brightText: ' \nWhy did the byte cross the bus?\n ',
-    scrollbarText: '│\n█\n│',
     footerText: '■ □',
   }) as Page],
 ];
@@ -110,7 +109,6 @@ describe('HudPageBuilder invariants', () => {
       transcriptHeight: 81,
       dimText: 'Tell me a joke.\n \n ',
       brightText: ' \nWhy did the byte cross the bus?\n ',
-      scrollbarText: '│\n█\n│',
       footerText: '■ □',
     }) as Page;
     const byName = (name: string) => page.textObject?.find((entry) => entry.containerName === name);
@@ -118,7 +116,7 @@ describe('HudPageBuilder invariants', () => {
     expect(page.imageObject).toBeUndefined();
     // The live header line, then the card: a running Pomodoro or route
     // stays visible above a conversation.
-    expect(page.textObject).toHaveLength(6);
+    expect(page.textObject).toHaveLength(5);
     expect(page.textObject?.[0]).toMatchObject({ containerName: 'status', yPosition: 0, height: 35 });
     expect(byName('conversation')).toMatchObject({
       yPosition: 142,
@@ -129,7 +127,8 @@ describe('HudPageBuilder invariants', () => {
     expect(byName('wearer-turns')).toMatchObject({ textColor: 2, content: expect.stringContaining('joke') });
     expect(byName('joat-turns')).toMatchObject({ textColor: 4, content: expect.stringContaining('byte') });
     expect(byName('generation')).toMatchObject({ content: '■ □' });
-    expect(byName('scroll-position')).toMatchObject({ content: '│\n█\n│' });
+    // Even AI draws no scrollbar, and a glyph column wraps to boxes.
+    expect(byName('scroll-position')).toBeUndefined();
 
     const frame = byName('conversation')!;
     const transcript = byName('wearer-turns')!;

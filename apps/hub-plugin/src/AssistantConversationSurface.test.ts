@@ -69,7 +69,7 @@ describe('native Even-style assistant conversation model', () => {
     expect(dim.some((line, index) => line.trim() && bright[index]?.trim())).toBe(false);
   });
 
-  it('grows only to the optical cap, then exposes a real scrollbar and bounded scrollback', () => {
+  it('grows only to the optical cap, then scrolls back without a scrollbar', () => {
     const long = snapshot(3, [
       { role: 'user', text: 'Explain why the daytime sky looks blue.' },
       { role: 'assistant', text: Array.from({ length: 90 }, (_, i) => `word${i}`).join(' ') },
@@ -77,8 +77,6 @@ describe('native Even-style assistant conversation model', () => {
     const tail = conversationViewport(long);
     expect(tail.lineCapacity).toBe(7);
     expect(tail.totalLines).toBeGreaterThan(tail.lineCapacity);
-    expect(tail.scrollbarText).toContain('█');
-    expect(tail.scrollbarText).toContain('│');
 
     const top = conversationViewport(long, Number.MAX_SAFE_INTEGER);
     expect(top.scrollFromTail).toBe(top.maximumScrollFromTail);
@@ -114,7 +112,6 @@ describe('native Even-style assistant conversation model', () => {
       { role: 'assistant', text: 'Dust, smoke, clouds, and pollution can intensify or' },
       { role: 'assistant', text: 'mute those sunset colors.' },
     ]);
-    expect(view.scrollbarText).toBe('│\n│\n│\n│\n█\n█\n█');
   });
 
   it('marks omitted history instead of silently pretending the viewport is complete', () => {
