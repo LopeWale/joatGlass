@@ -18,6 +18,7 @@ import {
   type ConversationExitResult,
 } from './AssistantConversationSurface';
 import { paginateMeasured } from './FirmwareText';
+import { overlayConversation } from './ConversationOverlay';
 import { ASSISTANT_ANSWER_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
 import { type HudStatusModel, nativeStatusLine } from './HudStatus';
 import { composeOverviewText } from './OverviewText';
@@ -482,7 +483,10 @@ export class HudPresenter {
       layouts,
       () => this.restoreAfterAssistantConversation(),
       {
-        replacePage: (page) => this.replaceNativePage(page, 'assistant-native'),
+        // The box floats over the page it was called on (Even AI's card).
+        replacePage: (page) => this.replaceNativePage(
+          overlayConversation(page, this.conversationUnderlay()), 'assistant-native',
+        ),
         statusText: () => this.nativeHeader(this.nativePageTitle()),
       },
     );
@@ -650,6 +654,34 @@ export class HudPresenter {
     const active = this.displayActive;
     const bridgeCurrent = this.client.captureDisplayGuard?.() ?? (() => true);
     return () => active && this.displayActive && revision === this.displayRevision && bridgeCurrent();
+  }
+
+  /** The page a JOAT box was called over, as its own layout would rebuild
+   * it now, for `overlayConversation` to cut beneath the box: Home, a
+   * firmware list, a text page or a native navigation page. The image pages
+   * (the Planning month, the live map) and the terminal return undefined;
+   * the box still stands alone over those. */
+  private conversationUnderlay(): RebuildPageContainer | undefined {
+    if (!this.visual) return undefined;
+    const surface = this.surface;
+    if (surface.kind === 'default') {
+      if (!nativeOverviewEnabled) return undefined;
+      const frame = this.visualFrame();
+      return frame.kind === 'overview'
+        ? this.layouts.overviewTextLayout(composeOverviewText(frame, this.overviewHeader()))
+        : undefined;
+    }
+    if (surface.kind === 'list' && surface.options.nativeFirmwareList) return this.nativeListLayout(surface);
+    const text = this.nativeTextPage;
+    if (text && ((surface.kind === 'list' && this.usesNativeTextPage(surface.options))
+      || (surface.kind === 'productivity' && !usesActionPillLayout(surface.productivity.phase)))) {
+      return this.layouts.textPageLayout(text.body, { status: '', hint: text.hint });
+    }
+    if (surface.kind === 'navigation') {
+      const native = navigationNativeBody(surface.navigation);
+      if (native !== undefined) return this.layouts.textPageLayout(native.body, { status: '', hint: native.hint });
+    }
+    return undefined;
   }
 
   /** A reader is Even's own text page over the visual HUD; the text
@@ -862,10 +894,10 @@ export class HudPresenter {
       if (!this.isPromptCurrent(prompt)) return false;
       const header = this.nativeHeader(this.nativePageTitle());
       const layout = prompt.messageReply
-        ? this.layouts.assistantConversationLayout(
+        ? overlayConversation(this.layouts.assistantConversationLayout(
           replyDraftView([{ role: 'assistant', text: prompt.question }], MESSAGE_REPLY_LISTENING_HINT),
           header,
-        )
+        ), this.conversationUnderlay())
         : this.layouts.promptQuestionLayout(pages[0] ?? ' ', header);
       painted = await this.replaceNativePage(layout, 'prompt-native');
       return painted && this.isPromptCurrent(prompt);
@@ -2507,10 +2539,10 @@ export class HudPresenter {
     // A reply's consent is the same gate in JOAT's conversation card: the
     // question it answered, then the wearer's exact words, then the gestures.
     const layout = draft
-      ? this.layouts.assistantConversationLayout(replyDraftView([
+      ? overlayConversation(this.layouts.assistantConversationLayout(replyDraftView([
         { role: 'assistant', text: `What do you want to say back to ${draft.recipient}?` },
         { role: 'user', text: draft.body },
-      ], MESSAGE_REPLY_CONFIRM_HINT), header)
+      ], MESSAGE_REPLY_CONFIRM_HINT), header), this.conversationUnderlay())
       : this.layouts.confirmationLayout(current.prompt, header, current.purpose);
     const ok = this.visual
       ? await this.replaceNativePage(layout, 'confirmation-native')
