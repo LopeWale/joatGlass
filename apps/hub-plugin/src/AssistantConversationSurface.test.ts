@@ -158,6 +158,21 @@ describe('AssistantConversationSurface delivery', () => {
     expect(rebuildPageContainer).toHaveBeenCalledTimes(1);
   });
 
+  it('stands the working glyph on the answer\'s row inside the box, then the answer replaces it', () => {
+    const thinking = conversationViewport(snapshot(1, [{ role: 'user', text: 'What time is it?' }], 'thinking'));
+    expect(thinking.lineCapacity).toBe(2);
+    expect(thinking.visibleLines.map((line) => line.role)).toEqual(['user', 'assistant']);
+    expect(thinking.brightText.split('\n')[1]?.trim()).toMatch(/^[■□ ]+$/u);
+    expect(thinking.footerText.trim()).toBe('');
+    const answered = conversationViewport(snapshot(2, [
+      { role: 'user', text: 'What time is it?' },
+      { role: 'assistant', text: 'Half past two.' },
+    ], 'ready'));
+    expect(answered.lineCapacity).toBe(2);
+    expect(answered.brightText).toContain('Half past two.');
+    expect(answered.brightText).not.toMatch(/[■□]/u);
+  });
+
   it('starts at two rows and grows upward from a fixed bottom, one rebuild per size', async () => {
     const { client, rebuildPageContainer } = fakeClient();
     const surface = new AssistantConversationSurface(
@@ -369,9 +384,10 @@ describe('AssistantConversationSurface delivery', () => {
       { role: 'user', text: 'First prompt\nwith a second line' },
       { role: 'assistant', text: 'The completed answer' },
     ], 'ready'))).resolves.toBe(true);
-    // The first card, the card grown a size by the answer, and the card
-    // rebuilt after the handoff.
-    expect(rebuildPageContainer).toHaveBeenCalledTimes(3);
+    // The first card (question and working glyph: the answer's row is
+    // already held, so the answer streams in place), and the card rebuilt
+    // after the handoff.
+    expect(rebuildPageContainer).toHaveBeenCalledTimes(2);
     expect(surface.currentIdentity()).toEqual({ conversationId: 'conversation-1', revision: 3 });
   });
 });

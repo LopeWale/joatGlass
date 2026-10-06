@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-06 — One header on every page; JOAT's working indicator inside its box
+
+The wearer: "Why are we not using a template for the top bar?… use images… for icons without slowing down rendering for things that are not needing to change very often". And the working indicator "is in the middle and half of it is in the box and the other half out".
+
+- **One header template.** The image pages (the Planning month, the live map) always drew the compact spine: the clock and the page's word in a small face, the mic and battery as icons. Every firmware page drew a line of the firmware font instead ("9:41 · MESSAGES · CONVERSATION · ● · ■"), bigger and different. Every firmware page (Home, lists, readers, the Messages thread, JOAT's box, the reply card, confirmations) now carries the same spine, drawn by the same renderer code (`HudCanvasRenderer.renderHeader`), as two 288x24 image containers (`HeaderImage.ts`; the SDK caps an image at 288 px wide).
+- **Images only where they rarely change.** The halves go on the image lane after the page's text, one send each after a page rebuild; afterwards only a half whose pixels changed is sent (the lane's existing pixel cache): a minute tick resends the clock's half, a mic or battery change the other. The page's text stays firmware text and keeps upgrading in place. `VITE_IMAGE_HEADER=0` keeps the old text line.
+- **The working indicator stands inside the box,** on the row the answer will take: a fresh question is a two-row box, the question and the animated glyph, and the answer replaces the glyph. Nothing straddles the border; the footer holds only a sentence (the continuation prompt).
+- **The simulator captures now show the real header.** The dev fixtures used to write a placeholder status line ("9:41 JOAT ready bat 87%") no wearer ever saw; they now set the same structured status model Chrome gives production.
+- Verified in the official simulator: the thread, Home, JOAT's box over Home and the reply card all carry the calendar's spine; the thread's header names its page; the indicator sits on the answer's row. Not verified on physical glasses.
+- Plugin 1114 passed; typecheck clean. Plugin-only.
+
 ## 2026-10-06 — Build JOAT 0.1.106
 
 - Packed from `ba86a79` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.106 above the last recorded build (0.1.105); app.json, package.json and package-lock.json all 0.1.106. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1107 tests passed.
