@@ -77,6 +77,7 @@ class Rig:
         self.generation = 'ui-connection'
         self.fence = 10
         self.capturing = False
+        self.now = 1_000.0
         self.submitted: list[tuple[str, str]] = []
         self.confirmations: list[str] = []
         self.confirm_bindings: list[dict[str, Any]] = []
@@ -95,8 +96,9 @@ class Rig:
             return self.confirm_result
 
         seams = {'begin_reply': lambda: self.ui.begin_reply(),
-                 'on_status': lambda status: self.ui.on_status(status)}
-        self.replies = MessageReplyController(Sender(), confirm,
+                 'on_status': lambda status: self.ui.on_status(status),
+                 'selection_on_glass': lambda: self.ui.conversation_on_glass()}
+        self.replies = MessageReplyController(Sender(), confirm, monotonic=lambda: self.now,
             contact_search=contact_search or (
                 lambda name: [('Sam', 'synthetic-contact')] if name == 'Sam' else []),
             **seams)
@@ -124,6 +126,16 @@ class Rig:
     def tap(self, index: int = 0, trace: str = 'selection-message') -> None:
         self.router.on_input(InputEvent(container_name='capdata', selected_name='MESSAGES',
             selected_index=index, request_id='request-messages', trace_id=trace))
+
+    def tap_reply_row(self) -> None:
+        history = self.router._message_history
+        assert history is not None and history.reply_index is not None
+        self.router.on_input(InputEvent(container_name='capmessage', selected_name='MESSAGES',
+            selected_index=history.reply_index, request_id='request-messages', trace_id='reply-row'))
+
+    def receipts(self) -> list[str]:
+        return [m.to_wire().get('text', '') for m in self.transport.sent
+                if m.to_wire().get('presentation') == 'receipt']
 
     def home(self) -> None:
         self.router.on_input(InputEvent(container_name='menu', selected_name='closed'))
@@ -197,6 +209,53 @@ async def test_selected_conversation_reply_uses_fresh_acknowledged_body() -> Non
         await until(lambda: rig.confirmations)
         assert body in rig.confirmations[0]
         assert rig.submitted == []
+    finally:
+        await rig.close()
+
+
+@pytest.mark.asyncio
+async def test_reply_row_after_long_reading_still_asks_for_the_body() -> None:
+    # The reply clock ran from the moment the conversation opened, so after
+    # two minutes of reading the tapped Reply row silently did nothing.
+    rig = Rig()
+    try:
+        await rig.select(1)
+        await until(lambda: rig.ui._reply_fence is not None)
+        rig.now += 300.0
+        asked = len(rig.transport.questions)
+        rig.tap_reply_row()
+        await until(lambda: len(rig.transport.questions) > asked)
+        assert rig.transport.questions[-1].field == 'body'
+        assert rig.receipts() == []
+    finally:
+        await rig.close()
+
+
+@pytest.mark.asyncio
+async def test_off_the_glass_the_conversation_still_expires() -> None:
+    rig = Rig()
+    try:
+        await rig.select(1)
+        await until(lambda: rig.ui._reply_fence is not None)
+        rig.ui.retire()
+        rig.now += 300.0
+        assert not rig.replies.selected_reply_available()
+    finally:
+        await rig.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_reply_row_says_why_on_the_glass() -> None:
+    rig = Rig()
+    try:
+        await rig.select(1)
+        await until(lambda: rig.ui._reply_fence is not None)
+        rig.capturing = True
+        asked = len(rig.transport.questions)
+        rig.tap_reply_row()
+        await until(lambda: rig.receipts())
+        assert rig.receipts() == ['Wait for the microphone to finish, then reply.']
+        assert len(rig.transport.questions) == asked
     finally:
         await rig.close()
 

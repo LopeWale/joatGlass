@@ -10,7 +10,7 @@ import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from ..channels.contacts import ContactResolver, RelationshipBook
@@ -162,6 +162,7 @@ class MessageReplyController:
         on_status: Callable[[MessageActionStatus], None] | None = None,
         relationships: RelationshipBook | None = None,
         review: Callable[[str, str], Awaitable[bool]] | None = None,
+        selection_on_glass: Callable[[], bool] | None = None,
     ) -> None:
         if selection_ttl_s <= 0:
             raise ValueError("message selection TTL must be positive")
@@ -177,6 +178,8 @@ class MessageReplyController:
         self._contact_search = contact_search or ContactResolver().search
         self._relationships = relationships
         self._begin_reply = begin_reply
+        # Whether the selected conversation is still the page on the glass.
+        self._selection_on_glass = selection_on_glass
         self._on_status = on_status
         self._selection: _MessageSelection | None = None
         self._selection_generation = 0
@@ -229,10 +232,12 @@ class MessageReplyController:
             return action.status
         if selection is None:
             return self._set_status(action, "awaiting_input", "Select a Messages conversation first.", needs_input="recipient")
-        if self._monotonic() > selection.expires_at:
+        if not self._selection_current():
             return self._set_status(action, "failed", "Message selection expired. Open Messages and choose the conversation again.")
         if selection.thread.reply_target is None:
             return self._set_status(action, "failed", "This conversation has no Messages send target. Open it again on your Mac.")
+        selection = self._selection
+        assert selection is not None
         action.recipient = selection.thread
         action.expires_at = min(action.expires_at, selection.expires_at)
         self._advance_preparation(action)
@@ -645,6 +650,24 @@ class MessageReplyController:
                 re.sub(r"[^a-zA-Z0-9._:-]", "-", reason)[:32] or "explicit",
             )
 
+    def _selection_current(self) -> bool:
+        """Whether the selected conversation may still be replied to.
+
+        Its clock restarts while the conversation is the page on the glass:
+        the wearer is acting on it now. Before, the clock ran from the moment
+        it opened, so a reply after two minutes of reading was refused, and
+        the tapped Reply row did nothing at all.
+        """
+        selection = self._selection
+        if selection is None:
+            return False
+        if self._selection_on_glass is not None and self._selection_on_glass():
+            self._selection = replace(
+                selection, expires_at=self._monotonic() + self._selection_ttl_s,
+            )
+            return True
+        return self._monotonic() < selection.expires_at
+
     async def handle_command(self, text: str) -> str | None:
         command = " ".join(text.strip().split())
         # Terminal punctuation is STT noise for grammar matching; the body a
@@ -714,7 +737,7 @@ class MessageReplyController:
             not self._closed
             and selection is not None
             and selection.thread.reply_target is not None
-            and self._monotonic() < selection.expires_at
+            and self._selection_current()
             and self._compose is None
             and self._pending_reply is None
             and self._active_action is None
@@ -731,7 +754,7 @@ class MessageReplyController:
         selection = self._selection
         if selection is None:
             return "Select a Messages conversation first."
-        if self._monotonic() > selection.expires_at:
+        if not self._selection_current():
             self.clear_selection("expired")
             return (
                 "Message selection expired. "
@@ -831,7 +854,7 @@ class MessageReplyController:
     async def _handle_reply(self, match: re.Match[str]) -> str:
         if self._selection is None:
             return "Select a Messages conversation first."
-        if self._monotonic() > self._selection.expires_at:
+        if not self._selection_current():
             self.clear_selection("expired")
             return (
                 "Message selection expired. "
