@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-05 — Build JOAT 0.1.100 merged package
+
+- Packed from `e608c03` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.100 above the last recorded build (0.1.99). Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
+- Canonical `apps/hub-plugin/joat.ehpk`: 163427 bytes, SHA-256 `c4e812cd1c1a82b58bcc453531e68522797c425faa761c865ef0e672f04b7513`. The first package with both lines in it: GitHub main through 0.1.98 and the cloud session's 0.1.99 work (route behind any page, activity chips, raster deletions finished), plus the local line — the phone page's Brainstorm and Accounts tabs beside Places and Connection, subscription account switching on the Mac, the Brainstorm thinking counter, the local command channel and the local Mac fixes. Plugin 1059 tests, Mac 3125 passed. The Mac side changed (accounts, sign-in, Brainstorm control, places), so the brain needs a restart from this revision. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-05 — Build JOAT 0.1.99 three-at-once package
 
 - Rebuilt the existing JOAT package from `dd4a71f` with the same `scripts/pack.sh`, the same `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.99 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
