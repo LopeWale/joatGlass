@@ -127,6 +127,7 @@ function loadRememberedBrain(): string | null {
 
 type VisualState =
   | 'overview'
+  | 'live-concurrency'
   | 'confirmation'
   | 'assistant-overlay'
   | 'nav-receipt'
@@ -172,6 +173,7 @@ const VISUAL_STATE = ((): VisualState | undefined => {
   if (!import.meta.env.DEV) return undefined;
   const requested = new URLSearchParams(window.location.search).get('joatVisual');
   return requested === 'overview'
+    || requested === 'live-concurrency'
     || requested === 'confirmation' || requested === 'assistant-overlay'
     || requested === 'nav-receipt'
     || isProductivityVisualState(requested)
@@ -1202,6 +1204,57 @@ async function loadDevMapPanel(): Promise<NavigationMapPanelModel | undefined> {
   }
 }
 
+/**
+ * Development only: three features at once, on a timeline the simulator
+ * probe captures. A running Pomodoro and a route, then a conversation in
+ * front of the route (the route keeps moving behind it, the header carries
+ * the turn), then the conversation ends and the map returns at the newest
+ * frame. Every step goes through the production presenter.
+ */
+async function renderLiveConcurrency(hud: HudPresenter): Promise<void> {
+  const clock = '9:41';
+  await hud.setStatusModel({ clock, link: 'connected', mic: true, battery: 87, charging: false });
+  await hud.acceptPanel({
+    kind: 'hud.panel', tab: 'pomodoro', revision: 1, rows: ['Pause', 'Reset'],
+    pomodoro: {
+      phase: 'focus', running: true, remainingMs: 12 * 60_000 - 1_000, lengthMs: 25 * 60_000,
+      completed: 1, endsAtUnixMs: Date.now() + 12 * 60_000 - 1_000,
+    },
+  });
+  const route = navigationVisualFixture('nav-guidance');
+  if (route.map && !route.map.panel) {
+    const sample = await loadDevMapPanel();
+    if (sample) route.map = { ...route.map, panel: sample };
+  }
+  const step = (maneuverDistanceM: number) => ({ ...route, maneuver: 'turn_right' as const, maneuverDistanceM });
+  await hud.showNavigation(step(240));
+  console.info('[joat] concurrency stage=map');
+  const later = (ms: number, work: () => Promise<unknown>) => new Promise<void>((resolve) => {
+    setTimeout(() => { void work().finally(resolve); }, ms);
+  });
+  await later(6_000, async () => {
+    await hud.showAssistantConversation({
+      conversationId: 'walk-and-talk', revision: 1, state: 'ready',
+      turns: [
+        { role: 'user', text: 'What did Dele say about the gate?' },
+        { role: 'assistant', text: 'Park on the left side of the building; the gate code is the same as last time.' },
+      ],
+      continueAfterMs: 120_000, earlierTurnsOmitted: false,
+    });
+    console.info('[joat] concurrency stage=conversation');
+  });
+  await later(5_000, async () => {
+    await hud.updateNavigation(step(140));
+    await hud.updateNavigation(step(80));
+    console.info('[joat] concurrency stage=walking');
+  });
+  await later(5_000, async () => {
+    await hud.requestAssistantConversationExit();
+    await hud.requestAssistantConversationExit();
+    console.info('[joat] concurrency stage=back');
+  });
+}
+
 async function renderVisualState(
   hud: HudPresenter,
   menu: CapabilityMenu,
@@ -1228,6 +1281,11 @@ async function renderVisualState(
       ContainerId.StatusBar,
     );
   };
+
+  if (state === 'live-concurrency') {
+    await renderLiveConcurrency(hud);
+    return;
+  }
 
   if (isNavigationVisualState(state) || state === 'nav-receipt') {
     // READY on purpose. A degraded link outranks the page name in the spine

@@ -24,16 +24,15 @@ function fakeClient(): BridgeClient {
 
 function presenter() {
   const frames: HudVisualFrame[] = [];
-  const localTicks: boolean[] = [];
   const visual = {
-    paint: async (frame: HudVisualFrame, localTick = false) => {
+    paint: async (frame: HudVisualFrame) => {
       frames.push(frame);
-      localTicks.push(localTick);
       return true;
     },
-  } as HudVisualSurface;
+    withPageTransition: async (replace: () => Promise<boolean>) => replace(),
+  } as unknown as HudVisualSurface;
   const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
-  return { hud, frames, localTicks };
+  return { hud, frames };
 }
 
 beforeEach(() => {
@@ -86,21 +85,9 @@ describe('HudPresenter — the tab rail', () => {
     });
   });
 
-  it.each([
-    ['POMODORO', 'pomodoro'], ['NEWS', 'news'], ['SEARCH', 'search'],
-  ] as const)('expanded %s keeps the custom banner and rail; other lists carry none', async (title, tab) => {
-    const { hud, frames } = presenter();
-    if (tab !== 'search') await hud.acceptPanel({ kind: 'hud.panel', tab, revision: 4, rows: ['First', 'Second'] });
-    await hud.showList(['First', 'Second'], { title, railTab: tab, selectable: true });
-    expect(frames[frames.length - 1]).toMatchObject({
-      kind: 'list', title, rail: { activeTab: tab },
-    });
-    await hud.showList(['Loading…'], { title: 'MESSAGES' });
-    expect(frames[frames.length - 1]).not.toHaveProperty('rail');
-  });
 
-  it('a running pomodoro ticks by the minute on the overview and by the second expanded', async () => {
-    const { hud, frames, localTicks } = presenter();
+  it('a running pomodoro ticks by the minute on the overview and asks the expanded list to rebuild', async () => {
+    const { hud, frames } = presenter();
     const endsAtUnixMs = Date.now() + 90_500; // 1:30.5 left
     await hud.acceptPanel({
       kind: 'hud.panel', tab: 'pomodoro', revision: 1, rows: ['Pause', 'Reset'],
@@ -115,18 +102,31 @@ describe('HudPresenter — the tab rail', () => {
     expect(frames).toHaveLength(painted); // 1:00.5 left: the minute digit has not moved
     await vi.advanceTimersByTimeAsync(1_000);
     expect(frames).toHaveLength(painted + 1); // 0:59.5 → "1 min left" still, but the boundary crossed
-    expect(localTicks[localTicks.length - 1]).toBe(true);
 
-    await hud.showList(['Pause', 'Reset'], { title: 'POMODORO', railTab: 'pomodoro', selectable: true });
+    // Expanded, the timer is a firmware list: its owner rebuilds it on the
+    // minute, and no image frame is painted for it.
+    const ticks: number[] = [];
+    hud.onNativePanelTick = () => { ticks.push(Date.now()); };
+    await hud.acceptPanel({
+      kind: 'hud.panel', tab: 'pomodoro', revision: 2, rows: ['Pause', 'Reset'],
+      pomodoro: {
+        phase: 'focus', running: true, remainingMs: 600_500, lengthMs: 1_500_000,
+        completed: 0, endsAtUnixMs: Date.now() + 600_500,
+      },
+    });
+    await hud.showList(['Pause', 'Reset'], {
+      title: 'POMODORO', railTab: 'pomodoro', selectable: true, nativeFirmwareList: true,
+    });
     const expanded = frames.length;
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(frames.length).toBeGreaterThanOrEqual(expanded + 2);
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(ticks.length).toBeGreaterThanOrEqual(1);
+    expect(frames).toHaveLength(expanded);
 
-    // Off the glass, the ticker stops: no repaint of a page that is gone.
-    await hud.showList(['x'], { title: 'MESSAGES' });
-    const away = frames.length;
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(frames).toHaveLength(away);
+    // Off the glass, the ticker stops.
+    await hud.showList(['x'], { title: 'MESSAGES', nativeFirmwareList: true });
+    const after = ticks.length;
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(ticks).toHaveLength(after);
   });
 
   it('the rail survives the host background migration', async () => {

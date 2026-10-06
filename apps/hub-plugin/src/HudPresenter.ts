@@ -19,6 +19,7 @@ import {
 import { paginateMeasured } from './FirmwareText';
 import { ASSISTANT_ANSWER_PAGE, fitHeader } from './HudPageBuilder';
 import { type HudStatusModel, nativeStatusLine } from './HudStatus';
+import { isRouteProgressView, navigationChip, pomodoroChip } from './ActivityChips';
 import { NativeTerminalSurface } from './NativeTerminalSurface';
 import { productivityActionHint, productivityPhaseLabel, usesActionPillLayout } from './HudCanvasRenderer';
 import { navigationNativeBody, type NavigationHudModel } from './NavigationHud';
@@ -262,6 +263,15 @@ function textPageHint(page: number, count: number, macHint: string): string {
   return count > 1 ? `${page + 1}/${count} · ${hint}` : hint;
 }
 
+/** Every list is Even's own list unless it is a reader (a text page) or
+ * carries the Planning month's grid, the one list drawn as an image. A
+ * caller that forgets the flag still gets a firmware list, never an empty
+ * image page: the renderer draws no other list. */
+function isFirmwareList(options: ListSurfaceOptions, visual: boolean): boolean {
+  if (options.nativeFirmwareList === true) return true;
+  return visual && options.nativeTextPage !== true && normalizePlanningGrid(options.planningGrid) === undefined;
+}
+
 /** An answer, a reader or a question as firmware pages: the firmware wraps
  * each page's words at its own break points, and `measureTextWrap` decides
  * how many a page holds (FirmwareText). */
@@ -364,6 +374,13 @@ export class HudPresenter {
   readonly rail = new PanelRail();
   /** Repaints the visible pomodoro when its next digit moves. */
   private panelTicker?: ReturnType<typeof setTimeout>;
+  /** The newest frame of a route in progress, kept whichever page is on the
+   * glass: the header chip reads its next turn. Cleared when the route ends. */
+  private routeActivity?: NavigationHudModel;
+  /** Moves the Pomodoro chip on its minute, whatever page is on the glass. */
+  private activityTicker?: ReturnType<typeof setTimeout>;
+  /** The chips the glass last received, so a change writes once. */
+  private shownActivities = '';
   private focusReturn?: HudContentState;
   private confirmation?: ConfirmationReturnState;
   private confirmationQueue: Promise<unknown> = Promise.resolve();
@@ -411,6 +428,7 @@ export class HudPresenter {
       () => this.restoreAfterAssistantConversation(),
       {
         replacePage: (page) => this.replaceNativePage(page, 'assistant-native'),
+        statusText: () => this.nativeHeader(this.nativePageTitle()),
       },
     );
     this.nativeTerminal = new NativeTerminalSurface(
@@ -523,7 +541,7 @@ export class HudPresenter {
     this.thinkingTicks = 0;
     this.client.suspendDisplay?.();
     this.visual?.suspendDisplay?.();
-    this.guardedListPaintRevision += 1;
+    this.clearActivityTicker();
     this.cancelAssistantOverlayPaintTimer();
     this.assistantOverlayPaintDirty = false;
     this.assistantOverlayPaint = undefined;
@@ -550,6 +568,7 @@ export class HudPresenter {
     this.client.resumeDisplay?.();
     this.visual?.resumeDisplay?.();
     this.displayActive = true;
+    this.armActivityTicker();
   }
 
   /** A firmware list page is still on the glass under a Home surface: the
@@ -565,18 +584,6 @@ export class HudPresenter {
     const active = this.displayActive;
     const bridgeCurrent = this.client.captureDisplayGuard?.() ?? (() => true);
     return () => active && this.displayActive && revision === this.displayRevision && bridgeCurrent();
-  }
-
-  /** The custom list owns its cursor; the compatibility list is firmware-owned.
-   * Without `next` this describes the page on the glass. With `next` it
-   * describes the page about to be shown: a menu deciding how the NEXT page
-   * selects must not read the answer off the current one, or a raster
-   * conversation opened from a firmware picker inherits the picker's cursor. */
-  usesCustomListSelection(next?: { nativeFirmwareList?: boolean; nativeTextPage?: boolean }): boolean {
-    if (this.visual === undefined) return false;
-    if (next) return next.nativeFirmwareList !== true && !this.usesNativeTextPage(next);
-    return !(this.surface.kind === 'list'
-      && (this.surface.options.nativeFirmwareList || this.usesNativeTextPage(this.surface.options)));
   }
 
   /** A reader is Even's own text page over the visual HUD; the text
@@ -1329,6 +1336,10 @@ export class HudPresenter {
   async setStatusModel(model: HudStatusModel): Promise<boolean> {
     this.statusModel = { ...model };
     this.micOn = model.mic;
+    if (this.assistantConversation.isActive()) {
+      this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
+      return this.assistantConversation.setStatus(this.nativeHeader(this.nativePageTitle()));
+    }
     if (this.pageOwner === 'terminal-conversation-native') {
       this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
       return this.nativeTerminal.setStatus(this.nativeHeader(this.nativePageTitle()));
@@ -1354,7 +1365,9 @@ export class HudPresenter {
    * from the model when Chrome has supplied one; otherwise the page's name
    * and whatever line the StatusBar stream holds. */
   private nativeHeader(pageTitle?: string): string {
-    if (this.statusModel) return fitHeader(nativeStatusLine(this.statusModel, pageTitle));
+    if (this.statusModel) {
+      return fitHeader(nativeStatusLine(this.withActivities(this.statusModel, { title: pageTitle }), pageTitle));
+    }
     return fitHeader([pageTitle?.trim(), this.streams.get(ContainerId.StatusBar)?.trim()]
       .filter((part): part is string => Boolean(part))
       .join(' · '));
@@ -1362,6 +1375,8 @@ export class HudPresenter {
 
   /** The name the header carries for the page the presenter holds. */
   private nativePageTitle(): string | undefined {
+    // A conversation is JOAT's own page, whatever feature it covers.
+    if (this.conversationInFront()) return undefined;
     switch (this.surface.kind) {
       case 'list': return this.surface.options.title;
       case 'navigation': return 'NAVIGATION';
@@ -1372,13 +1387,12 @@ export class HudPresenter {
     }
   }
 
-  private guardedListPaintRevision = 0;
 
   async showList(
     items: string[], options: ListSurfaceOptions = {}, isCurrent?: () => boolean,
   ): Promise<boolean> {
     if (!await this.prepareAssistantConversationHandoff()) return false;
-    if (!options.nativeFirmwareList && !await this.prepareNativeTerminalHandoff()) return false;
+    if (!isFirmwareList(options, this.visual !== undefined) && !await this.prepareNativeTerminalHandoff()) return false;
     if (isCurrent && this.usesNativeTextPage(options)) {
       return this.renderNativeTextPage({
         kind: 'list', items: [...items], options: this.resolveListOptions(options), selectedIndex: 0,
@@ -1494,11 +1508,139 @@ export class HudPresenter {
    * this presenter only gives it exclusive focus and exact restoration. */
   /** A retained route does not own input over a different visible feature. */
   isNavigationVisible(): boolean {
-    return this.surface.kind === 'navigation';
+    return this.navigationOnGlass();
+  }
+
+  /**
+   * A route's progress. While the route owns the glass (its page, or Home
+   * with nothing else open) it repaints exactly as `showNavigation` does.
+   * Behind another page — a conversation, a terminal, a list, a reader, an
+   * answer, a question or a decision gate — it never takes the glass: the
+   * retained page keeps the newest frame for when the wearer comes back,
+   * and the header's chip carries the next turn and its distance meanwhile.
+   * Until 2026-10-05 every frame (once a second while walking) went through
+   * `showNavigation`, which hands off whatever was on the glass, so a
+   * conversation or a Pomodoro page lasted until the next step.
+   */
+  async updateNavigation(navigation: NavigationHudModel, statusOverride?: string): Promise<boolean> {
+    if (this.navigationOwnsGlass()) return this.showNavigation(navigation, statusOverride);
+    if (!this.displayActive) return false;
+    this.noteRoute(navigation);
+    const latest: HudSurface = { kind: 'navigation', navigation: this.cloneNavigation(navigation) };
+    if (this.surface.kind === 'navigation') this.surface = latest;
+    if (this.confirmation?.surface.kind === 'navigation') this.confirmation.surface = latest;
+    this.refreshActivities();
+    return true;
+  }
+
+  /** The route ended: its chip leaves every header. */
+  navigationEnded(): void {
+    this.routeActivity = undefined;
+    this.refreshActivities();
+  }
+
+  private noteRoute(navigation: NavigationHudModel): void {
+    if (isRouteProgressView(navigation)) this.routeActivity = this.cloneNavigation(navigation);
+  }
+
+  /** Nothing the wearer chose is in front of the route: its own page, or
+   * Home. A firmware page, a conversation or a pending gate always is. */
+  private navigationOwnsGlass(): boolean {
+    if (this.confirmation || this.promptQuestion) return false;
+    if (this.conversationInFront() || this.nativeTerminal.isActive()) return false;
+    if (this.pageOwner !== 'visual' && this.pageOwner !== 'navigation-native') return false;
+    return this.surface.kind === 'navigation' || this.surface.kind === 'default';
+  }
+
+  private navigationOnGlass(): boolean {
+    return this.surface.kind === 'navigation' && !this.conversationInFront()
+      && !this.confirmation && !this.promptQuestion
+      && (this.pageOwner === 'visual' || this.pageOwner === 'navigation-native');
+  }
+
+  /** The conversation is on the glass — not merely being handed back. */
+  private conversationInFront(): boolean {
+    return this.assistantConversation.isActive() && !this.restoringAssistantConversation;
+  }
+
+  /**
+   * The other features still running, as chips for one page: the page
+   * being built names itself (its header word, or its image frame), and
+   * the feature it already shows has no chip of its own there — the map
+   * carries no turn chip, the Pomodoro page no timer chip (ActivityChips).
+   */
+  private activityChips(page: { title?: string; frame?: HudVisualFrame['kind'] }): string[] {
+    const title = page.title?.trim().toUpperCase() ?? '';
+    const showsRoute = page.frame === 'navigation' || title.startsWith('NAVIGATION');
+    const showsPomodoro = title === 'POMODORO'
+      || (page.frame === 'overview' && this.rail.active() === 'pomodoro');
+    const chips: string[] = [];
+    const pomodoro = this.rail.content('pomodoro')?.pomodoro;
+    if (pomodoro && !showsPomodoro) {
+      const chip = pomodoroChip(pomodoro, Date.now());
+      if (chip) chips.push(chip);
+    }
+    if (this.routeActivity && !showsRoute) {
+      const chip = navigationChip(this.routeActivity);
+      if (chip) chips.push(chip);
+    }
+    return chips;
+  }
+
+  /** The page on the glass, as activityChips needs to know it. */
+  private pageOnGlass(): { title?: string; frame?: HudVisualFrame['kind'] } {
+    if (this.conversationInFront() || this.pageOwner !== 'visual') {
+      const title = this.nativePageTitle();
+      return title === undefined ? {} : { title };
+    }
+    return { frame: this.baseVisualFrame().kind };
+  }
+
+  /** The status model with this page's chips; also records what the glass
+   * is about to be told, so a later refresh writes only a change. */
+  private withActivities(
+    model: HudStatusModel, page: { title?: string; frame?: HudVisualFrame['kind'] },
+  ): HudStatusModel {
+    const chips = this.activityChips(page);
+    this.shownActivities = chips.join('\u0000');
+    const next: HudStatusModel = {
+      clock: model.clock, link: model.link, mic: model.mic, charging: model.charging,
+      ...(model.battery !== undefined ? { battery: model.battery } : {}),
+      ...(model.macState !== undefined ? { macState: model.macState } : {}),
+    };
+    return chips.length > 0 ? { ...next, activities: chips } : next;
+  }
+
+  /** Re-show the header when the running features read differently: one
+   * in-place header upgrade on a firmware page, one spine tile on an image
+   * page, nothing when the chips are unchanged. */
+  private refreshActivities(): void {
+    if (!this.statusModel || !this.displayActive) return;
+    if (this.activityChips(this.pageOnGlass()).join('\u0000') === this.shownActivities) return;
+    void this.setStatusModel(this.statusModel).catch(() => false);
+  }
+
+  private armActivityTicker(): void {
+    this.clearActivityTicker();
+    const pomodoro = this.rail.content('pomodoro')?.pomodoro;
+    if (!pomodoro || !this.displayActive) return;
+    const delay = pomodoroTickDelayMs(pomodoro, Date.now(), 60_000);
+    if (delay === undefined) return;
+    this.activityTicker = setTimeout(() => {
+      this.activityTicker = undefined;
+      this.refreshActivities();
+      this.armActivityTicker();
+    }, delay);
+  }
+
+  private clearActivityTicker(): void {
+    if (this.activityTicker !== undefined) clearTimeout(this.activityTicker);
+    this.activityTicker = undefined;
   }
 
   async showNavigation(navigation: NavigationHudModel, statusOverride?: string): Promise<boolean> {
     if (!this.visual) return false;
+    this.noteRoute(navigation);
     if (!await this.prepareAssistantConversationHandoff()) return false;
     // Every frame before the live map (confirm the place, choose the mode,
     // the preview, the warnings, arrival, an error) is a text card: Even's
@@ -1874,55 +2016,6 @@ export class HudPresenter {
     return painted && this.surface === surface && foregroundAvailable();
   }
 
-  async setSelection(index: number): Promise<boolean> {
-    if (
-      this.surface.kind === 'default'
-      || this.surface.kind === 'navigation'
-      || this.surface.kind === 'brainstorm'
-      || this.surface.kind === 'productivity'
-    ) return false;
-    const maximum = Math.max(0, this.surface.items.length - 1);
-    const selectedIndex = Math.max(0, Math.min(maximum, index));
-    const surface: HudSurface = { ...this.surface, selectedIndex };
-    return this.renderList(surface);
-  }
-
-  /** Restore only after the selected custom row has painted and still owns
-   * the surface. Native compatibility lists have no cursor-setting API. */
-  async restoreSelection(index: number): Promise<boolean> {
-    const displayCurrent = this.captureDisplayGuard();
-    if (!displayCurrent()) return false;
-    const current = this.surface;
-    if (current.kind !== 'list' || this.confirmation || this.promptQuestion
-      || this.assistantConversation.isActive()) return false;
-    const selectedIndex = Math.max(0, Math.min(Math.max(0, current.items.length - 1), index));
-    if (!this.visual) return selectedIndex === 0 ? this.setSelection(0) : false;
-    const surface: HudSurface = { ...current, selectedIndex };
-    const painted = await this.renderList(surface);
-    if (!displayCurrent()) return false;
-    if (!painted && this.surface === surface && !this.confirmation && !this.promptQuestion
-      && !this.assistantConversation.isActive()) {
-      this.surface = current;
-      // One direct rollback paint follows the existing bounded recovery.
-      // Never recurse into another healing attempt or overwrite a successor.
-      await this.visual.paint(this.visualFrame());
-    }
-    return painted && this.surface === surface && !this.confirmation && !this.promptQuestion
-      && !this.assistantConversation.isActive();
-  }
-
-  moveSelection(delta: number): Promise<boolean> {
-    if (
-      this.surface.kind === 'default'
-      || this.surface.kind === 'navigation'
-      || this.surface.kind === 'brainstorm'
-      || this.surface.kind === 'productivity'
-    ) {
-      return Promise.resolve(false);
-    }
-    return this.setSelection(this.surface.selectedIndex + delta);
-  }
-
   private async renderNavigation(
     surface: Extract<HudSurface, { kind: 'navigation' }>,
     statusOverride?: string,
@@ -2069,6 +2162,10 @@ export class HudPresenter {
   async acceptPanel(message: HudPanelMessage): Promise<PanelContent> {
     const content = this.rail.accept(message);
     if (this.rail.active() === message.tab) await this.repaintRestingPane();
+    if (message.tab === 'pomodoro') {
+      this.armActivityTicker();
+      this.refreshActivities();
+    }
     return content;
   }
 
@@ -2086,10 +2183,8 @@ export class HudPresenter {
 
   /**
    * Repaint the visible pomodoro exactly when its next digit moves: every
-   * second on the expanded tab, every minute on the resting overview. A
-   * tick is a localTick — no new information from the Mac — so it is not a
-   * wearer-visible frame receipt, and it stops the moment the timer is not
-   * on the glass or not running.
+   * minute on the resting overview, and it stops the moment the timer is
+   * not on the glass or not running.
    */
   /** The expanded Pomodoro on the firmware list cannot be upgraded in
    * place: once a minute the owner of its rows (CapabilityMenu) rebuilds
@@ -2108,7 +2203,7 @@ export class HudPresenter {
         this.onNativePanelTick?.();
         return;
       }
-      void this.paintVisual(true);
+      void this.paintVisual();
     }, delay);
   }
 
@@ -2122,7 +2217,7 @@ export class HudPresenter {
     if (this.surface.kind === 'list' && this.surface.options.railTab === 'pomodoro') {
       // A firmware list is rebuilt per minute; the raster page repainted
       // one tile per second.
-      return pomodoroTickDelayMs(pomodoro, now, this.surface.options.nativeFirmwareList ? 60_000 : 1000);
+      return pomodoroTickDelayMs(pomodoro, now, 60_000);
     }
     return undefined;
   }
@@ -2770,7 +2865,7 @@ export class HudPresenter {
         : {}),
       hint: (options.hint?.trim() || DEFAULT_LIST_HINT).slice(0, MAX_FOCUS_HINT_CHARS),
       selectable: options.selectable ?? false,
-      ...(options.nativeFirmwareList ? { nativeFirmwareList: true } : {}),
+      ...(isFirmwareList(options, this.visual !== undefined) ? { nativeFirmwareList: true } : {}),
       ...(options.nativeTextPage ? { nativeTextPage: true } : {}),
       ...(options.nativeTextPage && options.nativeTextPageFromEnd ? { nativeTextPageFromEnd: true } : {}),
       ...(options.railTab ? { railTab: options.railTab } : {}),
@@ -2786,7 +2881,9 @@ export class HudPresenter {
 
   private visualFrame(): HudVisualFrame {
     const frame = this.baseVisualFrame();
-    return this.statusModel ? { ...frame, statusModel: { ...this.statusModel } } : frame;
+    return this.statusModel
+      ? { ...frame, statusModel: this.withActivities(this.statusModel, { frame: frame.kind }) }
+      : frame;
   }
 
   private baseVisualFrame(): HudVisualFrame {
@@ -2938,7 +3035,7 @@ export class HudPresenter {
     return true;
   }
 
-  private async paintVisual(localTick = false): Promise<boolean> {
+  private async paintVisual(): Promise<boolean> {
     this.removeRetiredNotifications();
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
@@ -2949,7 +3046,7 @@ export class HudPresenter {
     // page: the image page beneath it is not repainted while it is pending.
     if (this.confirmation || this.promptQuestion) return true;
     const notificationId = this.hasVisibleNotification() ? this.notificationId : undefined;
-    const ok = await this.visual.paint(this.visualFrame(), localTick);
+    const ok = await this.visual.paint(this.visualFrame());
     if (ok && displayCurrent() && notificationId === this.notificationId) {
       this.paintedNotificationId = notificationId;
     }

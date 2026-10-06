@@ -54,15 +54,15 @@ const LAYOUTS: ReadonlyArray<[string, Page]> = [
   ['confirmation', builder.confirmationLayout('Send reply?') as Page],
   ['visual-startup', builder.visualStartup() as Page],
   ['visual', builder.visualLayout() as Page],
-  ['visual-compatibility', builder.visualCompatibilityLayout() as Page],
+  ['visual-compatibility', builder.visualLayout() as Page],
   ['assistant-conversation', builder.assistantConversationLayout({
     cardTop: 128,
     cardHeight: 132,
     transcriptTop: 140,
     transcriptHeight: 81,
-    footerTop: 247,
     dimText: 'Tell me a joke.\n \n ',
     brightText: ' \nWhy did the byte cross the bus?\n ',
+    scrollbarText: '│\n█\n│',
     footerText: '■ □',
   }) as Page],
 ];
@@ -101,47 +101,43 @@ describe('HudPageBuilder invariants', () => {
     }
   });
 
-  it('builds the conversation as Even AI builds it: one bordered, bottom-anchored card', () => {
-    // The reference is Even's own product-page demo (frame-measured
-    // 2026-09-24): a single hairline box, the wearer's question dim above
-    // the bright answer, the box growing upward from a fixed bottom, the
-    // state glyph centred ON the bottom border — and no scrollbar; older
-    // lines simply leave through the top of the card.
+  it('builds the conversation as one bordered, bottom-anchored native surface', () => {
+    // A three-line card on the card's fixed lower edge (274).
     const page = builder.assistantConversationLayout({
-      cardTop: 128,
+      cardTop: 142,
       cardHeight: 132,
-      transcriptTop: 140,
+      transcriptTop: 154,
       transcriptHeight: 81,
-      footerTop: 247, // cardBottom 260 - half a 27px line: straddles the border
       dimText: 'Tell me a joke.\n \n ',
       brightText: ' \nWhy did the byte cross the bus?\n ',
+      scrollbarText: '│\n█\n│',
       footerText: '■ □',
     }) as Page;
     const byName = (name: string) => page.textObject?.find((entry) => entry.containerName === name);
 
     expect(page.imageObject).toBeUndefined();
-    expect(page.textObject).toHaveLength(4);
-    expect(page.textObject?.find((entry) => entry.containerName === 'scroll-position')).toBeUndefined();
+    // The live header line, then the card: a running Pomodoro or route
+    // stays visible above a conversation.
+    expect(page.textObject).toHaveLength(6);
+    expect(page.textObject?.[0]).toMatchObject({ containerName: 'status', yPosition: 0, height: 35 });
     expect(byName('conversation')).toMatchObject({
-      yPosition: 128,
+      yPosition: 142,
       height: 132,
       borderWidth: 1,
       isEventCapture: 1,
     });
     expect(byName('wearer-turns')).toMatchObject({ textColor: 2, content: expect.stringContaining('joke') });
     expect(byName('joat-turns')).toMatchObject({ textColor: 4, content: expect.stringContaining('byte') });
-    // The glyph line straddles the card's bottom edge, exactly as passed.
-    expect(byName('generation')).toMatchObject({ content: '■ □', yPosition: 247 });
+    expect(byName('generation')).toMatchObject({ content: '■ □' });
+    expect(byName('scroll-position')).toMatchObject({ content: '│\n█\n│' });
 
     const frame = byName('conversation')!;
     const transcript = byName('wearer-turns')!;
     const footer = byName('generation')!;
     expect((transcript.yPosition ?? 0) + (transcript.height ?? 0))
       .toBeLessThanOrEqual(footer.yPosition ?? 0);
-    // Straddling: the footer line starts above the border and ends below it.
-    expect(footer.yPosition ?? 0).toBeLessThan((frame.yPosition ?? 0) + (frame.height ?? 0));
     expect((footer.yPosition ?? 0) + (footer.height ?? 0))
-      .toBeGreaterThan((frame.yPosition ?? 0) + (frame.height ?? 0));
+      .toBeLessThan((frame.yPosition ?? 0) + (frame.height ?? 0));
   });
 
   it('keeps every visual container name within the packaged-host limit', () => {
@@ -178,7 +174,7 @@ describe('HudPageBuilder invariants', () => {
     })).filter(({ itemName }) => itemName !== 'Settings');
     expect(expected).toHaveLength(CAPABILITIES.length - 1);
     expect(visual.menuObject?.menuItems).toEqual(expected);
-    expect((builder.visualCompatibilityLayout() as Page).menuObject?.menuItems).toEqual(expected);
+    expect((builder.visualLayout() as Page).menuObject?.menuItems).toEqual(expected);
   });
 
   it('still routes a retired id from a host showing a cached menu', () => {

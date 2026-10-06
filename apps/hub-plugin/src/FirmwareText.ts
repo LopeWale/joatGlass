@@ -28,11 +28,6 @@ export function firmwareLineCount(text: string, innerWidth: number): number {
   return text.length === 0 ? 0 : measureTextWrap(text, innerWidth).lineCount;
 }
 
-/** Whether the firmware renders `text` on one line at `innerWidth`. */
-export function fitsOneLine(text: string, innerWidth: number): boolean {
-  return firmwareLineCount(text, innerWidth) <= 1;
-}
-
 /** The width the firmware draws `text` at on one line: leading spaces
  * dropped, glyphs rounded one by one. With a newline inside, the widest line. */
 export function firmwareLineWidth(text: string): number {

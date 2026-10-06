@@ -40,22 +40,15 @@ export const TYPE = {
   primary: prose(16),
   /** Active-guidance instruction: read while moving, one notch larger. */
   guide: prose(19),
-  /** At-distance alert primary (rerouting, warnings). */
-  glance: prose(24),
   /** Reading body and pills. */
   body: prose(14),
   /** Assistant answer inside the retained conversation transcript. */
   assistant: assistantProse(14),
-  /** A selectable row (focus lists, conversations, day entries). */
-  row: prose(14),
   /** Secondary line under a primary — on STATIC pages (decision, preview,
    * arrival, error). Screens read while MOVING (active guidance, warnings)
    * set their secondary in `body` instead: one deliberate step up, same
    * face, so the rule is two roles, not a per-screen number. */
   secondary: prose(11),
-  /** Brainstorm/terminal transcript body. HUD_TEXT_MEAN_ADVANCE_PX and
-   * BRAINSTORM_ROW_COLUMNS (105) are measured against exactly this. */
-  transcript: prose(11),
   /** Metadata: sources, ages, counters, in-content hints. */
   meta: prose(10),
   /** Uppercase section label / eyebrow. */
@@ -71,10 +64,6 @@ export const TYPE = {
   statusClock: mono(11),
   /** Status spine label (and the low-battery number). */
   statusMeta: mono(10),
-  /** Reader body: draws the Mac's prepared 62-mono-column rows verbatim;
-   * stays monospace until core/protocol.py's column model changes with it
-   * (they must move in the same commit, like every wire shape). */
-  readerBody: mono(14),
 } as const;
 
 /** Leadings, also by job — not one per draw site. */
@@ -87,10 +76,6 @@ export const LEAD = {
   tight: 16,
   /** 10px meta wraps. */
   meta: 14,
-  /** 11px transcript rows (was a magic 14 inside the draw loop). */
-  transcript: 14,
-  /** Reader rows: 10 rows of 14px mono between y84 and the footer. */
-  reader: 17,
 } as const;
 
 /**
@@ -100,25 +85,14 @@ export const LEAD = {
  * a pitch can never again be a bare number nobody can trace.
  */
 export const PITCH = {
-  /** Dense selectable rows: focus lists, pomodoro controls. */
-  row: 20,
-  /** Rows carrying a speaker/label column above the body: conversations. */
-  labelled: 22,
   /** A calendar week band. */
   week: 22,
-  /** Boxed choices with a border and padding: navigation decisions. */
-  boxed: 34,
   /** A month-grid band on the full-page planning calendar. */
   monthBand: 26,
-  /** An entry row in the planning dashboard's day pane. */
-  paneRow: 24,
 } as const;
 
 /** Every footer hint sits on this baseline, middle-aligned, centered. */
 export const HINT_BASELINE_Y = 267;
-
-/** The 3px selection rail is this tall beside every selectable row. */
-export const RAIL_HEIGHT = 19;
 
 /** The one draw-time case transform. Labels and eyebrows uppercase through
  * here so the discipline is greppable; matchers that only DETECT case keep

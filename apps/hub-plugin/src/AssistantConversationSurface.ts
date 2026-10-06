@@ -11,15 +11,11 @@ import {
   type AssistantConversationPage,
   type HudPageBuilder,
 } from './HudPageBuilder';
-import { TEXT_CONTAINER_MAX_BYTES, fitUtf8 } from './FirmwareLimits';
-import type {
-  AssistantConversationSnapshot,
-  AssistantConversationTurn,
-} from './types';
 import {
-  ASSISTANT_CONVERSATION_VISUAL_GEOMETRY,
-  type AssistantConversationVisual,
-} from './HudVisualSurface';
+  ContainerId,
+  type AssistantConversationSnapshot,
+  type AssistantConversationTurn,
+} from './types';
 
 export type {
   AssistantConversationSnapshot,
@@ -49,14 +45,11 @@ export interface AssistantConversationIdentity {
 interface AssistantConversationSurfaceOptions {
   indicatorIntervalMs?: number;
   continuationPromptEnabled?: boolean;
-  paintView?: (
-    view: AssistantConversationVisual,
-    isCurrent: () => boolean,
-  ) => Promise<boolean>;
-  measureTextWidth?: (text: string) => number;
   /** Own the page-type transition when a visual HUD is mounted underneath.
    * Native text must never rebuild while an image upload is still in flight. */
   replacePage?: (page: RebuildPageContainer) => Promise<boolean>;
+  /** The page's live header line (HudPresenter.nativeHeader) at rebuild. */
+  statusText?: () => string;
 }
 
 export type ConversationExitResult = 'inactive' | 'prompted' | 'exited' | 'failed';
@@ -68,19 +61,13 @@ export interface AssistantConversationSurfaceState {
   indicatorFrame: number;
 }
 
-// Native text is the latency path: within a stage, thinking, streamed answer
-// chunks, scrolling and the continuation prompt are flicker-free
-// textContainerUpgrade calls. The stages are BOUNDED so the card still does
-// what Even AI's own card does — hug its content and grow upward from the
-// fixed bottom as the exchange grows (product-page demo, frame-measured
-// 2026-09-24: five card heights across one exchange). A stage crossing is
-// one rebuild; per-chunk height changes would be one rebuild per chunk,
-// which is the redraw problem this path exists to avoid.
-const NATIVE_LINE_STAGES = [2, 3, 5, 7] as const;
-const VISUAL_LINE_STAGES = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
-// The visual renderer has eight observed morph phases. The text-only
-// compatibility page cannot reproduce their geometry, but it keeps the same
-// cadence and phase count with safe firmware glyphs.
+// Native text is the latency path. Keep one stable container geometry for the
+// whole visit so thinking, streamed answer chunks, scrolling, and the
+// continuation prompt use flicker-free textContainerUpgrade calls. Changing
+// the card height as lines arrive would turn every early chunk into a full
+// rebuildPageContainer and recreate the very redraw problem this path fixes.
+const NATIVE_LINE_STAGES = [7] as const;
+// Eight indicator phases in firmware glyphs, at the cadence Even AI uses.
 const INDICATOR_FRAMES = [
   '■ □', '□ ■', '■', '■ ■', '□ □', '■', '□', '■',
 ] as const;
@@ -199,6 +186,19 @@ function centered(text: string, width: number): string {
   return `${' '.repeat(Math.floor(room / space / 2))}${text}`;
 }
 
+function scrollbar(total: number, capacity: number, scrollFromTail: number): string {
+  if (total <= capacity) return ' ';
+  const slots = capacity;
+  const thumbSize = Math.max(1, Math.round((capacity / total) * slots));
+  const maximum = total - capacity;
+  const startFromTop = maximum - scrollFromTail;
+  const travel = Math.max(0, slots - thumbSize);
+  const thumbStart = maximum === 0 ? 0 : Math.round((startFromTop / maximum) * travel);
+  return Array.from({ length: slots }, (_, index) => (
+    index >= thumbStart && index < thumbStart + thumbSize ? '█' : '│'
+  )).join('\n');
+}
+
 export function conversationViewport(
   snapshot: AssistantConversationSnapshot,
   requestedScrollFromTail = 0,
@@ -226,20 +226,13 @@ export function conversationViewport(
     .map((line) => line.role === 'assistant' ? line.text : ' ')
     .join('\n');
   const geometry = ASSISTANT_CONVERSATION_GEOMETRY;
-  // The state glyph rides ON the card's bottom border, centred — Even AI's
-  // own placement (product-page demo) — so the resting card reserves no
-  // interior footer row. Only the continuation prompt is a sentence; the
-  // border must not strike through it, so that one state moves the footer
-  // inside the card and grows the card by one line to hold it.
   const cardHeight = (
     lineCapacity * geometry.lineHeight
     + geometry.cardTopPadding
     + geometry.footerGap
-    + (continuePrompt ? geometry.lineHeight + geometry.footerBottomInset : 0)
+    + geometry.lineHeight
+    + geometry.footerBottomInset
   );
-  const footerTop = continuePrompt
-    ? geometry.cardBottom - geometry.footerBottomInset - geometry.lineHeight
-    : geometry.cardBottom - Math.round(geometry.lineHeight / 2);
   const footer = continuePrompt
     ? CONTINUE_COPY
     : snapshot.state === 'ready'
@@ -250,9 +243,9 @@ export function conversationViewport(
     cardHeight,
     transcriptTop: geometry.cardBottom - cardHeight + geometry.cardTopPadding,
     transcriptHeight: lineCapacity * geometry.lineHeight,
-    footerTop,
     dimText,
     brightText,
+    scrollbarText: scrollbar(all.length, lineCapacity, scrollFromTail),
     footerText: centered(GesturePolicy.formatHint(footer), ASSISTANT_CONVERSATION_GEOMETRY.footerWidth),
     visibleLines,
     lineCapacity,
@@ -310,8 +303,12 @@ export class AssistantConversationSurface {
   private lastPaintSucceeded = false;
   private readonly indicatorIntervalMs: number;
   private readonly continuationPromptEnabled: boolean;
-  private readonly paintView?: AssistantConversationSurfaceOptions['paintView'];
   private readonly replacePage?: AssistantConversationSurfaceOptions['replacePage'];
+  private readonly statusText?: AssistantConversationSurfaceOptions['statusText'];
+  /** The header as the glass shows it, and the one it should show. */
+  private shownStatus = '';
+  private desiredStatus = '';
+  private statusDirty = false;
   private readonly viewportOptions: ConversationViewportOptions;
 
   constructor(
@@ -322,17 +319,9 @@ export class AssistantConversationSurface {
   ) {
     this.indicatorIntervalMs = Math.max(0, options.indicatorIntervalMs ?? 450);
     this.continuationPromptEnabled = options.continuationPromptEnabled ?? true;
-    this.paintView = options.paintView;
     this.replacePage = options.replacePage;
-    this.viewportOptions = options.paintView
-      ? {
-        lineStages: VISUAL_LINE_STAGES,
-        textWidth: ASSISTANT_CONVERSATION_VISUAL_GEOMETRY.width
-          - ASSISTANT_CONVERSATION_VISUAL_GEOMETRY.textInsetLeft
-          - ASSISTANT_CONVERSATION_VISUAL_GEOMETRY.textInsetRight,
-        ...(options.measureTextWidth ? { measureTextWidth: options.measureTextWidth } : {}),
-      }
-      : {};
+    this.statusText = options.statusText;
+    this.viewportOptions = {};
   }
 
   async present(value: AssistantConversationSnapshot): Promise<boolean> {
@@ -584,15 +573,18 @@ export class AssistantConversationSurface {
     const tracked = work.finally(() => {
       if (this.draining !== tracked) return;
       this.draining = undefined;
-      if ((this.snapshotDirty || this.footerDirty) && this.canWrite()) void this.ensureDrain();
+      if ((this.snapshotDirty || this.footerDirty || this.statusDirty) && this.canWrite()) void this.ensureDrain();
     });
     this.draining = tracked;
     return tracked;
   }
 
   private async drain(): Promise<void> {
-    while (this.canWrite() && (this.snapshotDirty || this.footerDirty)) {
-      if (this.snapshotDirty) {
+    while (this.canWrite() && (this.snapshotDirty || this.footerDirty || this.statusDirty)) {
+      if (this.statusDirty && !this.snapshotDirty && this.lastView !== undefined) {
+        this.statusDirty = false;
+        await this.paintStatus();
+      } else if (this.snapshotDirty) {
         this.snapshotDirty = false;
         this.footerDirty = false;
         this.lastPaintSucceeded = await this.paintSnapshot();
@@ -611,18 +603,11 @@ export class AssistantConversationSurface {
       current, requestedScroll, this.indicatorFrame, this.continuePrompt,
       this.viewportOptions,
     );
-    // A footer that moved (glyph on the border ↔ continuation sentence
-    // inside the card) needs its container re-placed; an upgrade would draw
-    // the new text at the old position.
-    const needsRebuild = this.pageLineCapacity !== view.lineCapacity
-      || this.lastView === undefined
-      || this.lastView.footerTop !== view.footerTop;
-    let painted = this.paintView
-      ? await this.paintVisual(current, view)
-      : needsRebuild
-        ? await this.rebuild(view)
-        : await this.upgradeView(view);
-    if (!painted && !this.paintView && !needsRebuild && this.canWrite()) {
+    const needsRebuild = this.pageLineCapacity !== view.lineCapacity || this.lastView === undefined;
+    let painted = needsRebuild
+      ? await this.rebuild(view)
+      : await this.upgradeView(view);
+    if (!painted && !needsRebuild && this.canWrite()) {
       painted = await this.rebuild(view);
     }
     if (!painted) {
@@ -646,14 +631,12 @@ export class AssistantConversationSurface {
       current, this.committedScroll, this.indicatorFrame, this.continuePrompt,
       this.viewportOptions,
     );
-    const ok = this.paintView
-      ? await this.paintVisual(current, view)
-      : await this.upgrade(
-        AssistantConversationContainerId.Generation,
-        'generation',
-        view.footerText,
-        this.lastView.footerText,
-      );
+    const ok = await this.upgrade(
+      AssistantConversationContainerId.Generation,
+      'generation',
+      view.footerText,
+      this.lastView.footerText,
+    );
     if (ok) {
       this.lastView = { ...this.lastView, footerText: view.footerText };
       this.armStateTimers();
@@ -661,42 +644,43 @@ export class AssistantConversationSurface {
     return ok;
   }
 
-  private rebuild(view: ConversationViewport): Promise<boolean> {
-    const page = this.layouts.assistantConversationLayout(view);
-    return this.replacePage
-      ? this.replacePage(page)
-      : this.client.require().rebuildPageContainer(page);
+  private async rebuild(view: ConversationViewport): Promise<boolean> {
+    const status = this.statusText?.() ?? this.desiredStatus;
+    const page = this.layouts.assistantConversationLayout(view, status);
+    const rebuilt = this.replacePage
+      ? await this.replacePage(page)
+      : await this.client.require().rebuildPageContainer(page);
+    if (rebuilt) {
+      this.shownStatus = status;
+      this.desiredStatus = status;
+      this.statusDirty = false;
+    }
+    return rebuilt;
   }
 
-  private paintVisual(
-    snapshot: AssistantConversationSnapshot,
-    view: ConversationViewport,
-  ): Promise<boolean> {
-    const paint = this.paintView;
-    if (!paint) return Promise.resolve(false);
-    const indicatorFrame = this.indicatorFrame;
-    const continuePrompt = this.continuePrompt;
-    const expectedScroll = view.scrollFromTail;
-    const visual: AssistantConversationVisual = {
-      conversationId: snapshot.conversationId,
-      revision: snapshot.revision,
-      state: snapshot.state,
-      visibleLines: view.visibleLines.map((line) => ({ ...line })),
-      lineCapacity: view.lineCapacity,
-      totalLines: view.totalLines,
-      scrollFromTail: view.scrollFromTail,
-      maximumScrollFromTail: view.maximumScrollFromTail,
-      indicatorFrame,
-      continuePrompt,
-    };
-    return paint(visual, () => (
-      this.canWrite()
-      && this.snapshot === snapshot
-      && this.snapshot.revision === snapshot.revision
-      && this.desiredScroll === expectedScroll
-      && this.indicatorFrame === indicatorFrame
-      && this.continuePrompt === continuePrompt
-    ));
+  /**
+   * The header line changed (the clock, the mic, the battery, a running
+   * Pomodoro or route): one in-place upgrade, serialized with the
+   * transcript writes so the two never race on the bridge.
+   */
+  setStatus(text: string): Promise<boolean> {
+    this.desiredStatus = text;
+    if (!this.canWrite() || this.lastView === undefined) return Promise.resolve(true);
+    if (text === this.shownStatus) {
+      this.statusDirty = false;
+      return Promise.resolve(true);
+    }
+    this.statusDirty = true;
+    return this.ensureDrain().then(() => this.shownStatus === text);
+  }
+
+  private async paintStatus(): Promise<boolean> {
+    const text = this.desiredStatus;
+    if (text === this.shownStatus) return true;
+    const previous = this.shownStatus;
+    const ok = await this.upgrade(ContainerId.StatusBar, 'status', text, previous);
+    if (ok) this.shownStatus = text;
+    return ok;
   }
 
   private async upgradeView(view: ConversationViewport): Promise<boolean> {
@@ -707,6 +691,9 @@ export class AssistantConversationSurface {
     }
     if (prior?.brightText !== view.brightText) {
       updates.push([AssistantConversationContainerId.JoatTurns, 'joat-turns', view.brightText, prior?.brightText ?? '']);
+    }
+    if (prior?.scrollbarText !== view.scrollbarText) {
+      updates.push([AssistantConversationContainerId.ScrollPosition, 'scroll-position', view.scrollbarText, prior?.scrollbarText ?? '']);
     }
     if (prior?.footerText !== view.footerText) {
       updates.push([AssistantConversationContainerId.Generation, 'generation', view.footerText, prior?.footerText ?? '']);
@@ -723,7 +710,7 @@ export class AssistantConversationSurface {
     content: string,
     previous = '',
   ): Promise<boolean> {
-    const replacement = fitUtf8(content, TEXT_CONTAINER_MAX_BYTES) || ' ';
+    const replacement = content || ' ';
     return this.client.require().textContainerUpgrade(new TextContainerUpgrade({
       containerID,
       containerName,

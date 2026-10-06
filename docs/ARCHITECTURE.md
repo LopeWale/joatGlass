@@ -91,6 +91,16 @@ live position ever reaching the Mac. A position-only repaint of the
 guidance page (the dot, the progress bar, the ETA; at most once a second)
 sends nothing; only a semantic state change does.
 
+A route keeps running behind every other page. While its own page (or Home)
+is on the glass a progress frame repaints it; while a conversation, a
+terminal, a list, a reader, an answer, a question or a decision gate is in
+front, the frame updates the retained page and the header's turn chip and
+never takes the glass (`HudPresenter.updateNavigation`). The pages that ask
+the wearer something — the place, the mode, the preview, an error — still
+take it. Until 2026-10-05 every frame went through the page-taking path, so
+with once-a-second repaints a conversation or a Pomodoro page lasted until
+the wearer's next step.
+
 Saved places are the one exception to "spoken destination": the wearer
 saves Home, Work and the rest on the phone page, the phone sends the list
 whole to the Mac (`places` uplink, kept in `saved_places`), and "navigate
