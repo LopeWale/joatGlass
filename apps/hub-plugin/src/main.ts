@@ -1445,6 +1445,12 @@ async function renderVisualState(
       );
       return;
     }
+    // The long thread goes through the real voice-adoption path, so the
+    // simulator's swipes page it exactly as they page a Mac thread.
+    if (state === 'messages-conversation-long') {
+      await menu.presentList(fixture.title, fixture.items, 'voice-fixture-thread', true, fixture.hint);
+      return;
+    }
     // Drawn as production draws it: a reader is Even's text page.
     const nativeTextPage = !usesFirmwareList({ title: fixture.title, selectable: fixture.selectable });
     await hud.showList(fixture.items, {

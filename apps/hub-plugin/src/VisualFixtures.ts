@@ -28,6 +28,7 @@ const VISUAL_CONFIRMATION_ID = 'visual-confirmation';
 export const PRODUCTIVITY_VISUAL_STATES = [
   'messages',
   'messages-conversation',
+  'messages-conversation-long',
   'messages-compose',
   'notifications',
   'notification-detail',
@@ -277,6 +278,33 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
         'Adele: Perfect. Dele wants the dark variants too.',
         'You: Exporting them now, give me ten minutes.',
         'Adele: Can you send the latest mockups before the review?',
+      ],
+    },
+    // A full thread page as the Mac sends it: paginate_reader_text's
+    // lossless 62-column slices, a link cut mid-token included.
+    'messages-conversation-long': {
+      title: 'MESSAGES · CONVERSATION',
+      hint: 'down more · tap: reply · left x2: back',
+      selectable: true,
+      items: [
+        '1/2 · Adele',
+        'Adele: Can you send the latest mockups before the review? I ',
+        'want to walk Marcus through the onboarding flow first.\n',
+        'You: Exporting them now, give me ten minutes. The dark ',
+        'variants are still rendering.\n',
+        'Adele: Perfect. Dele wants the dark variants too, and the ',
+        'empty states for the inbox screen.\n',
+        'You: Both palettes are in the file. Link: ',
+        'https://www.figma.com/design/k3J9xQ2/joat-hud-review?node-id=1',
+        '204-5521&t=Ab12\n',
+        'Adele: You are a lifesaver. See you at 4:30 in the big room, ',
+        "I'll bring coffee.\n",
+        'You: Thanks! Running two minutes late, start without me if ',
+        'Marcus is already there.\n',
+        "Adele: No rush. We're still waiting on the projector anyway.\n",
+        'Adele: Also, can you remind me which build has the new ',
+        'header? The one with the battery icon on the right.\n',
+        'You: 0.1.107 — the image header is on every page now.',
       ],
     },
     'messages-compose': {
