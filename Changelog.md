@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-07 — Build JOAT 0.1.118
+
+- Packed from `7d0c7cb` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.118 above the last recorded build (0.1.117); app.json, package.json and package-lock.json all 0.1.118. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1164 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 173816 bytes, SHA-256 `5a8321c7e36970393b0321ffea1a7a30337fdc2062e0cfc3fe745c5c96a38857`. Adds to 0.1.117 the gesture-free JOAT box, the one gesture template and messages hanging under the name. Plugin-only on top of 0.1.117 (whose brain restart still applies). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-07 — No gestures in JOAT's box; one gesture template; messages hang under the name
 
 The wearer's three points on 0.1.117: the reply card still carried gesture notes and no working indicator; every page named its gestures differently ("what does 'double click' mean"); and a wrapped message should line up under its first word, after "Sender: ".
