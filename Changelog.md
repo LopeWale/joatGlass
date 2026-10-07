@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-07 — The speaker's name opens their words, on the same row
+
+The wearer asked why two rows went to one thing: the notification card had the sender on a row of its own above the message, and JOAT's box read "JOAT" on one row and "Yes?" on the next. The ruling: "Name: the response", wrapped beneath.
+
+- **JOAT's box** (`AssistantConversationSurface.ts`): each turn's first row opens with its speaker's name, "You:" or "JOAT:", and the words wrap full width beneath. JOAT's name is dim and its words bright (the two layers share the row; the bright words start a typed space past the name). The working glyph stands on JOAT's row ("JOAT: ■ □"). The blank row between exchanges is gone: the names already part the turns. The box now starts at one row.
+- **A bare "JOAT"** (`orchestrator.py`): the name alone is not a question, so the box shows only "JOAT: Yes?". Before, the wearer's "JOAT" took a row above the answer and read as a name label. `_greet_assistant_conversation` adds JOAT's turn without replacing an earlier answer when the conversation is still open.
+- **The notification card** (`NotificationCard.ts`): "Sam: Didn't catch you on the phone…" under the app line, not the sender on a row of its own.
+- **The Messages reply card** gets the same rows: "JOAT: What do you want to say back to Adele?", then "You: …" as the wearer speaks, with no blank row between.
+- Verified in the official simulator: the wake answer as one row over Home, a question and its answer in two rows, the working glyph on JOAT's row, a long answer wrapping beneath the name, the card, and the reply card. Not verified on physical glasses.
+- Tests: plugin 1164 passed; typecheck and build clean. Mac 3460 passed, 1 skipped; the container's IPv6 test fails as before. mypy clean. Both sides change: a new package and a brain restart.
+
 ## 2026-10-07 — Build JOAT 0.1.116
 
 - Packed from `44191c6` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.116 above the last recorded build (0.1.115); app.json, package.json and package-lock.json all 0.1.116. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1163 tests passed.

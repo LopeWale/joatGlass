@@ -1080,9 +1080,10 @@ class VoiceOrchestrator:
                 # "JOAT" alone is the wearer opening a conversation and
                 # waiting to be asked. Answering "Yes?" and then demanding
                 # the name again in the very next breath is the behaviour
-                # this window exists to end.
-                self._begin_assistant_conversation("JOAT")
-                self._set_assistant_conversation_answer("Yes?")
+                # this window exists to end. The name alone is not a
+                # question, so the card shows JOAT's answer only: "JOAT:
+                # Yes?" on one row, not the wearer's "JOAT" above it.
+                self._greet_assistant_conversation("Yes?")
                 await self._publish_assistant_conversation("ready")
                 self._conversation.open()
                 return
@@ -1285,14 +1286,26 @@ class VoiceOrchestrator:
                 self._assistant_conversation_turns.pop(0)
             self._assistant_conversation_omitted = True
 
-    def _begin_assistant_conversation(self, query: str) -> None:
+    def _open_assistant_conversation(self) -> None:
+        """A fresh card unless the conversation window is still open."""
         if not self._conversation.is_open or not self._assistant_conversation_turns:
             self._assistant_conversation_id = f"voice-{uuid4().hex}"
             self._assistant_conversation_revision = 0
             self._assistant_conversation_turns = []
             self._assistant_conversation_omitted = False
+
+    def _begin_assistant_conversation(self, query: str) -> None:
+        self._open_assistant_conversation()
         self._assistant_conversation_turns.append(AssistantConversationTurn(
             "user", self._conversation_text(query),
+        ))
+        self._trim_conversation()
+
+    def _greet_assistant_conversation(self, text: str) -> None:
+        """JOAT speaks first: a turn of its own, never replacing an answer."""
+        self._open_assistant_conversation()
+        self._assistant_conversation_turns.append(AssistantConversationTurn(
+            "assistant", self._conversation_text(text),
         ))
         self._trim_conversation()
 

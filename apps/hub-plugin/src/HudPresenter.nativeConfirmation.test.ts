@@ -180,7 +180,8 @@ describe('HudPresenter Messages reply in the conversation card', () => {
     expect(page?.imageObject ?? []).toHaveLength(0);
     expect(page?.textObject?.map((c) => c.containerName)).toEqual(CARD);
     expect(text(page, 'joat-turns')).toContain('What do you want to say back to Adele?');
-    expect(text(page, 'wearer-turns')?.trim()).toBe('');
+    // Only JOAT's name stands in the dim layer, in front of its question.
+    expect(text(page, 'wearer-turns')?.trim()).toBe('JOAT:');
     expect(text(page, 'generation')).toContain('listening');
     expect(text(page, 'generation')).toContain('double-click: cancel');
   });

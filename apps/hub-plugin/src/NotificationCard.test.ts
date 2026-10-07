@@ -25,7 +25,8 @@ describe('notification card', () => {
     const by = (id: number) => texts.find((t) => t.containerID === id)!;
     expect(by(NotificationCardId.Head).content).toBe('WhatsApp');
     expect(by(NotificationCardId.Meta).content).toBe('Now · 1/3');
-    expect(by(NotificationCardId.Body).content).toBe(`Elizabeth\n${SHORT}`);
+    // The sender's name opens the message's first row, not a row of its own.
+    expect(by(NotificationCardId.Body).content).toBe(`Elizabeth: ${SHORT}`);
     // The body takes input; nothing else does.
     expect(texts.filter((t) => t.isEventCapture === 1).map((t) => t.containerID)).toEqual([NotificationCardId.Body]);
     // The body's text fits its lines exactly: no firmware scrollbar.
