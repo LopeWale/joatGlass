@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-07 — Build JOAT 0.1.113
+
+- Packed from `53b9050` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.113 above the last recorded build (0.1.112); app.json, package.json and package-lock.json all 0.1.113. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1139 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 170101 bytes, SHA-256 `55b7c553c78d0819e3b8a7a420791eba43751f1c1063a7af141db4b56d10ab14`. Adds to 0.1.112 the News article as a firmware text page with 16 px side margins. Plugin-only: no brain restart. The package is now tracked in git (main stopped ignoring `*.ehpk`). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-07 — A News article is firmware text again, 16 px clear of the sides
 
 The wearer reported the open article drawn as an image and hard to read while scrolling, its letters partly faded.
