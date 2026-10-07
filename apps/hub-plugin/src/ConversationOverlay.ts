@@ -1,4 +1,5 @@
 import {
+  ImageContainerProperty,
   ListContainerProperty,
   RebuildPageContainer,
   TextContainerProperty,
@@ -23,14 +24,16 @@ import { ContainerId } from './types';
 
 /** Space between the page above and the box's top border. */
 export const OVERLAY_GAP = 6;
-/** The SDK's page limits: 8 text and list containers, 12 in all. */
+/** The SDK's page limits: 8 text and list containers, 4 images, 12 in all. */
 const MAX_TEXT_AND_LIST = 8;
+const MAX_IMAGES = 4;
 const MAX_CONTAINERS = 12;
 const LIST_ROW_HEIGHT = 40;
 
 type Placed = TextContainerProperty | ListContainerProperty;
 
-function cardTop(card: RebuildPageContainer): number | undefined {
+/** The y of the box's top border: the page above it ends `OVERLAY_GAP` higher. */
+export function cardTop(card: RebuildPageContainer): number | undefined {
   return card.textObject?.find((text) => text.containerName === 'conversation')?.yPosition;
 }
 
@@ -73,7 +76,8 @@ export function overlayConversation(
   underlay: RebuildPageContainer | undefined,
 ): RebuildPageContainer {
   const top = cardTop(card);
-  if (!underlay || top === undefined || (underlay.imageObject?.length ?? 0) > 0) return card;
+  if (!underlay || top === undefined) return card;
+  if ((underlay.imageObject?.length ?? 0) > 0) return overImagePage(card, underlay);
   const limit = top - OVERLAY_GAP;
   const cardTexts = card.textObject ?? [];
   const room = Math.min(
@@ -116,5 +120,34 @@ export function overlayConversation(
     containerTotalNum: texts.length + lists.length + (card.imageObject?.length ?? 0),
     textObject: texts,
     ...(lists.length > 0 ? { listObject: lists } : {}),
+  });
+}
+
+/**
+ * The box over an image page the presenter repaints for it: a reader set in
+ * Even's font (EvenFont.ts). The page's image tiles stay beneath the box,
+ * and the presenter repaints them with nothing drawn below the box's top
+ * border, so the reader stays in its own small font above the box instead
+ * of falling back to the firmware's. The page's input layer and the box's
+ * own status line go: the box takes input, and the tiles draw the header.
+ */
+function overImagePage(card: RebuildPageContainer, underlay: RebuildPageContainer): RebuildPageContainer {
+  const images = underlay.imageObject ?? [];
+  const cardTexts = (card.textObject ?? []).filter((text) => text.containerID !== ContainerId.StatusBar);
+  const cardLists = card.listObject ?? [];
+  if ((card.imageObject?.length ?? 0) > 0 || images.length > MAX_IMAGES
+    || images.length + cardTexts.length + cardLists.length > MAX_CONTAINERS) return card;
+  // zOrderIndex is all or nothing per page: the tiles beneath, the box above.
+  const tiles = images.map((image, index) => new ImageContainerProperty({ ...image, zOrderIndex: index + 1 }));
+  const lift = tiles.length;
+  const raise = <T extends { zOrderIndex?: number }>(item: T): T => (
+    { ...item, zOrderIndex: (item.zOrderIndex ?? 0) + lift }
+  );
+  return new RebuildPageContainer({
+    ...card,
+    containerTotalNum: cardTexts.length + cardLists.length + tiles.length,
+    textObject: cardTexts.map((text) => new TextContainerProperty(raise(text))),
+    ...(cardLists.length > 0 ? { listObject: cardLists.map((list) => new ListContainerProperty(raise(list))) } : {}),
+    imageObject: tiles,
   });
 }

@@ -704,6 +704,11 @@ async function boot(): Promise<void> {
       case 'prompt.cancel':
         await awaitCurrent(promptedInput.handle(msg, context));
         break;
+      case 'prompt.partial':
+        // Not awaited: the words so far must never hold the downlink queue
+        // behind a card paint (the next partial supersedes this one).
+        void promptedInput.partial(msg, context);
+        break;
       case 'g2.diagnostic.control':
         g2Diagnostics.setEnabled(msg.enabled);
         if (msg.enabled && !firstLightReceiptDelivered) {
@@ -1363,14 +1368,18 @@ async function renderVisualState(
   if (isPanelVisualState(state)) {
     // The resting overview underneath, exactly as the 'overview' fixture
     // draws it, then the three pushes a connected Mac would have made.
-    await hud.showText('NEXT\nDesign review · 4:30', ContainerId.Main, 4);
-    await hud.showText(
-      'LAST QUERY\nWhere is the nearest coffee shop?', ContainerId.Context, 2,
-    );
-    await hud.showText(
-      'Calendar · 8m · Design review moved to 4:30\nMail · 23m · Q3 plan is ready for review',
-      ContainerId.Tray, 2,
-    );
+    // `&joatHomeRest=1` leaves Main empty, so the pane shows the lit tab's
+    // own card (its grid) instead of the newest notification.
+    if (new URLSearchParams(window.location.search).get('joatHomeRest') !== '1') {
+      await hud.showText('NEXT\nDesign review · 4:30', ContainerId.Main, 4);
+      await hud.showText(
+        'LAST QUERY\nWhere is the nearest coffee shop?', ContainerId.Context, 2,
+      );
+      await hud.showText(
+        'Calendar · 8m · Design review moved to 4:30\nMail · 23m · Q3 plan is ready for review',
+        ContainerId.Tray, 2,
+      );
+    }
     await hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
     for (const push of panelVisualPushes()) await hud.acceptPanel(push);
     const tab = panelVisualTab(state);
@@ -1445,6 +1454,12 @@ async function renderVisualState(
       );
       return;
     }
+    // The long thread goes through the real voice-adoption path, so the
+    // simulator's swipes page it exactly as they page a Mac thread.
+    if (state === 'messages-conversation-long') {
+      await menu.presentList(fixture.title, fixture.items, 'voice-fixture-thread', true, fixture.hint);
+      return;
+    }
     // Drawn as production draws it: a reader is Even's text page.
     const nativeTextPage = !usesFirmwareList({ title: fixture.title, selectable: fixture.selectable });
     await hud.showList(fixture.items, {
@@ -1503,6 +1518,10 @@ async function renderVisualState(
     await hud.showPromptQuestion(
       'visual-reply-question', 'What do you want to say back to Adele?', () => true, 'messages',
     );
+    // `&joatReplyWords=...`: the words so far, as the Mac's prompt.partial
+    // would deliver them while the wearer speaks (the simulator has no mic).
+    const words = new URLSearchParams(location.search).get('joatReplyWords');
+    if (words) await hud.showPromptPartial('visual-reply-question', words);
     return;
   }
   if (state === 'message-reply-confirm') {

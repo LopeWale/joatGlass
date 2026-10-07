@@ -5,6 +5,8 @@ import {
 import type { BridgeClient } from './BridgeClient';
 import type { G2DiagnosticTrace } from './G2DiagnosticTrace';
 import type { HudStatusModel } from './HudStatus';
+import type { EvenReaderLine } from './EvenFont';
+import type { HomeColumnView } from './HomeImages';
 import { isNavigationSetupStatus, type NavigationHudModel } from './NavigationHud';
 import type { PanelRailVisual } from './PanelRail';
 import {
@@ -87,6 +89,20 @@ type HudVisualBaseFrame =
     status: string;
     micOn: boolean;
     navigation: NavigationHudModel;
+  }
+  | {
+    /** A reader set in Even's font at 55% across the whole canvas
+     * (EvenFont.ts): the Messages thread and every Mac-paged reader. */
+    kind: 'reader';
+    status: string;
+    micOn: boolean;
+    title: string;
+    lines: EvenReaderLine[];
+    /** The page's hint, its first clause the page count ("2/3"). */
+    hint: string;
+    /** JOAT's box covers the page from here down: nothing is drawn below
+     * it (ConversationOverlay keeps these tiles under the box). */
+    clipBottom?: number;
   };
 
 /** Overlays composite into the same four G2 images, not a fifth container.
@@ -105,6 +121,10 @@ export interface HudFrameRenderer {
   render(frame: HudVisualFrame): Promise<readonly HudImageTile[]>;
   /** The header band alone, as its two image halves. */
   renderHeader?(model: HudStatusModel, label: string): Promise<readonly HudImageTile[]>;
+  /** Whether this renderer sets readers in Even's font (EvenFont.ts). */
+  readonly drawsReaders?: boolean;
+  /** Home's left column as its two images (HomeImages.ts). */
+  renderHomeColumn?(view: HomeColumnView, model?: HudStatusModel): Promise<readonly HudImageTile[]>;
 }
 
 /** A header repaint queued on the same single image lane as frames. */
@@ -113,7 +133,18 @@ interface HeaderPaint {
   model: HudStatusModel;
   label: string;
 }
-type PaintWork = HudVisualFrame | HeaderPaint;
+/** A part of a firmware page drawn as images (Home's column): its own
+ * tiles, on the same lane, sent only where their pixels changed. */
+interface StripPaint {
+  kind: 'strip';
+  render: () => Promise<readonly HudImageTile[]>;
+}
+type PaintWork = HudVisualFrame | HeaderPaint | StripPaint;
+
+/** Header and strip work: page parts, never superseded by a full frame. */
+function isPagePart(work: PaintWork): work is HeaderPaint | StripPaint {
+  return work.kind === 'header' || work.kind === 'strip';
+}
 
 export interface HudFramePainter {
   paint(frame: HudVisualFrame): Promise<boolean>;
@@ -127,6 +158,12 @@ export interface HudFramePainter {
   paintHeader?(model: HudStatusModel, label: string, isCurrent: () => boolean): Promise<boolean>;
   /** Whether this painter can draw the header (its renderer has one). */
   canPaintHeader?(): boolean;
+  /** Paint Home's left column images; only a tile whose pixels changed is sent. */
+  paintHomeColumn?(view: HomeColumnView, isCurrent: () => boolean): Promise<boolean>;
+  canPaintHomeColumn?(): boolean;
+  /** Whether this painter draws a reader page in Even's font at 55%. A
+   * painter without it keeps readers as firmware text pages. */
+  canPaintReader?(): boolean;
   /** Wait for queued paints without cancelling their delivery receipts. */
   whenIdle?(timeoutMs?: number): Promise<boolean>;
   /** Hold image submissions while a bounded native-idle check and page
@@ -383,6 +420,24 @@ export class HudVisualSurface implements HudFramePainter {
     return this.renderer.renderHeader !== undefined;
   }
 
+  canPaintReader(): boolean {
+    return this.renderer.drawsReaders === true;
+  }
+
+  canPaintHomeColumn(): boolean {
+    return this.renderer.renderHomeColumn !== undefined;
+  }
+
+  paintHomeColumn(view: HomeColumnView, isCurrent: () => boolean): Promise<boolean> {
+    const render = this.renderer.renderHomeColumn;
+    if (!render) return Promise.resolve(false);
+    const pageRevision = this.pageRevision;
+    return this.enqueue(
+      { kind: 'strip', render: () => render.call(this.renderer, view) },
+      () => pageRevision === this.pageRevision && isCurrent(),
+    );
+  }
+
   paintHeader(model: HudStatusModel, label: string, isCurrent: () => boolean): Promise<boolean> {
     if (!this.renderer.renderHeader) return Promise.resolve(false);
     const pageRevision = this.pageRevision;
@@ -398,13 +453,13 @@ export class HudVisualSurface implements HudFramePainter {
     const displayCurrent = () => this.displayActive && !this.replacingPage
       && this.displayRevision === displayRevision && bridgeCurrent();
     if (!displayCurrent()) return Promise.resolve(false);
-    const immediate = frame.kind === 'header' || !!isCurrent || frame.kind !== 'overview'
+    const immediate = isPagePart(frame) || !!isCurrent || frame.kind !== 'overview'
       || !!frame.assistantOverlay || !!frame.actionOverlay;
     return new Promise((resolve) => {
       const pending = this.queue[this.queue.length - 1];
       if (pending && pending.displayCurrent() && !isCurrent && !pending.isCurrent
         && frame.kind !== 'navigation' && pending.frame.kind !== 'navigation'
-        && frame.kind !== 'header' && pending.frame.kind !== 'header') {
+        && !isPagePart(frame) && !isPagePart(pending.frame)) {
         // A full frame supersedes every older not-yet-started frame. Keeping
         // only the latest prevents streamed text/countdown ticks from building
         // a stale multi-second BLE backlog while preserving one command lane.
@@ -478,7 +533,9 @@ export class HudVisualSurface implements HudFramePainter {
       const renderStartedAt = now();
       const rendered = frame.kind === 'header'
         ? await this.renderer.renderHeader!(frame.model, frame.label)
-        : await this.renderer.render(frame);
+        : frame.kind === 'strip'
+          ? await frame.render()
+          : await this.renderer.render(frame);
       timing.renderMs = elapsedSince(renderStartedAt);
       // Retire prior choices/instructions outside the status region before
       // replacing its complete explanation. No native write is parallelized.
@@ -560,7 +617,7 @@ export class HudVisualSurface implements HudFramePainter {
           return false;
         }
         const outcome = result === ImageRawDataUpdateResult.success ? 'success' : 'failed';
-        if (frame.kind !== 'header') this.diagnostics?.record({
+        if (!isPagePart(frame)) this.diagnostics?.record({
           type: 'tile_upload',
           frame: frameNumber,
           order,
@@ -605,7 +662,7 @@ export class HudVisualSurface implements HudFramePainter {
       // .ehpk — the only places the BLE hop is real. An unchanged frame sent
       // nothing: recording it floods a trace bounded at MAX_RETAINED_EVENTS
       // and buries the frames that did work.
-      if (timing.changedTiles > 0 && frame.kind !== 'header') {
+      if (timing.changedTiles > 0 && !isPagePart(frame)) {
         this.diagnostics?.record({
           type: 'frame_timing',
           frame: timing.frame,

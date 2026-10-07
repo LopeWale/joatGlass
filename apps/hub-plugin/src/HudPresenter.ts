@@ -18,8 +18,10 @@ import {
   type ConversationExitResult,
 } from './AssistantConversationSurface';
 import { paginateMeasured } from './FirmwareText';
-import { overlayConversation } from './ConversationOverlay';
+import { OVERLAY_GAP, cardTop, overlayConversation } from './ConversationOverlay';
+import { paginateEven, type EvenReaderLine } from './EvenFont';
 import { hasImageHeader, withImageHeader } from './HeaderImage';
+import { hasHomeImages, homeColumnView, withHomeImages, type HomeColumnView } from './HomeImages';
 import { ASSISTANT_ANSWER_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
 import { type HudStatusModel, hudStatusLabel, nativeStatusLine } from './HudStatus';
 import { composeOverviewText } from './OverviewText';
@@ -39,6 +41,7 @@ import {
   type BrainstormHudModel,
   type ConfirmationPurpose,
   type AssistantConversationSnapshot,
+  type AssistantConversationTurn,
   type HudContentKind,
   type PanelContentTab,
   type PanelTab,
@@ -227,6 +230,12 @@ let nativeOverviewEnabled = String(import.meta.env.VITE_NATIVE_OVERVIEW ?? '1') 
 /** Every firmware page carries the image spine as its header
  * (HeaderImage.ts); `VITE_IMAGE_HEADER=0` keeps the firmware text line. */
 const imageHeaderEnabled = String(import.meta.env.VITE_IMAGE_HEADER ?? '1') !== '0';
+/** Readers set in Even's font at 55% across the whole canvas (the wearer's
+ * ask, 2026-10-06); `VITE_EVEN_FONT_PAGES=0` keeps firmware text pages. */
+const evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '1') !== '0';
+/** Home's left column as images in Even's font (HomeImages.ts);
+ * `VITE_HOME_IMAGES=0` keeps it firmware text. */
+const homeImagesEnabled = String(import.meta.env.VITE_HOME_IMAGES ?? '1') !== '0';
 
 /** Tests that pin the IMAGE overview select it here. Never product code. */
 export function setNativeOverviewForTest(on: boolean): void {
@@ -281,6 +290,9 @@ interface NativeTextPageState {
   page: number;
   body: string;
   hint: string;
+  /** Present when the page is set in Even's font on an image page
+   * (EvenFont.ts) rather than as a firmware text page. */
+  lines?: EvenReaderLine[][];
 }
 
 /** The swipe promises a Mac reader writes for its own pages, formatted. */
@@ -300,6 +312,17 @@ export function parseMessageDraft(prompt: string): { recipient: string; body: st
 }
 
 const PAGE_SWIPES = new Set(['swipe: previous', 'swipe: more', 'swipe: page']);
+
+/** Whether two pages have the same containers in the same places, so the
+ * second can be reached by upgrading text in place instead of a rebuild. */
+function sameGeometry(left: RebuildPageContainer, right: RebuildPageContainer): boolean {
+  const shape = (page: RebuildPageContainer) => JSON.stringify([
+    ...(page.textObject ?? []).map((item) => [item.containerID, item.xPosition, item.yPosition, item.width, item.height, item.zOrderIndex]),
+    ...(page.listObject ?? []).map((item) => [item.containerID, item.xPosition, item.yPosition, item.width, item.height, item.zOrderIndex]),
+    ...(page.imageObject ?? []).map((item) => [item.containerID, item.xPosition, item.yPosition, item.width, item.height]),
+  ]);
+  return shape(left) === shape(right);
+}
 
 function textPageHint(page: number, count: number, macHint: string, review = false): string {
   // The Mac still writes "left x2"; every page says "double-click".
@@ -369,6 +392,13 @@ interface PromptQuestionState {
   question: string;
   isCurrent: () => boolean;
   paint?: Promise<boolean>;
+  /** The wearer's words so far, while they speak a reply (prompt.partial). */
+  partial?: string;
+  /** The reply card as last built, so a partial can upgrade it in place. */
+  layout?: RebuildPageContainer;
+  /** The newest partial waiting for the one in flight to land. */
+  pendingPartial?: string;
+  partialPaint?: Promise<boolean>;
 }
 
 interface ActionOverlayState {
@@ -466,6 +496,9 @@ export class HudPresenter {
   /** What the native `status` container currently shows, so a live
    * refresh can size its in-place upgrade. Set by every native rebuild. */
   private nativeStatusPainted?: string;
+  /** Where JOAT's box begins over a reader's tiles (ConversationOverlay):
+   * the tiles draw the header, so a status change repaints them. */
+  private readerUnderBox?: number;
   private displayActive = true;
   private displayRevision = 0;
   private readonly assistantConversation: AssistantConversationSurface;
@@ -539,6 +572,8 @@ export class HudPresenter {
         // The halves arrive just after the page's text, one send each, once
         // the caller has recorded which page this is (the header names it).
         if (header) setTimeout(() => { void this.paintImageHeader(); }, 0);
+        this.readerUnderBox = undefined;
+        this.paintReaderUnderBox(page);
       }
       return replaced && displayCurrent();
     } catch {
@@ -563,6 +598,7 @@ export class HudPresenter {
       this.pageOwner = 'visual';
       this.overviewText = undefined;
       this.imageHeaderShown = false;
+      this.readerUnderBox = undefined;
       return true;
     } catch {
       return false;
@@ -685,6 +721,8 @@ export class HudPresenter {
         : undefined;
     }
     if (surface.kind === 'list' && surface.options.nativeFirmwareList) return this.nativeListLayout(surface);
+    // A reader in Even's font keeps its own tiles under the box.
+    if (this.evenFontReaderRetained()) return this.layouts.visualLayout();
     const text = this.nativeTextPage;
     if (text && ((surface.kind === 'list' && this.usesNativeTextPage(surface.options))
       || (surface.kind === 'productivity' && !usesActionPillLayout(surface.productivity.phase)))) {
@@ -695,6 +733,13 @@ export class HudPresenter {
       if (native !== undefined) return this.layouts.textPageLayout(native.body, { status: '', hint: native.hint });
     }
     return undefined;
+  }
+
+  /** Home's column images; the image lane sends only a changed tile. */
+  private paintHomeColumn(view: HomeColumnView, current: () => boolean): Promise<boolean> {
+    const visual = this.visual;
+    if (!visual?.paintHomeColumn) return Promise.resolve(false);
+    return visual.paintHomeColumn(view, current).catch(() => false);
   }
 
   /** A firmware page with the image spine in place of its status line. */
@@ -724,6 +769,105 @@ export class HudPresenter {
    * compatibility surface (no visual HUD) shows it as its text layout. */
   private usesNativeTextPage(options: { nativeTextPage?: boolean }): boolean {
     return options.nativeTextPage === true && this.visual !== undefined;
+  }
+
+  /** A reader drawn in Even's font at 55% on the four image tiles, where
+   * the painter can draw one; otherwise it stays a firmware text page. */
+  private usesEvenFontPage(options: { nativeTextPage?: boolean }): boolean {
+    return evenFontPagesEnabled && this.usesNativeTextPage(options) && this.visual?.canPaintReader?.() === true;
+  }
+
+  /** The reader on the glass is an Even-font image page. Derived, not
+   * stored, so it cannot outlive the page. */
+  private evenFontPageOnGlass(): boolean {
+    return this.pageOwner === 'visual' && this.evenFontReaderRetained();
+  }
+
+  /** The surface is an Even-font reader, on the glass or beneath JOAT's box. */
+  private evenFontReaderRetained(): boolean {
+    const state = this.nativeTextPage;
+    return this.surface.kind === 'list'
+      && this.usesEvenFontPage(this.surface.options)
+      && state?.lines !== undefined && state.source === this.surface.items.join('\n');
+  }
+
+  /** The reader's page as an image frame; `clipBottom` leaves the area
+   * under JOAT's box dark. */
+  private readerFrame(clipBottom?: number): HudVisualFrame | undefined {
+    const reader = this.nativeTextPage;
+    if (this.surface.kind !== 'list' || !reader?.lines) return undefined;
+    const frame: HudVisualFrame = {
+      kind: 'reader',
+      status: this.streams.get(ContainerId.StatusBar) ?? '',
+      micOn: this.micOn,
+      title: this.surface.options.title,
+      lines: (reader.lines[reader.page] ?? []).map((line) => ({ ...line })),
+      hint: reader.hint,
+      ...(clipBottom !== undefined ? { clipBottom } : {}),
+    };
+    return this.statusModel
+      ? { ...frame, statusModel: this.withActivities(this.statusModel, { frame: frame.kind }) }
+      : frame;
+  }
+
+  /** A box page that kept the reader's tiles (ConversationOverlay) starts
+   * with them blank: paint the reader above the box. */
+  private paintReaderUnderBox(page: RebuildPageContainer): void {
+    const tiles = (page.imageObject ?? []).some((image) => image.containerID === ContainerId.Image);
+    const top = cardTop(page);
+    if (!tiles || top === undefined || !this.visual || !this.evenFontReaderRetained()) return;
+    const frame = this.readerFrame(top - OVERLAY_GAP);
+    if (!frame) return;
+    this.readerUnderBox = top - OVERLAY_GAP;
+    const displayCurrent = this.captureDisplayGuard();
+    const visual = this.visual;
+    setTimeout(() => {
+      if (!displayCurrent()) return;
+      void (visual.paintExact ? visual.paintExact(frame, displayCurrent) : visual.paint(frame)).catch(() => false);
+    }, 0);
+  }
+
+  /** Lay the reader out in Even's font and paint it as an image page. */
+  private async renderEvenFontPage(
+    surface: Extract<HudSurface, { kind: 'list' }>,
+    current: () => boolean,
+  ): Promise<boolean> {
+    const from = this.tracePage();
+    const source = surface.items.join('\n');
+    const lines = paginateEven(surface.items, surface.options.title.trim().toUpperCase().startsWith('MESSAGES'));
+    const pages = lines.map((page) => page.map((line) => line.text).join('\n'));
+    const page = this.nativeTextPage?.source === source
+      ? Math.max(0, Math.min(this.nativeTextPage.page, pages.length - 1))
+      : surface.options.nativeTextPageFromEnd ? pages.length - 1 : 0;
+    const hint = textPageHint(page, pages.length, surface.options.hint, surface.options.reviewTapOnLastPage);
+    if (!await this.rebuildVisualPage() || !current()) {
+      this.recordPageTransition(from, 'list', 'show_list', 'failed');
+      return false;
+    }
+    if (this.surface.kind === 'default' && !this.focusReturn) {
+      this.focusReturn = {
+        streams: new Map(this.streams), brightness: new Map(this.brightness),
+        kinds: new Map(this.kinds), notificationId: this.notificationId,
+      };
+    }
+    this.clearActionOverlay();
+    this.resetAll();
+    this.surface = surface;
+    this.streams.set(ContainerId.Main, surface.options.title);
+    this.brightness.set(ContainerId.Main, 4);
+    this.streams.set(ContainerId.Hint, surface.options.hint);
+    this.brightness.set(ContainerId.Hint, 1);
+    this.nativeTextPage = { source, pages, page, body: pages[page] ?? ' ', hint, lines };
+    const visual = this.visual!;
+    const painted = visual.paintExact
+      ? await visual.paintExact(this.visualFrame(), current)
+      : await visual.paint(this.visualFrame());
+    if (!painted || !current()) {
+      this.recordPageTransition(from, 'list', 'show_list', 'failed');
+      return false;
+    }
+    this.recordPageTransition(from, 'list', 'show_list', 'success');
+    return true;
   }
 
   /** Replace a container's full text. Also resets any stream in progress.
@@ -928,13 +1072,10 @@ export class HudPresenter {
       // writing into containers the question page has replaced.
       if (!await this.prepareNativeTerminalHandoff()) return false;
       if (!this.isPromptCurrent(prompt)) return false;
-      const header = this.nativeHeader(this.nativePageTitle());
       const layout = prompt.messageReply
-        ? overlayConversation(this.layouts.assistantConversationLayout(
-          replyDraftView([{ role: 'assistant', text: prompt.question }], MESSAGE_REPLY_LISTENING_HINT),
-          header,
-        ), this.conversationUnderlay())
-        : this.layouts.promptQuestionLayout(pages[0] ?? ' ', header);
+        ? this.replyCardLayout(prompt)
+        : this.layouts.promptQuestionLayout(pages[0] ?? ' ', this.nativeHeader(this.nativePageTitle()));
+      prompt.layout = layout;
       painted = await this.replaceNativePage(layout, 'prompt-native');
       return painted && this.isPromptCurrent(prompt);
     } catch {
@@ -945,6 +1086,70 @@ export class HudPresenter {
         await this.restoreRetainedPage().catch(() => false);
       }
     }
+  }
+
+  /** The Messages reply card over the thread: JOAT's question and, while
+   * the wearer speaks, their words so far. */
+  private replyCardLayout(prompt: PromptQuestionState): RebuildPageContainer {
+    const turns: AssistantConversationTurn[] = [{ role: 'assistant', text: prompt.question }];
+    if (prompt.partial?.trim()) turns.push({ role: 'user', text: prompt.partial });
+    return overlayConversation(this.layouts.assistantConversationLayout(
+      replyDraftView(turns, MESSAGE_REPLY_LISTENING_HINT),
+      this.nativeHeader(this.nativePageTitle()),
+    ), this.conversationUnderlay());
+  }
+
+  /**
+   * The wearer's words so far, in the reply card while they speak (the
+   * wearer, 2026-10-06: it "does not show my speech as I am speaking").
+   * Display only: the final transcript alone answers the question. While
+   * the card keeps its size the words are upgraded in place; a card that
+   * must grow is rebuilt. One paint at a time, the newest words win.
+   */
+  showPromptPartial(promptId: string, text: string): Promise<boolean> {
+    const prompt = this.promptQuestion;
+    if (!prompt || prompt.id !== promptId || !prompt.messageReply || !this.isPromptCurrent(prompt)) {
+      return Promise.resolve(false);
+    }
+    prompt.pendingPartial = text;
+    if (prompt.partialPaint) return prompt.partialPaint;
+    const run = async (): Promise<boolean> => {
+      let painted = false;
+      try {
+        await prompt.paint?.catch(() => false);
+        while (prompt.pendingPartial !== undefined && this.isPromptCurrent(prompt)) {
+          const words = prompt.pendingPartial;
+          prompt.pendingPartial = undefined;
+          if (words === prompt.partial) continue;
+          prompt.partial = words;
+          const previous = prompt.layout;
+          const next = this.replyCardLayout(prompt);
+          prompt.layout = next;
+          painted = previous && sameGeometry(previous, next)
+            ? await this.upgradeChangedTexts(previous, next)
+            : await this.replaceNativePage(next, 'prompt-native');
+        }
+        return painted && this.isPromptCurrent(prompt);
+      } catch {
+        return false;
+      } finally {
+        prompt.partialPaint = undefined;
+      }
+    };
+    prompt.partialPaint = run();
+    return prompt.partialPaint;
+  }
+
+  /** Upgrade, in place, each text container whose words changed. */
+  private async upgradeChangedTexts(previous: RebuildPageContainer, next: RebuildPageContainer): Promise<boolean> {
+    let ok = true;
+    for (const text of next.textObject ?? []) {
+      if (text.containerID === ContainerId.StatusBar && this.imageHeaderShown) continue;
+      const before = previous.textObject?.find((item) => item.containerID === text.containerID)?.content ?? '';
+      if (before === text.content) continue;
+      ok = await this.upgradeNativeText(text.containerID ?? 0, text.containerName ?? '', text.content ?? ' ', before) && ok;
+    }
+    return ok;
   }
 
   async dismissPromptQuestion(promptId: string): Promise<boolean> {
@@ -958,11 +1163,28 @@ export class HudPresenter {
     }
     // The old frame may already have one bridge write in flight. Its guard
     // prevents further writes; restore only after that owned work settles.
-    await prompt.paint?.catch(() => false);
+    await this.settlePromptPaints(prompt);
     if (!displayCurrent()) return false;
     if (this.promptQuestion || this.confirmation) return false;
     if (this.pageOwner === 'prompt-native') return this.restoreRetainedPage();
     return this.paintVisual();
+  }
+
+  /** Wait for everything a prompt is painting: its first page and the
+   * words-so-far paints (showPromptPartial). A partial that grows the card
+   * is a page replacement; the page guard refuses a second replacement
+   * while it runs, so a restore or a confirmation that did not wait was
+   * refused and the cancelled card stayed on the glass (review, 2026-10-06).
+   * Once the prompt is no longer current no new partial paint starts, so
+   * the loop ends. */
+  private async settlePromptPaints(prompt: PromptQuestionState): Promise<void> {
+    prompt.pendingPartial = undefined;
+    await prompt.paint?.catch(() => false);
+    while (prompt.partialPaint) {
+      const painting = prompt.partialPaint;
+      await painting.catch(() => false);
+      if (prompt.partialPaint === painting) prompt.partialPaint = undefined;
+    }
   }
 
   private isPromptCurrent(prompt: PromptQuestionState): boolean {
@@ -1489,6 +1711,12 @@ export class HudPresenter {
       this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
       return this.paintImageHeader();
     }
+    if (this.readerUnderBox !== undefined && this.visual && this.evenFontReaderRetained()) {
+      // The reader's tiles under JOAT's box carry the header.
+      this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
+      const frame = this.readerFrame(this.readerUnderBox);
+      return frame ? this.visual.paint(frame).catch(() => false) : Promise.resolve(false);
+    }
     if (this.assistantConversation.isActive()) {
       this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
       return this.assistantConversation.setStatus(this.nativeHeader(this.nativePageTitle()));
@@ -1596,6 +1824,7 @@ export class HudPresenter {
     const current = () => displayCurrent() && !this.confirmation && !this.promptQuestion
       && (isCurrent?.() ?? true);
     if (!current()) return false;
+    if (this.usesEvenFontPage(surface.options)) return this.renderEvenFontPage(surface, current);
     const from = this.tracePage();
     const liveStatus = this.captureLiveStatus();
     const source = surface.items.join('\n');
@@ -1640,7 +1869,7 @@ export class HudPresenter {
    * of an earlier one must never hold a later page's tap back. */
   isTextPageAtEnd(): boolean {
     const state = this.nativeTextPage;
-    if (!state || this.pageOwner !== 'text-page-native') return true;
+    if (!state || (this.pageOwner !== 'text-page-native' && !this.evenFontPageOnGlass())) return true;
     return state.page >= state.pages.length - 1;
   }
 
@@ -1651,9 +1880,19 @@ export class HudPresenter {
     const macHint = this.surface.kind === 'list' && this.usesNativeTextPage(this.surface.options)
       ? this.surface.options.hint
       : this.surface.kind === 'productivity' ? productivityActionHint(this.surface.productivity) : undefined;
-    if (!state || this.pageOwner !== 'text-page-native' || macHint === undefined) return false;
+    const evenFont = this.evenFontPageOnGlass();
+    if (!state || (this.pageOwner !== 'text-page-native' && !evenFont) || macHint === undefined) return false;
     const page = direction === 'down' ? state.page + 1 : state.page - 1;
     if (page < 0 || page >= state.pages.length) return false;
+    if (evenFont) {
+      // The image page repaints; only the tiles whose pixels changed are sent.
+      const review = this.surface.kind === 'list' && this.surface.options.reviewTapOnLastPage === true;
+      state.page = page;
+      state.body = state.pages[page] ?? ' ';
+      state.hint = textPageHint(page, state.pages.length, macHint, review);
+      void this.paintVisual();
+      return true;
+    }
     const previous = { body: state.body, hint: state.hint };
     const review = this.surface.kind === 'list' && this.surface.options.reviewTapOnLastPage === true;
     state.page = page;
@@ -2518,8 +2757,16 @@ export class HudPresenter {
         ready ? this.showConfirmation(prompt, id, diagnosticKind, isCurrent, purpose) : false
       ));
     }
-    // Asking for text never survives a transition into write consent.
+    // Asking for text never survives a transition into write consent. The
+    // question's paints settle first: a words-so-far rebuild still running
+    // would make the page guard refuse the consent card's own rebuild.
+    const askedPrompt = this.promptQuestion;
     this.promptQuestion = undefined;
+    if (askedPrompt && !askedPrompt.inlineTerminal) {
+      return this.settlePromptPaints(askedPrompt).then(() => (
+        this.showConfirmation(prompt, id, diagnosticKind, isCurrent, purpose)
+      ));
+    }
     if (!this.confirmation) {
       const content = this.surface.kind !== 'default' && this.focusReturn
         ? this.focusReturn
@@ -3068,6 +3315,17 @@ export class HudPresenter {
     // A confirmation, a question, a conversation page and a Planning outcome
     // are firmware pages; while one is on the glass the image page beneath
     // is not painted (pageOwner), so this frame describes the retained page.
+    const reader = this.nativeTextPage;
+    if (this.surface.kind === 'list' && reader?.lines && this.evenFontPageOnGlass()) {
+      return this.withOverlays({
+        kind: 'reader',
+        status,
+        micOn: this.micOn,
+        title: this.surface.options.title,
+        lines: (reader.lines[reader.page] ?? []).map((line) => ({ ...line })),
+        hint: reader.hint,
+      });
+    }
     if (this.surface.kind === 'list') {
       const railTab = this.surface.options.railTab;
       return this.withOverlays({
@@ -3268,10 +3526,22 @@ export class HudPresenter {
       && !this.nativeTerminal.isActive()
       && (taking || this.pageOwner === 'visual' || this.visualPagePending());
     if (!stillOurs()) return false;
-    const layout = this.withHeader(
-      this.layouts.overviewTextLayout(composeOverviewText(frame, this.overviewHeader())),
-    );
+    const view = composeOverviewText(frame, this.overviewHeader());
+    let layout = this.withHeader(this.layouts.overviewTextLayout(view));
+    const column = homeImagesEnabled && this.visual?.paintHomeColumn && this.visual.canPaintHomeColumn?.()
+      ? homeColumnView(
+        view,
+        frame.ambient ? `${frame.ambient.temperature} ${frame.ambient.condition}`.trim() : '',
+        frame.ambient?.unread ?? 0,
+      )
+      : undefined;
+    if (column) layout = withHomeImages(layout);
     const header = hasImageHeader(layout);
+    // The column's images follow the page's text: a tab swipe moves the
+    // pane first (an in-place upgrade), then the rail's one tile.
+    const paintColumn = (): void => {
+      if (column && hasHomeImages(layout)) void this.paintHomeColumn(column, stillOurs);
+    };
     const bands = new Map<number, OverviewBand>((layout.textObject ?? []).map((t) => [
       t.containerID ?? 0,
       { name: t.containerName ?? '', content: t.content ?? '', ...(t.textColor !== undefined ? { textColor: t.textColor } : {}) },
@@ -3284,10 +3554,14 @@ export class HudPresenter {
       });
       if (changed.length === 0) {
         if (header) void this.paintImageHeader();
+        paintColumn();
         this.armPanelTicker();
         return true;
       }
-      if (changed.length <= 2) {
+      // A tab swipe changes three bands (the rail, the grid's labels and
+      // its values): three in-place upgrades, never a rebuild, which would
+      // also resend the page's images.
+      if (changed.length <= 3) {
         let upgraded = true;
         for (const [containerID, band] of changed) {
           if (!stillOurs() || !this.overviewTextOnGlass()) return false;
@@ -3306,6 +3580,7 @@ export class HudPresenter {
         if (!stillOurs()) return false;
         if (upgraded) {
           if (header) void this.paintImageHeader();
+          paintColumn();
           this.armPanelTicker();
           return true;
         }
@@ -3329,6 +3604,7 @@ export class HudPresenter {
     this.visual?.forgetPage?.();
     this.imageHeaderShown = header;
     if (header) void this.paintImageHeader();
+    paintColumn();
     this.armPanelTicker();
     return true;
   }
@@ -3433,6 +3709,9 @@ export class HudPresenter {
       rail: this.rail.export(),
       ...(assistantConversation ? { assistantConversation } : {}),
       ...(nativeTerminal ? { nativeTerminal } : {}),
+      // The reader's own page: a return from the background resumes it
+      // instead of starting the wearer over at page one.
+      ...(this.nativeTextPage ? { textPage: { source: this.nativeTextPage.source, page: this.nativeTextPage.page } } : {}),
     };
   }
 
@@ -3475,6 +3754,13 @@ export class HudPresenter {
       && !this.assistantConversation.importState(saved.assistantConversation)) return false;
     if (saved.nativeTerminal !== undefined
       && !this.nativeTerminal.importState(saved.nativeTerminal)) return false;
+    const textPage = saved.textPage as { source?: unknown; page?: unknown } | undefined;
+    if (typeof textPage?.source === 'string' && typeof textPage.page === 'number'
+      && Number.isInteger(textPage.page) && textPage.page >= 0) {
+      // Only the page index: the render that follows pages the rows again
+      // and resumes here when they are the same rows.
+      this.nativeTextPage = { source: textPage.source, pages: [], page: textPage.page, body: ' ', hint: '' };
+    }
     return true;
   }
 

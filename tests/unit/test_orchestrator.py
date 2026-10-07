@@ -34,6 +34,7 @@ from joat.core.protocol import (
     ContainerId,
     DownlinkMessage,
     HudText,
+    PromptPartial,
 )
 from joat.services.orchestrator import (
     BYTES_PER_SECOND, ConversationWindow, VoiceOrchestrator,
@@ -2031,3 +2032,128 @@ class TestASentenceSplitByABreath:
         # endpoint timestamps alone would split a sentence nobody paused in.
         long_tail, _ = self.frag("for tomorrow and the day after", 9.0, 109.5, 21, 28)
         assert o._continues(head, 100.0, long_tail)
+
+
+class PartialEngine(FakeEngine):
+    """Says the words so far of whatever speech it is shown."""
+
+    def __init__(self, text: str = "running late") -> None:
+        super().__init__(text)
+        self.partials: list[int] = []
+
+    async def transcribe_partial(self, pcm: bytes) -> str | None:
+        self.partials.append(len(pcm))
+        return f"words {len(self.partials)}"
+
+
+class TestPromptPartials:
+    """The wearer sees their words while they answer a prompt (2026-10-06:
+    the reply card "does not show my speech as I am speaking")."""
+
+    def _prompt(self) -> tuple[PromptedInputDispatcher, str]:
+        dispatcher = PromptedInputDispatcher()
+
+        async def consume(text: str) -> None:
+            return None
+
+        ticket = dispatcher.begin_publication(
+            owner_kind="message", owner_id="selected", field="body",
+            source="glasses", connection_generation="g1",
+            presentation_binding="body-prompt", ttl_s=30,
+            is_valid=lambda: True, consume=consume,
+        )
+        assert dispatcher.acknowledge(
+            ticket.prompt_id, success=True, presentation_binding="body-prompt",
+            connection_generation="g1", audio_epoch=ticket.prompt_id, ingress_fence=0,
+        )
+        return dispatcher, ticket.prompt_id
+
+    async def test_words_so_far_reach_the_prompt_card_about_once_a_second(self) -> None:
+        dispatcher, prompt_id = self._prompt()
+        transport = FakeTransport()
+        engine = PartialEngine()
+        orchestrator = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), prompted_input=dispatcher, wake_words=("joat",),
+        )
+        for seq in range(12):  # 2.4 s of speech, never closed
+            orchestrator._ingest_audio(
+                LOUD, seq, source="glasses", speaker=None,
+                connection_generation="g1", audio_epoch=prompt_id,
+            )
+            await drain()
+        partials = [m for m in transport.sent if isinstance(m, PromptPartial)]
+        assert [p.text for p in partials] == ["words 1", "words 2"]
+        assert all(p.prompt_id == prompt_id and p.connection_generation == "g1" for p in partials)
+        # Each request carries the whole utterance so far, at least 0.9 s more.
+        assert engine.partials[1] - engine.partials[0] >= 28_800
+        assert partials[0].to_wire() == {
+            "kind": "prompt.partial", "promptId": prompt_id,
+            "connectionGeneration": "g1", "text": "words 1",
+        }
+
+    async def test_no_partials_without_a_prompt_or_for_another_epoch(self) -> None:
+        dispatcher, prompt_id = self._prompt()
+        for prompted, epoch in ((None, prompt_id), (dispatcher, "someone-else")):
+            transport = FakeTransport()
+            orchestrator = VoiceOrchestrator(
+                transport, PartialEngine(), vad=TEST_VAD(), prompted_input=prompted,
+                wake_words=("joat",),
+            )
+            for seq in range(12):
+                orchestrator._ingest_audio(
+                    LOUD, seq, source="glasses", speaker=None,
+                    connection_generation="g1", audio_epoch=epoch,
+                )
+                await drain()
+            assert not any(isinstance(m, PromptPartial) for m in transport.sent)
+
+    async def test_another_speakers_words_are_never_shown(self) -> None:
+        dispatcher, prompt_id = self._prompt()
+        transport = FakeTransport()
+        orchestrator = VoiceOrchestrator(
+            transport, PartialEngine(), vad=TEST_VAD(), prompted_input=dispatcher, wake_words=("joat",),
+        )
+        # A bystander talks for 2.4 s while the prompt is open: the frames
+        # carry the prompt's epoch, and the host names another speaker.
+        for seq in range(12):
+            orchestrator._ingest_audio(
+                LOUD, seq, source="glasses", speaker="other",
+                connection_generation="g1", audio_epoch=prompt_id,
+            )
+            await drain()
+        assert not any(isinstance(m, PromptPartial) for m in transport.sent)
+
+    async def test_a_rejected_final_clears_the_words_shown(self) -> None:
+        dispatcher, prompt_id = self._prompt()
+        transport = FakeTransport()
+        orchestrator = VoiceOrchestrator(
+            transport, PartialEngine(), vad=TEST_VAD(), prompted_input=dispatcher, wake_words=("joat",),
+        )
+        seq = 0
+        for _ in range(6):  # 1.2 s of unlabelled speech: words shown
+            orchestrator._ingest_audio(
+                LOUD, seq, source="glasses", speaker=None, connection_generation="g1", audio_epoch=prompt_id,
+            )
+            seq += 1
+            await drain()
+        shown = [m for m in transport.sent if isinstance(m, PromptPartial)]
+        assert shown and shown[-1].text == "words 1"
+        for _ in range(6):  # then the host names another speaker
+            orchestrator._ingest_audio(
+                LOUD, seq, source="glasses", speaker="other", connection_generation="g1", audio_epoch=prompt_id,
+            )
+            seq += 1
+            await drain()
+        for _ in range(4):  # quiet closes the utterance: rejected as not the wearer's
+            orchestrator._ingest_audio(
+                QUIET, seq, source="glasses", speaker=None, connection_generation="g1", audio_epoch=prompt_id,
+            )
+            seq += 1
+            await drain()
+        partials = [m for m in transport.sent if isinstance(m, PromptPartial)]
+        assert [p.text for p in partials] == ["words 1", ""]
+
+    def test_a_long_partial_keeps_its_newest_words(self) -> None:
+        wire = PromptPartial("p1", "g1", "x " * 400 + "the end").to_wire()
+        assert len(wire["text"]) <= 500
+        assert wire["text"].startswith("…") and wire["text"].endswith("the end")

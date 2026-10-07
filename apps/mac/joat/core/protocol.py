@@ -512,6 +512,33 @@ class PromptCancel:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PromptPartial:
+    """The wearer's words so far while they answer one prompt, shown in its
+    card as they speak. Display only: the final transcript alone answers."""
+
+    prompt_id: str
+    connection_generation: str
+    text: str
+
+    def to_wire(self) -> dict[str, Any]:
+        text = " ".join(self.text.split())
+        # The tail is the part being spoken: keep it when the words outgrow
+        # what a card can show.
+        if len(text) > PROMPT_PARTIAL_MAX_CHARS:
+            text = "…" + text[-(PROMPT_PARTIAL_MAX_CHARS - 1):]
+        return {
+            "kind": "prompt.partial",
+            "promptId": _prompt_token(self.prompt_id),
+            "connectionGeneration": _prompt_token(self.connection_generation),
+            "text": text,
+        }
+
+
+#: The longest partial sent: about what a reply card shows.
+PROMPT_PARTIAL_MAX_CHARS = 500
+
+
 CONTROL_ACTIONS = frozenset({
     "refresh",
     "brainstorm.reset",
@@ -1869,6 +1896,7 @@ DownlinkMessage = (
     | AssistantConversationDismiss
     | PromptPresent
     | PromptCancel
+    | PromptPartial
     | HudRebuild
     | HudList
     | MessageUIView

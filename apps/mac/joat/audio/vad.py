@@ -104,6 +104,11 @@ class RmsVad:
     def in_speech(self) -> bool:
         return self._in_speech
 
+    def speech_so_far(self) -> bytes | None:
+        """The utterance still being spoken, for a partial transcript; None
+        between utterances. A copy: the buffer keeps growing."""
+        return bytes(self._buffer) if self._in_speech else None
+
     @property
     def preroll_capacity(self) -> int:
         """Actual callback capacity, for a matching ingress-provenance ring."""
