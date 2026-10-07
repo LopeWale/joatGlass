@@ -5,7 +5,7 @@ import { ContainerId, HomeColumnId, PANEL_TABS, type PanelTab } from './types';
 
 /**
  * Home's left column (the date, the weather, the unread count and the tab
- * rail) as two images in Even's font at 55% with icons, the parts of Home
+ * rail) as two images in Even's font at 66% with icons, the parts of Home
  * that rarely change. The right pane stays firmware text: it changes on
  * every tab swipe, and an in-place text upgrade (~83 ms) is faster than any
  * image send. This is the mixed design the fast G2 plugins use
@@ -30,6 +30,14 @@ export const HOME_COLUMN = {
 export interface HomeColumnView {
   info: { date: string; weather: string; unread: number };
   tabs: { tab: PanelTab; label: string; active: boolean }[];
+  /** Under JOAT's box: nothing is drawn at or below this page y, so the
+   * column's rows never shine through the box (a G2 box has no fill). */
+  clipBottom?: number;
+  /** Under a notification card at the top: nothing is drawn above this
+   * page y, so only the rows below the card show. */
+  clipTop?: number;
+  /** Dimmed beneath a notification card, as Even dims the page under its own. */
+  dim?: boolean;
 }
 
 /** The column's content, from the same view the text column was built from. */

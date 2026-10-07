@@ -134,6 +134,7 @@ type VisualState =
   | 'message-reply-confirm'
   | 'assistant-overlay'
   | 'nav-receipt'
+  | 'notification-card'
   | ProductivityVisualState
   | ProductivityLifecycleVisualState
   | BrainstormVisualState
@@ -181,6 +182,7 @@ const VISUAL_STATE = ((): VisualState | undefined => {
     || requested === 'assistant-conversation'
     || requested === 'message-reply-question' || requested === 'message-reply-confirm'
     || requested === 'nav-receipt'
+    || requested === 'notification-card'
     || isProductivityVisualState(requested)
     || isProductivityLifecycleVisualState(requested)
     || isBrainstormVisualState(requested)
@@ -831,6 +833,10 @@ async function boot(): Promise<void> {
           unread: msg.unread,
         }));
         break;
+      case 'hud.notifications':
+        // The unread list the notification card moves through.
+        hud.acceptNotifications(Array.isArray(msg.cards) ? msg.cards : []);
+        break;
       case 'hud.panel':
         // Cache first, so a swipe onto this tab paints from memory. Then:
         // a voice-initiated open expands the tab; a push for a tab whose
@@ -1118,7 +1124,11 @@ async function boot(): Promise<void> {
     }
     micStatus = micOk ? label : 'JOAT · mic unavailable';
   }
-  if (!displayYielded && !exiting) await imu.start();
+  // No IMU at boot. Motion approves nothing (ImuMonitor: confirmation is a
+  // deliberate tap), so a stream opened here did nothing but send ten reports
+  // a second over Bluetooth and fill the diagnostics ring: the wearer's
+  // export of 2026-10-07 held 512 motion reports and no taps. The Mac opens
+  // it on purpose (imu.control) when it traces motion.
 
   // Deterministic official-simulator voice gate. Vite replaces DEV with false
   // and removes this branch from packed builds. The resolver independently
@@ -1364,6 +1374,34 @@ async function renderVisualState(
   }
 
   await hud.showText('9:41       JOAT ready       bat 87%', ContainerId.StatusBar, 2);
+
+  // The notification card over Home (or `&joatNoteOver=news`, over the News
+  // list), three unread cards, opened as Home's Notifications tab opens them:
+  // no display timer, so a capture or a tap is never raced by it.
+  if (state === 'notification-card') {
+    await hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 3 });
+    for (const push of panelVisualPushes()) await hud.acceptPanel(push);
+    if (new URLSearchParams(window.location.search).get('joatNoteOver') === 'news') {
+      await menu.openPanelTab('news');
+    }
+    const now = Date.now();
+    hud.acceptNotifications([
+      {
+        id: '1'.padStart(32, '0'), app: 'Messages', sender: 'Sam', at: now - 20_000, urgent: false,
+        body: 'Didn\u2019t catch you on the phone. Can you pick up some onions and peppers on the way home?',
+      },
+      {
+        id: '2'.padStart(32, '0'), app: 'Slack', sender: '#team-design', at: now - 4 * 60_000, urgent: false,
+        body: 'A new message from Alex: \u201cThe Q3 campaign report is ready for final review in the drive.\u201d',
+      },
+      {
+        id: '3'.padStart(32, '0'), app: 'Mail', sender: 'Billing', at: now - 47 * 60_000, urgent: false,
+        body: 'Payment received. A charge of $4,500 from Fixture Studio Inc. has been processed.',
+      },
+    ]);
+    await hud.browseNotifications();
+    return;
+  }
 
   if (isPanelVisualState(state)) {
     // The resting overview underneath, exactly as the 'overview' fixture

@@ -8,7 +8,7 @@ import type { BridgeClient } from './BridgeClient';
 import type { HudStatusModel } from './HudStatus';
 import type { HudVisualFrame, HudVisualSurface } from './HudVisualSurface';
 import { PANE_TEXT_WIDTH } from './OverviewText';
-import { ContainerId } from './types';
+import { ContainerId, HomeColumnId } from './types';
 
 /**
  * Home is firmware text (the default): one rebuild in, then only the bands
@@ -241,5 +241,28 @@ describe('Home with its column as images (HomeImages.ts)', () => {
     expect(order.indexOf('column')).toBeGreaterThan(order.indexOf('upgrade:pane'));
     const view = columns[columns.length - 1] as { tabs: { tab: string; active: boolean }[] };
     expect(view.tabs.find((tab) => tab.active)?.tab).toBe('news');
+  });
+
+  it('opens JOAT\'s box over Home as drawn: the column stays beneath and is repainted above the box', async () => {
+    const { hud, pages, columns } = columnHarness();
+    await hud.acceptPanel({ kind: 'hud.panel', tab: 'news', revision: 1, rows: ['[1m] Fresh headline · BBC'] });
+    await hud.setStatusModel(status('9:41'));
+    columns.length = 0;
+    expect(await hud.showAssistantConversation({
+      conversationId: 'c1', revision: 1, state: 'ready', continueAfterMs: 30_000, earlierTurnsOmitted: false,
+      turns: [{ role: 'user', text: 'What time is my next meeting?' }, { role: 'assistant', text: 'Design review at 2:30.' }],
+    })).toBe(true);
+    await vi.runAllTimersAsync();
+    const page = pages[pages.length - 1]!;
+    const images = (page.imageObject ?? []).map((image) => image.containerID);
+    expect(images).toEqual(expect.arrayContaining([HomeColumnId.Top, HomeColumnId.Bottom]));
+    const box = page.textObject?.find((text) => text.containerName === 'conversation');
+    expect(box?.isEventCapture).toBe(1);
+    // Home's pane is still there, above the box.
+    expect(page.textObject?.some((text) => text.containerName === 'pane')).toBe(true);
+    // The column was repainted with nothing drawn under the box.
+    const view = columns[columns.length - 1] as { clipBottom?: number };
+    expect(view.clipBottom).toBeDefined();
+    expect(view.clipBottom!).toBeLessThanOrEqual(box!.yPosition!);
   });
 });

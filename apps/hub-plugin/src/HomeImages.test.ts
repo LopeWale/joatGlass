@@ -87,4 +87,31 @@ describe('Home column images', () => {
     expect(marks.filter((mark) => mark.tile === 1 && mark.icon).map((mark) => mark.icon))
       .toEqual(['notifications', 'news', 'pomodoro', 'search']);
   });
+
+  it('under JOAT\'s box, leaves out whole rows at or below the box', () => {
+    const clipBottom = 200;
+    const marks = homeColumnLayout({ ...homeColumnView(VIEW, '72f clear', 2), clipBottom });
+    const line = evenLineHeight();
+    for (const mark of marks) {
+      const pageTop = HOME_COLUMN.top + (mark.tile === 1 ? HOME_COLUMN.tileHeight : 0) + mark.y;
+      expect(pageTop + Math.max(mark.height, line)).toBeLessThanOrEqual(clipBottom);
+    }
+    const rail = marks.filter((mark) => mark.tile === 1 && mark.text).map((mark) => mark.text);
+    // The first rows of the rail sit above the box; the last ones are gone, not cut.
+    expect(rail.length).toBeGreaterThan(0);
+    expect(rail.length).toBeLessThan(4);
+    expect(rail[0]).toBe('NOTIFICATIONS');
+  });
+
+  it('under a notification card, shows only the rows below it, dimmed', () => {
+    const plain = homeColumnLayout(homeColumnView(VIEW, '72f clear', 2));
+    const under = homeColumnLayout({ ...homeColumnView(VIEW, '72f clear', 2), clipTop: 180, dim: true });
+    expect(under.length).toBeGreaterThan(0);
+    expect(under.length).toBeLessThan(plain.length);
+    for (const mark of under) {
+      expect(HOME_COLUMN.top + (mark.tile === 1 ? HOME_COLUMN.tileHeight : 0) + mark.y).toBeGreaterThanOrEqual(180);
+      const same = plain.find((p) => p.text === mark.text && p.icon === mark.icon && p.y === mark.y && p.tile === mark.tile)!;
+      expect(mark.alpha).toBeLessThan(same.alpha);
+    }
+  });
 });

@@ -1,5 +1,73 @@
 # Changelog
 
+## 2026-10-07 — Build JOAT 0.1.116
+
+- Packed from `44191c6` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.116 above the last recorded build (0.1.115); app.json, package.json and package-lock.json all 0.1.116. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1163 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 172969 bytes, SHA-256 `df1bb8ae6294f1985e861554c273878633edd22df3888ae59bbc7daa3e45231d`. Adds to 0.1.115 the notification card and the IMU off at boot. **The Mac side changed too: restart the brain from this revision**, or the card only ever shows the Mac's short line. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-07 — Notifications pop up as Even's card, over every page
+
+The wearer asked for notifications the way Even shows its own: a card that pops up over the page, a tap that shows the next unread card, and a double tap that dismisses. Studied first, from Even's support article and its images and from frame-by-frame extracts of Even's G2 videos (recorded in `docs/EVEN_RESEARCH_QUESTIONS.md`).
+
+- **The card** (`NotificationCard.ts`) is laid out as Even's: a bordered card near the top, the app and the age ("Now", "7m ago") with its place among the unread ("1/3") on the first line, then the sender and the whole message. The page stays beneath it: everything under the card is left out, the rest is dimmed, Home's column is repainted dimmed below the card, and a list beneath loses its selection box. It is firmware text, so the next card is one page write.
+- **Gestures, the wearer's ruling:** a tap marks the card read on the Mac and shows the next unread one, or closes the card after the last; a double tap closes it and leaves it unread; swipes stay with the card; long press still opens the mic.
+- **When it pops up:** over every page, except while a decision, a question or JOAT's conversation owns the glass. Such a card waits as unread. A card that popped up on its own closes after 5 s, and each tap restarts that. Even's app shows 3 s, but this card holds the whole message.
+- **Home's Notifications tab** opens the newest unread card, which stays until the wearer is done. The list page remains for when nothing is unread, and for "show notifications".
+- **New wire message `hud.notifications`** (`protocol.py` and `types.ts`, changed together): every unread JOAT card, newest first, at most ten, each with its id, app, sender, whole message (at most 600 characters), time and urgency. The Mac republishes it from the same loop as the unread count, so a tap reaches the next card without a round trip. Until the list arrives, the card is drawn from the Mac's short line and redrawn whole when it does.
+- **Not done: Even's slide between cards.** Even's 0.32 s vertical slide is its firmware's own animation. The SDK has no animation API, and faking it means sending every in-between frame as image tiles, about 104 ms per tile over Bluetooth.
+- **The IMU no longer streams from boot.** It sent ten motion reports a second that nothing read, and filled the diagnostics ring: the wearer's export held 512 motion reports and no taps. Motion reports are also kept out of the diagnostics now.
+- Verified in the official simulator: the card over Home and over the News list, tapping through three cards to Home, and a double tap back to the list. Also verified end to end with the Mac's real gateway: its list and pop drew the card, and each tap came back to the Mac as `notification-dismiss` for that card, in order. Not verified on physical glasses.
+- Tests: plugin 1163 passed; typecheck and build clean. Mac 3460 passed, 1 skipped; the container's IPv6 test fails as before. mypy clean. Both sides change: a new package and a brain restart.
+
+## 2026-10-07 — Build JOAT 0.1.115
+
+- Packed from `aaea0b2` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.115 above the last recorded build (0.1.114); app.json, package.json and package-lock.json all 0.1.115. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1147 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 170954 bytes, SHA-256 `234590075706e5bb5bb6935738cd9b6ab06d1e4e994d9f1c1a4502b8a19b2225`. Adds to 0.1.114 JOAT's box over Home as Home is drawn. Plugin-only: no brain restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-07 — JOAT's box floats over Home as Home is drawn
+
+The wearer reported that JOAT's box still looked like a page of its own: the Home behind it was not the current Home.
+
+- **Cause, reproduced in the official simulator.** The box keeps the page it was called over beneath it. For Home, that underlay was rebuilt from Home's plain text layout. That layout has no image header and no left column, so the box sat over an older-looking Home: the date in the large firmware font at the very edge, no divider, no tab rail.
+- **Now the underlay is Home as drawn** (`conversationUnderlay` in `HudPresenter.ts`): its text, its two column images, and the image header (from the box's own status line, as on every page). `overlayConversation` keeps a page's images beneath the box and cuts its text to end above the box. Before, it handled only all-text pages and all-image readers.
+- **The column is repainted with nothing under the box** (`clipBottom` on `HomeColumnView`). A G2 box has no fill, so a rail row under it would shine through. Rows are left out whole, never cut through a glyph. When the box grows, the column is repainted with the new clip. When it closes, Home is rebuilt whole.
+- **A safeguard in reader paragraphs** (`readerParagraphs`): a row wider than the Mac's 62-column reader slice now stands alone. Before, it was joined to the next row without a space. This showed up only with a probe's hand-written oversized rows; the Mac's reader slices are at most 62 columns.
+- **Not changed: the News tab tap.** The wearer reported that a tap on the lit News tab does nothing. In the simulator it opened the News list in every sequence tried: from rest, with a notification on Home, after Back from the list and from an article, after closing JOAT's box, and connected to a live gateway with the panels probe. It was not reproduced, so nothing was changed for it.
+- Verified in the official simulator: the box over Home with the column and header intact, rows under the box left out, the box growing, and Home whole again after closing. Not verified on physical glasses.
+- Plugin 1147 passed; typecheck and build clean. Plugin-only.
+
+## 2026-10-07 — Build JOAT 0.1.114
+
+- Packed from `d629292` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.114 above the last recorded build (0.1.113); app.json, package.json and package-lock.json all 0.1.114. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1142 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 170631 bytes, SHA-256 `5509a101283586cce01bba9d51ba8edbc33faed1156d6e8d84a04e29606db3b6`. Adds to 0.1.113 solid image words at 66% and readers as firmware text. Plugin-only: no brain restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-07 — Image words at 66% with every pixel fully lit; readers are firmware text
+
+The wearer asked for the image fonts at 66%, reported the faded letters on every image surface, and ruled that more of the image text should be firmware text.
+
+- **Every image word is drawn solid** (`crispGlyph` in `EvenFont.ts`). Each glyph is scaled once with an exact area average of the atlas pixels under each new pixel, then every pixel is cut to fully lit or dark at a 0.3 share. Even's strokes are 1 px wide, and a 1 px stroke at 66% split evenly over two pixels gives each a 0.33 share, so no stroke can vanish (pinned by a test). The canvas's own smoothed scaling lit only 21% of a word's pixels at full brightness. Its high-quality downscale, tried first, dropped the clock's colon and parts of W, E and H, as a capture showed.
+- **66%** (`EVEN_FONT_SCALE`), up from 55%.
+- **Brightness:** header words full (were 67%). Home's date, weather and unread full (were 80-90%). Unlit tabs at 179/255 (were 40%), the firmware's own dimmest text level.
+- **Readers are firmware text pages** (the Messages thread, notes, notification detail, search result and the rest), as the article became in 0.1.113. `VITE_EVEN_FONT_PAGES=1` brings back the image readers. The Mac's 62-column slices are joined back into paragraphs (`readerParagraphs`) before the page is set, so a sentence is not broken into one slice per line.
+- Still images: the header words, Home's left column, the Planning month and dashboard, and the live map.
+- Verified in the official simulator: header words 100% at full brightness (55% build: 8%); every letter of "9:41", "Wed, Oct 7", "NEWS", "SEARCH" and "Focus 15m" intact; the thread as firmware text, paging in place. Not verified on physical glasses.
+- Plugin 1142 passed; typecheck and build clean. Plugin-only.
+
+## 2026-10-07 — Build JOAT 0.1.113
+
+- Packed from `53b9050` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.113 above the last recorded build (0.1.112); app.json, package.json and package-lock.json all 0.1.113. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1139 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 170101 bytes, SHA-256 `55b7c553c78d0819e3b8a7a420791eba43751f1c1063a7af141db4b56d10ab14`. Adds to 0.1.112 the News article as a firmware text page with 16 px side margins. Plugin-only: no brain restart. The package is now tracked in git (main stopped ignoring `*.ehpk`). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-07 — A News article is firmware text again, 16 px clear of the sides
+
+The wearer reported the open article drawn as an image and hard to read while scrolling, its letters partly faded.
+
+- **Why it faded, measured.** The image readers draw Even's own glyphs at 55%. The glyph atlas cut from the simulator is one-bit, and 90% of its horizontal strokes are 1 px wide. A 1 px stroke at 55% covers about half a pixel, so the canvas spreads it over one or two pixels at partial brightness. A simulator capture of the 55% thread showed only 21% of its lit body pixels at full brightness, the rest over eight dimmer levels. The body text is also drawn at 82% brightness and the hint at 50%.
+- **The article (`NEWS · ARTICLE`) is a firmware text page again** (`FIRMWARE_TEXT_READERS` in `HudPresenter.ts`). Every stroke is at full brightness, and a swipe pages it in place with one text upgrade instead of repainting image tiles. The Messages thread and the other readers stay 55% images.
+- **A reader's firmware text page keeps 16 px from both sides** (`READER_TEXT_PAGE` in `HudPageBuilder.ts`). The page used the answer page's 4 px inset, so text touched the edge. Its pages are cut to the narrower 544 px, so the firmware never wraps a line past the page. Answer, navigation and Planning pages keep their width.
+- Verified in the official simulator (`?joatVisual=panel-article`): the article as firmware text, no lit pixel within 16 px of either side below the header, and a swipe paging it in place. Not verified on physical glasses.
+- Plugin 1139 passed; typecheck and build clean. Plugin-only: no brain restart.
+
 ## 2026-10-06 — Build JOAT 0.1.112
 
 - Packed from `b35a012` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.112 above the last recorded build (0.1.111); app.json, package.json and package-lock.json all 0.1.112. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1138 tests passed.

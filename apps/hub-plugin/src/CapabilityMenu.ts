@@ -1562,6 +1562,10 @@ export class CapabilityMenu {
   async openActiveTab(): Promise<void> {
     const tab = this.hud.activeTab();
     if (tab === 'notifications') {
+      // The unread cards themselves, newest first, as Even's menu opens
+      // them: a tap reads one and shows the next. The list page remains for
+      // when nothing is unread (and for "show notifications").
+      if (this.hud.unreadNotifications().length > 0 && await this.hud.browseNotifications()) return;
       await this.openNotifications();
       return;
     }

@@ -10,7 +10,10 @@ import { firmwareLineCount } from './FirmwareText';
 import { OVERLAY_GAP, overlayConversation } from './ConversationOverlay';
 import { conversationViewport } from './AssistantConversationSurface';
 import { HudPageBuilder } from './HudPageBuilder';
-import { ContainerId } from './types';
+import { ContainerId, HomeColumnId } from './types';
+import { withImageHeader } from './HeaderImage';
+import { withHomeImages } from './HomeImages';
+import type { OverviewTextView } from './OverviewText';
 
 const builder = new HudPageBuilder();
 
@@ -117,6 +120,49 @@ describe('overlayConversation', () => {
     expect(cut?.isEventCapture).toBe(0);
     expect((cut?.yPosition ?? 0) + (cut?.height ?? 0)).toBeLessThanOrEqual(top(box) - OVERLAY_GAP);
     expect(validateEvenHubPageContainer(page)).toEqual({ valid: true });
+  });
+
+  it('floats over Home as drawn: its column images beneath, its text above the box, the header from the box', () => {
+    const view: OverviewTextView = {
+      header: '9:41 · JOAT',
+      info: ['Wed, Oct 7', '72f clear', '2 unread'],
+      tabs: [
+        { label: 'NOTIFICATIONS', active: true }, { label: 'NEWS', active: false },
+        { label: 'POMODORO', active: false }, { label: 'SEARCH', active: false },
+      ],
+      paneLabels: ['', ''],
+      pane: ['Ask JOAT anything.', 'tap: open notifications'],
+      paneBrightness: 4,
+      hint: 'tap: open · swipe: tabs',
+    };
+    // The underlay the presenter builds: Home's text with its column, no header.
+    const home = withHomeImages(builder.overviewTextLayout(view));
+    const box = card(1);
+    // replaceNativePage turns the box's status line into the image header.
+    const page = withImageHeader(overlayConversation(box, home));
+    expect(validateEvenHubPageContainer(page)).toEqual({ valid: true });
+    const ids = (page.imageObject ?? []).map((image) => image.containerID);
+    expect(ids).toEqual(expect.arrayContaining([HomeColumnId.Top, HomeColumnId.Bottom]));
+    expect(page.imageObject).toHaveLength(4);
+    const texts = page.textObject ?? [];
+    // Home's pane stays above the box; its hint (below the box) goes.
+    expect(texts.some((text) => text.containerID === ContainerId.Main && text.containerName === 'pane')).toBe(true);
+    expect(texts.some((text) => text.containerID === ContainerId.Hint)).toBe(false);
+    const boxNames = new Set((box.textObject ?? []).map((text) => text.containerName));
+    const fromHome = texts.filter((text) => !boxNames.has(text.containerName));
+    expect(fromHome.length).toBeGreaterThan(0);
+    for (const text of fromHome) {
+      expect((text.yPosition ?? 0) + (text.height ?? 0)).toBeLessThanOrEqual(top(page) - OVERLAY_GAP);
+    }
+    // One capture: the box.
+    expect(texts.filter((text) => text.isEventCapture === 1).map((t) => t.containerName)).toEqual(['conversation']);
+    // The box is drawn above every container of the page.
+    const boxZ = texts.find((text) => text.containerName === 'conversation')!.zOrderIndex ?? 0;
+    for (const image of page.imageObject ?? []) {
+      if (image.containerID === HomeColumnId.Top || image.containerID === HomeColumnId.Bottom) {
+        expect(image.zOrderIndex ?? 0).toBeLessThan(boxZ);
+      }
+    }
   });
 
   it('keeps an image page\'s tiles beneath the box; the box takes input and drops its status line', () => {

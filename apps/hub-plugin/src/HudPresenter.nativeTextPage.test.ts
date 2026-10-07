@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
-import { HudPageBuilder, PROMPT_QUESTION_HINT } from './HudPageBuilder';
+import { HudPageBuilder, PROMPT_QUESTION_HINT, READER_TEXT_PAGE } from './HudPageBuilder';
 import { HudPresenter, paginateAnswer, setNativeOverviewForTest } from './HudPresenter';
 import { ContainerId } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
+import { readerParagraphs } from './EvenFont';
+
+/** A reader's firmware pages: cut to the inset reader width. */
+const readerPages = (rows: readonly string[]) => paginateAnswer(
+  readerParagraphs(rows).join('\n'), READER_TEXT_PAGE.lineCapacity, READER_TEXT_PAGE.textWidth,
+);
 
 // These tests pin the IMAGE overview (VITE_NATIVE_OVERVIEW=0). The text
 // overview, which is Home by default, has its own: HudPresenter.textOverview.test.ts.
@@ -51,6 +57,8 @@ function rig() {
     forgetPage: vi.fn(() => operations.push('forget')),
     whenIdle: vi.fn(async () => true),
     withPageTransition: vi.fn(async (replace: () => Promise<boolean>) => replace()),
+    // The painter could draw a reader as an image; readers still are not.
+    canPaintReader: () => true,
   };
   const hud = new HudPresenter(client, new HudPageBuilder(), visual);
   return { hud, operations, rebuilds, upgrades, frames, visual };
@@ -66,6 +74,29 @@ const longMessage = Array.from({ length: 10 }, (_, index) => (
 const READER = { title: 'MESSAGES · MESSAGE', hint: 'swipe: more · say reply · double-click: back', selectable: false, nativeTextPage: true };
 
 describe('HudPresenter native text page for a Mac-paged reader', () => {
+  it('shows a Messages thread as firmware text, the Mac\'s slices joined back into sentences', async () => {
+    const r = rig();
+    expect(await r.hud.showList([
+      '1/1 · Adele',
+      'Adele: Can you send the latest mockups before the review? I ',
+      'want to walk Marcus through the onboarding flow first.\n',
+      'You: Exporting them now.\n',
+    ], {
+      title: 'MESSAGES · CONVERSATION', hint: 'tap: reply · left x2: back', selectable: true, nativeTextPage: true,
+    })).toBe(true);
+    expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
+    const page = r.rebuilds[r.rebuilds.length - 1];
+    expect(page?.imageObject?.some((image) => image.containerID === ContainerId.Image) ?? false).toBe(false);
+    const body = text(page, 'main') ?? '';
+    // One sentence, not a 62-column slice per line.
+    expect(body).toContain('review? I want to walk');
+    expect(body.split('\n')).toEqual([
+      '1/1 · Adele',
+      'Adele: Can you send the latest mockups before the review? I want to walk Marcus through the onboarding flow first.',
+      'You: Exporting them now.',
+    ]);
+  });
+
   it('shows the reader as one text page with the live status and no image tiles', async () => {
     const r = rig();
     await r.hud.setStatusModel({ clock: '12:34', link: 'connected', mic: false, battery: 80, charging: false });
@@ -90,7 +121,7 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
   it('pages a long Mac page in place and hands the edge swipe back to the caller', async () => {
     const r = rig();
     expect(await r.hud.showList(longMessage, READER)).toBe(true);
-    const pages = paginateAnswer(longMessage.join('\n'));
+    const pages = readerPages(longMessage);
     expect(pages.length).toBeGreaterThan(1);
     const first = r.rebuilds[r.rebuilds.length - 1];
     expect(text(first, 'main')).toBe(pages[0]);
@@ -114,7 +145,7 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
 
   it('opens the Mac\'s previous page on its last local page when asked', async () => {
     const r = rig();
-    const pages = paginateAnswer(longMessage.join('\n'));
+    const pages = readerPages(longMessage);
     expect(await r.hud.showList(longMessage, { ...READER, nativeTextPageFromEnd: true })).toBe(true);
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(text(page, 'main')).toBe(pages[pages.length - 1]);
@@ -126,7 +157,7 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
 
   it('offers a review\'s tap only on its last local page, and promises the swipe for both layers', async () => {
     const r = rig();
-    const pages = paginateAnswer(longMessage.join('\n'));
+    const pages = readerPages(longMessage);
     expect(pages.length).toBeGreaterThan(1);
     // The Mac's last page of a review: it offers the tap and a previous page.
     const REVIEW = {
@@ -146,7 +177,7 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
 
   it('reads every swipe the Mac offers, and forgets an earlier page once another is on the glass', async () => {
     const r = rig();
-    const pages = paginateAnswer(longMessage.join('\n'));
+    const pages = readerPages(longMessage);
     // The Mac's promises need not sit side by side to count.
     expect(await r.hud.showList(longMessage, {
       ...READER, title: 'BRAINSTORM · SAVED', hint: 'up previous · tap: continue · down more · left x2: back',
@@ -191,7 +222,7 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     const since = r.operations.slice(before);
     expect(since.filter((op) => op.startsWith('rebuild:4:') || op.startsWith('visual:') || op.startsWith('exact:'))).toHaveLength(0);
     expect(since.filter((op) => op.startsWith('rebuild:0:3:0'))).toHaveLength(1);
-    const pages = paginateAnswer(longMessage.join('\n'));
+    const pages = readerPages(longMessage);
     expect(text(r.rebuilds[r.rebuilds.length - 1], 'main')).toBe(pages[1]);
   });
 
