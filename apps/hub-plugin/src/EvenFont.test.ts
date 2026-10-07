@@ -92,9 +92,9 @@ describe('responsive layout', () => {
   });
 
   it('keeps the page count whole and drops the swipe clause before shortening the hint', () => {
-    expect(readerHint('2/3 · swipe: page · tap: reply · double-click: back'))
-      .toEqual({ left: 'swipe: page · tap: reply · double-click: back', right: '2/3' });
-    const long = readerHint(`2/3 · swipe: page · tap: reply · ${'double-click: back to the conversation list '.repeat(4)}`);
+    expect(readerHint('2/3 · swipe: page · tap: reply · 2x tap: back'))
+      .toEqual({ left: 'swipe: page · tap: reply · 2x tap: back', right: '2/3' });
+    const long = readerHint(`2/3 · swipe: page · tap: reply · ${'2x tap: back to the conversation list '.repeat(4)}`);
     expect(long.right).toBe('2/3');
     expect(long.left.startsWith('tap: reply')).toBe(true);
     expect(long.left.endsWith('…')).toBe(true);
@@ -109,8 +109,8 @@ describe('reader page margins', () => {
       'x'.repeat(200),
     ];
     const hints = [
-      '1/9 · swipe: page · tap: reply · double-click: back',
-      `12/40 · ${'tap: do the long thing · '.repeat(10)}double-click: back`,
+      '1/9 · swipe: page · tap: reply · 2x tap: back',
+      `12/40 · ${'tap: do the long thing · '.repeat(10)}2x tap: back`,
     ];
     for (const page of [...paginateEven(MAC_THREAD, true), ...paginateEven(stress, true)]) {
       for (const hint of hints) {

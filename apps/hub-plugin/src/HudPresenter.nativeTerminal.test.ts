@@ -96,7 +96,7 @@ describe('HudPresenter native Agent Terminal journey', () => {
 
     expect(await r.hud.showList(['OpenClaw', 'Hermes'], {
       title: 'AGENT TERMINAL',
-      hint: 'double-click: back',
+      hint: '2x tap: back',
       selectable: true,
       nativeFirmwareList: true,
     })).toBe(true);
@@ -138,7 +138,7 @@ describe('HudPresenter native Agent Terminal journey', () => {
 
     const rebuildsBeforeBack = r.rebuilds.length;
     expect(await r.hud.showList(['OpenClaw', 'Hermes'], {
-      title: 'AGENT TERMINAL', hint: 'double-click: back', selectable: true,
+      title: 'AGENT TERMINAL', hint: '2x tap: back', selectable: true,
       nativeFirmwareList: true,
     })).toBe(true);
     expect(r.rebuilds).toHaveLength(rebuildsBeforeBack + 1);
@@ -232,7 +232,7 @@ describe('HudPresenter Brainstorm on the native page', () => {
     expect(await r.hud.showBrainstorm(long)).toBe(true);
     const rebuilds = r.rebuilds.length;
     expect(r.hud.scrollTranscript('up')).toBe(true);
-    await vi.waitFor(() => expect(last(r.upgrades)?.content).toContain('newer · swipe down · double-click: cancel'));
+    await vi.waitFor(() => expect(last(r.upgrades)?.content).toContain('newer · swipe down · 2x tap: cancel'));
     expect(r.rebuilds).toHaveLength(rebuilds);
 
     expect(await r.hud.showPromptQuestion('q-1', 'What would you like to brainstorm?', () => true, 'brainstorm')).toBe(true);

@@ -255,7 +255,7 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     },
     messages: {
       title: 'MESSAGES',
-      hint: 'tap: select · left x2: back',
+      hint: 'tap: select · 2x tap: back',
       selectable: true,
       items: [
         'New message · voice recipient + text',
@@ -269,7 +269,7 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     // Mirrors capabilities._show_message_history_page.
     'messages-conversation': {
       title: 'MESSAGES · CONVERSATION',
-      hint: 'down more · tap: reply · left x2: back',
+      hint: 'down more · tap: reply · 2x tap: back',
       selectable: true,
       items: [
         '1/1+ · Adele',
@@ -284,7 +284,7 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     // lossless 62-column slices, a link cut mid-token included.
     'messages-conversation-long': {
       title: 'MESSAGES · CONVERSATION',
-      hint: 'down more · tap: reply · left x2: back',
+      hint: 'down more · tap: reply · 2x tap: back',
       selectable: true,
       items: [
         '1/2 · Adele',
@@ -309,7 +309,7 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     },
     'messages-compose': {
       title: 'MESSAGES · COMPOSE',
-      hint: 'speak: recipient · left x2: back',
+      hint: 'speak: recipient · 2x tap: back',
       selectable: false,
       items: [
         'Say the recipient name first.',
@@ -369,7 +369,7 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     // exact dictated text notes after — mirroring capabilities._show_notes.
     quicknotes: {
       title: 'QUICKNOTES',
-      hint: 'tap: detail · left x2: back',
+      hint: 'tap: detail · 2x tap: back',
       selectable: true,
       items: [
         '[4m] ● Client standup',
@@ -381,7 +381,7 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     // A recording's summary page (capabilities._show_voice_note_detail).
     'quicknote-detail': {
       title: 'QUICKNOTES · NOTE',
-      hint: 'say: ask the last note … · left x2: back',
+      hint: 'say: ask the last note … · 2x tap: back',
       selectable: false,
       items: [
         'Client standup',
@@ -568,6 +568,6 @@ export function panelArticleFixture(): { title: string; items: string[]; hint: s
       'consistent with a labour market that is cooling without',
       'breaking, and with fuel prices that have eased.',
     ],
-    hint: 'down more · left x2: back',
+    hint: 'down more · 2x tap: back',
   };
 }

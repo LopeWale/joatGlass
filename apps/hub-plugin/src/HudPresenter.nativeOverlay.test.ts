@@ -84,12 +84,12 @@ describe('HudPresenter native answer page over the visual HUD', () => {
     expect(pages.length).toBeGreaterThan(1);
     const first = r.rebuilds[r.rebuilds.length - 1];
     expect(text(first, 'main')).toBe(pages[0]);
-    expect(text(first, 'hint')).toBe(`1/${pages.length} · swipe: page · tap: dismiss`);
+    expect(text(first, 'hint')).toBe(`1/${pages.length} · tap: dismiss · swipe: page`);
     const rebuildsAfterOpen = r.rebuilds.length;
 
     expect(r.hud.scrollAssistantOverlay('down')).toBe(true);
     await vi.waitFor(() => expect(r.upgrades.some((u) => u.containerName === 'main' && u.content === pages[1])).toBe(true));
-    expect(r.upgrades.some((u) => u.containerName === 'hint' && u.content === `2/${pages.length} · swipe: page · tap: dismiss`)).toBe(true);
+    expect(r.upgrades.some((u) => u.containerName === 'hint' && u.content === `2/${pages.length} · tap: dismiss · swipe: page`)).toBe(true);
     expect(r.rebuilds).toHaveLength(rebuildsAfterOpen);
 
     const before = r.operations.length;
@@ -125,7 +125,7 @@ describe('HudPresenter native answer page over the visual HUD', () => {
   it('returns a firmware list directly to its own page after an answer', async () => {
     const r = rig();
     expect(await r.hud.showList(['Calendar create · Saved'], {
-      title: 'ACTIVITY', hint: 'double-click: back', selectable: true, nativeFirmwareList: true,
+      title: 'ACTIVITY', hint: '2x tap: back', selectable: true, nativeFirmwareList: true,
     })).toBe(true);
     expect(await r.hud.showAssistantOverlay('Nothing else is pending.')).toBe(true);
     const before = r.operations.length;

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-07 — No gestures in JOAT's box; one gesture template; messages hang under the name
+
+The wearer's three points on 0.1.117: the reply card still carried gesture notes and no working indicator; every page named its gestures differently ("what does 'double click' mean"); and a wrapped message should line up under its first word, after "Sender: ".
+
+- **No gesture notes in JOAT's box** (`AssistantConversationSurface.ts`, `HudPresenter.ts`). The Messages reply card no longer has "listening · double-click: cancel" or "tap: send · long-press: retry · double-click: cancel". While the wearer has yet to speak, the working glyph moves on their row ("You: ■"), and their first words replace it in place. The continuation question is just "Continue?". The wearer asked for this on 2026-10-06 ("i do not need the gesture stated at the model"); the reply card had kept its footer.
+- **One gesture template on every page** (`GesturePolicy.formatHint`): the words are tap, swipe, long tap and 2x tap. Double-click, long-press, hold and left x2 are gone. The order is always tap · swipe · long tap · 2x tap; a page count or a spoken command keeps its place. Every hint passes through it at the two places hints are written (`HudPageBuilder.region` and `HudPresenter.upgradeNativeText`), so a Mac's older wording becomes the template too. The plugin's own hint strings now use the template's words.
+- **Wrapped rows hang under the first word** (`FirmwareText.hangingLines`, `paginateHanging`): on the Messages pages, the notification card and in JOAT's box, a message's wrapped rows start where its words start after "Name: ". The rows are set as explicit lines with leading spaces, which the firmware keeps after a line break; each line is measured to fit, so the firmware never re-wraps one.
+- Verified in the official simulator: a long thread with every wrapped row under its first word, the reply card's glyph on the wearer's row with no footer, its consent card with no footer, the card's message hanging under "Sam: ", a long answer hanging under "JOAT: ", and Home's hints in the template. Not verified on physical glasses.
+- Tests: plugin 1164 passed; typecheck and build clean. Plugin-only: no brain restart.
+
 ## 2026-10-07 — Build JOAT 0.1.117
 
 - Packed from `d60a86d` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.117 above the last recorded build (0.1.116); app.json, package.json and package-lock.json all 0.1.117. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1164 tests passed.

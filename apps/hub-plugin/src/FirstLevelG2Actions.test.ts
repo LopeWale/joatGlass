@@ -233,7 +233,7 @@ describe('wearer G2 actions through Settings', () => {
       'in JOAT’s phone controls in Even Hub.',
     ]);
     expect(harness.lists[0]?.options).toEqual({
-      title: 'PHONE CONTROLS', hint: 'left x2: back', selectable: false, nativeFirmwareList: true,
+      title: 'PHONE CONTROLS', hint: '2x tap: back', selectable: false, nativeFirmwareList: true,
     });
 
     harness.fire(leftDoublePress());

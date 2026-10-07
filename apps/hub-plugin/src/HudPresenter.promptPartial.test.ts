@@ -56,15 +56,18 @@ describe('HudPresenter reply card words so far', () => {
     expect(await r.hud.showPromptQuestion('p1', QUESTION, () => true, 'messages')).toBe(true);
     const opened = r.rebuilds.length;
 
+    // The card opens with the working glyph on the wearer's row.
+    expect(wearerWords(last(r.rebuilds))).toMatch(/\nYou: +[■□]/u);
+
     expect(await r.hud.showPromptPartial('p1', 'Running')).toBe(true);
-    // The card grew a row for the wearer's words, straight beneath JOAT's
-    // question (no blank row between): one rebuild.
-    expect(r.rebuilds).toHaveLength(opened + 1);
-    expect(wearerWords(last(r.rebuilds))).toContain('You: Running');
+    // The words take the glyph's row: same size, upgraded in place.
+    expect(r.rebuilds).toHaveLength(opened);
+    expect(last(r.upgrades)?.containerName).toBe('wearer-turns');
+    expect(last(r.upgrades)?.content).toMatch(/\nYou: +Running$/u);
 
     expect(await r.hud.showPromptPartial('p1', 'Running late')).toBe(true);
     // Same size: only the words changed, upgraded in place.
-    expect(r.rebuilds).toHaveLength(opened + 1);
+    expect(r.rebuilds).toHaveLength(opened);
     expect(last(r.upgrades)?.containerName).toBe('wearer-turns');
     expect(last(r.upgrades)?.content).toContain('Running late');
   });

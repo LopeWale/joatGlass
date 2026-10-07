@@ -58,11 +58,11 @@ function main(page: RebuildPageContainer | undefined): string | undefined {
 
 const due: ProductivityHudModel = {
   domain: 'reminders', phase: 'due', title: 'Buy filters',
-  primary: 'Due now', secondary: 'This reminder is still incomplete.', hint: 'left x2: Planning',
+  primary: 'Due now', secondary: 'This reminder is still incomplete.', hint: '2x tap: Planning',
 };
 const saved: ProductivityHudModel = {
   domain: 'reminders', phase: 'saved', title: 'Buy filters',
-  primary: 'Saved', secondary: 'Reminders read-back matched', hint: 'left x2: Planning',
+  primary: 'Saved', secondary: 'Reminders read-back matched', hint: '2x tap: Planning',
 };
 
 describe('a receipt over a firmware page', () => {
@@ -84,7 +84,7 @@ describe('a receipt over a firmware page', () => {
     vi.useFakeTimers();
     try {
       const r = rig();
-      expect(await r.hud.showList(['A short note'], { title: 'QUICKNOTES · DETAIL', hint: 'left x2: back', nativeTextPage: true })).toBe(true);
+      expect(await r.hud.showList(['A short note'], { title: 'QUICKNOTES · DETAIL', hint: '2x tap: back', nativeTextPage: true })).toBe(true);
       expect(await r.hud.showAssistantOverlay('Saved QuickNote: A short note', false, true, 'receipt')).toBe(true);
       expect(r.hud.settleAssistantOverlay(3_000)).toBe(true);
       r.reset();
@@ -185,7 +185,7 @@ describe('navigation frames before the live map', () => {
     r.reset();
     const guidance = {
       view: 'guidance' as const, primary: 'Turn left', secondary: 'onto Main St',
-      hint: 'double-click: menu', interaction: 'none' as const, options: [], selectedIndex: 0,
+      hint: '2x tap: menu', interaction: 'none' as const, options: [], selectedIndex: 0,
       mode: 'walking' as const, maneuver: 'turn_left' as const, maneuverDistanceM: 80,
     };
     expect(await r.hud.showNavigation(guidance)).toBe(true);

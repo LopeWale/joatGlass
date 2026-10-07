@@ -7,7 +7,7 @@ const due = {
   title: 'Private reminder',
   primary: 'Due now',
   secondary: 'Still incomplete',
-  hint: 'left x2 Planning',
+  hint: '2x tap: Planning',
   reminderDueId: '67ec97c5-a0fd-48ec-89cb-1b756ddaf87a',
   reminderDueAttemptId: 'a76b12f1-45e4-41fd-aed8-086f6b6b1954',
   reminderDueGeneration: 7,

@@ -17,7 +17,7 @@ import {
   validAssistantConversationSnapshot,
   type ConversationExitResult,
 } from './AssistantConversationSurface';
-import { paginateMeasured } from './FirmwareText';
+import { paginateHanging, paginateMeasured } from './FirmwareText';
 import { OVERLAY_GAP, cardTop, overlayConversation } from './ConversationOverlay';
 import { paginateEven, readerParagraphs, type EvenReaderLine } from './EvenFont';
 import { hasImageHeader, withImageHeader } from './HeaderImage';
@@ -318,8 +318,8 @@ interface NativeTextPageState {
 /** The reply card's footers. The wearer's own words come back for
  * consent: tap sends them, long-press says them again, and Back cancels to
  * the thread. Both fit the card's 458 px footer (pretext). */
-const MESSAGE_REPLY_LISTENING_HINT = 'listening · x2: cancel';
-const MESSAGE_REPLY_CONFIRM_HINT = 'tap: send · hold: retry · x2: cancel';
+/** The working glyph's cadence on the wearer's row of a reply card. */
+const REPLY_LISTENING_TICK_MS = 450;
 
 /** The Mac's reply consent, `Send to Ada? “words”` (or, after a long
  * draft's review, `Send to Ada? (reviewed) “opening…”`), split back into
@@ -344,7 +344,7 @@ function sameGeometry(left: RebuildPageContainer, right: RebuildPageContainer): 
 }
 
 function textPageHint(page: number, count: number, macHint: string, review = false): string {
-  // The Mac still writes "left x2"; every page says "double-click".
+  // The Mac still writes "left x2"; every page says "2x tap".
   const hint = GesturePolicy.formatHint(macHint);
   if (count <= 1) return hint;
   // Two layers page this text: the Mac's pages, and the firmware pages cut
@@ -415,6 +415,11 @@ interface PromptQuestionState {
   partial?: string;
   /** The reply card as last built, so a partial can upgrade it in place. */
   layout?: RebuildPageContainer;
+  /** The working glyph's frame on the wearer's row until their words come. */
+  listeningFrame?: number;
+  /** A tick of the glyph waits to be painted. */
+  listeningDirty?: boolean;
+  listeningTimer?: ReturnType<typeof setTimeout>;
   /** The newest partial waiting for the one in flight to land. */
   pendingPartial?: string;
   partialPaint?: Promise<boolean>;
@@ -1156,6 +1161,7 @@ export class HudPresenter {
         : this.layouts.promptQuestionLayout(pages[0] ?? ' ', this.nativeHeader(this.nativePageTitle()));
       prompt.layout = layout;
       painted = await this.replaceNativePage(layout, 'prompt-native');
+      if (painted && prompt.messageReply) this.armReplyListening(prompt);
       return painted && this.isPromptCurrent(prompt);
     } catch {
       return false;
@@ -1171,9 +1177,10 @@ export class HudPresenter {
    * the wearer speaks, their words so far. */
   private replyCardLayout(prompt: PromptQuestionState): RebuildPageContainer {
     const turns: AssistantConversationTurn[] = [{ role: 'assistant', text: prompt.question }];
-    if (prompt.partial?.trim()) turns.push({ role: 'user', text: prompt.partial });
+    const spoken = Boolean(prompt.partial?.trim());
+    if (spoken) turns.push({ role: 'user', text: prompt.partial! });
     return overlayConversation(this.layouts.assistantConversationLayout(
-      replyDraftView(turns, MESSAGE_REPLY_LISTENING_HINT),
+      replyDraftView(turns, spoken ? undefined : prompt.listeningFrame ?? 0),
       this.nativeHeader(this.nativePageTitle()),
     ), this.conversationUnderlay());
   }
@@ -1191,15 +1198,38 @@ export class HudPresenter {
       return Promise.resolve(false);
     }
     prompt.pendingPartial = text;
+    return this.drainReplyCard(prompt);
+  }
+
+  /** The working glyph moves on the wearer's row of a reply card until
+   * their first words replace it. */
+  private armReplyListening(prompt: PromptQuestionState): void {
+    if (prompt.listeningTimer !== undefined) clearTimeout(prompt.listeningTimer);
+    prompt.listeningTimer = setTimeout(() => {
+      prompt.listeningTimer = undefined;
+      if (!this.isPromptCurrent(prompt) || prompt.partial?.trim()) return;
+      prompt.listeningFrame = (prompt.listeningFrame ?? 0) + 1;
+      prompt.listeningDirty = true;
+      void this.drainReplyCard(prompt).finally(() => {
+        if (this.isPromptCurrent(prompt) && !prompt.partial?.trim()) this.armReplyListening(prompt);
+      });
+    }, REPLY_LISTENING_TICK_MS);
+  }
+
+  /** Paint the reply card's newest words or glyph frame: one paint at a
+   * time, the newest state wins. */
+  private drainReplyCard(prompt: PromptQuestionState): Promise<boolean> {
     if (prompt.partialPaint) return prompt.partialPaint;
     const run = async (): Promise<boolean> => {
       let painted = false;
       try {
         await prompt.paint?.catch(() => false);
-        while (prompt.pendingPartial !== undefined && this.isPromptCurrent(prompt)) {
-          const words = prompt.pendingPartial;
+        while ((prompt.pendingPartial !== undefined || prompt.listeningDirty) && this.isPromptCurrent(prompt)) {
+          const words = prompt.pendingPartial ?? prompt.partial;
+          const tick = prompt.listeningDirty === true;
           prompt.pendingPartial = undefined;
-          if (words === prompt.partial) continue;
+          prompt.listeningDirty = false;
+          if (words === prompt.partial && !(tick && !words?.trim())) continue;
           prompt.partial = words;
           const previous = prompt.layout;
           const next = this.replyCardLayout(prompt);
@@ -1258,6 +1288,9 @@ export class HudPresenter {
    * the loop ends. */
   private async settlePromptPaints(prompt: PromptQuestionState): Promise<void> {
     prompt.pendingPartial = undefined;
+    prompt.listeningDirty = false;
+    if (prompt.listeningTimer !== undefined) clearTimeout(prompt.listeningTimer);
+    prompt.listeningTimer = undefined;
     await prompt.paint?.catch(() => false);
     while (prompt.partialPaint) {
       const painting = prompt.partialPaint;
@@ -1587,12 +1620,15 @@ export class HudPresenter {
   private upgradeNativeText(
     containerID: number, containerName: string, content: string, previous = '',
   ): Promise<boolean> {
-    const replacement = content || ' ';
+    // Every page's gestures in the one template (GesturePolicy.formatHint).
+    const hint = containerID === ContainerId.Hint;
+    const replacement = (hint ? GesturePolicy.formatHint(content) : content) || ' ';
+    const before = hint ? Math.max(previous.length, GesturePolicy.formatHint(previous).length) : previous.length;
     return this.client.require().textContainerUpgrade(new TextContainerUpgrade({
       containerID,
       containerName,
       contentOffset: 0,
-      contentLength: Math.max(previous.length, replacement.length),
+      contentLength: Math.max(before, replacement.length),
       content: replacement,
     }));
   }
@@ -2048,8 +2084,11 @@ export class HudPresenter {
     const source = surface.items.join('\n');
     // The Mac's 62-column slices joined back into paragraphs, then set at
     // the page's own width: a slice per line left ragged short lines.
-    const pages = paginateAnswer(
-      readerParagraphs(surface.items).join('\n'), READER_TEXT_PAGE.lineCapacity, READER_TEXT_PAGE.textWidth,
+    // A Messages page stands each message's wrapped rows under its words,
+    // after the sender's name (the wearer's ruling, 2026-10-07).
+    const paginate = surface.options.title.startsWith('MESSAGES') ? paginateHanging : paginateMeasured;
+    const pages = paginate(
+      readerParagraphs(surface.items).join('\n'), READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity,
     );
     const page = this.nativeTextPage?.source === source
       ? Math.min(this.nativeTextPage.page, pages.length - 1)
@@ -3053,7 +3092,7 @@ export class HudPresenter {
       ? overlayConversation(this.layouts.assistantConversationLayout(replyDraftView([
         { role: 'assistant', text: `What do you want to say back to ${draft.recipient}?` },
         { role: 'user', text: draft.body },
-      ], MESSAGE_REPLY_CONFIRM_HINT), header), this.conversationUnderlay())
+      ]), header), this.conversationUnderlay())
       : this.layouts.confirmationLayout(current.prompt, header, current.purpose);
     const ok = this.visual
       ? await this.replaceNativePage(layout, 'confirmation-native')

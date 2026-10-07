@@ -59,15 +59,15 @@ function headTextFor(model: Pick<BrainstormHudModel, 'screen'>): string {
  * the wearer is and what the double-press does there. */
 function brainstormFooter(model: BrainstormHudModel, newer: number): string {
   if (newer > 0) {
-    return `▼ ${newer} newer · swipe down · double-click: ${model.state === 'running' ? 'cancel' : 'menu'}`;
+    return `▼ ${newer} newer · swipe down · 2x tap: ${model.state === 'running' ? 'cancel' : 'menu'}`;
   }
   switch (model.state) {
-    case 'running': return 'swipe: scroll · tap: terminal · double-click: cancel';
-    case 'topic_capture': return 'speak your question · double-click: cancel';
-    case 'ready': return 'tap: speak · double-click: menu';
+    case 'running': return 'swipe: scroll · tap: terminal · 2x tap: cancel';
+    case 'topic_capture': return 'speak your question · 2x tap: cancel';
+    case 'ready': return 'tap: speak · 2x tap: menu';
     // The phone page's Brainstorm tab resets the room and switches accounts.
-    case 'unavailable': return 'fix on phone: JOAT › Brainstorm · double-click: menu';
-    default: return 'swipe: scroll · double-click: menu';
+    case 'unavailable': return 'fix on phone: JOAT › Brainstorm · 2x tap: menu';
+    default: return 'swipe: scroll · 2x tap: menu';
   }
 }
 
@@ -252,9 +252,9 @@ export function nativeTerminalFooter(
   newer: number,
   promptVisible = false,
 ): string {
-  if (promptVisible) return 'Listening · speak your answer · double-click: cancel';
+  if (promptVisible) return 'Listening · speak your answer · 2x tap: cancel';
   if ((model.approvals ?? 0) > 0) {
-    return 'tap: approve · swipe: deny · double-click: back';
+    return 'tap: approve · swipe: deny · 2x tap: back';
   }
 
   let action: string | undefined;
@@ -264,12 +264,12 @@ export function nativeTerminalFooter(
     || model.state === 'unavailable') action = 'tap: retry';
   else if (model.state === 'ready') action = model.inputRequired ? 'tap: reply' : 'tap: speak';
   // "terminal cancel" still works spoken; the hint names the gesture.
-  else if (model.state === 'running') action = 'long-press: cancel';
+  else if (model.state === 'running') action = 'long tap: cancel';
 
   const parts = [
     ...(action ? [action] : []),
     ...scrollHint(older, newer),
-    'double-click: back',
+    '2x tap: back',
   ];
   return oneMeasuredLine(parts.join(' · '), firmwareLineWidth);
 }

@@ -189,7 +189,7 @@ describe('CapabilityMenu — the overview tab rail', () => {
       ['Rover lands · NPR · 5m', 'The rover touched down at dawn.'],
       'panel-news-7',
       false,
-      'down more · left x2: back',
+      'down more · 2x tap: back',
     );
     expect(opened).toBe(true);
     expect(menu.isPanelExpanded()).toBe(false); // inside the reader
@@ -317,7 +317,7 @@ describe('CapabilityMenu — the overview tab rail', () => {
     rail.accept(newsPush(2, ['[2m] A · BBC', '[3m] B · BBC', '[4m] C · BBC']));
     await menu.openPanelTab('news');
     menu.handleList({ eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: 2 } as never);
-    await menu.presentList('NEWS · ARTICLE', ['C', 'body'], 'panel-news-2', false, 'left x2: back');
+    await menu.presentList('NEWS · ARTICLE', ['C', 'body'], 'panel-news-2', false, '2x tap: back');
     // The poller pushes while the wearer reads: cached only, the reader stays.
     rail.accept(newsPush(3, ['[0m] Fresh · NPR', '[3m] A · BBC']));
     expect(await menu.presentPanelContent('news')).toBe(false);

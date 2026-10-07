@@ -41,27 +41,51 @@ export class GesturePolicy {
     }
   }
 
-  static backHint = 'double-click';
+  static backHint = '2x tap';
 
-  /** One gesture vocabulary on every page, whatever a Mac version or an
-   * older screen authored. Even names the ACTION, never the hardware —
-   * tap, double-tap, swipe, long-press ("The Grammar of a Ring"; support
-   * "How to Control") — and the wearer uses a ring or either temple.
-   * Authored forms still in the repo and their wearer-facing spelling:
-   *   left x2 / x2        → double-click   (the wearer's accepted spelling)
-   *   hold                → long-press
+  /** The template's gestures, in the order every page names them. */
+  static readonly GESTURE_ORDER = ['tap', 'swipe', 'long tap', '2x tap'] as const;
+
+  /**
+   * One gesture template on every page, whatever a Mac version or an older
+   * screen authored (the wearer's ruling, 2026-10-07: "'tap', 'long tap'
+   * and '2x tap' as a template so it can be the same on the pages that
+   * need it"). The words: tap, swipe, long tap, 2x tap — never
+   * double-click, long-press, hold or left x2. The order: tap · swipe ·
+   * long tap · 2x tap; anything that is not a gesture (a page count, a
+   * spoken command) keeps its place.
+   * Authored forms still in the repo or on an older Mac, and what they become:
+   *   double-click / double tap / left x2 / x2 → 2x tap
+   *   long-press / hold                         → long tap
+   *   Back: double-click to Planning            → 2x tap: Planning
    *   up previous · down more → swipe: page; down more → swipe: more;
    *   up previous → swipe: previous; down older → swipe: older
-   * The reader hint used to read "down more" while the list beside it read
-   * "hold: refresh" and Home read "long-press: mic" (2026-09-22). */
+   */
   static formatHint(hint: string): string {
-    return hint
-      .replace(/left\s*(?:x|×)\s*2/gi, GesturePolicy.backHint)
-      .replace(/(?<![\w-])(?:x|×)\s*2(?![\w])/gi, GesturePolicy.backHint)
-      .replace(/\bhold\b/gi, 'long-press')
-      .replace(/\bup previous\s*·\s*down more\b/gi, 'swipe: page')
-      .replace(/\bdown more\b/gi, 'swipe: more')
-      .replace(/\bup previous\b/gi, 'swipe: previous')
-      .replace(/\bdown older\b/gi, 'swipe: older');
+    const words = hint
+      .replace(/\bBack:\s*(?:double[- ]?(?:click|tap)|left\s*(?:x|×)\s*2)\s+to\s+([^·]+?)\s*(?=·|$)/giu, '2x tap: $1')
+      .replace(/\bBack:\s*(?:double[- ]?(?:click|tap)|left\s*(?:x|×)\s*2)/giu, '2x tap: back')
+      .replace(/left\s*(?:x|×)\s*2\s+(?=[A-Z])/gu, '2x tap: ')
+      .replace(/left\s*(?:x|×)\s*2/giu, '2x tap')
+      .replace(/(?<![\w-])(?:x|×)\s*2(?![\w])/giu, '2x tap')
+      .replace(/double[- ]?(?:click|tap)/giu, '2x tap')
+      .replace(/long[- ]?press/giu, 'long tap')
+      .replace(/\bhold\b/giu, 'long tap')
+      .replace(/\bup previous\s*·\s*down more\b/giu, 'swipe: page')
+      .replace(/\bdown more\b/giu, 'swipe: more')
+      .replace(/\bup previous\b/giu, 'swipe: previous')
+      .replace(/\bdown older\b/giu, 'swipe: older');
+    const segments = words.split(/\s*·\s*/u);
+    const rank = (segment: string): number => {
+      const gesture = /^(2x tap|long tap|tap|swipe)\b/iu.exec(segment)?.[1]?.toLowerCase();
+      return gesture ? GesturePolicy.GESTURE_ORDER.indexOf(gesture as typeof GesturePolicy.GESTURE_ORDER[number]) : -1;
+    };
+    // The gestures, in the template's order, in the places gestures held.
+    const gestures = segments.filter((segment) => rank(segment) >= 0)
+      .map((segment, index) => ({ segment, index }))
+      .sort((a, b) => rank(a.segment) - rank(b.segment) || a.index - b.index)
+      .map(({ segment }) => segment);
+    let next = 0;
+    return segments.map((segment) => (rank(segment) >= 0 ? gestures[next++]! : segment)).join(' · ');
   }
 }

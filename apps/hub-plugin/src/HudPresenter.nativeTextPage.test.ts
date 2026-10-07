@@ -2,14 +2,17 @@ import { describe, expect, it, vi } from 'vitest';
 import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder, PROMPT_QUESTION_HINT, READER_TEXT_PAGE } from './HudPageBuilder';
-import { HudPresenter, paginateAnswer, setNativeOverviewForTest } from './HudPresenter';
+import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
+import { paginateHanging } from './FirmwareText';
+import { getTextWidth } from '@evenrealities/pretext';
 import { ContainerId } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
 import { readerParagraphs } from './EvenFont';
 
-/** A reader's firmware pages: cut to the inset reader width. */
-const readerPages = (rows: readonly string[]) => paginateAnswer(
-  readerParagraphs(rows).join('\n'), READER_TEXT_PAGE.lineCapacity, READER_TEXT_PAGE.textWidth,
+/** A Messages reader's firmware pages: explicit lines at the inset reader
+ * width, each message's rows hanging under its first word. */
+const readerPages = (rows: readonly string[]) => paginateHanging(
+  readerParagraphs(rows).join('\n'), READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity,
 );
 
 // These tests pin the IMAGE overview (VITE_NATIVE_OVERVIEW=0). The text
@@ -71,7 +74,7 @@ function text(page: RebuildPageContainer | undefined, name: string): string | un
 const longMessage = Array.from({ length: 10 }, (_, index) => (
   `Row ${index + 1} of a long message that the Mac cut into sixty-two column rows.`
 ));
-const READER = { title: 'MESSAGES · MESSAGE', hint: 'swipe: more · say reply · double-click: back', selectable: false, nativeTextPage: true };
+const READER = { title: 'MESSAGES · MESSAGE', hint: 'swipe: more · say reply · 2x tap: back', selectable: false, nativeTextPage: true };
 
 describe('HudPresenter native text page for a Mac-paged reader', () => {
   it('shows a Messages thread as firmware text, the Mac\'s slices joined back into sentences', async () => {
@@ -82,19 +85,25 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
       'want to walk Marcus through the onboarding flow first.\n',
       'You: Exporting them now.\n',
     ], {
-      title: 'MESSAGES · CONVERSATION', hint: 'tap: reply · left x2: back', selectable: true, nativeTextPage: true,
+      title: 'MESSAGES · CONVERSATION', hint: 'tap: reply · 2x tap: back', selectable: true, nativeTextPage: true,
     })).toBe(true);
     expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(page?.imageObject?.some((image) => image.containerID === ContainerId.Image) ?? false).toBe(false);
     const body = text(page, 'main') ?? '';
-    // One sentence, not a 62-column slice per line.
-    expect(body).toContain('review? I want to walk');
-    expect(body.split('\n')).toEqual([
-      '1/1 · Adele',
-      'Adele: Can you send the latest mockups before the review? I want to walk Marcus through the onboarding flow first.',
-      'You: Exporting them now.',
-    ]);
+    const lines = body.split('\n');
+    // One sentence, not a 62-column slice per line: set at the page's width
+    // with the sender's name in front, its wrapped rows standing under the
+    // first row's words.
+    expect(lines[0]).toBe('1/1 · Adele');
+    expect(lines[1]).toMatch(/^Adele: Can you send the latest mockups/u);
+    expect(lines[2]).toMatch(/^ +\S/u);
+    expect(lines[lines.length - 1]).toBe('You: Exporting them now.');
+    const message = lines.slice(1, -1).map((line) => line.trim()).join(' ');
+    expect(message).toBe('Adele: Can you send the latest mockups before the review? I want to walk Marcus through the onboarding flow first.');
+    // The wrapped row starts where the words after "Adele: " start.
+    const lead = getTextWidth(/^ */u.exec(lines[2]!)![0]);
+    expect(Math.abs(lead - getTextWidth('Adele: '))).toBeLessThanOrEqual(getTextWidth(' ') / 2);
   });
 
   it('shows the reader as one text page with the live status and no image tiles', async () => {
@@ -133,7 +142,7 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     await vi.waitFor(() => expect(r.upgrades.some((u) => u.containerName === 'main' && u.content === pages[1])).toBe(true));
     // From the second local page the swipe goes both ways.
     await vi.waitFor(() => expect(r.upgrades.some((u) => (
-      u.containerName === 'hint' && u.content === `2/${pages.length} · swipe: page · say reply · double-click: back`
+      u.containerName === 'hint' && u.content === `2/${pages.length} · swipe: page · say reply · 2x tap: back`
     ))).toBe(true));
     expect(r.rebuilds).toHaveLength(rebuildsAfterOpen);
 
@@ -150,7 +159,7 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(text(page, 'main')).toBe(pages[pages.length - 1]);
     // Earlier local pages and the Mac's next page: the swipe goes both ways.
-    expect(text(page, 'hint')).toBe(`${pages.length}/${pages.length} · swipe: page · say reply · double-click: back`);
+    expect(text(page, 'hint')).toBe(`${pages.length}/${pages.length} · swipe: page · say reply · 2x tap: back`);
     expect(r.hud.scrollTextPage('down')).toBe(false);
     expect(r.hud.scrollTextPage('up')).toBe(true);
   });
@@ -161,18 +170,18 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     expect(pages.length).toBeGreaterThan(1);
     // The Mac's last page of a review: it offers the tap and a previous page.
     const REVIEW = {
-      title: 'MESSAGES · REVIEW', hint: 'up previous · tap: confirm · left x2: back',
+      title: 'MESSAGES · REVIEW', hint: 'up previous · tap: confirm · 2x tap: back',
       selectable: true, nativeTextPage: true, reviewTapOnLastPage: true,
     };
     expect(await r.hud.showList(longMessage, REVIEW)).toBe(true);
     expect(text(r.rebuilds[r.rebuilds.length - 1], 'hint'))
-      .toBe(`1/${pages.length} · swipe: page · double-click: back`);
+      .toBe(`1/${pages.length} · swipe: page · 2x tap: back`);
     expect(r.hud.isTextPageAtEnd()).toBe(false);
 
     for (let page = 1; page < pages.length; page += 1) expect(r.hud.scrollTextPage('down')).toBe(true);
     expect(r.hud.isTextPageAtEnd()).toBe(true);
     await vi.waitFor(() => expect(r.upgrades.some((u) => u.containerName === 'hint'
-      && u.content === `${pages.length}/${pages.length} · swipe: previous · tap: confirm · double-click: back`)).toBe(true));
+      && u.content === `${pages.length}/${pages.length} · tap: confirm · swipe: previous · 2x tap: back`)).toBe(true));
   });
 
   it('reads every swipe the Mac offers, and forgets an earlier page once another is on the glass', async () => {
@@ -180,10 +189,10 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     const pages = readerPages(longMessage);
     // The Mac's promises need not sit side by side to count.
     expect(await r.hud.showList(longMessage, {
-      ...READER, title: 'BRAINSTORM · SAVED', hint: 'up previous · tap: continue · down more · left x2: back',
+      ...READER, title: 'BRAINSTORM · SAVED', hint: 'up previous · tap: continue · down more · 2x tap: back',
     })).toBe(true);
     expect(text(r.rebuilds[r.rebuilds.length - 1], 'hint'))
-      .toBe(`1/${pages.length} · swipe: page · tap: continue · double-click: back`);
+      .toBe(`1/${pages.length} · tap: continue · swipe: page · 2x tap: back`);
     expect(r.hud.isTextPageAtEnd()).toBe(false);
     // A firmware list replaces the reader: its page state no longer counts.
     expect(await r.hud.showList(['Latest messages', 'Dele · Hi'], {
@@ -195,9 +204,9 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
   it('keeps the Mac\'s own footer on a reader that fits one local page', async () => {
     const r = rig();
     expect(await r.hud.showList(['1/1 · To work', 'open a PR'], {
-      ...READER, title: 'AGENT TERMINAL · CHECK', hint: 'tap: send · left x2: back', reviewTapOnLastPage: true,
+      ...READER, title: 'AGENT TERMINAL · CHECK', hint: 'tap: send · 2x tap: back', reviewTapOnLastPage: true,
     })).toBe(true);
-    expect(text(r.rebuilds[r.rebuilds.length - 1], 'hint')).toBe('tap: send · double-click: back');
+    expect(text(r.rebuilds[r.rebuilds.length - 1], 'hint')).toBe('tap: send · 2x tap: back');
     expect(r.hud.isTextPageAtEnd()).toBe(true);
   });
 

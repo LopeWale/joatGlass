@@ -220,7 +220,7 @@ async function openThread(r: ReturnType<typeof rig>) {
 
 function showThread(
   menu: CapabilityMenu, requestId: string, index: number, count = 2,
-  hint = 'down more · tap: reply · left x2: back', selectable = true,
+  hint = 'down more · tap: reply · 2x tap: back', selectable = true,
   pageControls?: { newerIndex?: number; olderIndex?: number },
 ) {
   return menu.presentList(
@@ -250,7 +250,7 @@ describe('CapabilityMenu', () => {
     await menu.openFromContextualMenu(0); // Messages, via the firmware menu
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent messages…']);
-    expect(listOptions[0]).toEqual({ title: 'MESSAGES', hint: 'left x2: back', nativeFirmwareList: true });
+    expect(listOptions[0]).toEqual({ title: 'MESSAGES', hint: '2x tap: back', nativeFirmwareList: true });
     // Ownership is announced BEFORE the loading frame paints: the Mac must
     // know Home no longer owns the glass before any response can arrive.
     expect(operations).toEqual(['surface-feature', 'list']);
@@ -280,7 +280,7 @@ describe('CapabilityMenu', () => {
         'Return to Overview, then open Planning to retry.',
       ]);
       expect(listOptions[1]).toMatchObject({
-        title: 'PLANNING · RETRY', hint: 'left x2: back',
+        title: 'PLANNING · RETRY', hint: '2x tap: back',
       });
 
       expect(await menu.presentList(
@@ -303,7 +303,7 @@ describe('CapabilityMenu', () => {
       await vi.advanceTimersByTimeAsync(12_000);
       expect(lists[1]).toEqual(['Mac did not answer. Tap to retry Messages.']);
       expect(listOptions[1]).toMatchObject({
-        title: 'MESSAGES · RETRY', hint: 'tap: retry · left x2: back', selectable: true,
+        title: 'MESSAGES · RETRY', hint: 'tap: retry · 2x tap: back', selectable: true,
       });
 
       expect(menu.handleClick()).toBe(true);
@@ -333,10 +333,10 @@ describe('CapabilityMenu', () => {
       ],
       firstRequestId,
       false,
-      'left x2: back',
+      '2x tap: back',
     )).toBe(true);
     expect(listOptions[listOptions.length - 1]).toMatchObject({
-      selectable: true, hint: 'tap: retry · left x2: back',
+      selectable: true, hint: 'tap: retry · 2x tap: back',
     });
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
 
@@ -361,7 +361,7 @@ describe('CapabilityMenu', () => {
         ['Latest messages', 'Dele · Opening words', 'Say reply'],
         requestId,
         true,
-        'tap read · say reply · left x2: back',
+        'tap read · say reply · 2x tap: back',
       )).toBe(true);
       expect(menu.handleList(click(1))).toBe(true);
       return requestId;
@@ -388,7 +388,7 @@ describe('CapabilityMenu', () => {
       expect(lists[lists.length - 1]).toEqual(['Mac did not answer. Tap to retry Messages.']);
       expect(listOptions[listOptions.length - 1]).toMatchObject({
         title: 'MESSAGES · RETRY',
-        hint: 'tap: retry · left x2: back',
+        hint: 'tap: retry · 2x tap: back',
         selectable: true,
       });
 
@@ -462,7 +462,7 @@ describe('CapabilityMenu', () => {
         'Return to Overview, then open QuickNotes to retry.',
       ]);
       expect(listOptions[1]).toMatchObject({
-        title: 'QUICKNOTES · RETRY', hint: 'left x2: back',
+        title: 'QUICKNOTES · RETRY', hint: '2x tap: back',
       });
     } finally {
       vi.useRealTimers();
@@ -488,7 +488,7 @@ describe('CapabilityMenu', () => {
       });
       await vi.advanceTimersByTimeAsync(12_000);
       expect(listOptions[listOptions.length - 1]).toMatchObject({
-        title: 'PLANNING · RETRY', hint: 'left x2: back',
+        title: 'PLANNING · RETRY', hint: '2x tap: back',
       });
 
       // A late matching week frame still lands, and — because the timeout
@@ -604,7 +604,7 @@ describe('CapabilityMenu', () => {
     const requestId = latestRequestId(sent);
     const page = [...rows(20), '▼ Older notes'];
     expect(await menu.presentList(
-      'QUICKNOTES', page, requestId, true, 'down older · tap: open · left x2: back',
+      'QUICKNOTES', page, requestId, true, 'down older · tap: open · 2x tap: back',
       undefined, undefined, undefined, undefined, { index: 0, count: 2 }, undefined, undefined, { olderIndex: 20 },
     )).toBe(true);
     expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'QUICKNOTES', nativeFirmwareList: true });
@@ -617,7 +617,7 @@ describe('CapabilityMenu', () => {
       event: { containerName: 'cappage', selectedName: 'QUICKNOTES · LIST', selectedIndex: 0, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId },
     });
     expect(await menu.presentList(
-      'QUICKNOTES', ['Row 21', 'Row 22', '▲ Newer notes'], requestId, true, 'up newer · tap: open · left x2: back',
+      'QUICKNOTES', ['Row 21', 'Row 22', '▲ Newer notes'], requestId, true, 'up newer · tap: open · 2x tap: back',
       undefined, undefined, undefined, undefined, { index: 1, count: 2 }, undefined, undefined, { newerIndex: 2 },
     )).toBe(true);
     sent.length = 0;
@@ -626,7 +626,7 @@ describe('CapabilityMenu', () => {
       event: { containerName: 'cappage', selectedName: 'QUICKNOTES · LIST', selectedIndex: 1, eventType: OsEventTypeList.SCROLL_TOP_EVENT },
     });
     expect(await menu.presentList(
-      'QUICKNOTES', page, requestId, true, 'down older · tap: open · left x2: back',
+      'QUICKNOTES', page, requestId, true, 'down older · tap: open · 2x tap: back',
       undefined, undefined, undefined, undefined, { index: 0, count: 2 }, undefined, undefined, { olderIndex: 20 },
     )).toBe(true);
 
@@ -635,7 +635,7 @@ describe('CapabilityMenu', () => {
     expect(menu.handleList(click(1))).toBe(true);
     expect(sent[sent.length - 1]).toMatchObject({ event: { containerName: 'capdata', selectedName: 'QUICKNOTES', selectedIndex: 1 } });
     expect(await menu.presentList(
-      'QUICKNOTES · DETAIL', ['1/2 · Exact text', 'First page'], requestId, false, 'down more · left x2: back',
+      'QUICKNOTES · DETAIL', ['1/2 · Exact text', 'First page'], requestId, false, 'down more · 2x tap: back',
     )).toBe(true);
     expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'QUICKNOTES · DETAIL', nativeTextPage: true });
   });
@@ -653,7 +653,7 @@ describe('CapabilityMenu', () => {
       '‹ SEP 28', 'OCT 12 ›', '○ VIEW · MONTH', '● VIEW · WEEK', '○ VIEW · DAY',
     ];
     expect(await menu.presentList(
-      'PLANNING · PLAN · OCT 5–11', week, requestId, true, 'tap: open · left x2: back',
+      'PLANNING · PLAN · OCT 5–11', week, requestId, true, 'tap: open · 2x tap: back',
       undefined, 'Planning · OCT 5–11', 7, undefined, undefined, undefined, { canGoBack: true, selectedIndex: 0 },
     )).toBe(true);
     expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'PLANNING · PLAN · OCT 5–11', nativeFirmwareList: true });
@@ -666,7 +666,7 @@ describe('CapabilityMenu', () => {
     });
     const day = ['[09:00] Standup', '[16:30] □ Call the dentist', '‹ TUE OCT 6', 'THU OCT 8 ›', '○ VIEW · MONTH', '○ VIEW · WEEK', '● VIEW · DAY'];
     expect(await menu.presentList(
-      'PLANNING · PLAN · WED OCT 7', day, requestId, true, 'tap: open · left x2: back',
+      'PLANNING · PLAN · WED OCT 7', day, requestId, true, 'tap: open · 2x tap: back',
       undefined, 'Planning · WED OCT 7', 2,
       [{ time: 'Today, 09:00', kind: 'event', title: 'Standup' }, { time: 'Today, 16:30', kind: 'reminder', title: 'Call the dentist' }, null, null, null, null, null],
       undefined, undefined, { canGoBack: true, selectedIndex: 2 },
@@ -687,7 +687,7 @@ describe('CapabilityMenu', () => {
     await vi.waitFor(() => expect(latestRequestId(sent)).not.toBe(''));
     expect(await menu.presentList(
       'NOTIFICATIONS', ['[2m] Dele · Call me', 'Clear JOAT notifications'], latestRequestId(sent), true,
-      'tap: read · left x2: back', undefined, undefined, 1,
+      'tap: read · 2x tap: back', undefined, undefined, 1,
     )).toBe(true);
     expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'NOTIFICATIONS', nativeFirmwareList: true });
     expect(await menu.presentList(
@@ -704,7 +704,7 @@ describe('CapabilityMenu', () => {
     // A read-only entry answers a row tap and is a firmware text page.
     expect(menu.handleList(click(0))).toBe(true);
     expect(await menu.presentList(
-      'PLANNING · EVENT', ['Design review', '14:00 · Event'], planning, false, 'left x2 Planning',
+      'PLANNING · EVENT', ['Design review', '14:00 · Event'], planning, false, '2x tap: Planning',
     )).toBe(true);
     expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'PLANNING · EVENT', nativeTextPage: true });
   });
@@ -757,7 +757,7 @@ describe('CapabilityMenu', () => {
     const requestId = 'voice-check-1';
     expect(await menu.presentList(
       'AGENT TERMINAL · CHECK', ['1/2 · To work', 'fix the login test and open a PR'], requestId, false,
-      'down more · left x2: back', undefined, undefined, undefined, undefined, undefined,
+      'down more · 2x tap: back', undefined, undefined, undefined, undefined, undefined,
       { id: 'review-abc', index: 0, count: 2 },
     )).toBe(true);
     expect(listOptions[listOptions.length - 1]).toMatchObject({
@@ -788,21 +788,21 @@ describe('CapabilityMenu', () => {
       'BRAINSTORM · SAVED', [`${index + 1}/3 · session`, `Turn ${index + 1}`], requestId, true, hint,
       undefined, undefined, undefined, undefined, undefined, { id: 'brainstorm', index, count: 3 },
     );
-    expect(await show(0, 'down more · tap: continue · left x2: back')).toBe(true);
+    expect(await show(0, 'down more · tap: continue · 2x tap: back')).toBe(true);
     sent.length = 0;
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
     expect(sent[sent.length - 1]?.event).toMatchObject({
       containerName: 'cappage', selectedName: 'BRAINSTORM', selectedIndex: 0, traceId: 'brainstorm', requestId,
     });
 
-    expect(await show(1, 'up previous · down more · tap: continue · left x2: back')).toBe(true);
+    expect(await show(1, 'up previous · down more · tap: continue · 2x tap: back')).toBe(true);
     expect(listOptions[listOptions.length - 1]).not.toHaveProperty('nativeTextPageFromEnd');
     expect(menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);
     expect(sent[sent.length - 1]?.event).toMatchObject({
       containerName: 'cappage', selectedName: 'BRAINSTORM', selectedIndex: 1,
       eventType: OsEventTypeList.SCROLL_TOP_EVENT,
     });
-    expect(await show(0, 'down more · tap: continue · left x2: back')).toBe(true);
+    expect(await show(0, 'down more · tap: continue · 2x tap: back')).toBe(true);
     expect(listOptions[listOptions.length - 1]).toMatchObject({ nativeTextPageFromEnd: true });
   });
 
@@ -822,7 +822,7 @@ describe('CapabilityMenu', () => {
     });
     expect(await menu.presentList(
       title, ['2/2 · To work', 'and ask Wendy to review it tomorrow'], requestId, true,
-      'up previous · tap: confirm · left x2: back', undefined, undefined, undefined, undefined, undefined,
+      'up previous · tap: confirm · 2x tap: back', undefined, undefined, undefined, undefined, undefined,
       { id: 'review-def', index: 1, count: 2 },
     )).toBe(true);
     sent.length = 0;
@@ -841,7 +841,7 @@ describe('CapabilityMenu', () => {
     const requestId = 'voice-check-3';
     expect(await menu.presentList(
       'AGENT TERMINAL · CHECK', ['1/2 · To work', 'fix the login test'], requestId, false,
-      'down more · left x2: back', undefined, undefined, undefined, undefined, undefined,
+      'down more · 2x tap: back', undefined, undefined, undefined, undefined, undefined,
       { id: 'review-ghi', index: 0, count: 2 },
     )).toBe(true);
     sent.length = 0;
@@ -857,7 +857,7 @@ describe('CapabilityMenu', () => {
     const { menu, listOptions, sent } = r;
     const { requestId } = await openThread(r);
     expect(await showThread(
-      menu, requestId, 0, 2, 'down more · tap: reply · left x2: back', true, { olderIndex: 2 },
+      menu, requestId, 0, 2, 'down more · tap: reply · 2x tap: back', true, { olderIndex: 2 },
     )).toBe(true);
     expect(listOptions[listOptions.length - 1]).toMatchObject({ title: THREAD_TITLE, nativeTextPage: true });
     expect(listOptions[listOptions.length - 1]).not.toHaveProperty('nativeFirmwareList');
@@ -949,7 +949,7 @@ describe('CapabilityMenu', () => {
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList(
-      'PLANNING · PLAN · WEEK', rows(4), requestId, true, 'tap: open · double-click: back',
+      'PLANNING · PLAN · WEEK', rows(4), requestId, true, 'tap: open · 2x tap: back',
       undefined, undefined, undefined, undefined, undefined, undefined,
       { canGoBack: true, selectedIndex: 2 },
     )).toBe(true);
@@ -1086,7 +1086,7 @@ describe('CapabilityMenu', () => {
     const selection = sent[sent.length - 1];
     if (!selection) throw new Error('No note selection was emitted');
     const traceId = (selection.event as { traceId: string }).traceId;
-    await menu.presentList('QUICKNOTES · DETAIL', ['1/2 · Exact text', 'First page\n'], requestId, false, 'down more · left x2: back');
+    await menu.presentList('QUICKNOTES · DETAIL', ['1/2 · Exact text', 'First page\n'], requestId, false, 'down more · 2x tap: back');
     const swipe = (event: number) => input === 'text'
       ? menu.handleScroll(event) : menu.handleList(scroll(event, 0));
     const before = sent.length;
@@ -1098,7 +1098,7 @@ describe('CapabilityMenu', () => {
       eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId, traceId,
     }});
     expect(await menu.presentList('QUICKNOTES · DETAIL', ['2/2 · Exact text', 'Wrong request'], 'old-request', false)).toBe(false);
-    await menu.presentList('QUICKNOTES · DETAIL', ['2/2 · Exact text', 'Final page'], requestId, false, 'up previous · left x2: back');
+    await menu.presentList('QUICKNOTES · DETAIL', ['2/2 · Exact text', 'Final page'], requestId, false, 'up previous · 2x tap: back');
     const lastPage = sent.length;
     swipe(OsEventTypeList.SCROLL_BOTTOM_EVENT);
     expect(sent).toHaveLength(lastPage);
@@ -1117,7 +1117,7 @@ describe('CapabilityMenu', () => {
     expect(sent[sent.length - 1]).toMatchObject({event: {
       containerName: 'capdata', selectedName: 'QUICKNOTES', selectedIndex: 0, requestId,
     }});
-    await menu.presentList('QUICKNOTES · NOTE', ['1/1 · Recording', 'Full transcript'], requestId, false, 'left x2: back');
+    await menu.presentList('QUICKNOTES · NOTE', ['1/1 · Recording', 'Full transcript'], requestId, false, '2x tap: back');
     const complete = sent.length;
     swipe(OsEventTypeList.SCROLL_BOTTOM_EVENT);
     expect(sent).toHaveLength(complete);
@@ -1136,12 +1136,12 @@ describe('CapabilityMenu', () => {
     expect(menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);
     expect(sent).toEqual([]);
     // The last page: nothing older, whatever the footer says.
-    expect(await showThread(menu, requestId, 1, 2, 'up previous · down more · tap: reply · left x2: back')).toBe(true);
+    expect(await showThread(menu, requestId, 1, 2, 'up previous · down more · tap: reply · 2x tap: back')).toBe(true);
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
     expect(sent).toEqual([]);
     // A thread frame without a reader is not paged from the old footer wording.
     expect(await menu.presentList(
-      THREAD_TITLE, threadRows(0), requestId, true, 'down older · tap: reply · left x2: back',
+      THREAD_TITLE, threadRows(0), requestId, true, 'down older · tap: reply · 2x tap: back',
     )).toBe(true);
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
     expect(menu.handleList(scroll(OsEventTypeList.SCROLL_BOTTOM_EVENT, 2))).toBe(true);
@@ -1153,7 +1153,7 @@ describe('CapabilityMenu', () => {
     const r = rig();
     const { menu, listOptions, sent } = r;
     const { requestId } = await openThread(r);
-    expect(await showThread(menu, requestId, 1, 3, 'up previous · down more · tap: reply · left x2: back')).toBe(true);
+    expect(await showThread(menu, requestId, 1, 3, 'up previous · down more · tap: reply · 2x tap: back')).toBe(true);
     expect(listOptions[listOptions.length - 1]).not.toHaveProperty('nativeTextPageFromEnd');
     sent.length = 0;
     expect(menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);
@@ -1248,7 +1248,7 @@ describe('CapabilityMenu', () => {
       title: outcome.title,
       primary: 'Status',
       secondary: outcome.secondary,
-      hint: 'left x2 Planning',
+      hint: '2x tap: Planning',
       planningAnchorUnixMs: 1_788_274_200_000,
     })).toBe(true);
     expect(operations).toEqual(['productivity']);
@@ -1287,7 +1287,7 @@ describe('CapabilityMenu', () => {
       title: outcome.title,
       primary: 'Status',
       secondary: outcome.secondary,
-      hint: 'left x2 Planning',
+      hint: '2x tap: Planning',
       planningAnchorUnixMs: 1_788_274_200_000,
     })).toBe(true);
     expect(operations).toEqual(['productivity', 'surface-feature']);
@@ -1315,7 +1315,7 @@ describe('CapabilityMenu', () => {
   it('does not report a failed or superseded due paint as visible', async () => {
     const due: ProductivityHudModel = {
       domain: 'reminders', phase: 'due', title: 'Private reminder',
-      primary: 'Due now', secondary: 'Still incomplete', hint: 'left x2 Planning',
+      primary: 'Due now', secondary: 'Still incomplete', hint: '2x tap: Planning',
       reminderDueId: '67ec97c5-a0fd-48ec-89cb-1b756ddaf87a',
       reminderDueAttemptId: 'a76b12f1-45e4-41fd-aed8-086f6b6b1954',
       reminderDueGeneration: 7,
@@ -1357,7 +1357,7 @@ describe('CapabilityMenu', () => {
     const { menu, sent } = rig(true, true, true);
     expect(await menu.presentProductivity({
       domain: 'reminders', phase: 'failed', title: 'Buy filters',
-      primary: 'Not saved', secondary: 'No reminders item was changed.', hint: 'left x2 Planning',
+      primary: 'Not saved', secondary: 'No reminders item was changed.', hint: '2x tap: Planning',
     })).toBe(true);
     const before = sent.length;
     expect(menu.handleClick()).toBe(true);
@@ -1368,7 +1368,7 @@ describe('CapabilityMenu', () => {
     const { menu, deferredProductivityVisibleCallbacks } = rig(true, true, false);
     const due: ProductivityHudModel = {
       domain: 'reminders', phase: 'due', title: 'Private reminder',
-      primary: 'Due now', secondary: 'Still incomplete', hint: 'left x2 Planning',
+      primary: 'Due now', secondary: 'Still incomplete', hint: '2x tap: Planning',
       reminderDueId: '67ec97c5-a0fd-48ec-89cb-1b756ddaf87a',
       reminderDueAttemptId: 'a76b12f1-45e4-41fd-aed8-086f6b6b1954',
       reminderDueGeneration: 7,
@@ -1438,7 +1438,7 @@ describe('CapabilityMenu', () => {
         title: 'Native-backed item',
         primary: 'Outcome recorded',
         secondary: 'Read-back complete',
-        hint: 'left x2 Planning',
+        hint: '2x tap: Planning',
         planningAnchorUnixMs,
       });
 
@@ -1549,7 +1549,7 @@ describe('CapabilityMenu', () => {
         title: 'Buy filters',
         primary: 'Saved and verified',
         secondary: 'Reminders read-back matched',
-        hint: 'Monitoring next · left x2 Planning',
+        hint: 'Monitoring next · 2x tap: Planning',
         planningAnchorUnixMs,
         monitoringArmed: true,
       });
@@ -1581,7 +1581,7 @@ describe('CapabilityMenu', () => {
         title: 'Buy filters',
         primary: 'Monitoring armed',
         secondary: 'Native alarm is scheduled. JOAT will check at due time.',
-        hint: 'left x2: back',
+        hint: '2x tap: back',
         planningAnchorUnixMs,
       });
 
@@ -1605,7 +1605,7 @@ describe('CapabilityMenu', () => {
         title: 'Buy filters',
         primary: 'Saved and verified',
         secondary: 'Native alarm set · JOAT monitoring armed.',
-        hint: 'Monitoring next · left x2 Planning',
+        hint: 'Monitoring next · 2x tap: Planning',
         planningAnchorUnixMs: 1_788_274_200_000,
         monitoringArmed: true,
       });
@@ -1644,7 +1644,7 @@ describe('CapabilityMenu', () => {
         title: 'Buy filters',
         primary: 'Due now',
         secondary: 'This reminder is still incomplete.',
-        hint: 'left x2 Planning',
+        hint: '2x tap: Planning',
         planningAnchorUnixMs: 1_788_274_200_000,
       });
 
@@ -1666,7 +1666,7 @@ describe('CapabilityMenu', () => {
       title: 'Buy filters',
       primary: 'Due now',
       secondary: 'This reminder is still incomplete.',
-      hint: 'left x2 Planning',
+      hint: '2x tap: Planning',
       planningAnchorUnixMs: Number.NaN,
     });
 
@@ -1907,7 +1907,7 @@ describe('CapabilityMenu', () => {
     ]);
     expect(listOptions[0]).toEqual({
       title: 'PHONE CONTROLS',
-      hint: 'left x2: back',
+      hint: '2x tap: back',
       selectable: false,
       nativeFirmwareList: true,
     });
@@ -2175,7 +2175,7 @@ describe('queued conversational Terminal prelude ownership', () => {
   function queuedPrelude(menu: CapabilityMenu, requestId: string): () => Promise<boolean> {
     const current = menu.captureTerminalPreludeGuard();
     return async () => current()
-      ? menu.presentList('AGENT TERMINAL', ['Opening hermes…'], requestId, false, 'left x2: back')
+      ? menu.presentList('AGENT TERMINAL', ['Opening hermes…'], requestId, false, '2x tap: back')
       : false;
   }
 
