@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-07 — Build JOAT 0.1.114
+
+- Packed from `d629292` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.114 above the last recorded build (0.1.113); app.json, package.json and package-lock.json all 0.1.114. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1142 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 170631 bytes, SHA-256 `5509a101283586cce01bba9d51ba8edbc33faed1156d6e8d84a04e29606db3b6`. Adds to 0.1.113 solid image words at 66% and readers as firmware text. Plugin-only: no brain restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-07 — Image words at 66% with every pixel fully lit; readers are firmware text
 
 The wearer asked for the image fonts at 66%, reported the faded letters on every image surface, and ruled that more of the image text should be firmware text.
