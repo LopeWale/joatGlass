@@ -179,7 +179,7 @@ from .services.task_monitor import (
 )
 from .services.session import (
     BrainstormStartResult,
-    DebateSession, Session, SessionManager, seat_participants,
+    DebateSession, Session, SessionManager, notification_stack, seat_participants,
 )
 from .services.shutdown import (
     install_shutdown_handlers,
@@ -2055,6 +2055,7 @@ async def main() -> None:
             notifications_changed.clear()
             try:
                 await ambient.publish()
+                await transport.send(notification_stack(card_log.active()))
                 await sessions.publish_home_notifications()
             except asyncio.CancelledError:
                 raise

@@ -7,7 +7,7 @@ import atlasData from './assets/even-font.json';
  *
  * The firmware gives a plugin one font at one size (a 27 px line: seven
  * lines of body on a page), and no SDK through 0.0.16 offers a size. The
- * wearer asked for that font smaller (55%) across the whole 576x288, the way the
+ * wearer asked for that font smaller (now 66%, EVEN_FONT_SCALE) across the whole 576x288, the way the
  * Planning month already fills it. The glyphs were cut from the official
  * simulator (scripts/build_even_font.py) at exactly the positions pretext
  * gives them, so a line set here measures as `getTextWidth × scale`: the
@@ -22,9 +22,11 @@ import atlasData from './assets/even-font.json';
  *     the part that must stay whole (the page count).
  */
 
-/** The wearer's choice of the four scales shown (2026-10-06): first 66%,
- * then the smallest row, 55% ("the fonts are still too big"). */
-export const EVEN_FONT_SCALE = 0.55;
+/** The wearer's choice of scale: 66% (2026-10-07), after 55% proved too
+ * thin to read. Even's strokes are 1 px wide (90% of the atlas's
+ * horizontal runs), so any scale below 1 leaves a stroke covering part of
+ * a pixel; `crispGlyph` makes every drawn pixel fully on or off. */
+export const EVEN_FONT_SCALE = 0.66;
 /** The firmware's line, which the atlas cells keep. */
 export const EVEN_FONT_LINE = 27;
 const ELLIPSIS = '…';
@@ -157,8 +159,12 @@ export function readerParagraphs(rows: readonly string[]): string[] {
   for (const row of rows) {
     open += row;
     // A row continues when it was wrapped at a space, or cut mid-token at
-    // the Mac's full 62 columns (a long link).
-    const continues = / $/u.test(row) || readerColumns(row) >= READER_ROW_COLUMNS - 2;
+    // the Mac's full 62 columns (a long link). A row wider than 62 columns
+    // is no Mac slice: it stands alone, or its last word would be glued to
+    // the next row's first ("firmwaretext", seen in the panels probe).
+    const columns = readerColumns(row);
+    const continues = / $/u.test(row)
+      || (columns >= READER_ROW_COLUMNS - 2 && columns <= READER_ROW_COLUMNS);
     if (/[\r\n]$/u.test(row) || !continues) {
       paragraphs.push(open.replace(/[\r\n]+$/u, ''));
       open = '';
@@ -179,8 +185,8 @@ export const EVEN_READER = {
   width: 540,
   bodyTop: 30,
   bodyBottom: 258,
-  /** The 55% glyph line is 15 px; 3 px of leading keeps lines apart. */
-  pitch: 18,
+  /** The 66% glyph line is 18 px; 3 px of leading keeps lines apart. */
+  pitch: 21,
   /** Between messages, so they never run together. */
   gap: 5,
   hintTop: 262,
@@ -265,8 +271,112 @@ export function loadEvenFont(): Promise<HTMLImageElement | undefined> {
 }
 
 /**
+ * A pixel the scaled glyph covers by at least this share is drawn fully
+ * lit, any other is left dark. Measured on the atlas at 66%: shares from
+ * 0.3 to 0.5 light exactly the same pixels, so 0.3 is a stable cut that
+ * keeps every stroke.
+ */
+export const GLYPH_COVERAGE_CUT = 0.3;
+
+const crispGlyphs = new Map<string, HTMLCanvasElement | null>();
+let atlasCoverage: { width: number; alpha: Uint8ClampedArray } | null | undefined;
+
+/** The atlas's alpha channel, read once. */
+function atlasAlpha(atlas: HTMLImageElement): { width: number; alpha: Uint8ClampedArray } | null {
+  if (atlasCoverage !== undefined) return atlasCoverage;
+  atlasCoverage = null;
+  if (typeof document === 'undefined') return atlasCoverage;
+  const canvas = document.createElement('canvas');
+  canvas.width = atlas.naturalWidth || atlas.width;
+  canvas.height = atlas.naturalHeight || atlas.height;
+  const context = canvas.getContext('2d');
+  if (!context || canvas.width === 0) return atlasCoverage;
+  context.drawImage(atlas, 0, 0);
+  const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  const alpha = new Uint8ClampedArray(canvas.width * canvas.height);
+  for (let index = 0; index < alpha.length; index += 1) alpha[index] = data[index * 4 + 3] ?? 0;
+  atlasCoverage = { width: canvas.width, alpha };
+  return atlasCoverage;
+}
+
+/**
+ * One glyph scaled from the atlas, every pixel fully lit or dark. Each
+ * pixel's coverage is the exact area average of the atlas pixels under it
+ * (a box filter), then cut at GLYPH_COVERAGE_CUT. Scaling with canvas
+ * smoothing instead spread the atlas's 1 px strokes over one or two pixels
+ * at partial brightness (only 21% of the 55% thread's lit pixels were at
+ * full brightness, and letters looked half faded on the glass, the
+ * wearer's report of 2026-10-07); and the canvas's own high-quality
+ * downscale lost thin parts outright (the clock's colon, the middle of W).
+ * Cached per glyph and scale. Null where no canvas exists (unit tests).
+ */
+function crispGlyph(atlas: HTMLImageElement, point: number, scale: number): HTMLCanvasElement | null {
+  const key = `${point}@${scale}`;
+  const cached = crispGlyphs.get(key);
+  if (cached !== undefined) return cached;
+  const cell = ATLAS.glyphs[String(point)];
+  const source = atlasAlpha(atlas);
+  let glyph: HTMLCanvasElement | null = null;
+  if (cell && source) {
+    const [ax, ay, cellWidth] = cell;
+    const width = Math.max(1, Math.round(cellWidth * scale));
+    const height = Math.max(1, Math.round(ATLAS.lineHeight * scale));
+    const coverage = boxCoverage(source, ax, ay, cellWidth, ATLAS.lineHeight, width, height);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (context) {
+      const image = context.createImageData(width, height);
+      coverage.forEach((share, index) => {
+        image.data[index * 4] = 255;
+        image.data[index * 4 + 1] = 255;
+        image.data[index * 4 + 2] = 255;
+        image.data[index * 4 + 3] = share >= GLYPH_COVERAGE_CUT ? 255 : 0;
+      });
+      context.putImageData(image, 0, 0);
+      glyph = canvas;
+    }
+  }
+  crispGlyphs.set(key, glyph);
+  return glyph;
+}
+
+/** The share (0..1) of each destination pixel the source cell's lit
+ * pixels cover, when the cell is scaled to `width` x `height`. */
+export function boxCoverage(
+  source: { width: number; alpha: ArrayLike<number> },
+  cellX: number, cellY: number, cellWidth: number, cellHeight: number,
+  width: number, height: number,
+): number[] {
+  const stepX = cellWidth / width;
+  const stepY = cellHeight / height;
+  const out: number[] = [];
+  for (let y = 0; y < height; y += 1) {
+    const top = y * stepY;
+    const bottom = top + stepY;
+    for (let x = 0; x < width; x += 1) {
+      const left = x * stepX;
+      const right = left + stepX;
+      let lit = 0;
+      for (let sy = Math.floor(top); sy < Math.ceil(bottom); sy += 1) {
+        const overlapY = Math.min(bottom, sy + 1) - Math.max(top, sy);
+        for (let sx = Math.floor(left); sx < Math.ceil(right); sx += 1) {
+          const overlapX = Math.min(right, sx + 1) - Math.max(left, sx);
+          const value = source.alpha[(cellY + sy) * source.width + cellX + sx] ?? 0;
+          lit += overlapX * overlapY * (value / 255);
+        }
+      }
+      out.push(lit / (stepX * stepY));
+    }
+  }
+  return out;
+}
+
+/**
  * Draw one line with its cell top at `y`. Each glyph lands where pretext
- * puts it (the prefix's width), so kerning matches the firmware. A
+ * puts it (the prefix's width), snapped to a whole pixel and drawn from its
+ * crisp copy, so kerning matches the firmware and no stroke is half lit. A
  * character the atlas lacks is drawn by the canvas in the prose face at
  * the same size, so nothing goes missing.
  */
@@ -282,18 +392,26 @@ export function drawEvenText(
   const chars = Array.from(text);
   context.save();
   context.globalAlpha = options.alpha ?? 1;
+  context.imageSmoothingEnabled = false;
   let prefix = '';
   for (const char of chars) {
     const left = x + evenTextWidth(prefix, scale);
     prefix += char;
     if (/\s/u.test(char)) continue;
-    const cell = ATLAS.glyphs[String(char.codePointAt(0))];
+    const point = char.codePointAt(0) ?? 0;
+    const cell = ATLAS.glyphs[String(point)];
     if (cell && atlas) {
-      const [ax, ay, width] = cell;
-      context.drawImage(
-        atlas, ax, ay, width, ATLAS.lineHeight,
-        left - ATLAS.pad * scale, y, width * scale, ATLAS.lineHeight * scale,
-      );
+      const glyph = crispGlyph(atlas, point, scale);
+      const originX = Math.round(left - ATLAS.pad * scale);
+      if (glyph) {
+        context.drawImage(glyph, originX, Math.round(y));
+      } else {
+        const [ax, ay, width] = cell;
+        context.drawImage(
+          atlas, ax, ay, width, ATLAS.lineHeight,
+          originX, Math.round(y), width * scale, ATLAS.lineHeight * scale,
+        );
+      }
     } else {
       context.fillStyle = '#ffffff';
       context.font = options.fallbackFont;

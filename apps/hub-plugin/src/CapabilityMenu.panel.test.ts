@@ -40,7 +40,10 @@ function rig(activeTab: PanelTab = 'notifications') {
     }),
     setStatus: vi.fn(async () => true),
     showDefault: vi.fn(async () => { defaults += 1; return true; }),
-  } as unknown as HudPresenter;
+    unread: [] as Array<{ id: string }>,
+    unreadNotifications: () => hud.unread,
+    browseNotifications: vi.fn(async () => true),
+  } as unknown as HudPresenter & { unread: Array<{ id: string }>; browseNotifications: ReturnType<typeof vi.fn> };
   const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
   const menu = new CapabilityMenu(hud, new Settings(), link);
   return {
@@ -101,6 +104,15 @@ describe('CapabilityMenu — the overview tab rail', () => {
     expect(menu.handleOverviewSwipe(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
     expect(menu.handleOverviewSwipe(OsEventTypeList.CLICK_EVENT)).toBe(false);
     expect(steps).toEqual([-1, 1]);
+  });
+
+  it('a click on Notifications with unread opens the newest card, not the list', async () => {
+    const { menu, hud, lists, requests } = rig();
+    hud.unread = [{ id: 'a'.repeat(32) }];
+    await menu.openActiveTab();
+    expect(hud.browseNotifications).toHaveBeenCalledTimes(1);
+    expect(lists).toHaveLength(0);
+    expect(requests()).toEqual([]);
   });
 
   it('a click on Notifications still asks the Mac; on News it expands the cache', async () => {

@@ -19,12 +19,16 @@ import {
 } from './AssistantConversationSurface';
 import { paginateMeasured } from './FirmwareText';
 import { OVERLAY_GAP, cardTop, overlayConversation } from './ConversationOverlay';
-import { paginateEven, type EvenReaderLine } from './EvenFont';
+import { paginateEven, readerParagraphs, type EvenReaderLine } from './EvenFont';
 import { hasImageHeader, withImageHeader } from './HeaderImage';
 import { hasHomeImages, homeColumnView, withHomeImages, type HomeColumnView } from './HomeImages';
-import { ASSISTANT_ANSWER_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
+import { ASSISTANT_ANSWER_PAGE, READER_TEXT_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
 import { type HudStatusModel, hudStatusLabel, nativeStatusLine } from './HudStatus';
 import { composeOverviewText } from './OverviewText';
+import {
+  NOTIFICATION_CARD, NOTIFICATION_CARD_MS, cardFromRenderedText, notificationCardBottom,
+  notificationCardLayout, overlayNotificationCard,
+} from './NotificationCard';
 import { isRouteProgressView, navigationChip, pomodoroChip } from './ActivityChips';
 import { NativeTerminalSurface } from './NativeTerminalSurface';
 import { productivityActionHint, productivityPhaseLabel, usesActionPillLayout } from './HudCanvasRenderer';
@@ -43,6 +47,7 @@ import {
   type AssistantConversationSnapshot,
   type AssistantConversationTurn,
   type HudContentKind,
+  type HudNotificationCard,
   type PanelContentTab,
   type PanelTab,
   type PlanningGridCell,
@@ -230,9 +235,18 @@ let nativeOverviewEnabled = String(import.meta.env.VITE_NATIVE_OVERVIEW ?? '1') 
 /** Every firmware page carries the image spine as its header
  * (HeaderImage.ts); `VITE_IMAGE_HEADER=0` keeps the firmware text line. */
 const imageHeaderEnabled = String(import.meta.env.VITE_IMAGE_HEADER ?? '1') !== '0';
-/** Readers set in Even's font at 55% across the whole canvas (the wearer's
- * ask, 2026-10-06); `VITE_EVEN_FONT_PAGES=0` keeps firmware text pages. */
-const evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '1') !== '0';
+/** Readers are firmware text pages. Drawn in Even's font as images
+ * (0.1.108-0.1.113) they had to be repainted tile by tile on every swipe
+ * and their thin strokes looked faded; the wearer scrolls readers, and
+ * ruled that what is scrolled is firmware text (2026-10-07).
+ * `VITE_EVEN_FONT_PAGES=1` brings the image readers back. */
+let evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '0') === '1';
+/** Readers that stay firmware text pages even where Even-font pages are on.
+ * A News article is long prose the wearer scrolls through page after page:
+ * the firmware text pages in place (one upgrade per swipe) and draws every
+ * stroke at full brightness, where the 55% image's thin strokes look faded
+ * (the wearer, 2026-10-07). */
+const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE']);
 /** Home's left column as images in Even's font (HomeImages.ts);
  * `VITE_HOME_IMAGES=0` keeps it firmware text. */
 const homeImagesEnabled = String(import.meta.env.VITE_HOME_IMAGES ?? '1') !== '0';
@@ -240,6 +254,10 @@ const homeImagesEnabled = String(import.meta.env.VITE_HOME_IMAGES ?? '1') !== '0
 /** Tests that pin the IMAGE overview select it here. Never product code. */
 export function setNativeOverviewForTest(on: boolean): void {
   nativeOverviewEnabled = on;
+}
+
+export function setEvenFontPagesForTest(on: boolean): void {
+  evenFontPagesEnabled = on;
 }
 
 /** One band of the text overview as the glass last accepted it. */
@@ -254,7 +272,8 @@ type DisplayPageOwner =
   | 'overlay-native'
   | 'prompt-native'
   | 'text-page-native'
-  | 'navigation-native';
+  | 'navigation-native'
+  | 'notification-native';
 
 /** Firmware pages that hold JOAT content of their own (a list, a reader, a
  * navigation card). An image paint over one of them must recreate the four
@@ -499,6 +518,21 @@ export class HudPresenter {
   /** Where JOAT's box begins over a reader's tiles (ConversationOverlay):
    * the tiles draw the header, so a status change repaints them. */
   private readerUnderBox?: number;
+  /** Every unread JOAT notification, newest first (hud.notifications). */
+  private notificationStack: HudNotificationCard[] = [];
+  /** Cards the wearer marked read here, until the Mac's next list. */
+  private readonly notificationsReadHere = new Set<string>();
+  /** The notification card over the page, while it is up. */
+  private notificationCard?: {
+    card: HudNotificationCard;
+    /** Opened from Home's Notifications tab: no timer, the wearer reads. */
+    browsing: boolean;
+    /** Drawn from the Mac's rendered line before the full list arrived. */
+    provisional: boolean;
+    timer?: ReturnType<typeof setTimeout>;
+    revision: number;
+  };
+  private notificationCardRevision = 0;
   private displayActive = true;
   private displayRevision = 0;
   private readonly assistantConversation: AssistantConversationSurface;
@@ -565,6 +599,7 @@ export class HudPresenter {
       const replaced = await visual.withPageTransition(replace, displayCurrent);
       if (replaced && displayCurrent()) {
         visual.forgetPage?.();
+        if (owner !== 'notification-native') this.clearNotificationCard();
         this.pageOwner = owner;
         this.nativeStatusPainted = statusShown;
         this.overviewText = undefined;
@@ -574,6 +609,7 @@ export class HudPresenter {
         if (header) setTimeout(() => { void this.paintImageHeader(); }, 0);
         this.readerUnderBox = undefined;
         this.paintReaderUnderBox(page);
+        this.paintHomeColumnUnderBox(page);
       }
       return replaced && displayCurrent();
     } catch {
@@ -671,6 +707,7 @@ export class HudPresenter {
     this.confirmationQueue = Promise.resolve();
     this.healing = false;
     this.notificationReturn = undefined;
+    this.clearNotificationCard();
     this.focusReturn = undefined;
     this.resetAll();
     this.surface = { kind: 'default' };
@@ -716,9 +753,12 @@ export class HudPresenter {
     if (surface.kind === 'default') {
       if (!nativeOverviewEnabled) return undefined;
       const frame = this.visualFrame();
-      return frame.kind === 'overview'
-        ? this.layouts.overviewTextLayout(composeOverviewText(frame, this.overviewHeader()))
-        : undefined;
+      if (frame.kind !== 'overview') return undefined;
+      // Home as it is drawn: its text and its column images. The header
+      // comes from the box's own status line (replaceNativePage).
+      const view = composeOverviewText(frame, this.overviewHeader());
+      const layout = this.layouts.overviewTextLayout(view);
+      return this.homeColumnFor(frame, view) ? withHomeImages(layout) : layout;
     }
     if (surface.kind === 'list' && surface.options.nativeFirmwareList) return this.nativeListLayout(surface);
     // A reader in Even's font keeps its own tiles under the box.
@@ -726,13 +766,42 @@ export class HudPresenter {
     const text = this.nativeTextPage;
     if (text && ((surface.kind === 'list' && this.usesNativeTextPage(surface.options))
       || (surface.kind === 'productivity' && !usesActionPillLayout(surface.productivity.phase)))) {
-      return this.layouts.textPageLayout(text.body, { status: '', hint: text.hint });
+      return this.layouts.textPageLayout(
+        text.body, { status: '', hint: text.hint }, { inset: surface.kind === 'list' },
+      );
     }
     if (surface.kind === 'navigation') {
       const native = navigationNativeBody(surface.navigation);
       if (native !== undefined) return this.layouts.textPageLayout(native.body, { status: '', hint: native.hint });
     }
     return undefined;
+  }
+
+  /** Home's left column for this frame, where the painter can draw it. */
+  private homeColumnFor(
+    frame: Extract<HudVisualFrame, { kind: 'overview' }>,
+    view: ReturnType<typeof composeOverviewText>,
+  ): HomeColumnView | undefined {
+    return homeImagesEnabled && this.visual?.paintHomeColumn && this.visual.canPaintHomeColumn?.()
+      ? homeColumnView(
+        view,
+        frame.ambient ? `${frame.ambient.temperature} ${frame.ambient.condition}`.trim() : '',
+        frame.ambient?.unread ?? 0,
+      )
+      : undefined;
+  }
+
+  /** Under JOAT's box over Home: the page's column images were just
+   * recreated blank, so they are painted again with no row under the box. */
+  private paintHomeColumnUnderBox(page: RebuildPageContainer): void {
+    const top = cardTop(page);
+    if (!hasHomeImages(page) || top === undefined || this.surface.kind !== 'default') return;
+    const frame = this.visualFrame();
+    if (frame.kind !== 'overview') return;
+    const column = this.homeColumnFor(frame, composeOverviewText(frame, this.overviewHeader()));
+    if (!column) return;
+    const current = this.captureDisplayGuard();
+    void this.paintHomeColumn({ ...column, clipBottom: top - OVERLAY_GAP }, current);
   }
 
   /** Home's column images; the image lane sends only a changed tile. */
@@ -771,10 +840,13 @@ export class HudPresenter {
     return options.nativeTextPage === true && this.visual !== undefined;
   }
 
-  /** A reader drawn in Even's font at 55% on the four image tiles, where
-   * the painter can draw one; otherwise it stays a firmware text page. */
-  private usesEvenFontPage(options: { nativeTextPage?: boolean }): boolean {
-    return evenFontPagesEnabled && this.usesNativeTextPage(options) && this.visual?.canPaintReader?.() === true;
+  /** A reader drawn in Even's font on the four image tiles: only when
+   * opted in (VITE_EVEN_FONT_PAGES=1) and the painter can draw one, and
+   * never for FIRMWARE_TEXT_READERS. Otherwise a firmware text page. */
+  private usesEvenFontPage(options: { nativeTextPage?: boolean; title: string }): boolean {
+    return evenFontPagesEnabled && this.usesNativeTextPage(options)
+      && !FIRMWARE_TEXT_READERS.has(options.title.trim().toUpperCase())
+      && this.visual?.canPaintReader?.() === true;
   }
 
   /** The reader on the glass is an Even-font image page. Derived, not
@@ -883,6 +955,13 @@ export class HudPresenter {
     contentKind?: HudContentKind,
     notificationId?: string,
   ): Promise<boolean> {
+    // A new notification pops up as a card over whatever page is up (the
+    // wearer's ruling, 2026-10-07: over every page, as Even's own does).
+    // Home's own record of it below is unchanged.
+    if (containerId === ContainerId.Main && contentKind === 'notification'
+      && /^[a-f0-9]{32}$/i.test(notificationId ?? '') && text.trim()) {
+      void this.popNotification(notificationId!, text);
+    }
     if (this.confirmation && containerId !== ContainerId.StatusBar) {
       this.deferText(text, containerId, textColor, contentKind, notificationId);
       return true;
@@ -1584,6 +1663,145 @@ export class HudPresenter {
     return true;
   }
 
+  /** The Mac's list of unread notifications, newest first. */
+  acceptNotifications(cards: readonly HudNotificationCard[]): void {
+    this.notificationStack = cards
+      .filter((card) => /^[a-f0-9]{32}$/i.test(card.id) && typeof card.body === 'string')
+      .slice(0, 10)
+      .map((card) => ({ ...card }));
+    const ids = new Set(this.notificationStack.map((card) => card.id));
+    for (const id of [...this.notificationsReadHere]) if (!ids.has(id)) this.notificationsReadHere.delete(id);
+    // A card drawn from the Mac's short line before the list arrived is
+    // redrawn whole now.
+    const shown = this.notificationCard;
+    const full = shown && this.notificationStack.find((card) => card.id === shown.card.id);
+    if (shown && full && this.hasNotificationCard()
+      && (shown.provisional || full.body !== shown.card.body || full.sender !== shown.card.sender)) {
+      shown.card = full;
+      shown.provisional = false;
+      void this.paintNotificationCard();
+    }
+  }
+
+  /** Unread cards, newest first, that the wearer has not marked read here. */
+  unreadNotifications(): HudNotificationCard[] {
+    return this.notificationStack.filter((card) => !this.notificationsReadHere.has(card.id));
+  }
+
+  hasNotificationCard(): boolean {
+    return this.notificationCard !== undefined && this.pageOwner === 'notification-native';
+  }
+
+  /** A new notification: its card pops up over the page. Not over a
+   * decision, a question or JOAT's conversation, which own the glass until
+   * they end; it then waits as unread (Home's bell, the Notifications tab). */
+  private async popNotification(id: string, renderedText: string): Promise<boolean> {
+    if (!this.visual || !this.displayActive || this.confirmation || this.promptQuestion
+      || this.assistantConversation.isActive() || this.assistantOverlay) return false;
+    const full = this.notificationStack.find((card) => card.id === id);
+    const card = full ?? cardFromRenderedText(id, renderedText, Date.now());
+    this.showNotificationCard(card, false, !full);
+    return this.paintNotificationCard();
+  }
+
+  /** Home's Notifications tab: the newest unread card, to read at leisure. */
+  async browseNotifications(): Promise<boolean> {
+    const newest = this.unreadNotifications()[0];
+    if (!newest || !this.visual || this.confirmation || this.promptQuestion
+      || this.assistantConversation.isActive()) return false;
+    this.showNotificationCard(newest, true, false);
+    return this.paintNotificationCard();
+  }
+
+  private showNotificationCard(card: HudNotificationCard, browsing: boolean, provisional: boolean): void {
+    const previous = this.notificationCard;
+    if (previous?.timer !== undefined) clearTimeout(previous.timer);
+    const state = {
+      card, browsing: browsing || (previous?.browsing ?? false), provisional,
+      revision: ++this.notificationCardRevision,
+    } as NonNullable<HudPresenter['notificationCard']>;
+    this.notificationCard = state;
+    this.armNotificationCardTimer();
+  }
+
+  private armNotificationCardTimer(): void {
+    const state = this.notificationCard;
+    if (!state) return;
+    if (state.timer !== undefined) clearTimeout(state.timer);
+    state.timer = undefined;
+    if (state.browsing) return;
+    const revision = state.revision;
+    state.timer = setTimeout(() => {
+      if (this.notificationCard?.revision === revision) void this.closeNotificationCard();
+    }, NOTIFICATION_CARD_MS);
+  }
+
+  /** The card over the page as it is now; the page's column, if any, is
+   * repainted with nothing under the card. */
+  private async paintNotificationCard(): Promise<boolean> {
+    const state = this.notificationCard;
+    if (!state) return false;
+    const unread = this.unreadNotifications();
+    const list = unread.some((card) => card.id === state.card.id) ? unread : [state.card, ...unread];
+    const index = Math.max(0, list.findIndex((card) => card.id === state.card.id));
+    const layout = notificationCardLayout(
+      state.card, { index, count: list.length }, Date.now(), this.nativeHeader(this.nativePageTitle()),
+    );
+    const page = overlayNotificationCard(layout, this.conversationUnderlay());
+    const shown = await this.replaceNativePage(page, 'notification-native');
+    if (!shown || this.notificationCard !== state) return false;
+    const bottom = notificationCardBottom(page);
+    if (bottom !== undefined && hasHomeImages(page) && this.surface.kind === 'default') {
+      const frame = this.visualFrame();
+      if (frame.kind === 'overview') {
+        const column = this.homeColumnFor(frame, composeOverviewText(frame, this.overviewHeader()));
+        if (column) {
+          void this.paintHomeColumn(
+            { ...column, clipTop: bottom + NOTIFICATION_CARD.gap, dim: true }, this.captureDisplayGuard(),
+          );
+        }
+      }
+    }
+    return true;
+  }
+
+  /** A tap on the card: it is read; the next unread takes its place, or the
+   * card closes after the last. Returns the id read, for the Mac. */
+  tapNotificationCard(): string | undefined {
+    const state = this.notificationCard;
+    if (!state || !this.hasNotificationCard()) return undefined;
+    const read = state.card.id;
+    this.notificationsReadHere.add(read);
+    // Home's own copy of it goes too, in state only (the card is on the
+    // glass): Home comes back without it before the Mac's retire arrives.
+    this.retiredNotificationIds.add(read);
+    this.removeRetiredNotifications();
+    const next = this.unreadNotifications().find((card) => card.id !== read);
+    if (next) {
+      state.card = next;
+      state.provisional = false;
+      state.revision = ++this.notificationCardRevision;
+      this.armNotificationCardTimer();
+      void this.paintNotificationCard();
+    } else {
+      void this.closeNotificationCard();
+    }
+    return read;
+  }
+
+  /** Close the card, the page beneath as it is now. */
+  async closeNotificationCard(): Promise<boolean> {
+    if (!this.notificationCard) return false;
+    const onGlass = this.pageOwner === 'notification-native';
+    this.clearNotificationCard();
+    return onGlass ? this.restoreRetainedPage() : true;
+  }
+
+  private clearNotificationCard(): void {
+    if (this.notificationCard?.timer !== undefined) clearTimeout(this.notificationCard.timer);
+    this.notificationCard = undefined;
+  }
+
   /** Only a fully visible Home card is tappable. Focus pages keep incoming
    * notifications deferred, assistant overlays keep their higher priority,
    * and confirmations remain exclusive. */
@@ -1828,14 +2046,18 @@ export class HudPresenter {
     const from = this.tracePage();
     const liveStatus = this.captureLiveStatus();
     const source = surface.items.join('\n');
-    const pages = paginateAnswer(source);
+    // The Mac's 62-column slices joined back into paragraphs, then set at
+    // the page's own width: a slice per line left ragged short lines.
+    const pages = paginateAnswer(
+      readerParagraphs(surface.items).join('\n'), READER_TEXT_PAGE.lineCapacity, READER_TEXT_PAGE.textWidth,
+    );
     const page = this.nativeTextPage?.source === source
       ? Math.min(this.nativeTextPage.page, pages.length - 1)
       : surface.options.nativeTextPageFromEnd ? pages.length - 1 : 0;
     const body = pages[page] ?? ' ';
     const hint = textPageHint(page, pages.length, surface.options.hint, surface.options.reviewTapOnLastPage);
     const ok = await this.replaceNativePage(
-      this.layouts.textPageLayout(body, { status: this.nativeHeader(surface.options.title), hint }),
+      this.layouts.textPageLayout(body, { status: this.nativeHeader(surface.options.title), hint }, { inset: true }),
       'text-page-native',
     );
     if (!ok || !current()) {
@@ -3528,13 +3750,7 @@ export class HudPresenter {
     if (!stillOurs()) return false;
     const view = composeOverviewText(frame, this.overviewHeader());
     let layout = this.withHeader(this.layouts.overviewTextLayout(view));
-    const column = homeImagesEnabled && this.visual?.paintHomeColumn && this.visual.canPaintHomeColumn?.()
-      ? homeColumnView(
-        view,
-        frame.ambient ? `${frame.ambient.temperature} ${frame.ambient.condition}`.trim() : '',
-        frame.ambient?.unread ?? 0,
-      )
-      : undefined;
+    const column = this.homeColumnFor(frame, view);
     if (column) layout = withHomeImages(layout);
     const header = hasImageHeader(layout);
     // The column's images follow the page's text: a tab swipe moves the

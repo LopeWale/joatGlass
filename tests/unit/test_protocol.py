@@ -1664,3 +1664,34 @@ def test_terminal_opening_requires_a_complete_nonempty_binding(request_id, selec
     view = AgentTerminalHudView(state="ready", focus="work", lanes=[], activity="", opening_request_id=request_id, opening_selection_id=selection_id)
     with pytest.raises(ProtocolError):
         view.to_wire()
+
+
+class TestHudNotifications:
+    """The unread list the glasses' notification card reads. Plugin
+    counterpart: HudNotificationsMessage in apps/hub-plugin/src/types.ts."""
+
+    def test_wire_shape(self) -> None:
+        from joat.core.protocol import HudNotificationCard, HudNotifications
+
+        card = HudNotificationCard("a" * 32, "WhatsApp", "Elizabeth", "Mom didn't\n pick up.", 1_791_410_291_592, True)
+        assert HudNotifications((card,)).to_wire() == {
+            "kind": "hud.notifications",
+            "cards": [{
+                "id": "a" * 32, "app": "WhatsApp", "sender": "Elizabeth",
+                "body": "Mom didn't pick up.", "at": 1_791_410_291_592, "urgent": True,
+            }],
+        }
+
+    def test_bounds(self) -> None:
+        from joat.core.protocol import (
+            NOTIFICATION_BODY_CHARACTERS, NOTIFICATION_STACK_LIMIT, HudNotificationCard, HudNotifications,
+            ProtocolError,
+        )
+
+        long = HudNotificationCard("b" * 32, "Mail", "Ann", "word " * 400, 0)
+        body = long.to_wire()["body"]
+        assert len(body) <= NOTIFICATION_BODY_CHARACTERS and body.endswith("…")
+        many = tuple(HudNotificationCard(f"{i:032x}", "Mail", "Ann", "hi", i) for i in range(15))
+        assert len(HudNotifications(many).to_wire()["cards"]) == NOTIFICATION_STACK_LIMIT
+        with pytest.raises(ProtocolError):
+            HudNotificationCard("not-an-id", "Mail", "Ann", "hi", 0).to_wire()
