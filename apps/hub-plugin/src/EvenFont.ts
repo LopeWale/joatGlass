@@ -159,8 +159,12 @@ export function readerParagraphs(rows: readonly string[]): string[] {
   for (const row of rows) {
     open += row;
     // A row continues when it was wrapped at a space, or cut mid-token at
-    // the Mac's full 62 columns (a long link).
-    const continues = / $/u.test(row) || readerColumns(row) >= READER_ROW_COLUMNS - 2;
+    // the Mac's full 62 columns (a long link). A row wider than 62 columns
+    // is no Mac slice: it stands alone, or its last word would be glued to
+    // the next row's first ("firmwaretext", seen in the panels probe).
+    const columns = readerColumns(row);
+    const continues = / $/u.test(row)
+      || (columns >= READER_ROW_COLUMNS - 2 && columns <= READER_ROW_COLUMNS);
     if (/[\r\n]$/u.test(row) || !continues) {
       paragraphs.push(open.replace(/[\r\n]+$/u, ''));
       open = '';

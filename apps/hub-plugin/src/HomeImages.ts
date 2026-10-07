@@ -30,6 +30,9 @@ export const HOME_COLUMN = {
 export interface HomeColumnView {
   info: { date: string; weather: string; unread: number };
   tabs: { tab: PanelTab; label: string; active: boolean }[];
+  /** Under JOAT's box: nothing is drawn at or below this page y, so the
+   * column's rows never shine through the box (a G2 box has no fill). */
+  clipBottom?: number;
 }
 
 /** The column's content, from the same view the text column was built from. */

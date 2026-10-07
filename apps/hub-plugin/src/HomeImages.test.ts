@@ -87,4 +87,19 @@ describe('Home column images', () => {
     expect(marks.filter((mark) => mark.tile === 1 && mark.icon).map((mark) => mark.icon))
       .toEqual(['notifications', 'news', 'pomodoro', 'search']);
   });
+
+  it('under JOAT\'s box, leaves out whole rows at or below the box', () => {
+    const clipBottom = 200;
+    const marks = homeColumnLayout({ ...homeColumnView(VIEW, '72f clear', 2), clipBottom });
+    const line = evenLineHeight();
+    for (const mark of marks) {
+      const pageTop = HOME_COLUMN.top + (mark.tile === 1 ? HOME_COLUMN.tileHeight : 0) + mark.y;
+      expect(pageTop + Math.max(mark.height, line)).toBeLessThanOrEqual(clipBottom);
+    }
+    const rail = marks.filter((mark) => mark.tile === 1 && mark.text).map((mark) => mark.text);
+    // The first rows of the rail sit above the box; the last ones are gone, not cut.
+    expect(rail.length).toBeGreaterThan(0);
+    expect(rail.length).toBeLessThan(4);
+    expect(rail[0]).toBe('NOTIFICATIONS');
+  });
 });

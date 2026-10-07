@@ -344,7 +344,12 @@ export function homeColumnLayout(view: HomeColumnView): HomeColumnMark[] {
     icon(1, rowY, tab.tab, alpha);
     words(1, COLUMN_TEXT_X, rowY, tab.label, alpha);
   });
-  return marks;
+  const clip = view.clipBottom;
+  if (clip === undefined) return marks;
+  // Under JOAT's box a row is left out whole, never cut through a glyph.
+  return marks.filter((mark) => (
+    HOME_COLUMN.top + mark.tile * HOME_COLUMN.tileHeight + mark.y + Math.max(mark.height, line) <= clip
+  ));
 }
 
 /** Brightness of a reader's parts: the speaker over the words, the hint

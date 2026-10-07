@@ -152,3 +152,21 @@ describe('crisp glyph coverage', () => {
     }
   });
 });
+
+describe('reader paragraphs', () => {
+  it('never glues a row wider than the Mac\'s 62 columns to the next one', () => {
+    const rows = [
+      '1/2 · Fixture Wire',
+      'The simulator build of the plugin now draws every reader on a firmware',
+      'text page. The article body is the Mac\'s own paged rows.',
+    ];
+    expect(readerParagraphs(rows)).toEqual(rows);
+  });
+
+  it('still joins the Mac\'s slices: a wrap at a space, and a link cut at 62 columns', () => {
+    const link = 'https://www.figma.com/design/k3J9xQ2/joat-hud-review?node-id=1';
+    expect(link.length).toBe(62);
+    expect(readerParagraphs(['Adele: Can you send the mockups? I ', 'want them first.\n', link, '204-5521\n']))
+      .toEqual(['Adele: Can you send the mockups? I want them first.', `${link}204-5521`]);
+  });
+});
