@@ -27,8 +27,6 @@ dist/
 
 # IMU calibration traces (personal motion data)
 traces/
-# Packed Hub plugin bundles (build artifacts)
-*.ehpk
 
 # Python build metadata
 *.egg-info/
@@ -58,11 +56,7 @@ apps/hub-plugin/public/dev-map-sample.png
 apps/hub-plugin/public/__joat-audio-fixture/
 apps/hub-plugin/public/__joat-dev-fixtures/
 
-# Packaged plugin artifacts (scripts/pack.sh output)
 build/
-
-# Simulator screenshots dropped in the CWD by evenhub-simulator
-glasses_*.png
 
 # TypeScript incremental build artifact
 *.tsbuildinfo
