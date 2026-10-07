@@ -67,9 +67,10 @@ function cutList(list: ListContainerProperty, limit: number): ListContainerPrope
 
 /**
  * The box (`card`, the conversation layout) over the page (`underlay`, that
- * page's own layout as it would be rebuilt now). Without an underlay, or
- * when the page is pixels (image tiles cannot be cut without resending
- * them), the box stands alone as before.
+ * page's own layout as it would be rebuilt now). The page's text is cut to
+ * end above the box; its images (Home's column) stay beneath it, and the
+ * presenter repaints them with nothing drawn under the box. Without an
+ * underlay the box stands alone.
  */
 export function overlayConversation(
   card: RebuildPageContainer,
@@ -77,17 +78,27 @@ export function overlayConversation(
 ): RebuildPageContainer {
   const top = cardTop(card);
   if (!underlay || top === undefined) return card;
-  if ((underlay.imageObject?.length ?? 0) > 0) return overImagePage(card, underlay);
+  const underImages = underlay.imageObject ?? [];
+  // A page drawn wholly in pixels from the top (a reader in Even's font):
+  // its tiles stay and the presenter repaints them clipped.
+  if (underImages.some((image) => (image.yPosition ?? 0) === 0)) return overImagePage(card, underlay);
+  // Any other images (Home's column) stay beneath the box as they are; the
+  // presenter repaints them with nothing drawn under the box. The box's own
+  // status line stays: it becomes the page's image header, which leaves room
+  // for at most two of the page's images.
+  if ((card.imageObject?.length ?? 0) > 0 || underImages.length > MAX_IMAGES - 2) return card;
   const limit = top - OVERLAY_GAP;
   const cardTexts = card.textObject ?? [];
   const room = Math.min(
     MAX_TEXT_AND_LIST - cardTexts.length - (card.listObject?.length ?? 0),
-    MAX_CONTAINERS - cardTexts.length - (card.listObject?.length ?? 0) - (card.imageObject?.length ?? 0),
+    MAX_CONTAINERS - cardTexts.length - (card.listObject?.length ?? 0) - underImages.length - 2,
   );
   if (room <= 0) return card;
   const kept: Placed[] = [];
   for (const text of underlay.textObject ?? []) {
     if (text.containerID === ContainerId.StatusBar) continue;
+    // An empty, borderless container draws nothing (an input layer).
+    if (!(text.content ?? '').trim() && !(text.borderWidth ?? 0)) continue;
     const cut = cutText(text, limit);
     if (cut) kept.push(cut);
   }
@@ -95,15 +106,16 @@ export function overlayConversation(
     const cut = cutList(list, limit);
     if (cut) kept.push(cut);
   }
-  if (kept.length === 0) return card;
+  if (kept.length === 0 && underImages.length === 0) return card;
   // Highest first: when the page has more than the limits leave room for,
   // the top of the page is what the wearer still sees above the box.
   kept.sort((a, b) => (a.yPosition ?? 0) - (b.yPosition ?? 0));
   const under = kept.slice(0, room);
-  // zOrderIndex is all or nothing per page: the page sits beneath, in its
-  // own order, and every container of the box moves above it.
-  under.forEach((item, index) => { item.zOrderIndex = index + 1; });
-  const lift = under.length;
+  // zOrderIndex is all or nothing per page: the page's images lowest, its
+  // text above them in its own order, and every container of the box on top.
+  const images = underImages.map((image, index) => new ImageContainerProperty({ ...image, zOrderIndex: index + 1 }));
+  under.forEach((item, index) => { item.zOrderIndex = images.length + index + 1; });
+  const lift = images.length + under.length;
   const raise = <T extends { zOrderIndex?: number }>(item: T): T => (
     { ...item, zOrderIndex: (item.zOrderIndex ?? 0) + lift }
   );
@@ -117,9 +129,10 @@ export function overlayConversation(
   ];
   return new RebuildPageContainer({
     ...card,
-    containerTotalNum: texts.length + lists.length + (card.imageObject?.length ?? 0),
+    containerTotalNum: texts.length + lists.length + images.length,
     textObject: texts,
     ...(lists.length > 0 ? { listObject: lists } : {}),
+    ...(images.length > 0 ? { imageObject: images } : {}),
   });
 }
 

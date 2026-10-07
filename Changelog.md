@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-07 — JOAT's box floats over Home as Home is drawn
+
+The wearer reported that JOAT's box still looked like a page of its own: the Home behind it was not the current Home.
+
+- **Cause, reproduced in the official simulator.** The box keeps the page it was called over beneath it. For Home, that underlay was rebuilt from Home's plain text layout. That layout has no image header and no left column, so the box sat over an older-looking Home: the date in the large firmware font at the very edge, no divider, no tab rail.
+- **Now the underlay is Home as drawn** (`conversationUnderlay` in `HudPresenter.ts`): its text, its two column images, and the image header (from the box's own status line, as on every page). `overlayConversation` keeps a page's images beneath the box and cuts its text to end above the box. Before, it handled only all-text pages and all-image readers.
+- **The column is repainted with nothing under the box** (`clipBottom` on `HomeColumnView`). A G2 box has no fill, so a rail row under it would shine through. Rows are left out whole, never cut through a glyph. When the box grows, the column is repainted with the new clip. When it closes, Home is rebuilt whole.
+- **A safeguard in reader paragraphs** (`readerParagraphs`): a row wider than the Mac's 62-column reader slice now stands alone. Before, it was joined to the next row without a space. This showed up only with a probe's hand-written oversized rows; the Mac's reader slices are at most 62 columns.
+- **Not changed: the News tab tap.** The wearer reported that a tap on the lit News tab does nothing. In the simulator it opened the News list in every sequence tried: from rest, with a notification on Home, after Back from the list and from an article, after closing JOAT's box, and connected to a live gateway with the panels probe. It was not reproduced, so nothing was changed for it.
+- Verified in the official simulator: the box over Home with the column and header intact, rows under the box left out, the box growing, and Home whole again after closing. Not verified on physical glasses.
+- Plugin 1147 passed; typecheck and build clean. Plugin-only.
+
 ## 2026-10-07 — Build JOAT 0.1.114
 
 - Packed from `d629292` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.114 above the last recorded build (0.1.113); app.json, package.json and package-lock.json all 0.1.114. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1142 tests passed.

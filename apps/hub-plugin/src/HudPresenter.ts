@@ -587,6 +587,7 @@ export class HudPresenter {
         if (header) setTimeout(() => { void this.paintImageHeader(); }, 0);
         this.readerUnderBox = undefined;
         this.paintReaderUnderBox(page);
+        this.paintHomeColumnUnderBox(page);
       }
       return replaced && displayCurrent();
     } catch {
@@ -729,9 +730,12 @@ export class HudPresenter {
     if (surface.kind === 'default') {
       if (!nativeOverviewEnabled) return undefined;
       const frame = this.visualFrame();
-      return frame.kind === 'overview'
-        ? this.layouts.overviewTextLayout(composeOverviewText(frame, this.overviewHeader()))
-        : undefined;
+      if (frame.kind !== 'overview') return undefined;
+      // Home as it is drawn: its text and its column images. The header
+      // comes from the box's own status line (replaceNativePage).
+      const view = composeOverviewText(frame, this.overviewHeader());
+      const layout = this.layouts.overviewTextLayout(view);
+      return this.homeColumnFor(frame, view) ? withHomeImages(layout) : layout;
     }
     if (surface.kind === 'list' && surface.options.nativeFirmwareList) return this.nativeListLayout(surface);
     // A reader in Even's font keeps its own tiles under the box.
@@ -748,6 +752,33 @@ export class HudPresenter {
       if (native !== undefined) return this.layouts.textPageLayout(native.body, { status: '', hint: native.hint });
     }
     return undefined;
+  }
+
+  /** Home's left column for this frame, where the painter can draw it. */
+  private homeColumnFor(
+    frame: Extract<HudVisualFrame, { kind: 'overview' }>,
+    view: ReturnType<typeof composeOverviewText>,
+  ): HomeColumnView | undefined {
+    return homeImagesEnabled && this.visual?.paintHomeColumn && this.visual.canPaintHomeColumn?.()
+      ? homeColumnView(
+        view,
+        frame.ambient ? `${frame.ambient.temperature} ${frame.ambient.condition}`.trim() : '',
+        frame.ambient?.unread ?? 0,
+      )
+      : undefined;
+  }
+
+  /** Under JOAT's box over Home: the page's column images were just
+   * recreated blank, so they are painted again with no row under the box. */
+  private paintHomeColumnUnderBox(page: RebuildPageContainer): void {
+    const top = cardTop(page);
+    if (!hasHomeImages(page) || top === undefined || this.surface.kind !== 'default') return;
+    const frame = this.visualFrame();
+    if (frame.kind !== 'overview') return;
+    const column = this.homeColumnFor(frame, composeOverviewText(frame, this.overviewHeader()));
+    if (!column) return;
+    const current = this.captureDisplayGuard();
+    void this.paintHomeColumn({ ...column, clipBottom: top - OVERLAY_GAP }, current);
   }
 
   /** Home's column images; the image lane sends only a changed tile. */
@@ -3550,13 +3581,7 @@ export class HudPresenter {
     if (!stillOurs()) return false;
     const view = composeOverviewText(frame, this.overviewHeader());
     let layout = this.withHeader(this.layouts.overviewTextLayout(view));
-    const column = homeImagesEnabled && this.visual?.paintHomeColumn && this.visual.canPaintHomeColumn?.()
-      ? homeColumnView(
-        view,
-        frame.ambient ? `${frame.ambient.temperature} ${frame.ambient.condition}`.trim() : '',
-        frame.ambient?.unread ?? 0,
-      )
-      : undefined;
+    const column = this.homeColumnFor(frame, view);
     if (column) layout = withHomeImages(layout);
     const header = hasImageHeader(layout);
     // The column's images follow the page's text: a tab swipe moves the
