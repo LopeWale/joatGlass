@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-07 — Build JOAT 0.1.117
+
+- Packed from `d60a86d` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.117 above the last recorded build (0.1.116); app.json, package.json and package-lock.json all 0.1.117. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1164 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 172945 bytes, SHA-256 `1a9a20b5e19925fa0bbb9992217190049a92709f06881e13762507d245b84e89`. Adds to 0.1.116 the speaker's name in front of their words in JOAT's box and on the notification card. **The Mac side changed too: restart the brain from this revision**, or a bare "JOAT" still shows "JOAT" above "Yes?". Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-07 — The speaker's name opens their words, on the same row
 
 The wearer asked why two rows went to one thing: the notification card had the sender on a row of its own above the message, and JOAT's box read "JOAT" on one row and "Yes?" on the next. The ruling: "Name: the response", wrapped beneath.
