@@ -305,6 +305,11 @@ export interface HomeColumnMark {
 
 /** Inside each column tile: 16 px from the screen's edge, 16 px short of
  * the column's right edge, so nothing meets the rule or the edge. */
+/** The dimmest Even-font words (an unlit tab, a reader's hint): the
+ * firmware's own dimmest text level, 179/255 measured in the simulator.
+ * Below it, words looked faded on the glass (the wearer, 2026-10-07). */
+const DIM_WORDS = 179 / 255;
+
 const COLUMN_LEFT = 16;
 const COLUMN_RIGHT = HOME_COLUMN.width - 16;
 const COLUMN_ICON = 13;
@@ -327,15 +332,15 @@ export function homeColumnLayout(view: HomeColumnView): HomeColumnMark[] {
     marks.push({ tile, x: COLUMN_LEFT, y: y + (line - COLUMN_ICON) / 2, width: COLUMN_ICON, height: COLUMN_ICON, alpha, icon: name });
   };
   let y = 10;
-  if (view.info.date) { words(0, COLUMN_LEFT, y, view.info.date, 0.9); y += 26; }
-  if (view.info.weather) { icon(0, y, 'weather', 0.8); words(0, COLUMN_TEXT_X, y, view.info.weather, 0.8); y += 24; }
+  if (view.info.date) { words(0, COLUMN_LEFT, y, view.info.date, 1); y += 26; }
+  if (view.info.weather) { icon(0, y, 'weather', 1); words(0, COLUMN_TEXT_X, y, view.info.weather, 1); y += 24; }
   if (view.info.unread > 0) {
-    icon(0, y, 'messages', 0.8);
-    words(0, COLUMN_TEXT_X, y, `${view.info.unread} unread`, 0.8);
+    icon(0, y, 'messages', 1);
+    words(0, COLUMN_TEXT_X, y, `${view.info.unread} unread`, 1);
   }
   view.tabs.forEach((tab, index) => {
     const rowY = 8 + index * 26;
-    const alpha = tab.active ? 1 : 0.4;
+    const alpha = tab.active ? 1 : DIM_WORDS;
     icon(1, rowY, tab.tab, alpha);
     words(1, COLUMN_TEXT_X, rowY, tab.label, alpha);
   });
@@ -344,7 +349,7 @@ export function homeColumnLayout(view: HomeColumnView): HomeColumnMark[] {
 
 /** Brightness of a reader's parts: the speaker over the words, the hint
  * well under both. */
-const READER_ALPHA = { speaker: 1, body: 0.82, hint: 0.5 } as const;
+const READER_ALPHA = { speaker: 1, body: 1, hint: DIM_WORDS } as const;
 
 /**
  * Every run a reader page draws, in page coordinates. The renderer draws
@@ -1265,7 +1270,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   private drawSpineWords(
     context: CanvasRenderingContext2D, atlas: HTMLImageElement | undefined, text: string, x: number, top: number,
   ): void {
-    drawEvenText(context, atlas, text, x, top, { alpha: SUPPORT / 255, fallbackFont: TYPE.statusMeta });
+    drawEvenText(context, atlas, text, x, top, { alpha: 1, fallbackFont: TYPE.statusMeta });
   }
 
   /** A receipt strip over an image page (the dashboard, the month, the live

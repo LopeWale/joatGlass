@@ -91,8 +91,8 @@ type HudVisualBaseFrame =
     navigation: NavigationHudModel;
   }
   | {
-    /** A reader set in Even's font at 55% across the whole canvas
-     * (EvenFont.ts): the Messages thread and every Mac-paged reader. */
+    /** A reader set in Even's font (EvenFont.ts) across the whole canvas.
+     * Opt-in only (VITE_EVEN_FONT_PAGES=1): readers are firmware text. */
     kind: 'reader';
     status: string;
     micOn: boolean;
@@ -161,7 +161,7 @@ export interface HudFramePainter {
   /** Paint Home's left column images; only a tile whose pixels changed is sent. */
   paintHomeColumn?(view: HomeColumnView, isCurrent: () => boolean): Promise<boolean>;
   canPaintHomeColumn?(): boolean;
-  /** Whether this painter draws a reader page in Even's font at 55%. A
+  /** Whether this painter draws a reader page in Even's font. A
    * painter without it keeps readers as firmware text pages. */
   canPaintReader?(): boolean;
   /** Wait for queued paints without cancelling their delivery receipts. */

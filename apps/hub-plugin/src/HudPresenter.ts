@@ -19,7 +19,7 @@ import {
 } from './AssistantConversationSurface';
 import { paginateMeasured } from './FirmwareText';
 import { OVERLAY_GAP, cardTop, overlayConversation } from './ConversationOverlay';
-import { paginateEven, type EvenReaderLine } from './EvenFont';
+import { paginateEven, readerParagraphs, type EvenReaderLine } from './EvenFont';
 import { hasImageHeader, withImageHeader } from './HeaderImage';
 import { hasHomeImages, homeColumnView, withHomeImages, type HomeColumnView } from './HomeImages';
 import { ASSISTANT_ANSWER_PAGE, READER_TEXT_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
@@ -230,9 +230,12 @@ let nativeOverviewEnabled = String(import.meta.env.VITE_NATIVE_OVERVIEW ?? '1') 
 /** Every firmware page carries the image spine as its header
  * (HeaderImage.ts); `VITE_IMAGE_HEADER=0` keeps the firmware text line. */
 const imageHeaderEnabled = String(import.meta.env.VITE_IMAGE_HEADER ?? '1') !== '0';
-/** Readers set in Even's font at 55% across the whole canvas (the wearer's
- * ask, 2026-10-06); `VITE_EVEN_FONT_PAGES=0` keeps firmware text pages. */
-const evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '1') !== '0';
+/** Readers are firmware text pages. Drawn in Even's font as images
+ * (0.1.108-0.1.113) they had to be repainted tile by tile on every swipe
+ * and their thin strokes looked faded; the wearer scrolls readers, and
+ * ruled that what is scrolled is firmware text (2026-10-07).
+ * `VITE_EVEN_FONT_PAGES=1` brings the image readers back. */
+let evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '0') === '1';
 /** Readers that stay firmware text pages even where Even-font pages are on.
  * A News article is long prose the wearer scrolls through page after page:
  * the firmware text pages in place (one upgrade per swipe) and draws every
@@ -246,6 +249,10 @@ const homeImagesEnabled = String(import.meta.env.VITE_HOME_IMAGES ?? '1') !== '0
 /** Tests that pin the IMAGE overview select it here. Never product code. */
 export function setNativeOverviewForTest(on: boolean): void {
   nativeOverviewEnabled = on;
+}
+
+export function setEvenFontPagesForTest(on: boolean): void {
+  evenFontPagesEnabled = on;
 }
 
 /** One band of the text overview as the glass last accepted it. */
@@ -779,9 +786,9 @@ export class HudPresenter {
     return options.nativeTextPage === true && this.visual !== undefined;
   }
 
-  /** A reader drawn in Even's font at 55% on the four image tiles, where
-   * the painter can draw one; otherwise, and for the readers in
-   * FIRMWARE_TEXT_READERS, it stays a firmware text page. */
+  /** A reader drawn in Even's font on the four image tiles: only when
+   * opted in (VITE_EVEN_FONT_PAGES=1) and the painter can draw one, and
+   * never for FIRMWARE_TEXT_READERS. Otherwise a firmware text page. */
   private usesEvenFontPage(options: { nativeTextPage?: boolean; title: string }): boolean {
     return evenFontPagesEnabled && this.usesNativeTextPage(options)
       && !FIRMWARE_TEXT_READERS.has(options.title.trim().toUpperCase())
@@ -1839,7 +1846,11 @@ export class HudPresenter {
     const from = this.tracePage();
     const liveStatus = this.captureLiveStatus();
     const source = surface.items.join('\n');
-    const pages = paginateAnswer(source, READER_TEXT_PAGE.lineCapacity, READER_TEXT_PAGE.textWidth);
+    // The Mac's 62-column slices joined back into paragraphs, then set at
+    // the page's own width: a slice per line left ragged short lines.
+    const pages = paginateAnswer(
+      readerParagraphs(surface.items).join('\n'), READER_TEXT_PAGE.lineCapacity, READER_TEXT_PAGE.textWidth,
+    );
     const page = this.nativeTextPage?.source === source
       ? Math.min(this.nativeTextPage.page, pages.length - 1)
       : surface.options.nativeTextPageFromEnd ? pages.length - 1 : 0;
