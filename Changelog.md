@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-10-07 — Notifications pop up as Even's card, over every page
+
+The wearer asked for notifications the way Even shows its own: a card that pops up over the page, a tap that shows the next unread card, and a double tap that dismisses. Studied first, from Even's support article and its images and from frame-by-frame extracts of Even's G2 videos (recorded in `docs/EVEN_RESEARCH_QUESTIONS.md`).
+
+- **The card** (`NotificationCard.ts`) is laid out as Even's: a bordered card near the top, the app and the age ("Now", "7m ago") with its place among the unread ("1/3") on the first line, then the sender and the whole message. The page stays beneath it: everything under the card is left out, the rest is dimmed, Home's column is repainted dimmed below the card, and a list beneath loses its selection box. It is firmware text, so the next card is one page write.
+- **Gestures, the wearer's ruling:** a tap marks the card read on the Mac and shows the next unread one, or closes the card after the last; a double tap closes it and leaves it unread; swipes stay with the card; long press still opens the mic.
+- **When it pops up:** over every page, except while a decision, a question or JOAT's conversation owns the glass. Such a card waits as unread. A card that popped up on its own closes after 5 s, and each tap restarts that. Even's app shows 3 s, but this card holds the whole message.
+- **Home's Notifications tab** opens the newest unread card, which stays until the wearer is done. The list page remains for when nothing is unread, and for "show notifications".
+- **New wire message `hud.notifications`** (`protocol.py` and `types.ts`, changed together): every unread JOAT card, newest first, at most ten, each with its id, app, sender, whole message (at most 600 characters), time and urgency. The Mac republishes it from the same loop as the unread count, so a tap reaches the next card without a round trip. Until the list arrives, the card is drawn from the Mac's short line and redrawn whole when it does.
+- **Not done: Even's slide between cards.** Even's 0.32 s vertical slide is its firmware's own animation. The SDK has no animation API, and faking it means sending every in-between frame as image tiles, about 104 ms per tile over Bluetooth.
+- **The IMU no longer streams from boot.** It sent ten motion reports a second that nothing read, and filled the diagnostics ring: the wearer's export held 512 motion reports and no taps. Motion reports are also kept out of the diagnostics now.
+- Verified in the official simulator: the card over Home and over the News list, tapping through three cards to Home, and a double tap back to the list. Also verified end to end with the Mac's real gateway: its list and pop drew the card, and each tap came back to the Mac as `notification-dismiss` for that card, in order. Not verified on physical glasses.
+- Tests: plugin 1163 passed; typecheck and build clean. Mac 3460 passed, 1 skipped; the container's IPv6 test fails as before. mypy clean. Both sides change: a new package and a brain restart.
+
 ## 2026-10-07 — Build JOAT 0.1.115
 
 - Packed from `aaea0b2` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.115 above the last recorded build (0.1.114); app.json, package.json and package-lock.json all 0.1.115. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1147 tests passed.

@@ -64,6 +64,39 @@ firmware.
 
 ## Answered
 
+### How Even shows a notification on the G2 — ANSWERED (2026-10-07)
+Sources: Even's support article "Notifications" (support.evenrealities.com,
+article 14274501482639, updated 2026-09-29, read through the help centre's
+JSON API), its four images (the glasses panel in one is exactly 576x288, so
+it was measured 1:1), and frame-by-frame extracts of Even's own G2 product
+videos (evenrealities.com; the notification clip and the Dashboard clip are
+straight screen recordings at 25 fps).
+- **A card at the top, over the running feature.** A rounded 1 px border at
+  x 47-539, y 28-178. First line: app icon and app name, the age ("Now",
+  "7m ago") dim at the right. Then the sender, then the message in the
+  firmware font. The page beneath stays, dimmed. A running feature
+  (Navigate, Teleprompt) keeps running and the glasses return to it.
+- **Gestures.** Single tap marks it read and closes it; double tap closes it
+  unread. From Menu > Notifications the same card shows one at a time: swipe
+  moves between them (dots beside the card mark the position), tap marks the
+  current one read and removes it. The glasses keep the 10 newest; the
+  Dashboard bell shows the unread count.
+- **Settings** (Even app): Auto Display, "Don't disturb other features",
+  Display time (3 s in the article's screenshot), and per-app switches.
+- **The move to the next card is a vertical slide** of a column of cards,
+  about 8 frames (0.32 s) with easing; the Dashboard's right panel moves
+  between its boxes the same way over about 0.9 s. It is the firmware's
+  own animation: SDK 0.0.16 has no animation, transition or notification
+  API, so a plugin could only fake it by sending every in-between frame as
+  image tiles (about 104 ms per tile over BLE).
+- Notifications sit on a front layer above app content (Even's "Features
+  Overview" and the lens-alignment article name a "Menu/AI/Notification
+  layer" and an "application content layer"). Whether Even's own card also
+  appears over a running Hub plugin is not yet checked on glasses.
+What JOAT does with it: NotificationCard.ts, the same card in firmware text
+over every page, a tap reads it and shows the next unread, a double tap
+closes it unread; it switches with one page write and no slide.
+
 ### What the firmware scrolls by itself — ANSWERED (2026-10-06)
 Sources: hub.evenrealities.com/docs/build/display ("If content overflows
 and the container has `isEventCapture: 1`, the firmware scrolls it"), the

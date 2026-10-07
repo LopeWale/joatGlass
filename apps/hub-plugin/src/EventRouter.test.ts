@@ -1291,3 +1291,32 @@ it('keeps motion reports out of the diagnostics ring, and records the taps', () 
   fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
   expect(recorded).toEqual([{ type: 'gesture', gesture: 'tap', delivery: 'sys' }]);
 });
+
+describe('the notification card owns the taps while it is up', () => {
+  function withCard() {
+    const r = make();
+    let up = true;
+    const overlay = r.assistantOverlay as unknown as Record<string, unknown>;
+    overlay.hasNotificationCard = vi.fn(() => up);
+    overlay.tapNotificationCard = vi.fn(() => 'c'.repeat(32));
+    overlay.closeNotificationCard = vi.fn(async () => { up = false; return true; });
+    (r.link as unknown as { linkState: string }).linkState = 'connected';
+    return { ...r, overlay };
+  }
+
+  it('a tap marks the shown card read on the Mac and nothing else runs', () => {
+    const r = withCard();
+    r.fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
+    expect(r.overlay.tapNotificationCard).toHaveBeenCalledTimes(1);
+    expect(r.sent).toEqual([{ kind: 'input', event: { containerName: 'notification-dismiss', traceId: 'c'.repeat(32) } }]);
+    expect(r.menu.openActiveTab).not.toHaveBeenCalled();
+  });
+
+  it('a double tap closes the card unread instead of opening the menu', () => {
+    const r = withCard();
+    r.fire({ sysEvent: { eventType: OsEventTypeList.DOUBLE_CLICK_EVENT, eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L } });
+    expect(r.overlay.closeNotificationCard).toHaveBeenCalledTimes(1);
+    expect(r.menu.toggle).not.toHaveBeenCalled();
+    expect(r.sent).toEqual([]);
+  });
+});

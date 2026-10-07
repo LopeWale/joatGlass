@@ -102,4 +102,16 @@ describe('Home column images', () => {
     expect(rail.length).toBeLessThan(4);
     expect(rail[0]).toBe('NOTIFICATIONS');
   });
+
+  it('under a notification card, shows only the rows below it, dimmed', () => {
+    const plain = homeColumnLayout(homeColumnView(VIEW, '72f clear', 2));
+    const under = homeColumnLayout({ ...homeColumnView(VIEW, '72f clear', 2), clipTop: 180, dim: true });
+    expect(under.length).toBeGreaterThan(0);
+    expect(under.length).toBeLessThan(plain.length);
+    for (const mark of under) {
+      expect(HOME_COLUMN.top + (mark.tile === 1 ? HOME_COLUMN.tileHeight : 0) + mark.y).toBeGreaterThanOrEqual(180);
+      const same = plain.find((p) => p.text === mark.text && p.icon === mark.icon && p.y === mark.y && p.tile === mark.tile)!;
+      expect(mark.alpha).toBeLessThan(same.alpha);
+    }
+  });
 });

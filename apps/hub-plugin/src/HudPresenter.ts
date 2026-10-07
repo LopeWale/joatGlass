@@ -25,6 +25,10 @@ import { hasHomeImages, homeColumnView, withHomeImages, type HomeColumnView } fr
 import { ASSISTANT_ANSWER_PAGE, READER_TEXT_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
 import { type HudStatusModel, hudStatusLabel, nativeStatusLine } from './HudStatus';
 import { composeOverviewText } from './OverviewText';
+import {
+  NOTIFICATION_CARD, NOTIFICATION_CARD_MS, cardFromRenderedText, notificationCardBottom,
+  notificationCardLayout, overlayNotificationCard,
+} from './NotificationCard';
 import { isRouteProgressView, navigationChip, pomodoroChip } from './ActivityChips';
 import { NativeTerminalSurface } from './NativeTerminalSurface';
 import { productivityActionHint, productivityPhaseLabel, usesActionPillLayout } from './HudCanvasRenderer';
@@ -43,6 +47,7 @@ import {
   type AssistantConversationSnapshot,
   type AssistantConversationTurn,
   type HudContentKind,
+  type HudNotificationCard,
   type PanelContentTab,
   type PanelTab,
   type PlanningGridCell,
@@ -267,7 +272,8 @@ type DisplayPageOwner =
   | 'overlay-native'
   | 'prompt-native'
   | 'text-page-native'
-  | 'navigation-native';
+  | 'navigation-native'
+  | 'notification-native';
 
 /** Firmware pages that hold JOAT content of their own (a list, a reader, a
  * navigation card). An image paint over one of them must recreate the four
@@ -512,6 +518,21 @@ export class HudPresenter {
   /** Where JOAT's box begins over a reader's tiles (ConversationOverlay):
    * the tiles draw the header, so a status change repaints them. */
   private readerUnderBox?: number;
+  /** Every unread JOAT notification, newest first (hud.notifications). */
+  private notificationStack: HudNotificationCard[] = [];
+  /** Cards the wearer marked read here, until the Mac's next list. */
+  private readonly notificationsReadHere = new Set<string>();
+  /** The notification card over the page, while it is up. */
+  private notificationCard?: {
+    card: HudNotificationCard;
+    /** Opened from Home's Notifications tab: no timer, the wearer reads. */
+    browsing: boolean;
+    /** Drawn from the Mac's rendered line before the full list arrived. */
+    provisional: boolean;
+    timer?: ReturnType<typeof setTimeout>;
+    revision: number;
+  };
+  private notificationCardRevision = 0;
   private displayActive = true;
   private displayRevision = 0;
   private readonly assistantConversation: AssistantConversationSurface;
@@ -578,6 +599,7 @@ export class HudPresenter {
       const replaced = await visual.withPageTransition(replace, displayCurrent);
       if (replaced && displayCurrent()) {
         visual.forgetPage?.();
+        if (owner !== 'notification-native') this.clearNotificationCard();
         this.pageOwner = owner;
         this.nativeStatusPainted = statusShown;
         this.overviewText = undefined;
@@ -685,6 +707,7 @@ export class HudPresenter {
     this.confirmationQueue = Promise.resolve();
     this.healing = false;
     this.notificationReturn = undefined;
+    this.clearNotificationCard();
     this.focusReturn = undefined;
     this.resetAll();
     this.surface = { kind: 'default' };
@@ -932,6 +955,13 @@ export class HudPresenter {
     contentKind?: HudContentKind,
     notificationId?: string,
   ): Promise<boolean> {
+    // A new notification pops up as a card over whatever page is up (the
+    // wearer's ruling, 2026-10-07: over every page, as Even's own does).
+    // Home's own record of it below is unchanged.
+    if (containerId === ContainerId.Main && contentKind === 'notification'
+      && /^[a-f0-9]{32}$/i.test(notificationId ?? '') && text.trim()) {
+      void this.popNotification(notificationId!, text);
+    }
     if (this.confirmation && containerId !== ContainerId.StatusBar) {
       this.deferText(text, containerId, textColor, contentKind, notificationId);
       return true;
@@ -1631,6 +1661,145 @@ export class HudPresenter {
       return true;
     }
     return true;
+  }
+
+  /** The Mac's list of unread notifications, newest first. */
+  acceptNotifications(cards: readonly HudNotificationCard[]): void {
+    this.notificationStack = cards
+      .filter((card) => /^[a-f0-9]{32}$/i.test(card.id) && typeof card.body === 'string')
+      .slice(0, 10)
+      .map((card) => ({ ...card }));
+    const ids = new Set(this.notificationStack.map((card) => card.id));
+    for (const id of [...this.notificationsReadHere]) if (!ids.has(id)) this.notificationsReadHere.delete(id);
+    // A card drawn from the Mac's short line before the list arrived is
+    // redrawn whole now.
+    const shown = this.notificationCard;
+    const full = shown && this.notificationStack.find((card) => card.id === shown.card.id);
+    if (shown && full && this.hasNotificationCard()
+      && (shown.provisional || full.body !== shown.card.body || full.sender !== shown.card.sender)) {
+      shown.card = full;
+      shown.provisional = false;
+      void this.paintNotificationCard();
+    }
+  }
+
+  /** Unread cards, newest first, that the wearer has not marked read here. */
+  unreadNotifications(): HudNotificationCard[] {
+    return this.notificationStack.filter((card) => !this.notificationsReadHere.has(card.id));
+  }
+
+  hasNotificationCard(): boolean {
+    return this.notificationCard !== undefined && this.pageOwner === 'notification-native';
+  }
+
+  /** A new notification: its card pops up over the page. Not over a
+   * decision, a question or JOAT's conversation, which own the glass until
+   * they end; it then waits as unread (Home's bell, the Notifications tab). */
+  private async popNotification(id: string, renderedText: string): Promise<boolean> {
+    if (!this.visual || !this.displayActive || this.confirmation || this.promptQuestion
+      || this.assistantConversation.isActive() || this.assistantOverlay) return false;
+    const full = this.notificationStack.find((card) => card.id === id);
+    const card = full ?? cardFromRenderedText(id, renderedText, Date.now());
+    this.showNotificationCard(card, false, !full);
+    return this.paintNotificationCard();
+  }
+
+  /** Home's Notifications tab: the newest unread card, to read at leisure. */
+  async browseNotifications(): Promise<boolean> {
+    const newest = this.unreadNotifications()[0];
+    if (!newest || !this.visual || this.confirmation || this.promptQuestion
+      || this.assistantConversation.isActive()) return false;
+    this.showNotificationCard(newest, true, false);
+    return this.paintNotificationCard();
+  }
+
+  private showNotificationCard(card: HudNotificationCard, browsing: boolean, provisional: boolean): void {
+    const previous = this.notificationCard;
+    if (previous?.timer !== undefined) clearTimeout(previous.timer);
+    const state = {
+      card, browsing: browsing || (previous?.browsing ?? false), provisional,
+      revision: ++this.notificationCardRevision,
+    } as NonNullable<HudPresenter['notificationCard']>;
+    this.notificationCard = state;
+    this.armNotificationCardTimer();
+  }
+
+  private armNotificationCardTimer(): void {
+    const state = this.notificationCard;
+    if (!state) return;
+    if (state.timer !== undefined) clearTimeout(state.timer);
+    state.timer = undefined;
+    if (state.browsing) return;
+    const revision = state.revision;
+    state.timer = setTimeout(() => {
+      if (this.notificationCard?.revision === revision) void this.closeNotificationCard();
+    }, NOTIFICATION_CARD_MS);
+  }
+
+  /** The card over the page as it is now; the page's column, if any, is
+   * repainted with nothing under the card. */
+  private async paintNotificationCard(): Promise<boolean> {
+    const state = this.notificationCard;
+    if (!state) return false;
+    const unread = this.unreadNotifications();
+    const list = unread.some((card) => card.id === state.card.id) ? unread : [state.card, ...unread];
+    const index = Math.max(0, list.findIndex((card) => card.id === state.card.id));
+    const layout = notificationCardLayout(
+      state.card, { index, count: list.length }, Date.now(), this.nativeHeader(this.nativePageTitle()),
+    );
+    const page = overlayNotificationCard(layout, this.conversationUnderlay());
+    const shown = await this.replaceNativePage(page, 'notification-native');
+    if (!shown || this.notificationCard !== state) return false;
+    const bottom = notificationCardBottom(page);
+    if (bottom !== undefined && hasHomeImages(page) && this.surface.kind === 'default') {
+      const frame = this.visualFrame();
+      if (frame.kind === 'overview') {
+        const column = this.homeColumnFor(frame, composeOverviewText(frame, this.overviewHeader()));
+        if (column) {
+          void this.paintHomeColumn(
+            { ...column, clipTop: bottom + NOTIFICATION_CARD.gap, dim: true }, this.captureDisplayGuard(),
+          );
+        }
+      }
+    }
+    return true;
+  }
+
+  /** A tap on the card: it is read; the next unread takes its place, or the
+   * card closes after the last. Returns the id read, for the Mac. */
+  tapNotificationCard(): string | undefined {
+    const state = this.notificationCard;
+    if (!state || !this.hasNotificationCard()) return undefined;
+    const read = state.card.id;
+    this.notificationsReadHere.add(read);
+    // Home's own copy of it goes too, in state only (the card is on the
+    // glass): Home comes back without it before the Mac's retire arrives.
+    this.retiredNotificationIds.add(read);
+    this.removeRetiredNotifications();
+    const next = this.unreadNotifications().find((card) => card.id !== read);
+    if (next) {
+      state.card = next;
+      state.provisional = false;
+      state.revision = ++this.notificationCardRevision;
+      this.armNotificationCardTimer();
+      void this.paintNotificationCard();
+    } else {
+      void this.closeNotificationCard();
+    }
+    return read;
+  }
+
+  /** Close the card, the page beneath as it is now. */
+  async closeNotificationCard(): Promise<boolean> {
+    if (!this.notificationCard) return false;
+    const onGlass = this.pageOwner === 'notification-native';
+    this.clearNotificationCard();
+    return onGlass ? this.restoreRetainedPage() : true;
+  }
+
+  private clearNotificationCard(): void {
+    if (this.notificationCard?.timer !== undefined) clearTimeout(this.notificationCard.timer);
+    this.notificationCard = undefined;
   }
 
   /** Only a fully visible Home card is tappable. Focus pages keep incoming
