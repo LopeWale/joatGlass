@@ -3,11 +3,12 @@ import type { RebuildPageContainer } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import { measureTextWrap } from '@evenrealities/pretext';
 import { HudPageBuilder, READER_TEXT_PAGE } from './HudPageBuilder';
-import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
+import { HudPresenter, setEvenFontPagesForTest, setNativeOverviewForTest } from './HudPresenter';
 import type { HudVisualFrame } from './HudVisualSurface';
 import { ContainerId } from './types';
 
 setNativeOverviewForTest(false);
+setEvenFontPagesForTest(true);
 
 /**
  * A reader set in Even's font at 66% (EvenFont.ts) is an image page: the

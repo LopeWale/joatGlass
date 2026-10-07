@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-07 — Image words at 66% with every pixel fully lit; readers are firmware text
+
+The wearer asked for the image fonts at 66%, reported the faded letters on every image surface, and ruled that more of the image text should be firmware text.
+
+- **Every image word is drawn solid** (`crispGlyph` in `EvenFont.ts`). Each glyph is scaled once with an exact area average of the atlas pixels under each new pixel, then every pixel is cut to fully lit or dark at a 0.3 share. Even's strokes are 1 px wide, and a 1 px stroke at 66% split evenly over two pixels gives each a 0.33 share, so no stroke can vanish (pinned by a test). The canvas's own smoothed scaling lit only 21% of a word's pixels at full brightness. Its high-quality downscale, tried first, dropped the clock's colon and parts of W, E and H, as a capture showed.
+- **66%** (`EVEN_FONT_SCALE`), up from 55%.
+- **Brightness:** header words full (were 67%). Home's date, weather and unread full (were 80-90%). Unlit tabs at 179/255 (were 40%), the firmware's own dimmest text level.
+- **Readers are firmware text pages** (the Messages thread, notes, notification detail, search result and the rest), as the article became in 0.1.113. `VITE_EVEN_FONT_PAGES=1` brings back the image readers. The Mac's 62-column slices are joined back into paragraphs (`readerParagraphs`) before the page is set, so a sentence is not broken into one slice per line.
+- Still images: the header words, Home's left column, the Planning month and dashboard, and the live map.
+- Verified in the official simulator: header words 100% at full brightness (55% build: 8%); every letter of "9:41", "Wed, Oct 7", "NEWS", "SEARCH" and "Focus 15m" intact; the thread as firmware text, paging in place. Not verified on physical glasses.
+- Plugin 1142 passed; typecheck and build clean. Plugin-only.
+
 ## 2026-10-07 — Build JOAT 0.1.113
 
 - Packed from `53b9050` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.113 above the last recorded build (0.1.112); app.json, package.json and package-lock.json all 0.1.113. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1139 tests passed.

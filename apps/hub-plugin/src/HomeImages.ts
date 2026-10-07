@@ -5,7 +5,7 @@ import { ContainerId, HomeColumnId, PANEL_TABS, type PanelTab } from './types';
 
 /**
  * Home's left column (the date, the weather, the unread count and the tab
- * rail) as two images in Even's font at 55% with icons, the parts of Home
+ * rail) as two images in Even's font at 66% with icons, the parts of Home
  * that rarely change. The right pane stays firmware text: it changes on
  * every tab swipe, and an in-place text upgrade (~83 ms) is faster than any
  * image send. This is the mixed design the fast G2 plugins use

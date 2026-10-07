@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { getTextWidth } from '@evenrealities/pretext';
 import {
+  GLYPH_COVERAGE_CUT, boxCoverage,
   EVEN_FONT_SCALE, EVEN_READER, EVEN_WORD_SPACE, evenLineHeight, evenTextWidth, fitOneLineEven,
   paginateEven, readerHint, readerLineTops, readerParagraphs, wrapEven,
 } from './EvenFont';
@@ -120,6 +121,34 @@ describe('reader page margins', () => {
           expect(run.y + evenLineHeight()).toBeLessThanOrEqual(280);
         }
       }
+    }
+  });
+});
+
+describe('crisp glyph coverage', () => {
+  /** A cell `width` px wide, one lit column at `column`, `height` rows. */
+  const stroke = (width: number, height: number, column: number) => ({
+    width,
+    alpha: Array.from({ length: width * height }, (_, index) => (index % width === column ? 255 : 0)),
+  });
+  const CUT = GLYPH_COVERAGE_CUT;
+
+  it('averages exactly the area under each pixel', () => {
+    // A 2x1 cell, its left pixel lit, scaled to one pixel: half covered.
+    expect(boxCoverage({ width: 2, alpha: [255, 0] }, 0, 0, 2, 1, 1, 1)).toEqual([0.5]);
+    // Unscaled: unchanged.
+    expect(boxCoverage({ width: 2, alpha: [255, 0] }, 0, 0, 2, 1, 2, 1)).toEqual([1, 0]);
+  });
+
+  it('never loses a 1 px stroke at the wearer\'s scale, wherever it falls', () => {
+    // Even's strokes are 1 px. Scaled by s, a stroke split evenly over two
+    // pixels gives each a share of s / 2: 0.33 at 66%, above the cut.
+    expect(EVEN_FONT_SCALE / 2).toBeGreaterThanOrEqual(CUT);
+    const width = 20;
+    const scaled = Math.round(width * EVEN_FONT_SCALE);
+    for (let column = 0; column < width; column += 1) {
+      const shares = boxCoverage(stroke(width, 1, column), 0, 0, width, 1, scaled, 1);
+      expect(Math.max(...shares)).toBeGreaterThanOrEqual(CUT);
     }
   });
 });
