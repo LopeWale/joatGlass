@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-07 — A News article is firmware text again, 16 px clear of the sides
+
+The wearer reported the open article drawn as an image and hard to read while scrolling, its letters partly faded.
+
+- **Why it faded, measured.** The image readers draw Even's own glyphs at 55%. The glyph atlas cut from the simulator is one-bit, and 90% of its horizontal strokes are 1 px wide. A 1 px stroke at 55% covers about half a pixel, so the canvas spreads it over one or two pixels at partial brightness. A simulator capture of the 55% thread showed only 21% of its lit body pixels at full brightness, the rest over eight dimmer levels. The body text is also drawn at 82% brightness and the hint at 50%.
+- **The article (`NEWS · ARTICLE`) is a firmware text page again** (`FIRMWARE_TEXT_READERS` in `HudPresenter.ts`). Every stroke is at full brightness, and a swipe pages it in place with one text upgrade instead of repainting image tiles. The Messages thread and the other readers stay 55% images.
+- **A reader's firmware text page keeps 16 px from both sides** (`READER_TEXT_PAGE` in `HudPageBuilder.ts`). The page used the answer page's 4 px inset, so text touched the edge. Its pages are cut to the narrower 544 px, so the firmware never wraps a line past the page. Answer, navigation and Planning pages keep their width.
+- Verified in the official simulator (`?joatVisual=panel-article`): the article as firmware text, no lit pixel within 16 px of either side below the header, and a swipe paging it in place. Not verified on physical glasses.
+- Plugin 1139 passed; typecheck and build clean. Plugin-only: no brain restart.
+
 ## 2026-10-06 — Build JOAT 0.1.112
 
 - Packed from `b35a012` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.112 above the last recorded build (0.1.111); app.json, package.json and package-lock.json all 0.1.112. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1138 tests passed.
