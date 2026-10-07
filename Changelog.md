@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-07 — Build JOAT 0.1.116
+
+- Packed from `44191c6` with `scripts/pack.sh`, the `com.akinwale.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.116 above the last recorded build (0.1.115); app.json, package.json and package-lock.json all 0.1.116. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1163 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 172969 bytes, SHA-256 `df1bb8ae6294f1985e861554c273878633edd22df3888ae59bbc7daa3e45231d`. Adds to 0.1.115 the notification card and the IMU off at boot. **The Mac side changed too: restart the brain from this revision**, or the card only ever shows the Mac's short line. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-07 — Notifications pop up as Even's card, over every page
 
 The wearer asked for notifications the way Even shows its own: a card that pops up over the page, a tap that shows the next unread card, and a double tap that dismisses. Studied first, from Even's support article and its images and from frame-by-frame extracts of Even's G2 videos (recorded in `docs/EVEN_RESEARCH_QUESTIONS.md`).
