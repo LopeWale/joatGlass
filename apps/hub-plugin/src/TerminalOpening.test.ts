@@ -87,7 +87,7 @@ function rig() {
   async function picker(requestId: string) {
     expect(await menu.presentList(
       'AGENT TERMINAL', ['work · idle', 'calendar · idle'], requestId, true,
-      'tap: open · left x2: back',
+      'tap: open · 2x tap: back',
     )).toBe(true);
   }
 

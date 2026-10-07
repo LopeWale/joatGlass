@@ -548,7 +548,7 @@ describe('HudPresenter modal surfaces', () => {
       title: 'Buy filters',
       primary: 'Saved and verified',
       secondary: 'Reminders read-back matched',
-      hint: 'left x2 Reminders',
+      hint: '2x tap: Reminders',
     };
 
     expect(await hud.showConfirmation('Create reminder “Buy filters”? Personal', 'reminder-create')).toBe(true);
@@ -576,7 +576,7 @@ describe('HudPresenter modal surfaces', () => {
       title: 'Design review',
       primary: 'EventKit refused the write',
       secondary: 'Safe to retry',
-      hint: 'left x2 Planning',
+      hint: '2x tap: Planning',
     };
     const saved = { ...failed, phase: 'saved' as const, primary: 'Saved and verified' };
 
@@ -611,7 +611,7 @@ describe('HudPresenter modal surfaces', () => {
       title: 'Design review',
       primary: 'Saved and verified',
       secondary: 'Calendar read-back matched',
-      hint: 'left x2 Planning',
+      hint: '2x tap: Planning',
     };
 
     await hud.showNavigation(navigationVisualFixture('nav-guidance'));
@@ -644,7 +644,7 @@ describe('HudPresenter modal surfaces', () => {
       title: 'Design review',
       primary: 'Saved and verified',
       secondary: 'Calendar read-back matched',
-      hint: 'left x2 Planning',
+      hint: '2x tap: Planning',
     };
 
     expect(await hud.showProductivity(saved)).toBe(true);
@@ -868,10 +868,10 @@ describe('HudPresenter modal surfaces', () => {
       content: 'CAPABILITIES', textColor: 2,
     });
     // The page builder rewrites gesture wording to the shared GesturePolicy
-    // vocabulary ("left x2" → "double-click") so every footer names the
+    // vocabulary ("left x2" → "2x tap") so every footer names the
     // same Back gesture.
     expect(page.textObject?.find((c) => c.containerID === ContainerId.Hint)).toMatchObject({
-      content: 'tap open · double-click back', textColor: 1,
+      content: 'tap open · 2x tap back', textColor: 1,
     });
 
     // Chrome repaints its home hint on every state/clock change. In a focus
@@ -1092,7 +1092,7 @@ describe('HudPresenter modal surfaces', () => {
     expect(restored.textObject?.find((c) => c.containerID === ContainerId.StatusBar)?.content)
       .toBe('LISTENING RESUME');
     expect(restored.textObject?.find((c) => c.containerID === ContainerId.Hint)?.content)
-      .toBe('tap apply · double-click back');
+      .toBe('tap apply · 2x tap back');
   });
 
   it('ignores a stale dismissal after a replacement action claims the modal', async () => {
@@ -1235,7 +1235,7 @@ describe('HudPresenter background migration', () => {
     const before = new HudPresenter(fakeClient(), new HudPageBuilder());
     await before.showList(['Client standup', 'Field walkthrough'], {
       title: 'QUICKNOTES',
-      hint: 'tap: detail · left x2: back',
+      hint: 'tap: detail · 2x tap: back',
       selectable: true,
     });
     before.setMicState(true);

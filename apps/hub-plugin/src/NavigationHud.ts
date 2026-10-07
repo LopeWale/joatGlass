@@ -336,7 +336,7 @@ export const NAVIGATION_NATIVE_DEFAULT_HINTS: Readonly<Record<NavigationView, st
   repair: 'swipe: choose · tap: confirm',
   mode: 'swipe: choose · tap: continue',
   preview: 'tap: start · up: mode · down: place',
-  guidance: 'double-click: menu',
+  guidance: '2x tap: menu',
   uncertain: 'Pause safely · route held',
   wrong_way: 'Route resumes automatically',
   off_route: 'Checking a new route…',

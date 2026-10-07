@@ -91,7 +91,7 @@ describe('native Brainstorm document', () => {
     expect(body[0]).toBe('WORKING · Claude · round 1/2 · 2 calls');
     expect(body).toContain('CODEX > Cache only with a size cap and an eviction rule');
     expect(body).toContain('CLAUDE > Measure hit rate first');
-    expect(body[body.length - 1]).toBe('swipe: scroll · tap: terminal · double-click: cancel');
+    expect(body[body.length - 1]).toBe('swipe: scroll · tap: terminal · 2x tap: cancel');
   });
 
   it('streams a growing turn as one body upgrade, never a rebuild', async () => {
@@ -127,7 +127,7 @@ describe('native Brainstorm document', () => {
     const { surface, pages } = rig();
     await surface.present(brainstorm({ state: 'unavailable', activity: 'JOAT > Codex is signed out', activeSpeaker: undefined }));
     const body = lines(pages[pages.length - 1]);
-    expect(body[body.length - 1]).toBe('fix on phone: JOAT › Brainstorm · double-click: menu');
+    expect(body[body.length - 1]).toBe('fix on phone: JOAT › Brainstorm · 2x tap: menu');
   });
 
   it('scrolls a long room through older turns', async () => {

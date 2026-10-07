@@ -303,7 +303,7 @@ describe('navigationNativeHint', () => {
       .toBe(NAVIGATION_NATIVE_DEFAULT_HINTS.repair);
   });
 
-  it('never names a word that is not tap, swipe, or double-click', () => {
+  it('never names a word that is not tap, swipe, or 2x tap', () => {
     for (const view of VIEWS) {
       expect(NAVIGATION_NATIVE_DEFAULT_HINTS[view]).not.toMatch(/\bsay\b/iu);
       expect(navigationNativeHint({ ...fixture(view), hint: 'say anything · say stop' }))

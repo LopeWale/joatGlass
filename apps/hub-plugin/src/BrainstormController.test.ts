@@ -48,7 +48,7 @@ describe('BrainstormController', () => {
     expect(sent).toEqual([{ kind: 'brainstorm.action', action: 'show_terminal' }]);
   });
 
-  it('uses left-double-click only to cancel a live Brainstorm', () => {
+  it('uses left-2x tap only to cancel a live Brainstorm', () => {
     const { controller, sent } = make();
     controller.present(model({ state: 'running' }));
 
@@ -261,7 +261,7 @@ describe('native contextual menu input ownership', () => {
   });
 });
 
-describe('long-press on a running work session (2026-10-06)', () => {
+describe('long tap on a running work session (2026-10-06)', () => {
   it('cancels the job: the gesture for "terminal cancel"', () => {
     const { controller, sent } = make();
     controller.present(model({ screen: 'agent_terminal', state: 'running' }));
@@ -276,7 +276,7 @@ describe('long-press on a running work session (2026-10-06)', () => {
     expect(sent).toEqual([]);
   });
 
-  it('leaves long-press to the microphone everywhere else', () => {
+  it('leaves long tap to the microphone everywhere else', () => {
     const { controller, sent } = make();
     for (const other of [
       model({ screen: 'agent_terminal', state: 'ready' }),

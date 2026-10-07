@@ -131,7 +131,7 @@ describe('NativeTerminalSurface', () => {
     expect(pages[0]?.headText).toBe('MIC OFF');
     expect(pages[0]?.bodyText).toContain('OPENCLAW > READY');
     expect(pages[0]?.bodyText).not.toContain('OPENCLAW > READY · MIC OFF');
-    expect(footer(pages[0]!)).toBe('tap: speak · double-click: back');
+    expect(footer(pages[0]!)).toBe('tap: speak · 2x tap: back');
     expect(surface.scroll('up')).toBe(false);
     expect(surface.scroll('down')).toBe(false);
 
@@ -150,7 +150,7 @@ describe('NativeTerminalSurface', () => {
     expect(upgrades[0]?.content).toContain('AGENT > Checking the live agent now.');
     // 2026-10-06: the running page names the gesture; "terminal cancel"
     // still works spoken.
-    expect(upgrades[0]?.content).toContain('long-press: cancel · double-click: back');
+    expect(upgrades[0]?.content).toContain('long tap: cancel · 2x tap: back');
     expect(imageWrites).not.toHaveBeenCalled();
   });
 
@@ -217,7 +217,7 @@ describe('NativeTerminalSurface', () => {
     expect(upgrades[0]?.content).toContain('QUESTION > Which deployment should I inspect?');
     expect(upgrades[0]?.content).toContain('Include the affected service and region.');
     expect(last(upgrades[0]?.content?.split('\n') ?? [])).toBe(
-      'Listening · speak your answer · double-click: cancel',
+      'Listening · speak your answer · 2x tap: cancel',
     );
     expect(surface.scroll('up')).toBe(false);
 
@@ -360,7 +360,7 @@ describe('Brainstorm on the native page', () => {
     const lines = page.bodyText.split('\n');
     expect(lines[0]).toBe('READY · Ready for a question');
     expect(lines).toContain('Tap to choose a question, then speak.');
-    expect(footer(page)).toBe('tap: speak · double-click: menu');
+    expect(footer(page)).toBe('tap: speak · 2x tap: menu');
   });
 
   it('streams a running session through body upgrades and names the live speaker', async () => {
@@ -379,14 +379,14 @@ describe('Brainstorm on the native page', () => {
     const lines = (last(r.upgrades)?.content ?? '').split('\n');
     expect(lines[0]).toBe('WORKING · Codex · round 1/3 · 2 calls');
     expect(lines.some((line) => line.startsWith('CODEX > '))).toBe(true);
-    expect(lines[lines.length - 1]).toContain('double-click: cancel');
+    expect(lines[lines.length - 1]).toContain('2x tap: cancel');
   });
 
   it('shows the listening and unavailable states with their own footers', async () => {
     const r = rig();
     expect(await r.surface.present(brainstorm({ state: 'topic_capture', topic: 'Speak your question' }))).toBe(true);
     expect(last(r.pages)!.bodyText.split('\n')[0]).toBe('LISTENING · Speak your question');
-    expect(footer(last(r.pages)!)).toBe('speak your question · double-click: cancel');
+    expect(footer(last(r.pages)!)).toBe('speak your question · 2x tap: cancel');
     expect(await r.surface.present(brainstorm({
       state: 'unavailable', topic: 'Brainstorm', collaborators: ['Claude'],
       activity: 'codex CLI missing on the Mac — install to enable.',

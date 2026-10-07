@@ -99,7 +99,7 @@ export function fitListRow(row: string): string {
 export const LIST_ROW_MAX_UTF8_BYTES = 63;
 
 /** The raster prompt's footer, kept word for word on the text page. */
-export const PROMPT_QUESTION_HINT = 'speak your answer · double-click: cancel';
+export const PROMPT_QUESTION_HINT = 'speak your answer · 2x tap: cancel';
 
 /** Cut on a code-point boundary so the row stays under the host's byte cap. */
 export function clampUtf8Bytes(text: string, maxBytes: number): string {
@@ -277,7 +277,8 @@ export class HudPageBuilder {
       isEventCapture: geometry.isEventCapture ?? 0,
       zOrderIndex: z,
       textColor,
-      content: fitUtf8(content, TEXT_CONTAINER_MAX_BYTES),
+      // Every page's gestures in the one template (GesturePolicy.formatHint).
+      content: fitUtf8(id === ContainerId.Hint ? GesturePolicy.formatHint(content) : content, TEXT_CONTAINER_MAX_BYTES),
     });
   }
 
@@ -654,7 +655,7 @@ export class HudPageBuilder {
     // 96 mirrors HudPresenter.MAX_FOCUS_HINT_CHARS — the pixel truncation
     // below is the real bound; a tighter char pre-cut here silently dropped
     // half the presenter's copy (2026-09-05 audit).
-    const hint = pxTruncate(GesturePolicy.formatHint(chrome.hint?.trim() || 'double-click: overview').slice(0, 96), REGION_TEXT_WIDTH);
+    const hint = pxTruncate(GesturePolicy.formatHint(chrome.hint?.trim() || '2x tap: overview').slice(0, 96), REGION_TEXT_WIDTH);
     return new RebuildPageContainer({
       containerTotalNum: 3,
       ...this.menuConfig(),

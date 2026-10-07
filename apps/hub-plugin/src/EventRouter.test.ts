@@ -358,7 +358,7 @@ describe('EventRouter — confirm gestures', () => {
     false, undefined, false, false, false, false, false, false, false, undefined, retry,
   );
 
-  it.each(['textEvent', 'sysEvent'] as const)('a long-press (%s) on a reply consent asks to say it again, never the mic', (via) => {
+  it.each(['textEvent', 'sysEvent'] as const)('a long tap (%s) on a reply consent asks to say it again, never the mic', (via) => {
     const retry = vi.fn(() => true);
     const { fire, imu, audio, sent } = withRetry(retry);
     imu.isPending.mockReturnValue(true);
@@ -374,7 +374,7 @@ describe('EventRouter — confirm gestures', () => {
     expect(sent).toEqual([]);
   });
 
-  it('consumes a long-press the gate declines, without toggling the mic', () => {
+  it('consumes a long tap the gate declines, without toggling the mic', () => {
     const retry = vi.fn(() => false);
     const { fire, imu, audio, sent } = withRetry(retry);
     imu.isPending.mockReturnValue(true);
@@ -403,7 +403,7 @@ describe('EventRouter — confirm gestures', () => {
     expect(audio.start).not.toHaveBeenCalled();
   });
 
-  it('leaves long-press as the mic when no decision is pending', () => {
+  it('leaves long tap as the mic when no decision is pending', () => {
     const retry = vi.fn(() => true);
     const { fire, audio } = withRetry(retry);
     fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
@@ -904,7 +904,7 @@ describe('EventRouter — text and list', () => {
   });
 });
 
-describe('EventRouter — long-press mutes the mic', () => {
+describe('EventRouter — long tap mutes the mic', () => {
   /**
    * An earlier build ceded long-press to the glasses OS, believing a
    * declared menuObject made the OS open its contextual menu on that
@@ -920,7 +920,7 @@ describe('EventRouter — long-press mutes the mic', () => {
   const LONG_PRESS = OsEventTypeList.LONG_PRESS_EVENT;
   const RELEASE = OsEventTypeList.LONG_PRESS_RELEASE_EVENT;
 
-  it('toggles the mic when a plain sysEvent long-press reaches release', () => {
+  it('toggles the mic when a plain sysEvent long tap reaches release', () => {
     const r = make();
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
     r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
@@ -937,7 +937,7 @@ describe('EventRouter — long-press mutes the mic', () => {
     expect(r.audio.start).not.toHaveBeenCalled();
   });
 
-  it('keeps long-press as the mic on a Brainstorm page that is not a running job', () => {
+  it('keeps long tap as the mic on a Brainstorm page that is not a running job', () => {
     const r = make(false, undefined, false, true);
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
     r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
@@ -1007,7 +1007,7 @@ describe('EventRouter — long-press mutes the mic', () => {
     expect(r.sent).toEqual([]);
   });
 
-  it('routes a cached Refresh row through tap-then-long-press without toggling the mic', () => {
+  it('routes a cached Refresh row through tap-then-long tap without toggling the mic', () => {
     // Connection settings moved to the phone (HudPageBuilder.systemMenu):
     // the retired Refresh id stays routed to the settings guidance because a
     // host may still show a cached menu, and it must not mute on the way.

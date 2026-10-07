@@ -44,7 +44,7 @@ function harness(withVisual = true, withBarrier = false) {
 
 const NEWS = ['Story 01 · 2h', 'Story 02 · 3h', 'Story 03 · 5h'];
 const NEWS_OPTIONS = {
-  title: 'NEWS', hint: 'tap: open · hold: refresh · left x2: back',
+  title: 'NEWS', hint: 'tap: open · long tap: refresh · 2x tap: back',
   selectable: true, railTab: 'news' as const,
 };
 
