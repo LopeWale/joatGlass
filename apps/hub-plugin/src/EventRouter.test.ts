@@ -1281,3 +1281,13 @@ describe('EventRouter prompt ownership', () => {
     expect(f.lifecycle.onExit).toHaveBeenCalledWith('system');
   });
 });
+
+it('keeps motion reports out of the diagnostics ring, and records the taps', () => {
+  const recorded: unknown[] = [];
+  const { fire } = make(false, { record: (event) => recorded.push(event) });
+  for (let i = 0; i < 20; i += 1) {
+    fire({ sysEvent: { eventType: OsEventTypeList.IMU_DATA_REPORT, imuData: { x: 0, y: 0, z: 1 } } });
+  }
+  fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
+  expect(recorded).toEqual([{ type: 'gesture', gesture: 'tap', delivery: 'sys' }]);
+});

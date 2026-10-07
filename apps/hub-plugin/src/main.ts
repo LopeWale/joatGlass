@@ -1118,7 +1118,11 @@ async function boot(): Promise<void> {
     }
     micStatus = micOk ? label : 'JOAT · mic unavailable';
   }
-  if (!displayYielded && !exiting) await imu.start();
+  // No IMU at boot. Motion approves nothing (ImuMonitor: confirmation is a
+  // deliberate tap), so a stream opened here did nothing but send ten reports
+  // a second over Bluetooth and fill the diagnostics ring: the wearer's
+  // export of 2026-10-07 held 512 motion reports and no taps. The Mac opens
+  // it on purpose (imu.control) when it traces motion.
 
   // Deterministic official-simulator voice gate. Vite replaces DEV with false
   // and removes this branch from packed builds. The resolver independently
