@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { RebuildPageContainer } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
-import { HudPageBuilder } from './HudPageBuilder';
+import { measureTextWrap } from '@evenrealities/pretext';
+import { HudPageBuilder, READER_TEXT_PAGE } from './HudPageBuilder';
 import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
 import type { HudVisualFrame } from './HudVisualSurface';
+import { ContainerId } from './types';
 
 setNativeOverviewForTest(false);
 
@@ -101,6 +103,37 @@ describe('HudPresenter Even-font reader page', () => {
     await r.hud.showList(THREAD, OPTIONS);
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(page?.imageObject ?? []).toHaveLength(0);
+    expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
+  });
+
+  it('keeps a News article a firmware text page that pages in place', async () => {
+    const r = rig();
+    const article = [
+      'BBC · 12m · Consumer sentiment rises to 48.9 · 1/3',
+      ...Array.from({ length: 24 }, (_, index) => `Sentence ${index + 1} of the article about consumer sentiment.`),
+    ];
+    expect(await r.hud.showList(article, {
+      title: 'NEWS · ARTICLE', hint: 'down more · left x2: back', selectable: false, nativeTextPage: true,
+    })).toBe(true);
+    const page = r.rebuilds[r.rebuilds.length - 1];
+    expect(page?.imageObject?.some((image) => image.containerID === ContainerId.Image) ?? false).toBe(false);
+    expect(page?.textObject?.some((text) => text.content?.includes('Sentence 1 '))).toBe(true);
+    expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
+    // No glyph within 16 px of a side: the body and hint start 16 px in
+    // (container x + its 4 px padding) and every page fits its lines there.
+    for (const name of ['main', 'hint']) {
+      const box = page?.textObject?.find((text) => text.containerName === name);
+      expect((box?.xPosition ?? 0) + (box?.paddingLength ?? 0)).toBe(16);
+      expect((box?.xPosition ?? 0) + (box?.width ?? 0) - (box?.paddingLength ?? 0)).toBe(576 - 16);
+    }
+    const body = page?.textObject?.find((text) => text.containerName === 'main')?.content ?? '';
+    expect(measureTextWrap(body, READER_TEXT_PAGE.textWidth).lineCount)
+      .toBeLessThanOrEqual(READER_TEXT_PAGE.lineCapacity);
+    // A swipe pages the firmware text in place: an upgrade, no rebuild.
+    const rebuilds = r.rebuilds.length;
+    expect(r.hud.scrollTextPage('down')).toBe(true);
+    await vi.waitFor(() => expect(r.operations).toContain('upgrade'));
+    expect(r.rebuilds).toHaveLength(rebuilds);
     expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
   });
 

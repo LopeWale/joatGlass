@@ -128,6 +128,18 @@ export const ASSISTANT_ANSWER_PAGE = {
   textWidth: REGION_TEXT_WIDTH,
 } as const;
 
+/** A reader's firmware text page (a News article): the answer page's
+ * lines, inset so no glyph is drawn within 16 px of either side, the edge
+ * the wearer asked to keep clear (2026-10-06). The container's own 4 px
+ * padding is part of the 16. */
+const READER_SIDE_MARGIN = 16;
+export const READER_TEXT_PAGE = {
+  x: READER_SIDE_MARGIN - REGION_PAD, // 12
+  width: CANVAS.width - 2 * (READER_SIDE_MARGIN - REGION_PAD), // 552
+  textWidth: CANVAS.width - 2 * READER_SIDE_MARGIN, // 544
+  lineCapacity: ASSISTANT_ANSWER_PAGE.lineCapacity,
+} as const;
+
 export const ASSISTANT_CONVERSATION_GEOMETRY = {
   cardLeft: 36,
   cardWidth: 504,
@@ -698,12 +710,29 @@ export class HudPageBuilder {
 
   /** A Mac-paged reader (a Messages message, a note) as Even's own text
    * page: the same three containers as an answer, so the presenter can page
-   * it in place with `textContainerUpgrade`. */
+   * it in place with `textContainerUpgrade`. A reader (`inset`) keeps its
+   * text READER_TEXT_PAGE's 16 px from the sides; its body must be paged
+   * to READER_TEXT_PAGE.textWidth. */
   textPageLayout(
     body: string,
     chrome: { status?: string; hint?: string } = {},
+    options: { inset?: boolean } = {},
   ): RebuildPageContainer {
-    return this.assistantAnswerLayout(body, chrome);
+    if (!options.inset) return this.assistantAnswerLayout(body, chrome);
+    const side = { x: READER_TEXT_PAGE.x, width: READER_TEXT_PAGE.width };
+    return new RebuildPageContainer({
+      containerTotalNum: 3,
+      ...this.menuConfig(),
+      textObject: [
+        this.statusBar(chrome.status ?? ''),
+        this.main(ASSISTANT_ANSWER_PAGE.bodyHeight, 1, 4, (body || ' ').slice(0, 1000), side),
+        this.region(
+          ContainerId.Hint, 'hint', 253, 35, 3, 1,
+          pxTruncate((chrome.hint ?? 'tap: dismiss').slice(0, 96), READER_TEXT_PAGE.textWidth),
+          side,
+        ),
+      ],
+    });
   }
 
   /** One complete application question ("What should I say?") as a text
