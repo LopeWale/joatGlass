@@ -141,6 +141,12 @@ class SttEngine(ABC):
         """Drop buffered audio — call on a seq gap, so a dropped-frame
         discontinuity is never spliced into one bogus utterance."""
 
+    async def transcribe_partial(self, pcm: bytes) -> str | None:
+        """The words so far of an utterance still being spoken, shown to
+        the wearer while they speak; never acted on. Must not touch the
+        buffered utterance. None when this engine cannot say them yet."""
+        return None
+
 
 class Confirmer(ABC):
     """Explicit human approval for a consequential action (RULES.md #6)."""

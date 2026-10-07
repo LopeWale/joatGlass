@@ -1,4 +1,10 @@
 import { GesturePolicy } from './GesturePolicy';
+import { HOME_COLUMN, type HomeColumnView } from './HomeImages';
+import {
+  EVEN_READER, drawEvenText, evenLineHeight, evenTextWidth, fitOneLineEven, loadEvenFont, readerHint,
+  readerLineTops,
+  type EvenReaderLine,
+} from './EvenFont';
 import chatCircleSvg from '@phosphor-icons/core/regular/chat-circle-dots.svg?raw';
 import bellSvg from '@phosphor-icons/core/regular/bell.svg?raw';
 import calendarSvg from '@phosphor-icons/core/regular/calendar-dots.svg?raw';
@@ -35,6 +41,7 @@ import {
 import {
   CANVAS,
   HeaderImageId,
+  HomeColumnId,
   PANEL_TABS,
   SPINE_LABEL_BOX,
   type HudContentKind,
@@ -271,7 +278,112 @@ export function batteryIconFor(
 /** The raster lists draw flat: every pixel the rounded frame occupied was
  * a pixel of content. The dashboard and the live map keep the shell. */
 export function usesFlatHudShell(kind: HudVisualFrame['kind']): boolean {
-  return kind === 'list';
+  return kind === 'list' || kind === 'reader';
+}
+
+/** One run of text on a reader page, where it lands and how bright. */
+export interface ReaderRun {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  alpha: number;
+}
+
+/** One mark of Home's column: words in Even's font, or an icon. */
+export interface HomeColumnMark {
+  tile: 0 | 1;
+  x: number;
+  /** Top, within the tile. */
+  y: number;
+  width: number;
+  height: number;
+  alpha: number;
+  text?: string;
+  icon?: HudIconName;
+}
+
+/** Inside each column tile: 16 px from the screen's edge, 16 px short of
+ * the column's right edge, so nothing meets the rule or the edge. */
+const COLUMN_LEFT = 16;
+const COLUMN_RIGHT = HOME_COLUMN.width - 16;
+const COLUMN_ICON = 13;
+const COLUMN_TEXT_X = COLUMN_LEFT + COLUMN_ICON + 6;
+
+/**
+ * Where Home's column draws each mark. The top tile: the date, the weather
+ * with its icon, the unread count with the Messages icon. The bottom tile:
+ * the tab rail, one row per tab with its icon, the lit tab bright and the
+ * others dim. Pure, so the margins are tested without a canvas.
+ */
+export function homeColumnLayout(view: HomeColumnView): HomeColumnMark[] {
+  const line = evenLineHeight();
+  const marks: HomeColumnMark[] = [];
+  const words = (tile: 0 | 1, x: number, y: number, text: string, alpha: number) => {
+    const fitted = fitOneLineEven(text, COLUMN_RIGHT - x);
+    if (fitted) marks.push({ tile, x, y, width: evenTextWidth(fitted), height: line, alpha, text: fitted });
+  };
+  const icon = (tile: 0 | 1, y: number, name: HudIconName, alpha: number) => {
+    marks.push({ tile, x: COLUMN_LEFT, y: y + (line - COLUMN_ICON) / 2, width: COLUMN_ICON, height: COLUMN_ICON, alpha, icon: name });
+  };
+  let y = 10;
+  if (view.info.date) { words(0, COLUMN_LEFT, y, view.info.date, 0.9); y += 26; }
+  if (view.info.weather) { icon(0, y, 'weather', 0.8); words(0, COLUMN_TEXT_X, y, view.info.weather, 0.8); y += 24; }
+  if (view.info.unread > 0) {
+    icon(0, y, 'messages', 0.8);
+    words(0, COLUMN_TEXT_X, y, `${view.info.unread} unread`, 0.8);
+  }
+  view.tabs.forEach((tab, index) => {
+    const rowY = 8 + index * 26;
+    const alpha = tab.active ? 1 : 0.4;
+    icon(1, rowY, tab.tab, alpha);
+    words(1, COLUMN_TEXT_X, rowY, tab.label, alpha);
+  });
+  return marks;
+}
+
+/** Brightness of a reader's parts: the speaker over the words, the hint
+ * well under both. */
+const READER_ALPHA = { speaker: 1, body: 0.82, hint: 0.5 } as const;
+
+/**
+ * Every run a reader page draws, in page coordinates. The renderer draws
+ * exactly these, so the margin rule (16 px each side, 3 px top, 8 px
+ * bottom) is checked here without a canvas.
+ */
+export function readerLayout(lines: readonly EvenReaderLine[], hint: string, clipBottom?: number): ReaderRun[] {
+  const runs = readerRuns(lines, hint);
+  // Under JOAT's box nothing is drawn: a line that would reach past the
+  // box's top border goes, and so does the hint.
+  return clipBottom === undefined ? runs : runs.filter((run) => run.y + evenLineHeight() <= clipBottom);
+}
+
+function readerRuns(lines: readonly EvenReaderLine[], hint: string): ReaderRun[] {
+  const runs: ReaderRun[] = [];
+  const tops = readerLineTops(lines);
+  lines.forEach((line, index) => {
+    const y = tops[index] ?? EVEN_READER.bodyTop;
+    const x = EVEN_READER.marginX;
+    const label = line.speaker ? line.text.slice(0, line.speaker) : '';
+    if (label) runs.push({ text: label, x, y, width: evenTextWidth(label), alpha: READER_ALPHA.speaker });
+    const rest = line.text.slice(label.length);
+    const restX = x + evenTextWidth(label);
+    if (rest.trim()) {
+      runs.push({ text: rest, x: restX, y, width: evenTextWidth(line.text) - evenTextWidth(label), alpha: READER_ALPHA.body });
+    }
+  });
+  const { left, right } = readerHint(hint);
+  const hintY = EVEN_READER.hintBottom - evenLineHeight();
+  if (left) {
+    runs.push({ text: left, x: EVEN_READER.marginX, y: hintY, width: evenTextWidth(left), alpha: READER_ALPHA.hint });
+  }
+  if (right) {
+    const width = evenTextWidth(right);
+    runs.push({
+      text: right, x: EVEN_READER.marginX + EVEN_READER.width - width, y: hintY, width, alpha: READER_ALPHA.hint,
+    });
+  }
+  return runs;
 }
 
 export type HudIconName =
@@ -829,6 +941,8 @@ export function hudSpinePageTitle(frame: HudVisualFrame): string {
       return hudDisplayTitle(frame.title);
     case 'navigation':
       return 'Navigation';
+    case 'reader':
+      return hudDisplayTitle(frame.title);
     default:
       return '';
   }
@@ -943,6 +1057,7 @@ export function projectMercatorPanel(
 
 
 export class HudCanvasRenderer implements HudFrameRenderer {
+  readonly drawsReaders = true;
   private readonly icons: Promise<Record<HudIconName, HTMLImageElement>>;
 
   constructor() {
@@ -980,6 +1095,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       case 'navigation':
         this.drawNavigation(context, frame.navigation);
         break;
+      case 'reader': {
+        const atlas = await loadEvenFont();
+        for (const run of readerLayout(frame.lines, frame.hint, frame.clipBottom)) {
+          drawEvenText(context, atlas, run.text, run.x, run.y, { alpha: run.alpha, fallbackFont: TYPE.body });
+        }
+        break;
+      }
     }
     // Chrome is the final compositing layer. Besides making ownership
     // explicit, this prevents state-specific paths from ever obscuring the
@@ -991,6 +1113,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       usesFlatHudShell(frame.kind),
       frame.kind !== 'overview',
       hudSpineLabel(frame),
+      await loadEvenFont(),
     );
     if (frame.actionOverlay) {
       this.drawActionPill(context, frame.actionOverlay.productivity, icons);
@@ -1010,6 +1133,37 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     return splitGrayscaleTiles(pixels);
   }
 
+  /** Home's left column as its two images (HomeImages.ts). */
+  async renderHomeColumn(view: HomeColumnView): Promise<readonly HudImageTile[]> {
+    const icons = await this.icons;
+    const atlas = await loadEvenFont();
+    const width = HOME_COLUMN.width;
+    const height = HOME_COLUMN.tileHeight;
+    const marks = homeColumnLayout(view);
+    return [HomeColumnId.Top, HomeColumnId.Bottom].map((containerId, tile) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d', { alpha: false });
+      if (!context) throw new Error('2D canvas is unavailable');
+      context.fillStyle = '#000000';
+      context.fillRect(0, 0, width, height);
+      context.imageSmoothingEnabled = true;
+      for (const mark of marks.filter((item) => item.tile === tile)) {
+        if (mark.icon) this.drawIcon(context, icons[mark.icon], mark.x, mark.y, mark.width, Math.round(mark.alpha * 255));
+        else if (mark.text) {
+          drawEvenText(context, atlas, mark.text, mark.x, mark.y, { alpha: mark.alpha, fallbackFont: TYPE.statusMeta });
+        }
+      }
+      const rgba = context.getImageData(0, 0, width, height).data;
+      const pixels = new Uint8Array(width * height);
+      for (let source = 0, target = 0; source < rgba.length; source += 4, target += 1) {
+        pixels[target] = Math.max(rgba[source] ?? 0, rgba[source + 1] ?? 0, rgba[source + 2] ?? 0);
+      }
+      return { containerId, pixels, width, height };
+    });
+  }
+
   /** The spine alone, as the two 288x24 halves of a firmware page's image
    * header (HeaderImage.ts): the same drawing as the image pages' spine. */
   async renderHeader(model: HudStatusModel, label: string): Promise<readonly HudImageTile[]> {
@@ -1024,7 +1178,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = '#000000';
     context.fillRect(0, 0, width, height);
     context.imageSmoothingEnabled = true;
-    this.drawShell(context, model, icons, true, true, label);
+    this.drawShell(context, model, icons, true, true, label, await loadEvenFont());
     const rgba = context.getImageData(0, 0, width, height).data;
     const half = width / 2;
     return [HeaderImageId.Left, HeaderImageId.Right].map((containerId, index) => {
@@ -1050,6 +1204,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
      * puts it, rather than stacking it on top of the big clock. */
     showTime = true,
     label = hudStatusLabel(status),
+    /** Even's font (EvenFont.ts): the spine's words are set in it, the
+     * mic and battery are the only icons (the wearer's ask, 2026-10-06). */
+    atlas?: HTMLImageElement,
   ): void {
     if (!flat) {
       context.strokeStyle = gray(HAIRLINE);
@@ -1064,20 +1221,16 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // smaller"); the cell's fill carries the level, the slash carries the
     // closed mic, and the number comes back only when the battery is low.
     const baseline = HUD_VISUAL_GEOMETRY.statusBaselineY;
+    // The words sit centred on the band's middle line, in Even's font.
+    const top = baseline - evenLineHeight() / 2;
+    const words = (text: string, x: number) => this.drawSpineWords(context, atlas, text, x, top);
     context.textBaseline = 'middle';
     context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.statusClock;
     context.textAlign = 'left';
-    context.fillText(
-      showTime ? (status.clock || '--:--') : hudDateLabel(new Date()),
-      30,
-      baseline,
-    );
-    // Same compact face as the clock. The label box is measured
-    // (types.ts SPINE_LABEL_BOX) and ends on the tile seam, so the changing
-    // word stays inside the top-left tile.
-    context.font = TYPE.statusMeta;
-    this.fitText(context, label, SPINE_LABEL_BOX.x, baseline, SPINE_LABEL_BOX.width);
+    words(showTime ? (status.clock || '--:--') : hudDateLabel(new Date()), 30);
+    // The label box is measured (types.ts SPINE_LABEL_BOX) and ends on the
+    // tile seam, so the changing word stays inside the top-left tile.
+    words(fitOneLineEven(label, SPINE_LABEL_BOX.width), SPINE_LABEL_BOX.x);
     this.drawIcon(
       context,
       status.mic ? icons.microphone : icons.microphoneSlash,
@@ -1090,10 +1243,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         SPINE_ICONS.batteryX, SPINE_ICONS.batteryY, SPINE_ICONS.batterySize, SUPPORT,
       );
       if (!status.charging && status.battery <= HUD_LOW_BATTERY_PCT) {
-        context.font = TYPE.statusMeta;
-        context.textAlign = 'right';
-        context.fillText(`${Math.round(status.battery)}%`, SPINE_ICONS.lowBatteryTextRightX, baseline);
-        context.textAlign = 'left';
+        const level = `${Math.round(status.battery)}%`;
+        words(level, SPINE_ICONS.lowBatteryTextRightX - evenTextWidth(level));
       }
     }
 
@@ -1101,22 +1252,20 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // Pomodoro's minutes on the map, the next turn on the dashboard.
     const chips = (status.activities ?? []).filter((chip) => chip.trim().length > 0);
     if (chips.length > 0) {
-      context.font = TYPE.statusMeta;
-      context.fillStyle = gray(SUPPORT);
-      context.textAlign = 'right';
-      const room = SPINE_ICONS.activityRightX - SPINE_ICONS.activityLeftX;
-      let text = chips.join(' · ');
-      if (context.measureText(text).width > room) {
-        while (text.length > 1 && context.measureText(`${text}…`).width > room) text = text.slice(0, -1);
-        text = `${text.trimEnd()}…`;
-      }
-      context.fillText(text, SPINE_ICONS.activityRightX, baseline);
-      context.textAlign = 'left';
+      const text = fitOneLineEven(chips.join(' · '), SPINE_ICONS.activityRightX - SPINE_ICONS.activityLeftX);
+      words(text, SPINE_ICONS.activityRightX - evenTextWidth(text));
     }
 
     // No rule under the spine. It separated nothing that the gap below it
     // does not already separate, and it lit 540 pixels to do it (the
     // wearer's ruling: another waste).
+  }
+
+  /** One run of the spine's words in Even's font, its cell top at `top`. */
+  private drawSpineWords(
+    context: CanvasRenderingContext2D, atlas: HTMLImageElement | undefined, text: string, x: number, top: number,
+  ): void {
+    drawEvenText(context, atlas, text, x, top, { alpha: SUPPORT / 255, fallbackFont: TYPE.statusMeta });
   }
 
   /** A receipt strip over an image page (the dashboard, the month, the live

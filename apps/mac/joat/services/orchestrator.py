@@ -34,6 +34,7 @@ from ..core.protocol import (
     AudioSource,
     ContainerId,
     HudText,
+    PromptPartial,
     utf16_slice,
     utf16_units,
 )
@@ -96,6 +97,11 @@ its true start and the real silence between two fragments.
 """
 
 BYTES_PER_SECOND = 16_000 * 2
+
+#: How much more speech before the words so far are transcribed again for
+#: an open prompt's card (the wearer: "it does not show my speech as I am
+#: speaking"). About once a second while they talk, one request at a time.
+PARTIAL_STEP_BYTES = int(BYTES_PER_SECOND * 0.9)
 
 SPLIT_REQUEST_WINDOW_S = 6.0
 """How long an ignored fragment waits to be claimed by the rest of itself.
@@ -347,6 +353,15 @@ class VoiceOrchestrator:
         self._unaddressed_tail: tuple[str, float] | None = None
         self._stt = stt
         self._vad = vad or RmsVad()
+        # The words so far of the utterance being spoken, for an open
+        # prompt's card: one transcription in flight, dropped once the
+        # utterance it belongs to has ended.
+        self._partial_task: asyncio.Task[None] | None = None
+        self._partial_bytes = 0
+        self._utterance_serial = 0
+        # Provisional words are on the prompt's card: a final that does not
+        # answer the prompt (another speaker, no text, refused) clears them.
+        self._partial_shown = False
         self._stt_available = stt_available
         self._replier = replier
         # Disabled by default. Acceptance may inject a local observer, which
@@ -558,7 +573,9 @@ class VoiceOrchestrator:
             self._utterance_frames = list(self._audio_preroll)
             self._audio_preroll.clear()
         if utterance is None:
+            self._maybe_publish_partial(audio_epoch, connection_generation)
             return
+        self._end_partials()
         provenance = self._completed_provenance(self._utterance_frames)
         utterance_source: AudioSource | None = (
             "glasses" if provenance.source == "glasses"
@@ -582,6 +599,7 @@ class VoiceOrchestrator:
                 "ignored non-wearer utterance bytes=%d source=%s roles=%s",
                 len(utterance), provenance.source, ",".join(sorted(roles)),
             )
+            self._schedule_clear_partial()
             return
         # Pure-`unknown` on a source we KNOW classifies is the remaining
         # suspect for phantom questions: the classifier was running and still
@@ -630,7 +648,93 @@ class VoiceOrchestrator:
             mixed=any(len(values) > 1 for values in (sources, generations, epochs)),
         )
 
+    def _end_partials(self) -> None:
+        """The utterance ended or broke off: a late partial is not shown."""
+        self._utterance_serial += 1
+        self._partial_bytes = 0
+
+    def _maybe_publish_partial(self, audio_epoch: str | None, connection_generation: str | None) -> None:
+        """While the wearer answers a prompt, transcribe their words so far
+        about once a second and show them in its card. Only for audio of
+        that prompt (its epoch and connection), and never acted on: the
+        final transcript of the whole utterance alone answers it."""
+        ticket = self._prompted_input.current_ticket if self._prompted_input is not None else None
+        if (
+            ticket is None or audio_epoch != ticket.prompt_id
+            or connection_generation != ticket.connection_generation
+        ):
+            return
+        if self._partial_task is not None and not self._partial_task.done():
+            return
+        # The same eligibility `dispatch` applies to the final transcript,
+        # over every frame buffered so far: never another speaker's words,
+        # never a mixed or foreign-epoch buffer (review, 2026-10-06: the
+        # epoch check alone let a bystander's 0.9 s appear as the reply).
+        if not self._utterance_frames:
+            return
+        provenance = self._completed_provenance(self._utterance_frames)
+        if (
+            provenance.mixed is not False
+            or provenance.source != ticket.source
+            or provenance.connection_generation != ticket.connection_generation
+            or provenance.audio_epoch != ticket.prompt_id
+            or any(role == "other" for role in provenance.speaker_roles)
+        ):
+            return
+        speech = self._vad.speech_so_far()
+        if speech is None or len(speech) - self._partial_bytes < PARTIAL_STEP_BYTES:
+            return
+        self._partial_bytes = len(speech)
+        self._partial_task = asyncio.get_running_loop().create_task(
+            self._publish_partial(speech, ticket, self._utterance_serial)
+        )
+
+    async def _publish_partial(self, speech: bytes, ticket: PromptTicket, serial: int) -> None:
+        try:
+            text = await self._stt.transcribe_partial(speech)
+        except Exception as exc:  # display only: never disturb the turn
+            log.info("partial transcript failed error=%s", type(exc).__name__)
+            return
+        current = self._prompted_input.current_ticket if self._prompted_input is not None else None
+        if (
+            not text or not text.strip() or serial != self._utterance_serial
+            or current is None or current.prompt_id != ticket.prompt_id
+        ):
+            return
+        try:
+            await self._transport.send(PromptPartial(
+                prompt_id=ticket.prompt_id,
+                connection_generation=ticket.connection_generation,
+                text=text,
+            ))
+            self._partial_shown = True
+        except Exception as exc:
+            log.info("partial transcript not sent error=%s", type(exc).__name__)
+
+    async def _clear_partial(self) -> None:
+        """Take provisional words off the prompt's card: the utterance they
+        came from will not answer it. An empty partial is the Hub's cue."""
+        if not self._partial_shown:
+            return
+        self._partial_shown = False
+        ticket = self._prompted_input.current_ticket if self._prompted_input is not None else None
+        if ticket is None:
+            return
+        try:
+            await self._transport.send(PromptPartial(
+                prompt_id=ticket.prompt_id,
+                connection_generation=ticket.connection_generation,
+                text="",
+            ))
+        except Exception as exc:
+            log.info("partial clear not sent error=%s", type(exc).__name__)
+
+    def _schedule_clear_partial(self) -> None:
+        if self._partial_shown:
+            asyncio.get_running_loop().create_task(self._clear_partial())
+
     def _reset_partial_utterance(self) -> None:
+        self._end_partials()
         if self._prompted_input is not None and self._prompted_input.current_ticket is not None:
             self._vad.fence_prompt()
         else:
@@ -797,6 +901,7 @@ class VoiceOrchestrator:
         turn = self._begin_turn(queued.endpointed_at)
         transcript = await self._transcribe(turn, queued.pcm)
         if transcript is None:
+            await self._clear_partial()
             return
         head = _Transcribed(turn, transcript, queued.source, queued.provenance)
         head_endpointed_at = queued.endpointed_at
@@ -881,8 +986,11 @@ class VoiceOrchestrator:
             ):
                 # The typed owner received the exact transcript. Do not let
                 # greetings, command parsing or a second model reinterpret it.
+                self._partial_shown = False  # the consent card replaces the words
                 self._observe_latency(latency_turn, "reply_complete", started_at)
                 return
+            # Not the prompt's answer: its provisional words come off the card.
+            await self._clear_partial()
             # A tap has explicitly armed the next glasses phrase as a
             # Brainstorm topic. This path intentionally runs before the normal
             # wake-word gate: requiring the wearer to say JOAT again would

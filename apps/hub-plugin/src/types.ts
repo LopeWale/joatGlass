@@ -53,12 +53,19 @@ export const VisualContainerName: Readonly<Record<number, string>> = {
   [ContainerId.VisualBottomLeft]: 'visual-bl',
   [ContainerId.VisualBottomRight]: 'visual-br',
   16: 'hdr-left',
+  18: 'home-top',
+  19: 'home-bot',
   17: 'hdr-right',
 };
 
 /** The one header every firmware page carries: the image spine's two
  * halves (HeaderImage.ts). Page-local ids; they never cross the wire. */
 export const HeaderImageId = { Left: 16, Right: 17 } as const;
+/** Home's left column as two images (HomeImages.ts). */
+export const HomeColumnId = { Top: 18, Bottom: 19 } as const;
+/** Home's pane label column (OverviewText.ts): the grid's left column,
+ * beside the value column that is ContainerId.Main. Page-local. */
+export const HomePaneLabelId = 20;
 
 /** Canvas constants from the SDK. Never hardcode these elsewhere. */
 export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;
@@ -363,6 +370,15 @@ export interface PromptCancelMessage {
   connectionGeneration: string;
 }
 
+/** The wearer's words so far while they answer this prompt (Mac partial
+ * transcript). Display only; the final transcript alone answers. */
+export interface PromptPartialMessage {
+  kind: 'prompt.partial';
+  promptId: string;
+  connectionGeneration: string;
+  text: string;
+}
+
 export interface PromptAckMessage {
   kind: 'prompt.ack';
   promptId: string;
@@ -579,6 +595,7 @@ export type DownlinkMessage =
   | PromptPresentMessage
   | MessageUIMessage
   | PromptCancelMessage
+  | PromptPartialMessage
   /** The socket is usable only after this frame. */
   | { kind: 'auth.accepted' }
   | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean; textColor?: number; contentKind?: HudContentKind; traceId?: string }

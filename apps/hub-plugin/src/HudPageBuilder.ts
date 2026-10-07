@@ -22,6 +22,7 @@ import {
   ContainerId,
   VisualContainerName,
   type ConfirmationPurpose,
+  HomePaneLabelId,
 } from './types';
 import {
   NATIVE_TERMINAL_GEOMETRY,
@@ -73,8 +74,20 @@ export function fitHeader(line: string, width = REGION_TEXT_WIDTH): string {
 }
 /** Inner text width of a full-width region (576 − 2×REGION_PAD). */
 const REGION_TEXT_WIDTH = CANVAS.width - 2 * REGION_PAD;
-/** A list row's text width: container pad (8) + firmware row pad (12/side). */
-const LIST_ROW_TEXT_WIDTH = CANVAS.width - 2 * 8 - 2 * 12;
+/** A list row's text width: container pad (8) + firmware row pad (12/side),
+ * less 12 px held back. The selected row draws a border inside its text
+ * area, and a row cut to the last pixel of 536 wrapped under it: two 27 px
+ * lines in a 40 px row, over the row below (the wearer's report,
+ * 2026-10-06). */
+const LIST_ROW_TEXT_WIDTH = CANVAS.width - 2 * 8 - 2 * 12 - 12;
+
+/** One list row on one line: any line break or run of whitespace becomes a
+ * single space (pretext measures a line break as 0 px, but the firmware
+ * breaks the row there), then the row is cut to the measured width. */
+export function fitListRow(row: string): string {
+  const flat = row.replace(/\s+/gu, ' ').trim();
+  return pxTruncate(clampUtf8Bytes(flat, LIST_ROW_MAX_UTF8_BYTES), LIST_ROW_TEXT_WIDTH);
+}
 /**
  * The host's real per-row limit, measured in the official simulator on
  * 2026-10-05: a row of 64 UTF-8 bytes or more makes `rebuildPageContainer`
@@ -344,12 +357,14 @@ export class HudPageBuilder {
       content: fitUtf8(content, TEXT_CONTAINER_MAX_BYTES),
     });
     return new RebuildPageContainer({
-      containerTotalNum: 6,
+      containerTotalNum: 7,
       ...this.menuConfig(),
       textObject: [
         text(ContainerId.StatusBar, 'status', g.header, 1, 2, fitBand([view.header], g.header)),
         text(ContainerId.Context, 'info', g.info, 2, 3, fitBand(view.info, g.info)),
         text(ContainerId.Tray, 'tabs', g.tabs, 3, 2, fitBand(railRows(view.tabs), g.tabs), 1),
+        // The pane's grid: labels dim in their own column, values beside them.
+        text(HomePaneLabelId, 'pane-l', g.paneLabels, 7, 2, fitBand(view.paneLabels, g.paneLabels)),
         text(ContainerId.Main, 'pane', g.pane, 4,
           Math.max(0, Math.min(4, Math.round(view.paneBrightness))), fitBand(view.pane, g.pane)),
         // The column rule: a 2 px box whose 1 px border draws one solid line.
@@ -620,8 +635,7 @@ export class HudPageBuilder {
     items: string[],
     chrome: { title?: string; hint?: string; status?: string } = {},
   ): RebuildPageContainer {
-    const capped = items.slice(0, 20)
-      .map((s) => pxTruncate(clampUtf8Bytes(s, LIST_ROW_MAX_UTF8_BYTES), LIST_ROW_TEXT_WIDTH));
+    const capped = items.slice(0, 20).map(fitListRow);
     // The presenter composes the header with the page's name in it; a bare
     // title here is the no-status fallback, so the page is never nameless.
     const header = (chrome.status?.trim() || chrome.title?.trim() || 'JOAT').slice(0, 64);

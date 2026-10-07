@@ -140,6 +140,8 @@ class TestService:
             "[!] Some feeds unavailable · partial list", "[1m] Only story · BBC",
         )
         assert svc.partial is True and svc.last_error is None
+        # A tap counts that row; opening counts headlines.
+        assert svc.status_rows == 1
 
     async def test_all_feeds_dead_keeps_yesterdays_headlines(self, tmp_path: Path) -> None:
         bbc, _npr, _google = CATEGORY_FEEDS["technology"]

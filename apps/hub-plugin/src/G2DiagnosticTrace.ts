@@ -74,7 +74,7 @@ export type G2TraceEvent =
     type: 'frame_timing';
     frame: number;
     kind: 'brainstorm' | 'confirmation' | 'list' | 'messages'
-      | 'navigation' | 'overview' | 'productivity' | 'prompt_question';
+      | 'navigation' | 'overview' | 'productivity' | 'prompt_question' | 'reader';
     /** Tiles actually re-sent. 0 means every region was already correct. */
     changedTiles: number;
     /** Waiting to start, behind an in-flight frame. */

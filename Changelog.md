@@ -1,5 +1,143 @@
 # Changelog
 
+## 2026-10-06 — Build JOAT 0.1.112
+
+- Packed from `b35a012` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.112 above the last recorded build (0.1.111); app.json, package.json and package-lock.json all 0.1.112. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1138 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 169963 bytes, SHA-256 `5b24290bc191aab2ab9a0180db1e80b3cdeddbe9034980b3252740c35eea4457`. Adds to 0.1.111 the two live-words fixes from the PR #17 review. **The Mac side changed too: restart the brain from this revision.** The package is gitignored (`*.ehpk`); this entry is its record. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-06 — Live words: a cancel waits for the card, and another speaker's words never show
+
+A review of PR #17 found two defects in the live-transcription path, both confirmed in the code and fixed.
+
+- **A cancel or a consent card could lose to a growing partial.** The words so far can grow the reply card, which is a page replacement, and the page guard refuses a second replacement while one runs. `dismissPromptQuestion` waited only for the card's first paint, so a cancel arriving mid-growth tried to restore the page beneath, was refused, and the cancelled card stayed on the glass; a consent card could be refused the same way. Both now wait for every paint the prompt owns (`settlePromptPaints`) before replacing the page. Pinned by a test that holds the partial's rebuild while a cancel arrives.
+- **Another speaker's words could appear as the wearer's reply.** The partial publisher checked only the latest frame's prompt epoch and connection; a bystander talking for 0.9 s during an open prompt, with the host naming `speaker="other"`, was transcribed into the card. The final-transcript path already rejected such audio. The publisher now applies `dispatch`'s own eligibility over every buffered frame: no `other` speaker, the prompt's source, epoch and connection, nothing mixed.
+- **Provisional words come off the card when the final does not answer the prompt:** a rejected non-wearer utterance, a final with no text, or a final `dispatch` refuses now sends an empty `prompt.partial`, which shrinks the card back to the question. Before, somebody else's words could stay until the next update.
+- Tests: plugin 1138 passed, typecheck and build clean. Mac 3457 passed, 1 skipped; the container's IPv6 test fails as before. mypy clean. Both sides change: a new package and a brain restart.
+
+## 2026-10-06 — Build JOAT 0.1.111
+
+- Packed from `bc5e305` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.111 above the last recorded build (0.1.110); app.json, package.json and package-lock.json all 0.1.111. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1137 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 169876 bytes, SHA-256 `c5313c7b0fa5a9f2bebc15aa3c3687a56cea7d6ffa6077bb7115ddbd976e7796`. Adds to 0.1.110 Home's label/value grid. Plugin-only since 0.1.109: a brain restarted for 0.1.109 needs no restart. The package is gitignored (`*.ehpk`): it lives only where `npm run pack` ran, and this entry is its record. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-06 — Home's pane is a label/value grid, as weather-even-g2 lays out its stats
+
+The wearer pointed at weather-even-g2's right panel. Read from its source and captured live in the official simulator: its Today screen's right half is two native text containers side by side, a label column (feels, wind, humid, press, rise, set, uv) and a value column, with no border, icon or list. Two containers because the firmware font is proportional: columns line up only at fixed x, never as padded spaces in one container.
+
+- **Home's pane is now that grid** (`OverviewText.ts`, `HudPageBuilder.overviewTextLayout`): a 96 px label column (`pane-l`, dim) beside the value column (`pane`, which stays `ContainerId.Main`, so replies still stream into it and it still holds the input).
+  - Notifications: `NEXT` / `Calendar` / `Mail` beside their lines.
+  - News: each headline's age (`12m`, `1h`) beside `headline · source`.
+  - Pomodoro: `Timer` / `Left` / `Cycle` beside the block, minutes left and the cycle dots; the bar and the action rows span the value column.
+  - Search: `Query` beside the question, then numbered results, so "open the second" names a row.
+  - `NOTIFICATION` (116 px) and `LAST QUERY` (108 px) are wider than the column and show as `NOTICE` and `QUERY`; a boot title (`RECONNECTING`, 130 px) heads the value column as before.
+- **A tab swipe is three in-place upgrades** (the rail, the labels, the values), never a rebuild; the presenter's in-place limit rose from two bands to three. A rebuild would also resend Home's four images.
+- Dev fixture: `?joatVisual=panel-news&joatHomeRest=1` (and `panel-pomodoro`, `panel-search`) shows the lit tab's own card instead of the newest notification.
+- Verified in the official simulator on all four tabs. Not verified on physical glasses.
+- Plugin 1137 passed; typecheck clean. Plugin-only.
+
+## 2026-10-06 — Build JOAT 0.1.110
+
+- Packed from `34e0b42` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.110 above the last recorded build (0.1.109); app.json, package.json and package-lock.json all 0.1.110. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1137 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 169696 bytes, SHA-256 `8875ab7bd57c4e3fe0095148af4aab5e049c9627671db97831f484ecffb6b1df`. Adds to 0.1.109 Home's column in Even's font and the reader kept at 55% under JOAT's box. Plugin-only since 0.1.109: a brain restarted for 0.1.109 needs no restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-06 — Mixed rendering: Home's column in Even's font; the reader stays 55% under JOAT's box
+
+The wearer asked for sources on the font limits, and they are now confirmed:
+- Even's display docs say "a single LVGL font baked into firmware. No font selection, no size control" (hub.evenrealities.com/docs/build/display).
+- App fonts are an open request, everything-evenhub#37.
+- `TextContainerProperty` in SDK 0.0.16 has 14 fields and no font.
+
+Every G2 plugin with other fonts draws that text as images; the fast ones mix the two (weather-even-g2, sandevistan, amap-hud). The wearer chose that mixed design: images in Even's font for what rarely changes, native text for what changes often.
+
+- **Home's left column** (the date, weather, unread count and tab rail) is now two image tiles in Even's font at 55%, with icons (`HomeImages.ts`, `HudCanvasRenderer.renderHomeColumn`).
+  - The right pane stays firmware text and keeps its in-place upgrade on every tab swipe; it now holds the page's input.
+  - A swipe moves the pane first, then resends only the rail's tile (26 ms in the simulator; one image send on the glasses).
+  - The weather or unread count resends the other tile. The clock is in the header, so nothing repaints on the minute.
+  - `VITE_HOME_IMAGES=0` keeps the text column.
+- **JOAT's box over a reader keeps the reader in Even's font.** The reply card used to rebuild the reader above it as a firmware text page, which jumped the thread back to the firmware's size. Now:
+  - The reader's four tiles stay beneath the box (`ConversationOverlay` keeps an image underlay's tiles and drops its input layer and the box's status line).
+  - The presenter repaints the reader with nothing below the box's top border (`clipBottom` on the reader frame).
+  - A status change repaints those tiles.
+  - Closing the box repaints the whole reader.
+- **The image lane gained a strip kind** for page parts that are images: Home's column, alongside the header. These are never superseded by a full frame, and only changed tiles are sent.
+- **Verified in the official simulator:** Home before and after, a tab swipe (rail tile only), and the reply box over the long thread with the thread at 55%. Not verified on physical glasses.
+- Plugin 1137 passed; typecheck and build clean. Plugin-only.
+
+## 2026-10-06 — Build JOAT 0.1.109
+
+- Packed from `2a8d724` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.109 above the last recorded build (0.1.108); app.json, package.json and package-lock.json all 0.1.109. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1131 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 168065 bytes, SHA-256 `cf33ba02a80a1f2cacfb777635f2277ab849cc0c6af2081b3bf968b00ae0e304`. Adds to 0.1.108 Even's font at 55% and in the header, one-line list rows, your words in the reply card while you speak, and News taps that open the right story. **The Mac side changed too: restart the brain from this revision** (live words and the News fix are Mac-side). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-06 — Your words while you reply; News taps open the right story; smaller font, header in Even's font
+
+The wearer reported five things:
+1. "the tap to click and open news page does not work"
+2. the message reply "does not show my speech as I am speaking"
+3. list rows "that have wrapped text… get overlaid slightly by the next row"
+4. "the fonts are still too big", so use the smallest row (55%)
+5. "use the fonts for time and topic in the top header", with the mic and battery the only icons
+
+- **Your words appear in the reply card while you speak.**
+  - **Why they never appeared:** no partial transcript existed anywhere. Speech-to-text (whisper) only transcribed a whole utterance after 1 s of quiet, and the first time the glass saw the words was the consent card. JOAT's own conversation worked the same way.
+  - **What the Mac does now:** while a prompt is open, it transcribes the speech so far about once a second through the warm whisper server and sends a new `prompt.partial` (`protocol.py` `PromptPartial`, `types.ts` `PromptPartialMessage`).
+    - Only for that prompt's own audio: its epoch and its connection.
+    - One request at a time.
+    - Dropped once the utterance ends.
+    - Never acted on: the final transcript alone answers.
+  - **What the glasses do:** the Hub shows the words under JOAT's question. The first words grow the card by a row; after that each update is an in-place text upgrade, and only the newest words are painted.
+  - A partial never starts or restarts the whisper server and never falls back to the batch CLI. With the batch CLI engine there are no partials.
+- **A News tap opens the story on that row.** When any feed failed, News put a "[!] Some feeds unavailable" row above the headlines, but a tap's row index was used as a headline index. Every tap opened the story below it, and the last row opened nothing (a republish that looked like a dead tap). With 3 categories × 3 feeds, one failing feed is enough. The panel now skips the status row (`NewsService.status_rows`); tapping the status row itself opens nothing.
+- **List rows stay on one line.**
+  - A multi-line message preview reached the firmware row with its line break. Pretext measures a line break as 0 px, but the firmware breaks there: two 27 px lines in a 40 px row, over the row below.
+  - Rows were also cut to the last pixel of the 536 px row, which the selected row's border narrows.
+  - The fix, Mac side: the inbox row joins the preview's whitespace.
+  - The fix, plugin side: `fitListRow` collapses whitespace in every firmware list row and cuts it to 524 px.
+- **Even's font at 55%:** readers use an 18 px line (15 px glyphs) with a 5 px gap between messages. The thread fixture holds eight messages a page, up from six at 66% and two in the firmware font.
+- **The header's words in Even's font:** the clock, the page's name, the activity chips and the low-battery number, on every image page and on the image header of every firmware page. The mic and battery stay icons.
+- **Verified in the official simulator** (`?joatVisual=message-reply-question&joatReplyWords=…`, `messages-conversation-long`):
+  - The words show in the reply card over the thread.
+  - The thread at 55% and the header in Even's font render as described.
+  - Not verified with live speech (the simulator has no microphone), and not on physical glasses.
+  - Firmware lists (the Messages inbox, News) are still the firmware's own font: only image pages can be drawn smaller.
+- **Tests:** plugin 1131 passed, typecheck clean. Mac 3455 passed, 1 skipped; the container's IPv6 test fails as before. mypy clean. Both sides change: this needs a new package and a brain restart.
+
+## 2026-10-06 — Build JOAT 0.1.108
+
+- Packed from `fda926f` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.108 above the last recorded build (0.1.107); app.json, package.json and package-lock.json all 0.1.108. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1127 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 167555 bytes, SHA-256 `edbf5464f909a2c30f26ee2c3d13b352b281c6943cccb6278bd9e075de1a95d1`. Adds to 0.1.107 the readers in Even's font at 66% across the whole glass (the atlas adds about 9 KB). Plugin-only. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-06 — Readers in Even's font at 66%, spread across the whole glass
+
+The wearer: pages look cramped and sparse, and only Planning uses the full 576x288; "use the smaller font display", "space shit out", and keep a margin "so things are not getting cut off at the edge of the screen".
+
+- **Every reader is now set in Even's own font at 66%**: the Messages thread first, and also the message review, News, QuickNotes and Planning readers. That means every surface that went through the firmware text page (`renderNativeTextPage`).
+  - **Why images:** the firmware gives plugin text one font at one size (a 27 px line, seven lines a page). No SDK through 0.0.16 offers a size. So the page is drawn into the four 288x144 image tiles over the full-screen input layer, as Planning is.
+  - **The font itself:** the letterforms are the firmware's, from the atlas cut from the official simulator (`src/assets/even-font.*`, `scripts/build_even_font.py`). Each glyph sits where pretext places it, so the advances and kerning are the firmware's, scaled.
+  - **Word spacing:** 1.5 px is added per space, because at 66% the firmware's space runs words together.
+- **Spaced out, edge to edge:**
+  - Body text sits on a 22 px line (the 18 px glyph line plus leading).
+  - A 6 px gap separates messages.
+  - Text runs from x 18 to 558.
+  - The hint sits at the foot, with the page count right-aligned.
+  - The thread fixture went from two messages on page 1 of 4 to six messages on page 1 of 2.
+- **Responsive, element by element** (`EvenFont.ts`):
+  - **Messages and prose** wrap at word boundaries and are never cut. A message that does not fit carries on to the next page.
+  - **One token wider than the whole line** (a long link) is the only thing broken mid-word, after `/ . - _ ? & = #` where possible.
+  - **The hint** keeps the page count whole. It drops its swipe clause first, then shortens with "…".
+  - **Rows are re-set at the new width.** The Mac's 62-column reader rows are joined back first: a row wrapped at a space or cut at the full 62 columns continues, and a line break ends a paragraph.
+  - **Sender names** ("Adele:", "You:") are drawn brighter than the words after them.
+- **Margins:** nothing is drawn within 16 px of either side, 3 px of the top or 8 px of the bottom. A test checks every placed run on stress pages (long names, doubled links, a long hint). The simulator capture has no lit pixel in those bands.
+- **Paging** repaints the tiles; it no longer upgrades the text in place. Only tiles whose pixels changed are sent, and paging back reuses the encoded tiles.
+  - Measured in the simulator: opening the thread 144–357 ms (the first open includes loading the font); a page turn 75–81 ms.
+  - On the glasses each tile is a BLE image send (about 0.1 s plus 3.9 ms/KB), so a page turn will cost more than the two text upgrades (about 83 ms each) it replaces. This is the one place the change adds latency, and it is not yet measured on hardware.
+- **A reader keeps its page through the background migration.** The page index is in the background snapshot; before this, a return started the reader over at page 1.
+- **Known limit:** when JOAT's box opens over the thread, the lines left above the box are firmware text in the firmware's size. Image tiles cannot be cut under a box without being resent.
+- **How to verify, and what is not verified:**
+  - `VITE_EVEN_FONT_PAGES=0` keeps the firmware text pages.
+  - Dev fixture: `?joatVisual=messages-conversation-long`, a real Mac-paged thread with a link cut mid-token, driven through the menu so the simulator's swipes page it.
+  - The simulator draws the firmware font as an approximation (Even's test-with-simulator guidance), so the letterforms need a look on the glasses.
+  - Not verified on physical glasses.
+- Plugin 1127 passed; typecheck clean. Plugin-only.
+
 ## 2026-10-06 — Build JOAT 0.1.107
 
 - Packed from `c10cb86` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.107 above the last recorded build (0.1.106); app.json, package.json and package-lock.json all 0.1.107. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1114 tests passed.
