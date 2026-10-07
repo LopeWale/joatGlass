@@ -443,6 +443,9 @@ export class EventRouter {
   }
 
   private recordGesture(gesture: G2Gesture, delivery: G2GestureDelivery): void {
+    // Motion reports arrive ten a second while the IMU is open; recorded,
+    // they push every tap and swipe out of the bounded ring.
+    if (gesture === 'imu_report') return;
     this.diagnostics?.record({ type: 'gesture', gesture, delivery });
   }
 
