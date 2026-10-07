@@ -1521,7 +1521,10 @@ async function renderVisualState(
       earlierTurnsOmitted: false,
       // ?joatConvTurns=short: one short exchange, the card at its first size.
       // ?joatConvTurns=question: a question JOAT is still working on.
-      turns: new URLSearchParams(window.location.search).get('joatConvTurns') === 'question' ? [
+      // ?joatConvTurns=wake: the wearer said only "JOAT"; JOAT answers.
+      turns: new URLSearchParams(window.location.search).get('joatConvTurns') === 'wake' ? [
+        { role: 'assistant', text: 'Yes?' },
+      ] : new URLSearchParams(window.location.search).get('joatConvTurns') === 'question' ? [
         { role: 'user', text: 'What time is my next meeting?' },
       ] : new URLSearchParams(window.location.search).get('joatConvTurns') === 'short' ? [
         { role: 'user', text: 'What time is my next meeting?' },

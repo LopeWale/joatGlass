@@ -57,9 +57,10 @@ describe('HudPresenter reply card words so far', () => {
     const opened = r.rebuilds.length;
 
     expect(await r.hud.showPromptPartial('p1', 'Running')).toBe(true);
-    // The card grew a row for the wearer's words: one rebuild.
+    // The card grew a row for the wearer's words, straight beneath JOAT's
+    // question (no blank row between): one rebuild.
     expect(r.rebuilds).toHaveLength(opened + 1);
-    expect(wearerWords(last(r.rebuilds))).toContain('Running');
+    expect(wearerWords(last(r.rebuilds))).toContain('You: Running');
 
     expect(await r.hud.showPromptPartial('p1', 'Running late')).toBe(true);
     // Same size: only the words changed, upgraded in place.

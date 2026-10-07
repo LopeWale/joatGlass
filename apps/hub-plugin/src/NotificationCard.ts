@@ -15,8 +15,9 @@ import { CANVAS, ContainerId, type HudNotificationCard } from './types';
  * (Even's support article "Notifications", its glasses image measured 1:1 on
  * the 576x288 canvas, 2026-10-07): a bordered card near the top over the
  * page the wearer was on, the app on its first line with the age at the
- * right, then the sender and the whole message. The page stays beneath it,
- * dimmed, below the card.
+ * right, then the whole message with the sender's name in front of it on
+ * the same row (not a row of its own). The page stays beneath the card,
+ * dimmed.
  *
  * Firmware text, not pixels: a tap moves to the next unread card, and a text
  * page swaps in one page write, where an image card would cost about 104 ms
@@ -72,11 +73,13 @@ export function cardFromRenderedText(id: string, text: string, nowMs: number): H
   };
 }
 
-/** The card's text lines: the sender, then the message, fitted to the room. */
+/** The card's text: the sender's name in front of their message on the
+ * same row ("Elizabeth: Mom didn't…"), never on a row of its own (the
+ * wearer's ruling, 2026-10-07), fitted to the room. */
 function bodyText(card: HudNotificationCard, maxLines: number): string {
   const sender = card.sender.trim();
   const message = card.body.trim() || ' ';
-  const text = sender ? `${sender}\n${message}` : message;
+  const text = sender ? `${sender}: ${message}` : message;
   return fitLines(text, BODY_WIDTH, maxLines);
 }
 

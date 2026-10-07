@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
+import { getTextWidth } from '@evenrealities/pretext';
 import { HudPageBuilder } from './HudPageBuilder';
 import {
   AssistantConversationSurface,
@@ -66,7 +67,33 @@ describe('native Even-style assistant conversation model', () => {
     expect(dim).toHaveLength(bright.length);
     expect(dim.some((line) => line.includes('What is the weather?'))).toBe(true);
     expect(bright.some((line) => line.includes('warm and partly cloudy'))).toBe(true);
-    expect(dim.some((line, index) => line.trim() && bright[index]?.trim())).toBe(false);
+    // The two layers share a row only where JOAT's dim name stands in
+    // front of its bright words, and the words start past the name.
+    dim.forEach((line, index) => {
+      if (!line.trim() || !bright[index]?.trim()) return;
+      expect(line).toBe('JOAT:');
+      expect(bright[index]!.length - bright[index]!.trimStart().length).toBeGreaterThan(0);
+      const pad = getTextWidth(bright[index]!.match(/^ */u)![0]);
+      expect(pad).toBeGreaterThan(getTextWidth('JOAT:'));
+      expect(pad).toBeLessThanOrEqual(getTextWidth('JOAT: ') + getTextWidth(' ') / 2);
+    });
+  });
+
+  it('names the speaker on the first row of each turn, never on a row of its own', () => {
+    const view = conversationViewport(snapshot(1, [
+      { role: 'user', text: 'What is the weather?' },
+      { role: 'assistant', text: 'It is warm and partly cloudy.' },
+    ]));
+    // Two turns, two rows: no name rows, no blank row between them.
+    expect(view.lineCapacity).toBe(2);
+    expect(view.dimText.split('\n')).toEqual(['You: What is the weather?', 'JOAT:']);
+    expect(view.brightText.split('\n')[1]!.trim()).toBe('It is warm and partly cloudy.');
+    // A long answer wraps beneath, full width.
+    const long = conversationLines(snapshot(2, [
+      { role: 'assistant', text: Array.from({ length: 40 }, (_, i) => `word${i}`).join(' ') },
+    ]));
+    expect(long[0]?.label).toBe('JOAT:');
+    expect(long.slice(1).every((line) => line.label === undefined)).toBe(true);
   });
 
   it('grows only to the optical cap, then scrolls back without a scrollbar', () => {
