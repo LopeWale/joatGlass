@@ -1531,6 +1531,60 @@ class HudAmbient:
         }
 
 
+#: The notification card's bounds: the glasses keep the ten newest, as
+#: Even's own notifications do, and a card shows its whole message.
+NOTIFICATION_STACK_LIMIT = 10
+NOTIFICATION_BODY_CHARACTERS = 600
+NOTIFICATION_LABEL_CHARACTERS = 48
+_NOTIFICATION_ID = re.compile(r"^[a-f0-9]{32}$")
+
+
+@dataclass(frozen=True, slots=True)
+class HudNotificationCard:
+    """One unread JOAT notification as the glasses' card shows it: the app,
+    the sender, the whole message and when it arrived."""
+
+    card_id: str
+    app: str
+    sender: str
+    body: str
+    at_unix_ms: int
+    urgent: bool = False
+
+    def to_wire(self) -> dict[str, Any]:
+        if not _NOTIFICATION_ID.match(self.card_id):
+            raise ProtocolError("notification card id must be 32 lowercase hex characters")
+        if self.at_unix_ms < 0:
+            raise ProtocolError("notification time is out of range")
+        body = " ".join(self.body.split())
+        if len(body) > NOTIFICATION_BODY_CHARACTERS:
+            body = body[: NOTIFICATION_BODY_CHARACTERS - 1].rstrip() + "…"
+        return {
+            "id": self.card_id,
+            "app": " ".join(self.app.split())[:NOTIFICATION_LABEL_CHARACTERS],
+            "sender": " ".join(self.sender.split())[:NOTIFICATION_LABEL_CHARACTERS],
+            "body": body,
+            "at": self.at_unix_ms,
+            "urgent": self.urgent,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HudNotifications:
+    """Every unread JOAT notification, newest first, republished whenever
+    the card log changes. The glasses' card reads its next unread from here,
+    so a tap moves to it without a round trip to the Mac.
+    Plugin counterpart: HudNotificationsMessage in apps/hub-plugin/src/types.ts."""
+
+    cards: tuple[HudNotificationCard, ...] = ()
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": "hud.notifications",
+            "cards": [card.to_wire() for card in self.cards[:NOTIFICATION_STACK_LIMIT]],
+        }
+
+
 #: The tabs whose content the Mac pushes. Rail order on the glass is
 #: notifications, news, pomodoro, search; notifications is not a push because
 #: that tab reads the overview's own Main/Context/Tray streams.
@@ -1914,6 +1968,7 @@ DownlinkMessage = (
     | NavigationRoute
     | NavigationMapPanel
     | HudAmbient
+    | HudNotifications
     | HudPanel
     | NavigationStop
     | ConfirmRequest

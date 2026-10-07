@@ -33,6 +33,11 @@ export interface HomeColumnView {
   /** Under JOAT's box: nothing is drawn at or below this page y, so the
    * column's rows never shine through the box (a G2 box has no fill). */
   clipBottom?: number;
+  /** Under a notification card at the top: nothing is drawn above this
+   * page y, so only the rows below the card show. */
+  clipTop?: number;
+  /** Dimmed beneath a notification card, as Even dims the page under its own. */
+  dim?: boolean;
 }
 
 /** The column's content, from the same view the text column was built from. */

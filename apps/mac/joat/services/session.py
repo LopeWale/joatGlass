@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from ..core.interfaces import ReplyEngine
-from ..core.protocol import AudioSource, BrainstormAction, BrainstormHudView
+from ..core.protocol import AudioSource, BrainstormAction, BrainstormHudView, HudNotificationCard, HudNotifications
 from ..verifier.citations import parse_citations
 from ..verifier.gate import CitationStatus, VerifierGate
 from ..channels.cards import Card, CardLog, Urgency
@@ -127,6 +127,23 @@ _BRAINSTORM_TRIGGER = re.compile(
 )
 
 from .agent_terminal import ApprovalReceipt, parse_reply_route
+
+
+def notification_stack(active: Sequence[Card]) -> HudNotifications:
+    """Every unread JOAT card, newest first, as the glasses' notification
+    card reads them: a tap there moves to the next unread without asking
+    the Mac. `active` is the card log's order, oldest first."""
+    return HudNotifications(tuple(
+        HudNotificationCard(
+            card_id=card.card_id,
+            app=card.channel,
+            sender=card.source,
+            body=card.body or card.summary,
+            at_unix_ms=int(card.at * 1000),
+            urgent=card.urgency is Urgency.URGENT,
+        )
+        for card in reversed(active)
+    ))
 
 # "Note that" / "save Claude's reply as a note", spoken into a live
 # session. Anchored so a REMARK that happens to open with "note that…"

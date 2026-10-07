@@ -69,6 +69,13 @@ export interface AssistantOverlayInputOwner {
   hasVisibleNotification(): boolean;
   visibleNotificationId?(): string | undefined;
   dismissVisibleNotification(): Promise<boolean>;
+  /** The notification card over the page (NotificationCard.ts). */
+  hasNotificationCard?(): boolean;
+  /** Mark the shown card read and move to the next unread, or close. The
+   * id of the card marked read, for the Mac. */
+  tapNotificationCard?(): string | undefined;
+  /** Close the card without marking it read (Even's double tap). */
+  closeNotificationCard?(): Promise<boolean>;
 }
 
 export interface PromptInputOwner {
@@ -306,6 +313,7 @@ export class EventRouter {
       // HERE, and the relay below would forward it as an ordinary scroll.
       if (this.handleLongPress(event.textEvent.eventType, 'textEvent')) return;
       if (this.handlePromptInput(event.textEvent.eventType)) return;
+      if (this.handleNotificationCard(event.textEvent.eventType)) return;
       if (this.handleAssistantConversation(event.textEvent.eventType)) return;
       if (this.dismissAssistantOverlayFor(event.textEvent.eventType)) return;
       if (this.dismissVisibleNotificationFor(event.textEvent.eventType)) return;
@@ -375,6 +383,7 @@ export class EventRouter {
       this.recordGesture(this.classify(event.listEvent.eventType), 'list');
       if (this.handleLongPress(event.listEvent.eventType, 'listEvent')) return;
       if (this.handlePromptInput(event.listEvent.eventType)) return;
+      if (this.handleNotificationCard(event.listEvent.eventType)) return;
       if (this.handleAssistantConversation(event.listEvent.eventType)) return;
       if (this.dismissAssistantOverlayFor(event.listEvent.eventType)) return;
       // Some G2 firmware represents a Home-tile tap as a List event. A
@@ -403,12 +412,37 @@ export class EventRouter {
     if (this.imu.isPending()) { this.imu.declineByTap(); return; }
     if (this.backPending) return;
     if (this.handlePromptInput(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
+    if (this.handleNotificationCard(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
     if (this.handleAssistantConversation(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
     if (this.dismissAssistantOverlayFor(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
     if (this.navigation?.isActive() && this.navigation.handleCancel()) return;
     if (this.brainstorm?.isActive() && this.brainstorm.handleCancel()) return;
     this.backPending = true;
     void this.menu.toggle().finally(() => { this.backPending = false; });
+  }
+
+  /**
+   * The notification card owns the page's taps while it is up, as Even's
+   * own card does (the wearer's ruling, 2026-10-07): a tap marks it read and
+   * shows the next unread, or closes the card after the last; a double tap
+   * closes it and leaves it unread. Swipes stay with the card. Long press
+   * is not taken: the microphone keeps it.
+   */
+  private handleNotificationCard(eventType: number | undefined): boolean {
+    if (!this.assistantOverlay?.hasNotificationCard?.()) return false;
+    const type = eventType ?? OsEventTypeList.CLICK_EVENT;
+    if (type === OsEventTypeList.CLICK_EVENT) {
+      const read = this.assistantOverlay.tapNotificationCard?.();
+      if (read && this.link.linkState === 'connected') {
+        this.link.send({ kind: 'input', event: { containerName: 'notification-dismiss', traceId: read } });
+      }
+      return true;
+    }
+    if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+      void this.assistantOverlay.closeNotificationCard?.();
+      return true;
+    }
+    return type === OsEventTypeList.SCROLL_TOP_EVENT || type === OsEventTypeList.SCROLL_BOTTOM_EVENT;
   }
 
   /** Questions retain the feature underneath; only Back releases this owner. */
@@ -539,6 +573,7 @@ export class EventRouter {
     }
 
     if (this.handlePromptInput(type)) return;
+    if (this.handleNotificationCard(type)) return;
     if (this.handleAssistantConversation(type)) return;
     if (this.dismissAssistantOverlayFor(type)) return;
     if (this.dismissVisibleNotificationFor(type)) return;

@@ -4597,3 +4597,16 @@ async def test_terminal_retry_and_cycle_bind_before_scheduled_action(action):
         await asyncio.wait_for(finished.wait(), 1)
     finally:
         await manager.close()
+
+
+def test_notification_stack_is_newest_first_with_the_whole_message() -> None:
+    from joat.services.session import notification_stack
+
+    old = Card(source="Ann", channel="Mail", summary="Lunch?", body="Lunch on Friday at noon?", at=100.0)
+    new = Card(source="Dele", channel="Messages", summary="On my way", at=200.0, urgency=Urgency.URGENT)
+    wire = notification_stack([old, new]).to_wire()
+    assert [card["sender"] for card in wire["cards"]] == ["Dele", "Ann"]
+    assert wire["cards"][1]["body"] == "Lunch on Friday at noon?"
+    assert wire["cards"][0]["body"] == "On my way"
+    assert wire["cards"][0]["urgent"] is True
+    assert wire["cards"][0]["at"] == 200_000

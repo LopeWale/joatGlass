@@ -310,6 +310,10 @@ export interface HomeColumnMark {
  * Below it, words looked faded on the glass (the wearer, 2026-10-07). */
 const DIM_WORDS = 179 / 255;
 
+/** Home's column beneath a notification card: dimmed well below the card's
+ * own words, as Even's page under its card. */
+const UNDER_CARD_ALPHA = 0.45;
+
 const COLUMN_LEFT = 16;
 const COLUMN_RIGHT = HOME_COLUMN.width - 16;
 const COLUMN_ICON = 13;
@@ -344,12 +348,16 @@ export function homeColumnLayout(view: HomeColumnView): HomeColumnMark[] {
     icon(1, rowY, tab.tab, alpha);
     words(1, COLUMN_TEXT_X, rowY, tab.label, alpha);
   });
-  const clip = view.clipBottom;
-  if (clip === undefined) return marks;
-  // Under JOAT's box a row is left out whole, never cut through a glyph.
-  return marks.filter((mark) => (
-    HOME_COLUMN.top + mark.tile * HOME_COLUMN.tileHeight + mark.y + Math.max(mark.height, line) <= clip
-  ));
+  if (view.dim) for (const mark of marks) mark.alpha *= UNDER_CARD_ALPHA;
+  const { clipBottom, clipTop } = view;
+  if (clipBottom === undefined && clipTop === undefined) return marks;
+  // Under JOAT's box or a notification card a row is left out whole, never
+  // cut through a glyph.
+  return marks.filter((mark) => {
+    const top = HOME_COLUMN.top + mark.tile * HOME_COLUMN.tileHeight + mark.y;
+    return (clipBottom === undefined || top + Math.max(mark.height, line) <= clipBottom)
+      && (clipTop === undefined || top >= clipTop);
+  });
 }
 
 /** Brightness of a reader's parts: the speaker over the words, the hint

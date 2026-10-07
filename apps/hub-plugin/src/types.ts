@@ -591,6 +591,30 @@ export type UplinkMessage =
   };
 
 /** Messages sent Mac → plugin. */
+/** One unread JOAT notification as the glasses' card shows it. */
+export interface HudNotificationCard {
+  /** The Mac's card id (32 hex): the dismiss uplink's `traceId`. */
+  id: string;
+  app: string;
+  sender: string;
+  /** The whole message, whitespace collapsed, at most 600 characters. */
+  body: string;
+  /** Unix ms. */
+  at: number;
+  urgent: boolean;
+}
+
+/**
+ * Every unread JOAT notification, newest first (at most ten), republished
+ * whenever the Mac's card log changes. The notification card reads its next
+ * unread from here, so a tap moves on without a round trip.
+ * Mac counterpart: HudNotifications in apps/mac/joat/core/protocol.py.
+ */
+export interface HudNotificationsMessage {
+  kind: 'hud.notifications';
+  cards: HudNotificationCard[];
+}
+
 export type DownlinkMessage =
   | PromptPresentMessage
   | MessageUIMessage
@@ -705,6 +729,7 @@ export type DownlinkMessage =
     condition: string;
     unread: number;
   }
+  | HudNotificationsMessage
   /**
    * One tab of the overview's right panel, pushed proactively like
    * `hud.ambient` so a swipe between tabs never costs a Mac round trip. The
