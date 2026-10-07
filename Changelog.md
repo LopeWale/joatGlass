@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-07 — Build JOAT 0.1.115
+
+- Packed from `aaea0b2` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.115 above the last recorded build (0.1.114); app.json, package.json and package-lock.json all 0.1.115. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1147 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 170954 bytes, SHA-256 `234590075706e5bb5bb6935738cd9b6ab06d1e4e994d9f1c1a4502b8a19b2225`. Adds to 0.1.114 JOAT's box over Home as Home is drawn. Plugin-only: no brain restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-07 — JOAT's box floats over Home as Home is drawn
 
 The wearer reported that JOAT's box still looked like a page of its own: the Home behind it was not the current Home.
