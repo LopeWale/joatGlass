@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-08 — Build JOAT 0.1.119
+
+- Packed from `804f38c` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.119 above the last recorded build (0.1.118); app.json, package.json and package-lock.json all 0.1.119. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1166 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 174041 bytes, SHA-256 `523535bc2900d9ebf993d2b4c00646bf68903e67ef247350eeca380a3919a0a9`. Adds to 0.1.118 the consent card after a spoken Messages reply and the tap-to-speak trace. **The Mac side changed too: restart the brain from this revision**, or the new `prompt_stage` diagnostics are refused and the refusal reasons are not logged. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-08 — A spoken Messages reply reaches its consent card; tap-to-speak is traced on the glasses
 
 The wearer: "the tap to speak on the brainstorm and message reply do not work". Both were run end to end in the official simulator, with the Mac's real prompt runtime (`PromptedSpeechRuntime`, `SessionManager`, `MessageUIController`, `MessageReplyController`) and the real plugin. The simulator has no microphone, so `?joatTestPromptMic=1` stands in for it.
