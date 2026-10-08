@@ -1,5 +1,5 @@
 import type { MacLink } from './MacLink';
-import type { UplinkMessage } from './types';
+import type { PromptOwnerKind, UplinkMessage } from './types';
 
 /**
  * The real-G2 diagnostic vocabulary. It deliberately has no text, URLs,
@@ -151,7 +151,20 @@ export type G2TraceEvent =
   | {
     type: 'messages_confirmation';
     outcome: 'accepted' | 'declined' | 'timed_out';
+  }
+  /** Where a spoken answer's question stopped on the glasses (a Messages
+   * reply, a Brainstorm topic, a terminal reply, a page row's question):
+   * which owner, and the step reached. No question text, no words. */
+  | {
+    type: 'prompt_stage';
+    owner: PromptOwnerKind;
+    stage: PromptStage;
   };
+
+/** The steps a spoken answer's question takes on the glasses. */
+export type PromptStage =
+  | 'presented' | 'painted' | 'paint_refused' | 'mic_ready' | 'mic_refused'
+  | 'acknowledged' | 'ack_refused' | 'retired';
 
 /** Narrow observer seam so instrumentation cannot change HUD control flow. */
 export interface G2DiagnosticTrace {

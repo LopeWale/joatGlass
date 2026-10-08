@@ -465,6 +465,17 @@ class TestParseUplink:
             "outcome": "failed",
         })
 
+    def test_g2_diagnostic_accepts_a_prompt_stage_and_nothing_else_about_it(self) -> None:
+        event = {"type": "prompt_stage", "owner": "brainstorm", "stage": "mic_refused"}
+        assert parse_uplink({"kind": "g2.diagnostic", "event": event}) == G2Diagnostic(event=event)
+        for bad in (
+            {**event, "stage": "spoken"},
+            {**event, "owner": "notes"},
+            {**event, "question": "What would you like to brainstorm?"},
+        ):
+            with pytest.raises(ProtocolError):
+                parse_uplink({"kind": "g2.diagnostic", "event": bad})
+
     def test_g2_diagnostic_accepts_only_redacted_brainstorm_action_receipts(self) -> None:
         assert parse_uplink({
             "kind": "g2.diagnostic",

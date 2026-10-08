@@ -492,6 +492,7 @@ async function boot(): Promise<void> {
         menuRef?.cancelMessageAction(message.ownerId);
       }
     },
+    onStage: (owner, stage) => g2Diagnostics.record({ type: 'prompt_stage', owner, stage }),
   });
   promptedInputRef = promptedInput;
   audio.onPromptInvalidated = (promptId) => promptedInput.audioInvalidated(promptId);

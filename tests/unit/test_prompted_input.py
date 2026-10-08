@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError, replace
 
@@ -52,6 +53,30 @@ def receipt(ticket: PromptTicket, *, first: int = 11, last: int = 14) -> Utteran
 
 
 class TestPromptedInputDispatcher:
+    async def test_a_refused_answer_logs_why_never_the_words(self, caplog) -> None:  # type: ignore[no-untyped-def]
+        # A tap-to-speak that "does nothing" on the glasses: the Mac log says
+        # which check turned the answer down (2026-10-08).
+        caplog.set_level(logging.INFO, logger="joat.services.prompted_input")
+        fixture = PromptFixture()
+        ticket = fixture.begin()
+        assert await fixture.dispatcher.dispatch(Transcript("secret words", True), receipt(ticket)) is False
+        assert fixture.acknowledge(ticket) is True
+        early = receipt(ticket, first=5, last=14)
+        assert await fixture.dispatcher.dispatch(Transcript("secret words", True), early) is False
+        foreign = UtteranceProvenance(
+            source=ticket.source, connection_generation=ticket.connection_generation,
+            audio_epoch=None, first_ingress_ordinal=11, last_ingress_ordinal=14,
+            speaker_roles=frozenset(),
+        )
+        assert await fixture.dispatcher.dispatch(Transcript("secret words", True), foreign) is False
+        reasons = [record.getMessage() for record in caplog.records]
+        assert reasons == [
+            "prompted answer not taken owner=messages reason=not_acknowledged",
+            "prompted answer not taken owner=messages reason=started_before_question",
+            "prompted answer not taken owner=messages reason=audio_before_question",
+        ]
+        assert not any("secret" in reason for reason in reasons)
+
     async def test_publication_alone_does_not_admit_an_answer(self) -> None:
         fixture = PromptFixture()
         ticket = fixture.begin()

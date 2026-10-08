@@ -5,7 +5,8 @@ import type { BridgeClient } from './BridgeClient';
 import type { HudPresenter } from './HudPresenter';
 import type { DownlinkContext, MacLink } from './MacLink';
 import { PromptedInputController } from './PromptedInputController';
-import type { PromptPresentMessage, UplinkMessage } from './types';
+import type { PromptStage } from './G2DiagnosticTrace';
+import type { PromptOwnerKind, PromptPresentMessage, UplinkMessage } from './types';
 
 function present(overrides: Partial<PromptPresentMessage> = {}): PromptPresentMessage {
   return {
@@ -34,6 +35,7 @@ const cleanup: Array<() => void> = [];
 function rig(hooks: {
   isOwnerCurrent?: (message: Readonly<PromptPresentMessage>) => boolean;
   onCancel?: (message: Readonly<PromptPresentMessage>, reason?: string) => void;
+  onStage?: (owner: PromptOwnerKind, stage: PromptStage) => void;
 } = {}) {
   const defaultContext = context().value;
   const sent: Array<{ message: BoundMessage; generation: number }> = [];
@@ -92,6 +94,23 @@ afterEach(() => {
   for (const dispose of cleanup.splice(0)) dispose();
   vi.clearAllTimers();
   vi.useRealTimers();
+});
+
+describe('PromptedInputController diagnostics', () => {
+  it('records each step a question reaches, and where it stopped', async () => {
+    const stages: string[] = [];
+    const r = rig({ onStage: (owner, stage) => stages.push(`${owner}:${stage}`) });
+    const ctx = await r.publish(present());
+    r.controller.cancel('test', false);
+    expect(stages).toEqual([
+      'messages:presented', 'messages:painted', 'messages:mic_ready', 'messages:acknowledged', 'messages:retired',
+    ]);
+
+    stages.length = 0;
+    r.state.open = false;
+    await r.publish(present({ promptId: 'mic_refused' }), ctx);
+    expect(stages).toEqual(['messages:presented', 'messages:painted', 'messages:mic_refused', 'messages:retired']);
+  });
 });
 
 describe('PromptedInputController application owner binding', () => {

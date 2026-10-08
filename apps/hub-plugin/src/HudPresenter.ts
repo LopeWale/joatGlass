@@ -578,7 +578,25 @@ export class HudPresenter {
   /** Switch from the image HUD to an SDK-native text page under the same
    * serialized display barrier. This is the path Even's own text-heavy and
    * AI surfaces use for responsive content and scroll updates. */
-  private async replaceNativePage(
+  /** The page replacement in flight, if any (replaceNativePage). */
+  private pageReplacement?: Promise<boolean>;
+
+  /** Replace the whole page with a native one. The visual surface refuses a
+   * second replacement while one runs; `pageReplacement` lets a surface
+   * that must not be refused (the consent card) wait for it first. */
+  private replaceNativePage(
+    page: RebuildPageContainer,
+    owner: Exclude<DisplayPageOwner, 'visual'>,
+  ): Promise<boolean> {
+    const replacement = this.replaceNativePageNow(page, owner);
+    this.pageReplacement = replacement;
+    void replacement.finally(() => {
+      if (this.pageReplacement === replacement) this.pageReplacement = undefined;
+    }).catch(() => undefined);
+    return replacement;
+  }
+
+  private async replaceNativePageNow(
     page: RebuildPageContainer,
     owner: Exclude<DisplayPageOwner, 'visual'>,
   ): Promise<boolean> {
@@ -3071,6 +3089,17 @@ export class HudPresenter {
     // leave reply text covering an armed decision gate.
     // A failed reply is settled too; it must not strand this new gate.
     if (this.assistantOverlayPaint) await this.assistantOverlayPaint.catch(() => false);
+    // A page replacement already running (the page a spoken answer's
+    // question restores as it closes) would make the guard refuse the
+    // consent card: the Mac's confirmation lands while that restore is in
+    // flight, the card is refused, and the draft is cancelled — the wearer
+    // speaks and the card just goes away (simulator, 2026-10-08). Let it
+    // finish; the consent card then replaces it.
+    while (this.pageReplacement) {
+      const running = this.pageReplacement;
+      await running.catch(() => false);
+      if (this.pageReplacement === running) break;
+    }
     if (!displayCurrent()) return false;
     const current = this.confirmation;
     if (!current || current.id !== id || (claimed && current !== claimed)) return !claimed?.isCurrent;
