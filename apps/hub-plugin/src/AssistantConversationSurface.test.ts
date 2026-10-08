@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
+import { getTextWidth } from '@evenrealities/pretext';
 import { HudPageBuilder } from './HudPageBuilder';
 import {
   AssistantConversationSurface,
@@ -66,7 +67,33 @@ describe('native Even-style assistant conversation model', () => {
     expect(dim).toHaveLength(bright.length);
     expect(dim.some((line) => line.includes('What is the weather?'))).toBe(true);
     expect(bright.some((line) => line.includes('warm and partly cloudy'))).toBe(true);
-    expect(dim.some((line, index) => line.trim() && bright[index]?.trim())).toBe(false);
+    // The two layers share a row only where JOAT's dim name stands in
+    // front of its bright words, and the words start past the name.
+    dim.forEach((line, index) => {
+      if (!line.trim() || !bright[index]?.trim()) return;
+      expect(line).toBe('JOAT:');
+      expect(bright[index]!.length - bright[index]!.trimStart().length).toBeGreaterThan(0);
+      const pad = getTextWidth(bright[index]!.match(/^ */u)![0]);
+      expect(pad).toBeGreaterThan(getTextWidth('JOAT:'));
+      expect(pad).toBeLessThanOrEqual(getTextWidth('JOAT: ') + getTextWidth(' ') / 2);
+    });
+  });
+
+  it('names the speaker on the first row of each turn, never on a row of its own', () => {
+    const view = conversationViewport(snapshot(1, [
+      { role: 'user', text: 'What is the weather?' },
+      { role: 'assistant', text: 'It is warm and partly cloudy.' },
+    ]));
+    // Two turns, two rows: no name rows, no blank row between them.
+    expect(view.lineCapacity).toBe(2);
+    expect(view.dimText.split('\n')).toEqual(['You: What is the weather?', 'JOAT:']);
+    expect(view.brightText.split('\n')[1]!.trim()).toBe('It is warm and partly cloudy.');
+    // A long answer wraps beneath, full width.
+    const long = conversationLines(snapshot(2, [
+      { role: 'assistant', text: Array.from({ length: 40 }, (_, i) => `word${i}`).join(' ') },
+    ]));
+    expect(long[0]?.label).toBe('JOAT:');
+    expect(long.slice(1).every((line) => line.label === undefined)).toBe(true);
   });
 
   it('grows only to the optical cap, then scrolls back without a scrollbar', () => {
@@ -103,15 +130,18 @@ describe('native Even-style assistant conversation model', () => {
       },
     ]));
 
-    expect(view.visibleLines).toEqual([
-      { role: 'assistant', text: 'daytime sky look blue. At sunset, sunlight travels' },
-      { role: 'assistant', text: 'through more atmosphere, so most blues are' },
-      { role: 'assistant', text: 'scattered away before the light reaches you. The' },
-      { role: 'assistant', text: 'remaining direct light is richer in reds and oranges,' },
-      { role: 'assistant', text: 'which paints the Sun and nearby sky in warm colors.' },
-      { role: 'assistant', text: 'Dust, smoke, clouds, and pollution can intensify or' },
-      { role: 'assistant', text: 'mute those sunset colors.' },
-    ]);
+    // The tail is the answer's exact last words, each wrapped row's words
+    // standing under the first row's, after "JOAT:".
+    const visible = view.visibleLines;
+    expect(visible).toHaveLength(7);
+    expect(visible.every((line) => line.role === 'assistant' && line.pad !== undefined)).toBe(true);
+    expect(visible[visible.length - 1]?.text.endsWith('those sunset colors.')).toBe(true);
+    const answer = "Sunlight contains many colors, and Earth's atmosphere scatters shorter blue wavelengths more strongly than longer red wavelengths, making the daytime sky look blue. At sunset, sunlight travels through more atmosphere, so most blues are scattered away before the light reaches you. The remaining direct light is richer in reds and oranges, which paints the Sun and nearby sky in warm colors. Dust, smoke, clouds, and pollution can intensify or mute those sunset colors.";
+    expect(answer.endsWith(visible.map((line) => line.text).join(' '))).toBe(true);
+    const rows = view.brightText.split('\n');
+    const lead = (row: string) => getTextWidth(/^ */u.exec(row)![0]);
+    expect(new Set(rows.map(lead)).size).toBe(1);
+    expect(lead(rows[0]!)).toBeGreaterThan(getTextWidth('JOAT:'));
   });
 
   it('marks omitted history instead of silently pretending the viewport is complete', () => {
@@ -317,7 +347,7 @@ describe('AssistantConversationSurface delivery', () => {
         (text: { containerName?: string }) => text.containerName === 'generation',
       ));
     const prompt = footers.find(
-      (footer) => footer?.content?.trim() === 'Continue? tap: stay · double-click: back',
+      (footer) => footer?.content?.trim() === 'Continue?',
     );
     const ready = footers[footers.length - 1];
     // A sentence sits inside the card; the state glyph rides on the border,

@@ -56,14 +56,18 @@ describe('HudPresenter reply card words so far', () => {
     expect(await r.hud.showPromptQuestion('p1', QUESTION, () => true, 'messages')).toBe(true);
     const opened = r.rebuilds.length;
 
+    // The card opens with the working glyph on the wearer's row.
+    expect(wearerWords(last(r.rebuilds))).toMatch(/\nYou: +[■□]/u);
+
     expect(await r.hud.showPromptPartial('p1', 'Running')).toBe(true);
-    // The card grew a row for the wearer's words: one rebuild.
-    expect(r.rebuilds).toHaveLength(opened + 1);
-    expect(wearerWords(last(r.rebuilds))).toContain('Running');
+    // The words take the glyph's row: same size, upgraded in place.
+    expect(r.rebuilds).toHaveLength(opened);
+    expect(last(r.upgrades)?.containerName).toBe('wearer-turns');
+    expect(last(r.upgrades)?.content).toMatch(/\nYou: +Running$/u);
 
     expect(await r.hud.showPromptPartial('p1', 'Running late')).toBe(true);
     // Same size: only the words changed, upgraded in place.
-    expect(r.rebuilds).toHaveLength(opened + 1);
+    expect(r.rebuilds).toHaveLength(opened);
     expect(last(r.upgrades)?.containerName).toBe('wearer-turns');
     expect(last(r.upgrades)?.content).toContain('Running late');
   });
@@ -92,6 +96,34 @@ describe('HudPresenter reply card words so far', () => {
     const onGlass = last(r.rebuilds);
     expect(onGlass?.textObject?.some((text) => text.containerName === 'conversation')).toBe(false);
     expect(onGlass?.textObject?.some((text) => text.containerName === 'main')).toBe(true);
+  });
+
+  it('the consent card waits for the restore the answered question started, then shows', async () => {
+    // Simulator, 2026-10-08: the wearer's words answered the question; its
+    // cancel started restoring the thread, and the Mac's confirmation landed
+    // while that restore ran. The guard refused the consent card, the hub
+    // declined, and the Mac cancelled the draft: the card just went away.
+    const r = rig();
+    await r.hud.showList(['1/1 · Adele', 'Adele: hi'], {
+      title: 'MESSAGES · CONVERSATION', hint: 'tap: reply', selectable: true, nativeTextPage: true,
+    });
+    await r.hud.showPromptQuestion('p1', QUESTION, () => true, 'messages');
+    let release: () => void = () => undefined;
+    r.gate.current = new Promise<void>((resolve) => { release = resolve; });
+    const rebuildsBefore = r.rebuilds.length;
+    const restored = r.hud.dismissPromptQuestion('p1');  // the restore, held
+    // The restore is inside the page guard, waiting on the gate, before
+    // the confirmation arrives (the order the simulator showed).
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(r.rebuilds).toHaveLength(rebuildsBefore);
+    const consent = r.hud.showConfirmation('Send to Adele? “On my way.”', 'reply-consent', 'messages');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    release();
+    await restored;  // superseded by the consent card: its own result is moot
+    expect(await consent).toBe(true);
+    // The consent card is what the glass shows, after the thread.
+    const onGlass = last(r.rebuilds);
+    expect(onGlass?.textObject?.find((text) => text.containerName === 'wearer-turns')?.content).toContain('On my way.');
   });
 
   it('ignores words for another prompt or a non-Messages question', async () => {

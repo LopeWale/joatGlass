@@ -1,4 +1,4 @@
-import { measureTextWrap } from '@evenrealities/pretext';
+import { getTextWidth, measureTextWrap } from '@evenrealities/pretext';
 
 /**
  * Text as the firmware lays it out.
@@ -151,5 +151,95 @@ export function paginateMeasured(
     pages.push(trimBreaks(join(tokens, start, start + count)));
     start += count;
   }
+  return pages.length > 0 ? pages : [' '];
+}
+
+/** "Name: words" — a speaker's name in front of their words. */
+const SPEAKER_LINE = /^([^:\s][^:]{0,31}):\s+(\S.*)$/u;
+
+/** The spaces that stand a continuation row's words under the first row's
+ * words, after `label` and its space. */
+export function hangingPad(label: string): string {
+  const space = Math.max(1, getTextWidth(' '));
+  return ' '.repeat(Math.max(1, Math.round(getTextWidth(`${label} `) / space)));
+}
+
+/** Words greedily onto lines `width` wide, measured as the firmware draws
+ * them; a word wider than a line is cut at the glyph. */
+function wrapWords(words: readonly string[], width: number): string[] {
+  const lines: string[] = [];
+  let line = '';
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (firmwareLineWidth(candidate) <= width) { line = candidate; continue; }
+    if (line) lines.push(line);
+    line = '';
+    let rest = word;
+    while (firmwareLineWidth(rest) > width) {
+      const points = Array.from(rest);
+      const count = Math.max(1, largestFitting(points.length - 1,
+        (n) => firmwareLineWidth(points.slice(0, n).join('')) <= width));
+      lines.push(points.slice(0, count).join(''));
+      rest = points.slice(count).join('');
+    }
+    line = rest;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+/**
+ * A paragraph as explicit firmware lines. "Name: words" keeps the name in
+ * front of the words and stands every wrapped row's words under the first
+ * row's (a hanging indent, the wearer's ruling 2026-10-07): the rows after
+ * the first lead with spaces, which the firmware keeps after a line break.
+ * Any other paragraph wraps at the full width. Every line fits `width`, so
+ * the firmware never breaks one again.
+ */
+export function hangingLines(paragraph: string, width: number): string[] {
+  const words = (text: string) => text.split(/\s+/u).filter(Boolean);
+  const speaker = SPEAKER_LINE.exec(paragraph.trim());
+  if (!speaker) {
+    const lines = wrapWords(words(paragraph), width);
+    return lines.length > 0 ? lines : [' '];
+  }
+  const label = `${speaker[1]}:`;
+  const pad = hangingPad(label);
+  const indent = getTextWidth(pad);
+  // Too narrow to hang (a long name on a slim card): wrap it whole.
+  if (width - indent < width / 2) return wrapWords(words(paragraph), width);
+  const rows = wrapWords(words(speaker[2]!), width - indent);
+  // The first row's words start where the pad ends: the name, then the
+  // whole spaces that reach that column.
+  const space = Math.max(1, getTextWidth(' '));
+  const gap = ' '.repeat(Math.max(1, Math.round((indent - getTextWidth(label)) / space)));
+  return rows.map((row, index) => (index === 0 ? `${label}${gap}${row}` : `${pad}${row}`));
+}
+
+/**
+ * Text as firmware pages of explicit lines, each speaker's words hanging
+ * under the first row's (hangingLines): at most `maxLines` lines and
+ * `maxUnits` code units a page. Pages break between lines.
+ */
+export function paginateHanging(
+  text: string,
+  innerWidth: number,
+  maxLines: number,
+  maxUnits = NATIVE_PAGE_MAX_UNITS,
+): string[] {
+  const lines = text.replace(/\r\n?/gu, NEWLINE).split(NEWLINE)
+    .filter((paragraph) => paragraph.trim().length > 0)
+    .flatMap((paragraph) => hangingLines(paragraph, innerWidth));
+  const pages: string[] = [];
+  let page: string[] = [];
+  for (const line of lines) {
+    const candidate = [...page, line].join(NEWLINE);
+    if (page.length > 0 && (page.length >= Math.max(1, maxLines) || candidate.length > maxUnits)) {
+      pages.push(page.join(NEWLINE));
+      page = [];
+    }
+    page.push(line);
+  }
+  if (page.length > 0) pages.push(page.join(NEWLINE));
   return pages.length > 0 ? pages : [' '];
 }

@@ -1,5 +1,50 @@
 # Changelog
 
+## 2026-10-08 — Build JOAT 0.1.119
+
+- Packed from `804f38c` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.119 above the last recorded build (0.1.118); app.json, package.json and package-lock.json all 0.1.119. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1166 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 174041 bytes, SHA-256 `523535bc2900d9ebf993d2b4c00646bf68903e67ef247350eeca380a3919a0a9`. Adds to 0.1.118 the consent card after a spoken Messages reply and the tap-to-speak trace. **The Mac side changed too: restart the brain from this revision**, or the new `prompt_stage` diagnostics are refused and the refusal reasons are not logged. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-08 — A spoken Messages reply reaches its consent card; tap-to-speak is traced on the glasses
+
+The wearer: "the tap to speak on the brainstorm and message reply do not work". Both were run end to end in the official simulator, with the Mac's real prompt runtime (`PromptedSpeechRuntime`, `SessionManager`, `MessageUIController`, `MessageReplyController`) and the real plugin. The simulator has no microphone, so `?joatTestPromptMic=1` stands in for it.
+
+- **Fixed: a spoken Messages reply was cancelled the moment it was heard.** The words answered the question and the Mac asked for consent, but the consent card never showed. When an answer arrives, the hub starts restoring the thread under the closing question. The Mac's confirmation landed while that restore was still running. The page guard refuses a second page replacement while one runs, so it refused the consent card, the hub declined, and the Mac cancelled the draft. The wearer saw the card simply go away. The consent card now waits for a page replacement already in flight, then replaces it (`HudPresenter.renderConfirmation`, `pageReplacement`). Verified in the simulator: "JOAT: What do you want to say back to Adaeze? / You: On my way, see you at 4:30." on the glass, `confirmation-visible`. A test reproduces the order and fails without the fix.
+- **Brainstorm with the stand-in microphone works end to end**, and was not changed. The ready frame's tap reached the Mac as `begin_topic_capture`. The question was acknowledged in 0.1 s. The spoken topic was taken, and the run's first frame painted. What the simulator cannot run is the real glasses microphone and the Mac turning that audio into the answer, so that part is unverified.
+- **Tap-to-speak is now traced, so the glasses show where it stops.** The hub records each step of a question in the G2 diagnostics, as a new `prompt_stage` event: presented, painted or paint refused, mic ready or mic refused, acknowledged or acknowledgement refused, retired. Each event names its owner (messages, brainstorm, terminal, capability). The event is in `protocol.py` and `types.ts` (`G2DiagnosticTrace.ts`) together, and the Mac validates it. The Mac logs why it turned down a spoken answer while a question waited: `prompted answer not taken owner=… reason=…`, with no words. The reasons are not acknowledged, owner gone, mixed audio, other mic, other connection, audio before the question, other speaker, or started before the question.
+- Tests: plugin 1166 passed; typecheck and build clean. Mac 3462 passed, 1 skipped; the container's IPv6 test fails as before. mypy clean. Both sides change: a new package and a brain restart.
+
+## 2026-10-07 — Build JOAT 0.1.118
+
+- Packed from `7d0c7cb` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.118 above the last recorded build (0.1.117); app.json, package.json and package-lock.json all 0.1.118. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1164 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 173816 bytes, SHA-256 `5a8321c7e36970393b0321ffea1a7a30337fdc2062e0cfc3fe745c5c96a38857`. Adds to 0.1.117 the gesture-free JOAT box, the one gesture template and messages hanging under the name. Plugin-only on top of 0.1.117 (whose brain restart still applies). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-07 — No gestures in JOAT's box; one gesture template; messages hang under the name
+
+The wearer's three points on 0.1.117: the reply card still carried gesture notes and no working indicator; every page named its gestures differently ("what does 'double click' mean"); and a wrapped message should line up under its first word, after "Sender: ".
+
+- **No gesture notes in JOAT's box** (`AssistantConversationSurface.ts`, `HudPresenter.ts`). The Messages reply card no longer has "listening · double-click: cancel" or "tap: send · long-press: retry · double-click: cancel". While the wearer has yet to speak, the working glyph moves on their row ("You: ■"), and their first words replace it in place. The continuation question is just "Continue?". The wearer asked for this on 2026-10-06 ("i do not need the gesture stated at the model"); the reply card had kept its footer.
+- **One gesture template on every page** (`GesturePolicy.formatHint`): the words are tap, swipe, long tap and 2x tap. Double-click, long-press, hold and left x2 are gone. The order is always tap · swipe · long tap · 2x tap; a page count or a spoken command keeps its place. Every hint passes through it at the two places hints are written (`HudPageBuilder.region` and `HudPresenter.upgradeNativeText`), so a Mac's older wording becomes the template too. The plugin's own hint strings now use the template's words.
+- **Wrapped rows hang under the first word** (`FirmwareText.hangingLines`, `paginateHanging`): on the Messages pages, the notification card and in JOAT's box, a message's wrapped rows start where its words start after "Name: ". The rows are set as explicit lines with leading spaces, which the firmware keeps after a line break; each line is measured to fit, so the firmware never re-wraps one.
+- Verified in the official simulator: a long thread with every wrapped row under its first word, the reply card's glyph on the wearer's row with no footer, its consent card with no footer, the card's message hanging under "Sam: ", a long answer hanging under "JOAT: ", and Home's hints in the template. Not verified on physical glasses.
+- Tests: plugin 1164 passed; typecheck and build clean. Plugin-only: no brain restart.
+
+## 2026-10-07 — Build JOAT 0.1.117
+
+- Packed from `d60a86d` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.117 above the last recorded build (0.1.116); app.json, package.json and package-lock.json all 0.1.117. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1164 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 172945 bytes, SHA-256 `1a9a20b5e19925fa0bbb9992217190049a92709f06881e13762507d245b84e89`. Adds to 0.1.116 the speaker's name in front of their words in JOAT's box and on the notification card. **The Mac side changed too: restart the brain from this revision**, or a bare "JOAT" still shows "JOAT" above "Yes?". Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
+## 2026-10-07 — The speaker's name opens their words, on the same row
+
+The wearer asked why two rows went to one thing: the notification card had the sender on a row of its own above the message, and JOAT's box read "JOAT" on one row and "Yes?" on the next. The ruling: "Name: the response", wrapped beneath.
+
+- **JOAT's box** (`AssistantConversationSurface.ts`): each turn's first row opens with its speaker's name, "You:" or "JOAT:", and the words wrap full width beneath. JOAT's name is dim and its words bright (the two layers share the row; the bright words start a typed space past the name). The working glyph stands on JOAT's row ("JOAT: ■ □"). The blank row between exchanges is gone: the names already part the turns. The box now starts at one row.
+- **A bare "JOAT"** (`orchestrator.py`): the name alone is not a question, so the box shows only "JOAT: Yes?". Before, the wearer's "JOAT" took a row above the answer and read as a name label. `_greet_assistant_conversation` adds JOAT's turn without replacing an earlier answer when the conversation is still open.
+- **The notification card** (`NotificationCard.ts`): "Sam: Didn't catch you on the phone…" under the app line, not the sender on a row of its own.
+- **The Messages reply card** gets the same rows: "JOAT: What do you want to say back to Adele?", then "You: …" as the wearer speaks, with no blank row between.
+- Verified in the official simulator: the wake answer as one row over Home, a question and its answer in two rows, the working glyph on JOAT's row, a long answer wrapping beneath the name, the card, and the reply card. Not verified on physical glasses.
+- Tests: plugin 1164 passed; typecheck and build clean. Mac 3460 passed, 1 skipped; the container's IPv6 test fails as before. mypy clean. Both sides change: a new package and a brain restart.
+
 ## 2026-10-07 — Build JOAT 0.1.116
 
 - Packed from `44191c6` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.116 above the last recorded build (0.1.115); app.json, package.json and package-lock.json all 0.1.116. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1163 tests passed.

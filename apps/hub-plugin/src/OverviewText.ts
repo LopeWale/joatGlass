@@ -212,7 +212,7 @@ export function composeOverviewText(
       case 'news':
         if (!content) return [['', 'Waiting for JOAT on your Mac…']];
         if (content.rows.length === 0) {
-          return [['', content.empty ?? 'No headlines yet.'], ['', 'tap: open · long-press: refresh']];
+          return [['', content.empty ?? 'No headlines yet.'], ['', 'tap: open · long tap: refresh']];
         }
         return [
           ...(content.headline ? [['', content.headline] as PaneRow] : []),

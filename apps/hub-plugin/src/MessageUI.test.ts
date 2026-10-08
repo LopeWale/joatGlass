@@ -92,7 +92,7 @@ function select(r: ReturnType<typeof rig>, index = 1) {
 function thread(r: ReturnType<typeof rig>, requestId: string, index: number, count = 2): Promise<boolean> {
   return r.menu.presentList(
     'MESSAGES · CONVERSATION', [`${index + 1}/${count} · Alex`, 'Alex: Existing received message.', 'You: Thanks'],
-    requestId, true, 'down more · tap: reply · left x2: back',
+    requestId, true, 'down more · tap: reply · 2x tap: back',
     undefined, 'Alex', undefined, undefined, undefined, { id: 'thread-alex', index, count },
   );
 }

@@ -29,30 +29,37 @@ const NAMES_HARDWARE = /\b(left|right|temple|ring)\b/i;
 describe('wearer-facing hints never name a device or a side', () => {
   it('formatHint strips the authored left-temple form', () => {
     expect(GesturePolicy.formatHint('tap: dismiss · left x2: menu'))
-      .toBe('tap: dismiss · double-click: menu');
+      .toBe('tap: dismiss · 2x tap: menu');
     // Case and spacing variants are all authored somewhere in this repo.
     expect(GesturePolicy.formatHint('SWIPE move · TAP open · LEFT x2 back'))
-      .toBe('SWIPE move · TAP open · double-click back');
-    expect(GesturePolicy.formatHint('left×2 overview')).toBe('double-click overview');
+      .toBe('TAP open · SWIPE move · 2x tap back');
+    expect(GesturePolicy.formatHint('left×2 overview')).toBe('2x tap overview');
   });
 
-  it('formatHint speaks one vocabulary: tap, double-click, swipe, long-press', () => {
-    // The reader (Mac reader_hint), the list beside it, and Home used to
-    // disagree: "down more" vs "hold: refresh" vs "long-press: mic".
+  it('formatHint speaks one template: tap, swipe, long tap, 2x tap, in that order', () => {
+    // The wearer's ruling (2026-10-07): "'tap', 'long tap' and '2x tap' as
+    // a template so it can be the same on the pages that need it".
     expect(GesturePolicy.formatHint('down more · left x2: back'))
-      .toBe('swipe: more · double-click: back');
+      .toBe('swipe: more · 2x tap: back');
     expect(GesturePolicy.formatHint('up previous · down more · left x2: back'))
-      .toBe('swipe: page · double-click: back');
+      .toBe('swipe: page · 2x tap: back');
     expect(GesturePolicy.formatHint('up previous · left x2: back'))
-      .toBe('swipe: previous · double-click: back');
+      .toBe('swipe: previous · 2x tap: back');
     expect(GesturePolicy.formatHint('tap: open · hold: refresh · double-click: back'))
-      .toBe('tap: open · long-press: refresh · double-click: back');
+      .toBe('tap: open · long tap: refresh · 2x tap: back');
+    expect(GesturePolicy.formatHint('double-click: menu · long-press: mic'))
+      .toBe('long tap: mic · 2x tap: menu');
     expect(GesturePolicy.formatHint('Continue conversation? tap stays · x2 exits'))
-      .toBe('Continue conversation? tap stays · double-click exits');
+      .toBe('Continue conversation? tap stays · 2x tap exits');
+    // Non-gestures (a page count, a spoken command) keep their places.
     expect(GesturePolicy.formatHint('down older · tap read · say reply · left x2: back'))
-      .toBe('swipe: older · tap read · say reply · double-click: back');
-    for (const hint of ['hold: mic', 'down more', 'up previous · down more']) {
-      expect(GesturePolicy.formatHint(hint)).not.toMatch(/\b(hold|up previous|down more)\b/);
+      .toBe('tap read · swipe: older · say reply · 2x tap: back');
+    expect(GesturePolicy.formatHint('1/2 · swipe: page · tap: dismiss'))
+      .toBe('1/2 · tap: dismiss · swipe: page');
+    expect(GesturePolicy.formatHint('Back: double-click to Planning · auto in 5s'))
+      .toBe('2x tap: Planning · auto in 5s');
+    for (const hint of ['hold: mic', 'down more', 'up previous · down more', 'long-press: mic', 'double-click: back']) {
+      expect(GesturePolicy.formatHint(hint)).not.toMatch(/\b(hold|up previous|down more|long-press|double-click)\b/);
     }
   });
 

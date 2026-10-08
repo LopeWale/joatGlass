@@ -180,9 +180,12 @@ describe('HudPresenter Messages reply in the conversation card', () => {
     expect(page?.imageObject ?? []).toHaveLength(0);
     expect(page?.textObject?.map((c) => c.containerName)).toEqual(CARD);
     expect(text(page, 'joat-turns')).toContain('What do you want to say back to Adele?');
-    expect(text(page, 'wearer-turns')?.trim()).toBe('');
-    expect(text(page, 'generation')).toContain('listening');
-    expect(text(page, 'generation')).toContain('double-click: cancel');
+    // JOAT's name in front of its question, then the working glyph on the
+    // wearer's row until their words come. No gesture footer in the box.
+    const wearer = text(page, 'wearer-turns')?.split('\n') ?? [];
+    expect(wearer[0]).toBe('JOAT:');
+    expect(wearer[1]).toMatch(/^You: +[■□]/u);
+    expect(text(page, 'generation')?.trim()).toBe('');
   });
 
   it('keeps an ordinary question on the plain question page', async () => {
@@ -195,7 +198,7 @@ describe('HudPresenter Messages reply in the conversation card', () => {
   it.each([
     ['plain', 'Send to Adele? “On my way.”'],
     ['reviewed', 'Send to Adele? (reviewed) “On my way.”'],
-  ])('draws a %s messages confirmation as the question, then the wearer\'s words, then the gestures', async (_form, prompt) => {
+  ])('draws a %s messages confirmation as the question, then the wearer\'s words, no gestures', async (_form, prompt) => {
     const r = rig();
     expect(await r.hud.showConfirmation(prompt, 'reply-consent', 'messages')).toBe(true);
     const gate = r.rebuilds[r.rebuilds.length - 1];
@@ -205,11 +208,8 @@ describe('HudPresenter Messages reply in the conversation card', () => {
     expect(text(gate, 'joat-turns')).not.toContain('On my way.');
     expect(text(gate, 'wearer-turns')).toContain('On my way.');
     expect(text(gate, 'wearer-turns')).not.toContain('(reviewed)');
-    const footer = text(gate, 'generation') ?? '';
-    expect(footer).toContain('tap: send');
-    expect(footer).toContain('long-press: retry');
-    expect(footer).toContain('double-click: cancel');
-    expect(footer).not.toContain('hold');
+    // No gesture footer in the box: the wearer knows tap sends.
+    expect(text(gate, 'generation')?.trim()).toBe('');
   });
 
   it('keeps the plain decision page for a non-messages confirmation and an unparsed messages one', async () => {

@@ -209,7 +209,7 @@ function isPlanningAnchor(value: unknown): value is number {
 const SETTINGS_SURFACE = {
   title: 'PHONE CONTROLS',
   // GesturePolicy owns the source-independent Back meaning.
-  hint: 'left x2: back',
+  hint: '2x tap: back',
 } as const;
 
 export function isActionLifecycleTitle(title?: string): boolean {
@@ -545,7 +545,7 @@ export class CapabilityMenu {
     if (parent === this.dataSurface && parent) parent = { ...parent, selectedIndex: this.selectedIndex };
     const rows = [`1/1 · ${accepted.state}`, accepted.text];
     const title = `MESSAGES · ${accepted.state.toUpperCase()}`;
-    const hint = 'left x2: back';
+    const hint = '2x tap: back';
     const transition = this.beginTransition();
     const stillCurrent = () => current() && this.transitionId === transition;
     // The result is Even's own text page, paged in place by swipe; it used
@@ -772,7 +772,7 @@ export class CapabilityMenu {
       : undefined;
     const effectiveSelectable = messagesState?.selectable ?? selectable;
     const effectiveHint = messagesState?.rowAction === 'retry'
-      ? 'tap: retry · left x2: back'
+      ? 'tap: retry · 2x tap: back'
       : hint;
 
     if (isReview) {
@@ -1878,7 +1878,7 @@ export class CapabilityMenu {
     // agenda immediately instead of spending another paint on a loading page.
     const shown = receiptRefresh !== undefined || await this.hud.showList([`Loading recent ${picked.toLowerCase()}…`], {
       title,
-      hint: 'left x2: back',
+      hint: '2x tap: back',
       ...(usesTextPage(title) ? { nativeTextPage: true } : { nativeFirmwareList: true }),
     });
     if (!this.isCurrentTransition(transition)) return;
@@ -1999,7 +1999,7 @@ export class CapabilityMenu {
         `Return to Overview, then open ${readable} to retry.`,
       ], {
       title: `${title} · RETRY`,
-      hint: isMessagesRetry ? 'tap: retry · left x2: back' : 'left x2: back',
+      hint: isMessagesRetry ? 'tap: retry · 2x tap: back' : '2x tap: back',
       selectable: isMessagesRetry,
       // The timeout page replaced a firmware page with four image tiles.
       nativeTextPage: true,
@@ -2020,7 +2020,7 @@ export class CapabilityMenu {
     this.dataRowsSelectable = isMessagesRetry;
     this.dataItemCount = isMessagesRetry ? 1 : 0;
     this.messagesScreen = isMessagesRetry ? 'retry' : undefined;
-    this.dataHint = isMessagesRetry ? 'tap: retry · left x2: back' : undefined;
+    this.dataHint = isMessagesRetry ? 'tap: retry · 2x tap: back' : undefined;
     this.dataPagePending = false;
     // A tap whose response was lost must not keep swallowing later taps on
     // the replacement retry surface.
@@ -2249,7 +2249,7 @@ export class CapabilityMenu {
         title: saved.title,
         primary: 'Monitoring armed',
         secondary: 'Native alarm is scheduled. JOAT will check at due time.',
-        hint: 'left x2: back',
+        hint: '2x tap: back',
         planningAnchorUnixMs: saved.planningAnchorUnixMs,
       });
     }, PRODUCTIVITY_OUTCOME_RETURN_DELAY_MS);

@@ -53,7 +53,7 @@ const THREAD = [
   ...Array.from({ length: 14 }, (_, index) => `${index % 2 ? 'You' : 'Adele'}: Message ${index + 1} about the review and the mockups.\n`),
 ];
 const OPTIONS = {
-  title: 'MESSAGES · CONVERSATION', hint: 'down more · tap: reply · left x2: back',
+  title: 'MESSAGES · CONVERSATION', hint: 'down more · tap: reply · 2x tap: back',
   selectable: true, nativeTextPage: true,
 };
 
@@ -114,7 +114,7 @@ describe('HudPresenter Even-font reader page', () => {
       ...Array.from({ length: 24 }, (_, index) => `Sentence ${index + 1} of the article about consumer sentiment.`),
     ];
     expect(await r.hud.showList(article, {
-      title: 'NEWS · ARTICLE', hint: 'down more · left x2: back', selectable: false, nativeTextPage: true,
+      title: 'NEWS · ARTICLE', hint: 'down more · 2x tap: back', selectable: false, nativeTextPage: true,
     })).toBe(true);
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(page?.imageObject?.some((image) => image.containerID === ContainerId.Image) ?? false).toBe(false);

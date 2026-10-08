@@ -177,9 +177,9 @@ export const PANEL_RAIL = {
  * affordance from the footer while it kept working. The pomodoro page
  * names it too: that tab is excluded from the refresh carve-out
  * (CapabilityMenu.isPanelRefreshable), so a hold there opens the mic. */
-export const PANEL_OVERVIEW_HINT = 'tap: open · swipe: tabs · hold: mic';
-export const PANEL_EXPANDED_HINT = 'tap: open · hold: refresh · double-click: back';
-export const POMODORO_EXPANDED_HINT = 'tap: choose · hold: mic · double-click: back';
+export const PANEL_OVERVIEW_HINT = 'tap: open · swipe: tabs · long tap: mic';
+export const PANEL_EXPANDED_HINT = 'tap: open · long tap: refresh · 2x tap: back';
+export const POMODORO_EXPANDED_HINT = 'tap: choose · long tap: mic · 2x tap: back';
 
 export interface HudNotificationRow {
   source: string;
@@ -658,9 +658,9 @@ export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): st
  * cancels an in-flight native write nor claims an unavailable post-save undo.
  */
 export function productivityActionHint(model: Pick<ProductivityHudModel, 'phase' | 'monitoringArmed'>): string {
-  if (model.phase === 'due') return 'tap: complete · Back: double-click to Planning';
+  if (model.phase === 'due') return 'tap: complete · 2x tap: Planning';
   if (model.phase === 'saved' && model.monitoringArmed) {
-    return 'Back: double-click to Planning · monitoring next';
+    return '2x tap: Planning · monitoring next';
   }
   if (
     model.phase === 'saved'
@@ -671,9 +671,9 @@ export function productivityActionHint(model: Pick<ProductivityHudModel, 'phase'
     || model.phase === 'cancelled'
     || model.phase === 'not_saved'
   ) {
-    return 'Back: double-click to Planning · auto in 5s';
+    return '2x tap: Planning · auto in 5s';
   }
-  return 'Back: double-click to Planning';
+  return '2x tap: Planning';
 }
 
 function gray(level: number): string {
@@ -813,7 +813,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       title: 'Offline',
       primary: 'JOAT on your Mac is unavailable.',
       recovery: 'Open JOAT on your Mac to reconnect.',
-      hint: 'double-click: menu · long-press: mic',
+      hint: '2x tap: menu · long tap: mic',
     };
   }
   if (/\breconnecting\b/i.test(input.status)) {
@@ -822,7 +822,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       title: 'Reconnecting',
       primary: 'Restoring JOAT on your Mac…',
       recovery: 'This screen will refresh automatically.',
-      hint: 'double-click: menu · long-press: mic',
+      hint: '2x tap: menu · long tap: mic',
     };
   }
   if (/\bconnecting\b/i.test(input.status)) {
@@ -831,7 +831,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       title: 'Connecting',
       primary: 'Waiting for JOAT on your Mac…',
       recovery: 'This screen will refresh automatically.',
-      hint: 'double-click: menu · long-press: mic',
+      hint: '2x tap: menu · long tap: mic',
     };
   }
   if (!main && !context && !tray) {
@@ -840,7 +840,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       title: 'Ready',
       primary: 'Ask JOAT anything.',
       recovery: 'Say “JOAT …” · tap then hold for menu.',
-      hint: 'double-click: menu · long-press: mic',
+      hint: '2x tap: menu · long tap: mic',
     };
   }
 

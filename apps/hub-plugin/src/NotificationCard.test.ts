@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { validateEvenHubPageContainer } from '@evenrealities/even_hub_sdk';
+import { getTextWidth } from '@evenrealities/pretext';
 import { firmwareLineCount } from './FirmwareText';
 import { withImageHeader } from './HeaderImage';
 import { withHomeImages } from './HomeImages';
@@ -25,7 +26,16 @@ describe('notification card', () => {
     const by = (id: number) => texts.find((t) => t.containerID === id)!;
     expect(by(NotificationCardId.Head).content).toBe('WhatsApp');
     expect(by(NotificationCardId.Meta).content).toBe('Now · 1/3');
-    expect(by(NotificationCardId.Body).content).toBe(`Elizabeth\n${SHORT}`);
+    // The sender's name opens the message's first row, not a row of its
+    // own, and the wrapped rows stand under the first row's words.
+    const lines = by(NotificationCardId.Body).content!.split('\n');
+    expect(lines[0]).toMatch(/^Elizabeth: Mom/u);
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines.map((line) => line.trim()).join(' ')).toBe(`Elizabeth: ${SHORT}`);
+    for (const line of lines.slice(1)) {
+      const lead = getTextWidth(/^ */u.exec(line)![0]);
+      expect(Math.abs(lead - getTextWidth('Elizabeth: '))).toBeLessThanOrEqual(getTextWidth(' ') / 2);
+    }
     // The body takes input; nothing else does.
     expect(texts.filter((t) => t.isEventCapture === 1).map((t) => t.containerID)).toEqual([NotificationCardId.Body]);
     // The body's text fits its lines exactly: no firmware scrollbar.

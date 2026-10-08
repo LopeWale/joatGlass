@@ -24,7 +24,7 @@ import type { HudStatusModel } from './HudStatus';
 // The resting overview's gestures, truthfully: tap expands the tab the
 // rail has lit, swipe moves along the rail, hold is the microphone. The
 // menu is the firmware's (tap, then hold) and needs no line of its own.
-const HINT = 'tap: open \u00b7 swipe: tabs \u00b7 long-press: mic \u00b7 \u201cJOAT \u2026\u201d';
+const HINT = 'tap: open \u00b7 swipe: tabs \u00b7 long tap: mic \u00b7 \u201cJOAT \u2026\u201d';
 const RESTING_WORDS = /^(?:listening|mic off|ready|online)$/i;
 /** Past the boundary, so the new minute has begun when the clock is read. */
 const CLOCK_EDGE_MS = 50;

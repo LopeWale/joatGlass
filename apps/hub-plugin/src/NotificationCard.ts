@@ -6,7 +6,7 @@ import {
   TextContainerProperty,
 } from '@evenrealities/even_hub_sdk';
 import { getTextWidth } from '@evenrealities/pretext';
-import { FIRMWARE_LINE_HEIGHT, fitLines, firmwareLineCount, paginateMeasured } from './FirmwareText';
+import { FIRMWARE_LINE_HEIGHT, fitLines, hangingLines, paginateMeasured } from './FirmwareText';
 import { TEXT_CONTAINER_MAX_BYTES, fitUtf8 } from './FirmwareLimits';
 import { CANVAS, ContainerId, type HudNotificationCard } from './types';
 
@@ -15,8 +15,10 @@ import { CANVAS, ContainerId, type HudNotificationCard } from './types';
  * (Even's support article "Notifications", its glasses image measured 1:1 on
  * the 576x288 canvas, 2026-10-07): a bordered card near the top over the
  * page the wearer was on, the app on its first line with the age at the
- * right, then the sender and the whole message. The page stays beneath it,
- * dimmed, below the card.
+ * right, then the whole message with the sender's name in front of it on
+ * the same row (not a row of its own), its wrapped rows standing under its
+ * first word. The page stays beneath the card,
+ * dimmed.
  *
  * Firmware text, not pixels: a tap moves to the next unread card, and a text
  * page swaps in one page write, where an image card would cost about 104 ms
@@ -72,12 +74,21 @@ export function cardFromRenderedText(id: string, text: string, nowMs: number): H
   };
 }
 
-/** The card's text lines: the sender, then the message, fitted to the room. */
+/** The card's text: the sender's name in front of their message on the
+ * same row ("Elizabeth: Mom didn't…"), never on a row of its own (the
+ * wearer's ruling, 2026-10-07), fitted to the room. */
 function bodyText(card: HudNotificationCard, maxLines: number): string {
   const sender = card.sender.trim();
   const message = card.body.trim() || ' ';
-  const text = sender ? `${sender}\n${message}` : message;
-  return fitLines(text, BODY_WIDTH, maxLines);
+  const lines = hangingLines(sender ? `${sender}: ${message}` : message, BODY_WIDTH);
+  if (lines.length <= maxLines) return lines.join('\n');
+  // Too long for the card: its last row ends in an ellipsis, still hanging.
+  const kept = lines.slice(0, Math.max(1, maxLines));
+  const last = kept.length - 1;
+  const lead = /^ */u.exec(kept[last]!)![0];
+  const rest = [kept[last]!.slice(lead.length), ...lines.slice(kept.length).map((line) => line.trim())].join(' ');
+  kept[last] = `${lead}${fitLines(rest, BODY_WIDTH - getTextWidth(lead), 1)}`;
+  return kept.join('\n');
 }
 
 export interface NotificationCardGeometry {
@@ -92,7 +103,7 @@ export function notificationCardGeometry(card: HudNotificationCard): Notificatio
   const c = NOTIFICATION_CARD;
   const bodyTop = c.top + c.topInset + FIRMWARE_LINE_HEIGHT;
   const roomLines = Math.floor((c.maxBottom - c.topInset - bodyTop) / FIRMWARE_LINE_HEIGHT);
-  const wanted = firmwareLineCount(bodyText(card, 99), BODY_WIDTH);
+  const wanted = bodyText(card, 99).split('\n').length;
   const bodyLines = Math.max(1, Math.min(roomLines, wanted));
   const frameHeight = c.topInset + FIRMWARE_LINE_HEIGHT + bodyLines * FIRMWARE_LINE_HEIGHT + c.topInset;
   return { frameTop: c.top, frameHeight, bodyTop, bodyLines, bottom: c.top + frameHeight };

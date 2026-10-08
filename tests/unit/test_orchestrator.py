@@ -1420,7 +1420,8 @@ class TestWakeWordGate:
 
     async def test_wake_word_alone_prompts(self) -> None:
         texts = await self._run("JOAT.")
-        assert texts == ["JOAT", "Yes?"]
+        # The name alone is not a question: JOAT's answer is the only turn.
+        assert texts == ["Yes?"]
 
     async def test_none_gate_answers_everything(self) -> None:
         texts = await self._run("any old speech", wake=None)

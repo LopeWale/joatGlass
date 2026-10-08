@@ -161,31 +161,44 @@ class PromptedInputDispatcher:
         self, transcript: Transcript, provenance: UtteranceProvenance | None,
     ) -> bool:
         current = self._unexpired_publication()
-        if current is None or current.ingress_fence is None:
-            return False
-        if not self._owner_is_current(current):
-            return False
-        if transcript.is_final is not True or not transcript.text.strip() or provenance is None:
+        if current is None:
             return False
         ticket = current.ticket
+
+        def refused(reason: str) -> bool:
+            # Why a spoken answer did not answer the question on the glasses
+            # (a tap-to-speak that "does nothing"). Never the words.
+            log.info("prompted answer not taken owner=%s reason=%s", ticket.owner_kind, reason)
+            return False
+
+        if current.ingress_fence is None:
+            return refused("not_acknowledged")
+        if not self._owner_is_current(current):
+            return refused("owner_gone")
+        if transcript.is_final is not True or not transcript.text.strip() or provenance is None:
+            return refused("no_final_text")
+        if provenance.mixed is not False:
+            return refused("mixed_audio")
+        if provenance.source != ticket.source:
+            return refused("other_mic")
+        if provenance.connection_generation != ticket.connection_generation:
+            return refused("other_connection")
+        if provenance.audio_epoch != ticket.prompt_id:
+            return refused("audio_before_question")
         if (
-            provenance.mixed is not False
-            or provenance.source != ticket.source
-            or provenance.connection_generation != ticket.connection_generation
-            or provenance.audio_epoch != ticket.prompt_id
-            or not self._valid_ordinal(provenance.first_ingress_ordinal)
+            not self._valid_ordinal(provenance.first_ingress_ordinal)
             or not self._valid_ordinal(provenance.last_ingress_ordinal)
         ):
-            return False
+            return refused("no_ordinals")
         # SDK speaker attribution is optional and is not biometric identity.
         # Unknown/absent attribution stays eligible; any explicit other-speaker
         # frame disqualifies this complete utterance without spending the lease.
         if any(not isinstance(role, str) or role.casefold() == "other" for role in provenance.speaker_roles):
-            return False
+            return refused("other_speaker")
         first, last = provenance.first_ingress_ordinal, provenance.last_ingress_ordinal
         assert first is not None and last is not None
         if first <= current.ingress_fence or last < first:
-            return False
+            return refused("started_before_question")
         # No await or command interpretation may occur before consumption.
         # An owner can publish a successor while its callback runs; completion
         # of this callback must never revoke that newer publication.

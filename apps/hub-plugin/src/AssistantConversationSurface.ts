@@ -3,7 +3,6 @@ import {
   type RebuildPageContainer,
 } from '@evenrealities/even_hub_sdk';
 import { getTextWidth } from '@evenrealities/pretext';
-import { GesturePolicy } from './GesturePolicy';
 import type { BridgeClient } from './BridgeClient';
 import {
   ASSISTANT_CONVERSATION_GEOMETRY,
@@ -27,6 +26,27 @@ export type ConversationLineRole = AssistantConversationTurn['role'] | 'separato
 export interface ConversationLine {
   role: ConversationLineRole;
   text: string;
+  /** Who speaks, on the first row of their turn, in front of their words
+   * ("JOAT: Yes?"), never on a row of its own (the wearer's ruling,
+   * 2026-10-07). */
+  label?: string;
+  /** The spaces a wrapped row leads with, so its words stand under the
+   * first row's words, after the name (a hanging indent). */
+  pad?: string;
+}
+
+/** The speaker names that open each turn's first row. */
+export const SPEAKER_LABEL = { user: 'You:', assistant: 'JOAT:' } as const;
+
+/** The spaces the bright layer leads with so JOAT's words start a typed
+ * space past its dim name on the same row (two containers, one geometry):
+ * the nearest whole number of spaces, never touching the name. */
+function labelPad(label: string, measure: TextMeasure): string {
+  const space = Math.max(1, measure(' '));
+  const name = measure(label);
+  let count = Math.round(measure(`${label} `) / space);
+  while (count * space < name + 2) count += 1;
+  return ' '.repeat(count);
 }
 
 export interface ConversationViewport extends AssistantConversationPage {
@@ -61,23 +81,23 @@ export interface AssistantConversationSurfaceState {
   indicatorFrame: number;
 }
 
-// Even AI's card hugs its content: two rows for the first exchange, growing
+// Even AI's card hugs its content: one row for JOAT's "Yes?", two for the
+// first exchange (each speaker's name in front of their words), growing
 // upward from a fixed bottom as requests and replies are added, and
 // scrolling to the latest reply once it reaches its height cap (the
 // wearer's ask, 2026-10-06; Even's product demo, frame-measured
-// 2026-09-24). The growth is BOUNDED to four stages so a stage crossing is
+// 2026-09-24). The growth is BOUNDED to five stages so a stage crossing is
 // one rebuild and everything within a stage (streamed chunks, scrolling,
 // the indicator) stays a flicker-free textContainerUpgrade.
-const NATIVE_LINE_STAGES = [2, 3, 5, 7] as const;
+const NATIVE_LINE_STAGES = [1, 2, 3, 5, 7] as const;
 // Eight indicator phases in firmware glyphs, at the cadence Even AI uses.
 const INDICATOR_FRAMES = [
   '■ □', '□ ■', '■', '■ ■', '□ □', '■', '□', '■',
 ] as const;
 const ANSWERING_INDICATOR_MIN_MS = 2_000;
-// Use the same product word as every other surface. "x2 exits" described the
-// mechanism but made this page sound like it was closing JOAT; the gesture
-// actually returns to the retained feature underneath.
-const CONTINUE_COPY = 'Continue? tap: stay · double-click: back';
+// No gestures in the box: the wearer knows them, and the row is worth more
+// than a reminder (the wearer's ruling, 2026-10-06 and 2026-10-07).
+const CONTINUE_COPY = 'Continue?';
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
@@ -91,9 +111,9 @@ type TextMeasure = (text: string) => number;
 
 interface ConversationViewportOptions {
   lineStages?: readonly number[];
-  /** A footer sentence the card holds inside its border (a Messages draft's
-   * gestures), in place of the state glyph on the border. */
-  footerHint?: string;
+  /** The wearer is speaking into the card (a Messages reply): the working
+   * glyph, at this frame, stands on their row until their words arrive. */
+  listeningFrame?: number;
   textWidth?: number;
   measureTextWidth?: TextMeasure;
 }
@@ -154,8 +174,37 @@ export function wrapConversationText(
   return lines.length > 0 ? lines : [' '];
 }
 
-/** All logical rows. A blank separator appears only between completed
- * assistant/user pairs, matching the native Even AI image hierarchy. */
+/** One turn's rows: the speaker's name, then their words on the same row,
+ * wrapping full width beneath. */
+function turnLines(
+  role: AssistantConversationTurn['role'],
+  text: string,
+  options: ConversationViewportOptions,
+): ConversationLine[] {
+  const measure = options.measureTextWidth ?? getTextWidth;
+  const label = SPEAKER_LABEL[role];
+  const pad = labelPad(label, measure);
+  // Every row's words stand under the first row's, after the name.
+  const rows = wrapConversationText(
+    text,
+    (options.textWidth ?? ASSISTANT_CONVERSATION_GEOMETRY.transcriptWidth) - measure(pad),
+    measure,
+  );
+  return rows.map((row, index) => index === 0 ? { role, text: row, label } : { role, text: row, pad });
+}
+
+/** A turn's row as its layer draws it: the name and the words on the first
+ * row, the words alone, under the first row's, on the rest. */
+function rowText(line: ConversationLine, measure: TextMeasure): string {
+  if (line.pad) return `${line.pad}${line.text}`;
+  if (!line.label) return line.text;
+  const space = Math.max(1, measure(' '));
+  const gap = Math.max(1, Math.round((measure(labelPad(line.label, measure)) - measure(line.label)) / space));
+  return `${line.label}${' '.repeat(gap)}${line.text}`;
+}
+
+/** All logical rows. Each turn opens with its speaker's name on its first
+ * row; the names part the turns, so no blank row is spent between them. */
 export function conversationLines(
   snapshot: AssistantConversationSnapshot,
   options: ConversationViewportOptions = {},
@@ -164,18 +213,7 @@ export function conversationLines(
   if (snapshot.earlierTurnsOmitted) {
     lines.push({ role: 'user', text: 'Earlier conversation…' });
   }
-  for (const turn of snapshot.turns) {
-    if (turn.role === 'user' && lines.some((line) => line.role === 'assistant')) {
-      lines.push({ role: 'separator', text: ' ' });
-    }
-    for (const text of wrapConversationText(
-      turn.text,
-      options.textWidth ?? ASSISTANT_CONVERSATION_GEOMETRY.transcriptWidth,
-      options.measureTextWidth ?? getTextWidth,
-    )) {
-      lines.push({ role: turn.role, text });
-    }
-  }
+  for (const turn of snapshot.turns) lines.push(...turnLines(turn.role, turn.text, options));
   return lines.length > 0 ? lines : [{ role: 'separator', text: ' ' }];
 }
 
@@ -204,7 +242,12 @@ export function conversationViewport(
   // question and the working glyph, and the answer replaces the glyph.
   const lastTurn = snapshot.turns[snapshot.turns.length - 1];
   if (snapshot.state !== 'ready' && lastTurn?.role === 'user') {
-    all.push({ role: 'assistant', text: INDICATOR_FRAMES[indicatorFrame % INDICATOR_FRAMES.length]! });
+    all.push(...turnLines('assistant', INDICATOR_FRAMES[indicatorFrame % INDICATOR_FRAMES.length]!, options));
+  }
+  // While the wearer speaks into the card, the glyph stands on their row
+  // until their words arrive.
+  if (options.listeningFrame !== undefined && lastTurn?.role === 'assistant') {
+    all.push(...turnLines('user', INDICATOR_FRAMES[options.listeningFrame % INDICATOR_FRAMES.length]!, options));
   }
   const lineCapacity = stageFor(all.length, options.lineStages ?? NATIVE_LINE_STAGES);
   const maximumScrollFromTail = Math.max(0, all.length - lineCapacity);
@@ -218,17 +261,27 @@ export function conversationViewport(
   while (visibleLines.length < lineCapacity) {
     visibleLines.push({ role: 'separator', text: ' ' });
   }
+  // The wearer's rows are dim, names and all; JOAT's name is dim and its
+  // words bright, starting just past the name on the same row.
+  const measure = options.measureTextWidth ?? getTextWidth;
   const dimText = visibleLines
-    .map((line) => line.role === 'user' ? line.text : ' ')
+    .map((line) => {
+      if (line.role === 'user') return rowText(line, measure);
+      if (line.role === 'assistant' && line.label) return line.label;
+      return ' ';
+    })
     .join('\n');
   const brightText = visibleLines
-    .map((line) => line.role === 'assistant' ? line.text : ' ')
+    .map((line) => {
+      if (line.role !== 'assistant') return ' ';
+      return line.label ? `${labelPad(line.label, measure)}${line.text}` : rowText(line, measure);
+    })
     .join('\n');
   const geometry = ASSISTANT_CONVERSATION_GEOMETRY;
-  // The footer holds only a sentence (the continuation prompt, a draft's
-  // gestures), inside the box, which grows a row to hold it. The working
-  // indicator is not a footer: it stands on the answer's row (above).
-  const sentence = continuePrompt ? CONTINUE_COPY : options.footerHint;
+  // The footer holds only the continuation question, inside the box, which
+  // grows a row to hold it. Never gestures; the working indicator is not a
+  // footer either: it stands on the row the words will take (above).
+  const sentence = continuePrompt ? CONTINUE_COPY : undefined;
   const footer = sentence ?? ' ';
   const cardHeight = (
     lineCapacity * geometry.lineHeight
@@ -247,7 +300,7 @@ export function conversationViewport(
     footerTop,
     dimText,
     brightText,
-    footerText: centered(GesturePolicy.formatHint(footer), ASSISTANT_CONVERSATION_GEOMETRY.footerWidth),
+    footerText: centered(footer, ASSISTANT_CONVERSATION_GEOMETRY.footerWidth),
     visibleLines,
     lineCapacity,
     totalLines: all.length,
@@ -257,10 +310,11 @@ export function conversationViewport(
 }
 
 /** A Messages reply drafted in JOAT's own conversation card: JOAT's
- * question, then the wearer's words, under a footer naming the gestures.
+ * question, then the wearer's words, or the working glyph on their row
+ * while they have yet to speak (`listeningFrame`). No gesture footer.
  * Only the page is shared with the assistant conversation; the draft keeps
  * its own question and consent owners underneath. */
-export function replyDraftView(turns: AssistantConversationTurn[], hint: string): ConversationViewport {
+export function replyDraftView(turns: AssistantConversationTurn[], listeningFrame?: number): ConversationViewport {
   return conversationViewport({
     conversationId: 'message-reply',
     revision: 0,
@@ -268,7 +322,7 @@ export function replyDraftView(turns: AssistantConversationTurn[], hint: string)
     continueAfterMs: 120_000,
     turns,
     earlierTurnsOmitted: false,
-  }, 0, 0, false, { footerHint: hint });
+  }, 0, 0, false, { listeningFrame });
 }
 
 export function validAssistantConversationSnapshot(value: AssistantConversationSnapshot): boolean {

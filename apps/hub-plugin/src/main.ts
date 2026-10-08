@@ -492,6 +492,7 @@ async function boot(): Promise<void> {
         menuRef?.cancelMessageAction(message.ownerId);
       }
     },
+    onStage: (owner, stage) => g2Diagnostics.record({ type: 'prompt_stage', owner, stage }),
   });
   promptedInputRef = promptedInput;
   audio.onPromptInvalidated = (promptId) => promptedInput.audioInvalidated(promptId);
@@ -1487,7 +1488,7 @@ async function renderVisualState(
         fixture.items,
         'voice-fixture-calendar',
         true,
-        'tap: choose · swipe: move · left x2: back',
+        'tap: choose · swipe: move · 2x tap: back',
         grid,
       );
       return;
@@ -1521,7 +1522,10 @@ async function renderVisualState(
       earlierTurnsOmitted: false,
       // ?joatConvTurns=short: one short exchange, the card at its first size.
       // ?joatConvTurns=question: a question JOAT is still working on.
-      turns: new URLSearchParams(window.location.search).get('joatConvTurns') === 'question' ? [
+      // ?joatConvTurns=wake: the wearer said only "JOAT"; JOAT answers.
+      turns: new URLSearchParams(window.location.search).get('joatConvTurns') === 'wake' ? [
+        { role: 'assistant', text: 'Yes?' },
+      ] : new URLSearchParams(window.location.search).get('joatConvTurns') === 'question' ? [
         { role: 'user', text: 'What time is my next meeting?' },
       ] : new URLSearchParams(window.location.search).get('joatConvTurns') === 'short' ? [
         { role: 'user', text: 'What time is my next meeting?' },
@@ -1595,7 +1599,7 @@ async function renderVisualState(
     ContainerId.Tray, 2,
   );
   await hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
-  await hud.showText('tap: open · swipe: tabs · long-press: mic', ContainerId.Hint, 1);
+  await hud.showText('tap: open · swipe: tabs · long tap: mic', ContainerId.Hint, 1);
 }
 
 function productivityLifecycleFixture(
@@ -1607,7 +1611,7 @@ function productivityLifecycleFixture(
   const nativeApp = calendar ? 'Calendar' : 'Reminders';
   // The production workflow returns to one live, mixed planner (not stale
   // app-specific lists) after every terminal status.
-  const returnHint = 'left x2 Planning';
+  const returnHint = '2x tap: Planning';
   switch (state) {
     case 'calendar-verifying':
     case 'reminders-verifying':
@@ -1660,7 +1664,7 @@ function productivityLifecycleFixture(
       return {
         domain, phase: 'due', title,
         primary: 'Due now', secondary: 'This reminder is still incomplete.',
-        hint: 'tap: complete · left x2 Planning',
+        hint: 'tap: complete · 2x tap: Planning',
       };
   }
 }

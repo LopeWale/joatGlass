@@ -34,15 +34,15 @@ describe('productivity escape copy', () => {
   // GesturePolicy routes a double-click as Back on every source (temple or
   // ring), so the escape is named by the gesture, not by a hand.
   it.each([
-    [{ phase: 'verifying', monitoringArmed: false }, 'Back: double-click to Planning'],
-    [{ phase: 'saved', monitoringArmed: true }, 'Back: double-click to Planning · monitoring next'],
-    [{ phase: 'monitoring', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
-    [{ phase: 'completed', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
-    [{ phase: 'failed', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
-    [{ phase: 'check', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
-    [{ phase: 'cancelled', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
-    [{ phase: 'not_saved', monitoringArmed: false }, 'Back: double-click to Planning · auto in 5s'],
-    [{ phase: 'due', monitoringArmed: false }, 'tap: complete · Back: double-click to Planning'],
+    [{ phase: 'verifying', monitoringArmed: false }, '2x tap: Planning'],
+    [{ phase: 'saved', monitoringArmed: true }, '2x tap: Planning · monitoring next'],
+    [{ phase: 'monitoring', monitoringArmed: false }, '2x tap: Planning · auto in 5s'],
+    [{ phase: 'completed', monitoringArmed: false }, '2x tap: Planning · auto in 5s'],
+    [{ phase: 'failed', monitoringArmed: false }, '2x tap: Planning · auto in 5s'],
+    [{ phase: 'check', monitoringArmed: false }, '2x tap: Planning · auto in 5s'],
+    [{ phase: 'cancelled', monitoringArmed: false }, '2x tap: Planning · auto in 5s'],
+    [{ phase: 'not_saved', monitoringArmed: false }, '2x tap: Planning · auto in 5s'],
+    [{ phase: 'due', monitoringArmed: false }, 'tap: complete · 2x tap: Planning'],
   ] as const)('keeps %o visibly escapable', (model, hint) => {
     expect(productivityActionHint(model)).toBe(hint);
   });
@@ -154,7 +154,7 @@ describe('resolveHudOverview', () => {
       title: 'Connecting',
       primary: 'Waiting for JOAT on your Mac…',
       recovery: 'This screen will refresh automatically.',
-      hint: 'double-click: menu · long-press: mic',
+      hint: '2x tap: menu · long tap: mic',
     });
   });
 
@@ -169,7 +169,7 @@ describe('resolveHudOverview', () => {
       title: 'Reconnecting',
       primary: 'Restoring JOAT on your Mac…',
       recovery: 'This screen will refresh automatically.',
-      hint: 'double-click: menu · long-press: mic',
+      hint: '2x tap: menu · long tap: mic',
     });
   });
 
@@ -620,7 +620,7 @@ describe('the resting overview wears one footer on every tab', () => {
       mainBrightness: 4,
       context: '',
       tray: '',
-      hint: 'tap: open · swipe: tabs · hold: mic · “JOAT …”',
+      hint: 'tap: open · swipe: tabs · long tap: mic · “JOAT …”',
       ...(rail ? { rail: { activeTab: 'notifications' } } : {}),
     }, {});
     const footer = texts[texts.length - 1];
@@ -633,6 +633,6 @@ describe('the resting overview wears one footer on every tab', () => {
   });
 
   it('keeps the chrome hint where there is no rail to swipe', () => {
-    expect(overviewFooter(false)).toBe('tap: open · swipe: tabs · hold: mic · “JOAT …”');
+    expect(overviewFooter(false)).toBe('tap: open · swipe: tabs · long tap: mic · “JOAT …”');
   });
 });

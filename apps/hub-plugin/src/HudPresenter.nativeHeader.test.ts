@@ -84,7 +84,7 @@ describe('the header on a firmware list page', () => {
     const r = rig();
     await r.hud.setStatusModel(at941);
     expect(await r.hud.showList(['Calendar create · Saved'], {
-      title: 'ACTIVITY', hint: 'double-click: back', selectable: true, nativeFirmwareList: true,
+      title: 'ACTIVITY', hint: '2x tap: back', selectable: true, nativeFirmwareList: true,
     })).toBe(true);
     expect(status(last(r.rebuilds))).toBe('9:41 · ACTIVITY · ○ · ▇');
     const mark = r.operations.length;
@@ -119,7 +119,7 @@ describe('the header on a firmware list page', () => {
   it('returns to painting frames once the visual page is back', async () => {
     const r = rig();
     await r.hud.setStatusModel(at941);
-    await r.hud.showList(['row'], { title: 'ACTIVITY', hint: 'double-click: back', selectable: true, nativeFirmwareList: true });
+    await r.hud.showList(['row'], { title: 'ACTIVITY', hint: '2x tap: back', selectable: true, nativeFirmwareList: true });
     expect(await r.hud.showDefault()).toBe(true);
     const mark = r.operations.length;
     await r.hud.setStatusModel(at942);
@@ -133,7 +133,7 @@ describe('the header on a firmware text page', () => {
     const r = rig();
     await r.hud.setStatusModel(at941);
     expect(await r.hud.showList(['1/1 · From Dele', 'Call me when you arrive.'], {
-      title: 'MESSAGES · MESSAGE', hint: 'double-click: back', selectable: false, nativeTextPage: true,
+      title: 'MESSAGES · MESSAGE', hint: '2x tap: back', selectable: false, nativeTextPage: true,
     })).toBe(true);
     expect(status(last(r.rebuilds))).toBe('9:41 · MESSAGES · MESSAGE · ○ · ▇');
     const mark = r.operations.length;

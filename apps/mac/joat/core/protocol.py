@@ -2563,6 +2563,19 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             "type": "messages_confirmation",
             "outcome": _trace_enum(event["outcome"], "outcome", ("accepted", "declined", "timed_out")),
         }
+    if event_type == "prompt_stage":
+        # Where a spoken answer's question stopped on the glasses: its owner
+        # and the step reached. No question text, no words.
+        _trace_shape(event, {"type", "owner", "stage"})
+        return {
+            "type": "prompt_stage",
+            "owner": _trace_enum(event["owner"], "owner", ("messages", "brainstorm", "terminal", "capability")),
+            "stage": _trace_enum(
+                event["stage"], "stage",
+                ("presented", "painted", "paint_refused", "mic_ready", "mic_refused",
+                 "acknowledged", "ack_refused", "retired"),
+            ),
+        }
     raise ProtocolError("g2 diagnostic type is invalid")
 
 

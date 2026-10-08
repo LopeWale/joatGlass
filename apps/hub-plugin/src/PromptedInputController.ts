@@ -2,7 +2,8 @@ import { AudioInputSource } from '@evenrealities/even_hub_sdk';
 import type { AudioStreamer, PromptMicrophone } from './AudioStreamer';
 import type { HudPresenter } from './HudPresenter';
 import type { DownlinkContext, MacLink } from './MacLink';
-import type { PromptAckMessage, PromptCancelMessage, PromptPresentMessage } from './types';
+import type { PromptStage } from './G2DiagnosticTrace';
+import type { PromptAckMessage, PromptCancelMessage, PromptOwnerKind, PromptPresentMessage } from './types';
 
 interface PromptedInputOptions {
   presenter: Partial<Pick<HudPresenter, 'showPromptQuestion' | 'dismissPromptQuestion' | 'showPromptPartial'>>;
@@ -11,6 +12,9 @@ interface PromptedInputOptions {
   monotonicMs?: () => number;
   isOwnerCurrent?: (message: Readonly<PromptPresentMessage>) => boolean;
   onCancel?: (message: Readonly<PromptPresentMessage>, reason?: string) => void;
+  /** Each step a question reaches, for the G2 diagnostics: where a spoken
+   * answer stopped when a tap-to-speak "does nothing" on the glasses. */
+  onStage?: (owner: PromptOwnerKind, stage: PromptStage) => void;
 }
 
 interface Publication {
@@ -173,6 +177,7 @@ export class PromptedInputController {
       || publication.started || !this.isCurrent(publication)) return;
     publication.started = true;
     let ackAttempted = false;
+    this.stage(message, 'presented');
     try {
       const show = this.options.presenter.showPromptQuestion;
       const painted = show
@@ -180,9 +185,11 @@ export class PromptedInputController {
         : false;
       if (!this.isCurrent(publication)) return;
       if (!painted) {
+        this.stage(message, 'paint_refused');
         this.fail(publication);
         return;
       }
+      this.stage(message, 'painted');
       publication.microphone = this.options.audio.openPromptMicrophone(
         message.source === 'glasses' ? AudioInputSource.Glasses : AudioInputSource.Phone,
         message.promptId,
@@ -190,9 +197,11 @@ export class PromptedInputController {
       const ready = await publication.microphone.ready;
       if (!this.isCurrent(publication)) return;
       if (!ready) {
+        this.stage(message, 'mic_refused');
         this.fail(publication);
         return;
       }
+      this.stage(message, 'mic_ready');
       const activated = this.options.audio.activatePromptEpoch({
         promptId: message.promptId, generation: publication.context.generation,
         source: message.source === 'glasses' ? AudioInputSource.Glasses : AudioInputSource.Phone,
@@ -203,6 +212,7 @@ export class PromptedInputController {
           ...this.ack(publication, true), audioEpoch: message.promptId,
         });
       });
+      this.stage(message, activated ? 'acknowledged' : 'ack_refused');
       if (!activated && this.current === publication) {
         // Once a success receipt was attempted, do not issue a contradictory
         // second receipt or retry it on another connection.
@@ -281,9 +291,14 @@ export class PromptedInputController {
     this.retire(publication, false);
   }
 
+  private stage(message: Readonly<PromptPresentMessage>, stage: PromptStage): void {
+    try { this.options.onStage?.(message.ownerKind, stage); } catch { /* Diagnostics never steer input. */ }
+  }
+
   private retire(publication: Publication, notify: boolean): void {
     if (this.current !== publication) return;
     this.current = undefined;
+    if (publication.started) this.stage(publication.message, 'retired');
     this.cleanup(publication, notify);
   }
 

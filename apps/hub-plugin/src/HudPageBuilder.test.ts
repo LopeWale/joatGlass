@@ -298,7 +298,7 @@ describe('HudPageBuilder invariants', () => {
     expect(hint).toMatchObject({ yPosition: 253, height: 35, textColor: 1 });
     // The builder rewrites a Mac's old left-only wording to the gesture
     // GesturePolicy honours on every source (GesturePolicy.formatHint).
-    expect(hint?.content).toBe('SWIPE move · TAP open · double-click back');
+    expect(hint?.content).toBe('TAP open · SWIPE move · 2x tap back');
     expect((hint?.yPosition ?? 0) + (hint?.height ?? 0)).toBe(CANVAS.height);
   });
 
