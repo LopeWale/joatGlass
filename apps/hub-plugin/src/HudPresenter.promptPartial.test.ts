@@ -98,6 +98,34 @@ describe('HudPresenter reply card words so far', () => {
     expect(onGlass?.textObject?.some((text) => text.containerName === 'main')).toBe(true);
   });
 
+  it('the consent card waits for the restore the answered question started, then shows', async () => {
+    // Simulator, 2026-10-08: the wearer's words answered the question; its
+    // cancel started restoring the thread, and the Mac's confirmation landed
+    // while that restore ran. The guard refused the consent card, the hub
+    // declined, and the Mac cancelled the draft: the card just went away.
+    const r = rig();
+    await r.hud.showList(['1/1 · Adele', 'Adele: hi'], {
+      title: 'MESSAGES · CONVERSATION', hint: 'tap: reply', selectable: true, nativeTextPage: true,
+    });
+    await r.hud.showPromptQuestion('p1', QUESTION, () => true, 'messages');
+    let release: () => void = () => undefined;
+    r.gate.current = new Promise<void>((resolve) => { release = resolve; });
+    const rebuildsBefore = r.rebuilds.length;
+    const restored = r.hud.dismissPromptQuestion('p1');  // the restore, held
+    // The restore is inside the page guard, waiting on the gate, before
+    // the confirmation arrives (the order the simulator showed).
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(r.rebuilds).toHaveLength(rebuildsBefore);
+    const consent = r.hud.showConfirmation('Send to Adele? “On my way.”', 'reply-consent', 'messages');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    release();
+    await restored;  // superseded by the consent card: its own result is moot
+    expect(await consent).toBe(true);
+    // The consent card is what the glass shows, after the thread.
+    const onGlass = last(r.rebuilds);
+    expect(onGlass?.textObject?.find((text) => text.containerName === 'wearer-turns')?.content).toContain('On my way.');
+  });
+
   it('ignores words for another prompt or a non-Messages question', async () => {
     const r = rig();
     await r.hud.showPromptQuestion('p1', QUESTION, () => true, 'messages');
