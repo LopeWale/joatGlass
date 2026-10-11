@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-11 — Build JOAT 0.1.121
+
+- Packed from `b1f1c6a` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.121 above the last recorded build (0.1.120); app.json, package.json and package-lock.json all 0.1.121. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1175 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 183855 bytes, SHA-256 `7fb61eb5aa04e7f2d080bd36434ad533204c09de93aa2cc0bee9a0d59b62d500`. Adds to 0.1.120 the end of the 15 s link drops (a stuck header or column image switches both to firmware text and frees the lane) and page-part failures in the diagnostics. **The Mac side changed too: restart JOAT from this revision** (diagnostics toggle, backlog freezes, quieter logs, page-part diagnostics). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-11 — A stuck header or column image no longer drops the Mac link; the log errors, fixed
 
 The wearer asked for every error in the current logs to be fixed. Each one below was traced in `brain.log` and to the code, and reproduced where it could be.
