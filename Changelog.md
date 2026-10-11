@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-11 — "Record G2 diagnostics" off now means off
+
+The wearer: the logs kept logging with "Record G2 diagnostics" turned off. They did. The toggle was off (`G2DiagnosticsEnabled` false, and the running engine had no `--g2-diagnostics`), yet `brain.log` held 8832 `tile_upload container=…` lines and 15 "paint diagnostics armed" lines, and `g2-diagnostics.json` was still being written.
+
+- **Fixed: the engine armed the G2 trace itself** (`joat/__main__.py`, since 2026-09-08). A second after the glasses connected, it built its own diagnostic store, so the toggle did nothing. That store wrote to the same `g2-diagnostics.json` and told the plugin to stream every event, again on every reconnect. That startup step is gone. The only trace is the one `--g2-diagnostics` (the toggle) or the location probe asks for, armed by the gateway as before.
+- With the toggle off, the glasses send no trace and `brain.log` has no `tile_upload` lines. The voice latency record no longer gets its `painted` receipt unless the toggle is on.
+- Tests: Mac 3465 passed. One failure, `test_whisper_cold_start::test_shutdown_after_foreground_timeout_reaps_child_and_stops_retries`, fails the same way without this change. A new test fails without the fix. **Mac-only: restart JOAT** for it to apply; no new package.
+
 ## 2026-10-11 — Build JOAT 0.1.120
 
 - Packed from `b26930a` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.120 above the last recorded build (0.1.119); app.json, package.json and package-lock.json all 0.1.120. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1170 tests passed.

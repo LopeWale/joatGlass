@@ -1994,14 +1994,15 @@ async def main() -> None:
     def log_paint_cost(event: dict[str, str | int]) -> None:
         """How long the lens actually took, in the log, on every frame.
 
-        The plugin's trace stream defaults to OFF and only an acceptance run
-        ever turned it on, so a wearer reporting "the rendering is very slow"
-        produced no record of a single tile upload — the one number that
-        would settle it. Even's own guidance puts an image frame at 0.5-2s
-        over BLE and a 576x288 screen needs four of them, which is a claim
-        this line can now confirm or refute on THIS hardware.
+        Only while the wearer has "Record G2 diagnostics" on (`--g2-diagnostics`):
+        the plugin streams its trace only when the gateway arms it, and the
+        gateway arms it only for that opt-in. Content-free: a container id,
+        an outcome and a duration.
 
-        Content-free: a container id, an outcome and a duration.
+        The engine used to arm the trace itself a second after every
+        connection (2026-09-08), so the toggle did nothing: with it off, the
+        glasses still streamed every event, this line logged every tile and
+        g2-diagnostics.json was still written. The toggle is the only switch.
         """
         if event.get("type") != "tile_upload":
             return
@@ -2011,24 +2012,7 @@ async def main() -> None:
             event.get("durationMs"),
         )
 
-    async def enable_paint_diagnostics() -> None:
-        # Wait for the plugin: the control message rides the same link, and
-        # a store set before connect would be silently unarmed on the glass.
-        for _ in range(60):
-            await asyncio.sleep(1.0)
-            if transport.connected:
-                break
-        else:
-            return
-        await transport.set_g2_diagnostics(
-            G2DiagnosticStore(observer=lambda events: None),
-        )
-        log.info("paint diagnostics armed — tile upload timings will be logged")
-
     transport.on_trace(log_paint_cost)
-    paint_diagnostics_task = asyncio.get_running_loop().create_task(
-        enable_paint_diagnostics()
-    )
 
     # The resting dashboard's margin facts. Weather is not in the Even Hub
     # SDK, so JOAT resolves it on this Mac from the position the phone

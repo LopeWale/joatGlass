@@ -38,6 +38,29 @@ def test_private_tailnet_gateway_rejects_an_ambiguous_explicit_listener() -> Non
         )
 
 
+def test_g2_diagnostics_are_explicitly_opt_in() -> None:
+    parser = build_argument_parser()
+
+    assert parser.parse_args([]).g2_diagnostics is False
+    assert parser.parse_args(["--g2-diagnostics"]).g2_diagnostics is True
+
+
+def test_the_engine_never_arms_the_g2_trace_on_its_own() -> None:
+    """"Record G2 diagnostics" off must mean off. The engine used to arm the
+    trace a second after every connection, so the glasses streamed every
+    event and g2-diagnostics.json was written with the toggle off. The only
+    store is the one built at startup from `--g2-diagnostics` (or the
+    location probe, which needs it) and handed to the gateway."""
+    import inspect
+
+    import joat.__main__ as engine
+
+    source = inspect.getsource(engine.main)
+    assert "set_g2_diagnostics(" not in source
+    assert source.count("G2DiagnosticStore(") == 1
+    assert "if args.g2_diagnostics or args.location_probe" in source
+
+
 def test_voice_latency_receipt_is_explicitly_opt_in() -> None:
     parser = build_argument_parser()
 
