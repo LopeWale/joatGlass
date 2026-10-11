@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-11 — Build JOAT 0.1.120
+
+- Packed from `b26930a` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.120 above the last recorded build (0.1.119); app.json, package.json and package-lock.json all 0.1.120. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1170 tests passed.
+- Canonical `apps/hub-plugin/joat.ehpk`: 183458 bytes, SHA-256 `99c6d86276c3efce3a517c88d6b3cccbcf7ddfe1074fc9acdb893622365a61c4`. Adds to 0.1.119 Home's tabs swiping and opening with a notification on Home, the Notifications tab's unread list and the lit tab's underline. Plugin-only on top of 0.1.119 (whose brain restart still applies). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-11 — Home's tabs swipe and open again, with a notification on Home
 
 The wearer, on 0.1.119 on the glasses: Home's tabs no longer switched the right pane on a swipe, and a tap no longer opened the tab. The gestures did reach the plugin. A notification was blocking them, and on the glasses the Mac sends notifications all the time. The simulator runs had none, which is why they passed.
