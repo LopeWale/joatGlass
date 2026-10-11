@@ -527,3 +527,119 @@ async def test_metadata_only_observation_is_retained_but_never_rendered(
         assert store.execute(
             "SELECT state,reason_code FROM notification_outbox"
         ).fetchone() == ("suppressed", "metadata_only_not_renderable")
+
+
+async def test_a_backlog_drain_never_holds_the_event_loop(tmp_path: Path) -> None:
+    """A stale observation awaits nothing, so a backlog used to run its whole
+    length without yielding: 1,130 old banners froze JOAT for 9.7 s at
+    startup (2026-10-11), and glasses reconnects drained 5-12 s backlogs.
+    Another task must get the loop between every two observations."""
+    stale_at = time.time() - 3600
+    backlog = [
+        Notification(index, "Mail", f"old {index}", "", "body", stale_at, str(index))
+        for index in range(200)
+    ]
+    source = ScriptedSource(0, [(backlog, 200)])
+    cards: list[Card] = []
+    ticks = 0
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        mux = NotificationMux(
+            [NotificationLane(
+                "ax-banners", source, "notifications.banner", "best_effort",
+                "healthy_best_effort", "best_effort",
+            )],
+            NotificationObservationStore(store),
+            triage=None,
+            deliver=cards.append,
+            poll_interval_s=0.01,
+            authority_grace_s=0.0,
+        )
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0)
+                ticks += 1
+
+        # The tick count each observation was handled at: it must move
+        # between every two, i.e. the other task ran in between.
+        handled_at: list[int] = []
+        handle = mux._handler._handle
+
+        async def recording(item: Notification) -> bool:
+            handled_at.append(ticks)
+            return await handle(item)
+
+        mux._handler._handle = recording  # type: ignore[method-assign]
+        task = asyncio.create_task(mux.run())
+        other = asyncio.create_task(ticker())
+        settled = 0
+        for _ in range(500):
+            settled = store.execute(
+                "SELECT COUNT(*) FROM notification_outbox WHERE state='suppressed'"
+            ).fetchone()[0]
+            if settled == 200:
+                break
+            await asyncio.sleep(0.01)
+        mux.stop()
+        for running in (task, other):
+            running.cancel()
+            try:
+                await running
+            except asyncio.CancelledError:
+                pass
+
+        assert settled == 200
+        assert cards == []
+        assert len(handled_at) == 200
+        assert all(later > earlier for earlier, later in zip(handled_at, handled_at[1:]))
+
+
+async def test_a_failing_source_warns_once_per_spell_and_logs_recovery(
+    tmp_path: Path, caplog,  # type: ignore[no-untyped-def]
+) -> None:
+    """The banner watcher pauses while the Mac sleeps; its stale heartbeat
+    used to log a warning on every poll (once a second) until it woke."""
+
+    class Flaky:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def baseline(self):  # type: ignore[no-untyped-def]
+            return 0
+
+        def read_new(self, watermark):  # type: ignore[no-untyped-def]
+            self.reads += 1
+            if self.reads <= 5:
+                raise RuntimeError("stale Accessibility watcher heartbeat")
+            return [], watermark
+
+    source = Flaky()
+    with DurableStore(tmp_path / "joat.sqlite3") as store:
+        mux = NotificationMux(
+            [NotificationLane(
+                "ax-banners", source, "notifications.banner", "best_effort",
+                "healthy_best_effort", "best_effort",
+            )],
+            NotificationObservationStore(store),
+            triage=None,
+            deliver=lambda card: None,
+            poll_interval_s=0.005,
+            authority_grace_s=0.0,
+        )
+        with caplog.at_level("INFO", logger="joat.channels.notification_mux"):
+            task = asyncio.create_task(mux.run())
+            for _ in range(200):
+                if source.reads >= 8:
+                    break
+                await asyncio.sleep(0.005)
+            mux.stop()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("poll failed" in message for message in messages) == 1
+    assert any("recovered after 5 failed polls" in message for message in messages)

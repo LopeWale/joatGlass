@@ -96,8 +96,24 @@ class JsonlNotificationStore:
         identity_changed = prior_device != info.st_dev or prior_inode != info.st_ino
         prefix_changed = offset > 0 and offset <= size and prior_anchor != self._anchor(offset)
         if size < offset or identity_changed or prefix_changed:
+            reason = ("shrank" if size < offset
+                      else "replaced" if identity_changed else "rewritten")
             offset = 0
             generation = self._generation(info)
+            # Everything already in the file at our last read was read then,
+            # or is history: re-reading from the start must never deliver it
+            # again. On 2026-10-11 a reset re-read the whole feed, 1,130
+            # banners from 46 days back, at startup. They were held back as
+            # too stale, but the drain froze JOAT for 9.7 s.
+            seen_ns = watermark.get("mtime_ns") if isinstance(watermark, dict) else None
+            if isinstance(seen_ns, int) and seen_ns > 0:
+                initial_scan_end = size
+                initial_cutoff = max(initial_cutoff, seen_ns / 1e9 - INITIAL_RECENCY_SECONDS)
+            log.info(
+                "Accessibility banner feed %s under the cursor; re-reading it "
+                "without the lines already seen",
+                reason,
+            )
         if size == offset:
             return [], self._cursor(info, offset=offset, generation=generation)
         with self._path.open("rb") as fh:

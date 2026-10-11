@@ -7,6 +7,11 @@ import type { PromptOwnerKind, UplinkMessage } from './types';
  * independently validates this same vocabulary before it writes an export.
  */
 export type G2TracePage = 'overview' | 'sidebar' | 'list' | 'confirmation' | 'navigation';
+/** Image containers a tile_upload names: the four full-frame tiles, and the
+ * page parts (header halves 16/17, Home's column 18/19). protocol.py
+ * accepts the same set; a page-part failure the Mac refused to log is how
+ * the 2026-10-08/09 link drops went unexplained. */
+export type TraceTileContainer = 4 | 8 | 9 | 10 | 16 | 17 | 18 | 19;
 export type G2TraceCadence = 'first' | 'lte1s' | '1_5s' | '5_30s' | 'gt30s';
 /** Fixed Messages surfaces only. The trace never receives list rows, sender
  * names, contact handles, draft text, or the confirmation prompt. */
@@ -49,7 +54,7 @@ export type G2TraceEvent =
     type: 'tile_upload';
     frame: number;
     order: number;
-    containerId: 4 | 8 | 9 | 10;
+    containerId: TraceTileContainer;
     outcome: 'success' | 'failed' | 'error';
     /** SDK call duration in whole ms. Excludes queueing, rendering, encoding
      * and pacing; success is not proof of visible delivery on the glasses. */

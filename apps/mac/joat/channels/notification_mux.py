@@ -150,6 +150,7 @@ class NotificationMux:
         if cursor is None:
             return
         self._publish_status()
+        failed_polls = 0
         while self._running:
             await asyncio.sleep(self._interval)
             before = cursor
@@ -173,6 +174,12 @@ class NotificationMux:
                     health,
                     now_us=time.time_ns() // 1_000,
                 )
+                if failed_polls:
+                    log.info(
+                        "notification source=%s recovered after %d failed polls",
+                        lane.source_id, failed_polls,
+                    )
+                    failed_polls = 0
             except Exception as exc:
                 cursor = before
                 self._observations.set_health(
@@ -180,7 +187,15 @@ class NotificationMux:
                     "failed",
                     now_us=time.time_ns() // 1_000,
                 )
-                log.warning("notification source=%s poll failed error=%s", lane.source_id, type(exc).__name__)
+                # Once per failing spell, not once a second: the banner
+                # watcher pauses whenever the Mac sleeps, and its stale
+                # heartbeat logged a warning on every poll until it woke.
+                failed_polls += 1
+                if failed_polls == 1:
+                    log.warning(
+                        "notification source=%s poll failed error=%s",
+                        lane.source_id, type(exc).__name__,
+                    )
             self._publish_status()
 
     async def _deliver(self) -> None:
@@ -191,6 +206,13 @@ class NotificationMux:
                 continue
             deferred = False
             for observation in pending:
+                # Each observation is a few synchronous SQLite writes, and a
+                # stale one awaits nothing at all. Without this a backlog held
+                # the event loop for its whole length: 1,130 old banners at
+                # startup on 2026-10-11 froze JOAT for 9.7 s, and every
+                # glasses reconnect drained one too (5-12 s freezes logged
+                # right after "plugin connected", 2026-10-08/09).
+                await asyncio.sleep(0)
                 if observation.completeness == "metadata_only":
                     self._observations.mark_suppressed(
                         observation.observation_id,

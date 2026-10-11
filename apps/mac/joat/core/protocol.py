@@ -2348,9 +2348,17 @@ def _trace_shape(
         raise ProtocolError("g2 diagnostic has unsupported fields")
 
 
+# The four full-frame tiles, and the page parts drawn as images: the header
+# halves (16, 17) and Home's column (18, 19). Refusing the page parts is how
+# the 2026-10-08/09 link drops went unexplained: every hung header or column
+# write the glasses reported was dropped here as "containerId is invalid".
+# Plugin twin: TraceTileContainer in apps/hub-plugin/src/G2DiagnosticTrace.ts.
+TRACE_TILE_CONTAINERS = (4, 8, 9, 10, 16, 17, 18, 19)
+
+
 def _trace_tile_container(value: Any) -> int:
-    container_id = _trace_int(value, "containerId", minimum=4, maximum=10)
-    if container_id not in (4, 8, 9, 10):
+    container_id = _trace_int(value, "containerId", minimum=4, maximum=19)
+    if container_id not in TRACE_TILE_CONTAINERS:
         raise ProtocolError("g2 diagnostic containerId is invalid")
     return container_id
 

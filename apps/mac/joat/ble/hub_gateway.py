@@ -192,6 +192,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._lockout_warned = False
         self._server: object | None = None
         self._conn: ServerConnection | None = None
+        # Downlinks sent while no plugin was connected, since the last one was.
+        self._dropped_while_disconnected = 0
 
         self._audio_cbs: list[AudioCallback] = []
         self._audio_frame_cbs: list[AudioFrameCallback] = []
@@ -496,7 +498,16 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
     async def send(self, message: DownlinkMessage) -> None:
         conn = self._conn
         if conn is None:
-            log.warning("dropping %s — no plugin connected", type(message).__name__)
+            # One line per disconnected spell, then a count when the glasses
+            # return: logging every frame wrote ~1,500 identical warnings in
+            # three days and buried everything else in brain.log.
+            self._dropped_while_disconnected += 1
+            if self._dropped_while_disconnected == 1:
+                log.warning(
+                    "dropping %s — no plugin connected (further drops are counted "
+                    "until the glasses connect)",
+                    type(message).__name__,
+                )
             return
         try:
             await conn.send(json.dumps(message.to_wire()))
@@ -1197,6 +1208,12 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._lockout_warned = False
         connected_at = time.monotonic()
         log.info("plugin connected")
+        if self._dropped_while_disconnected:
+            log.info(
+                "dropped %d downlinks while no plugin was connected",
+                self._dropped_while_disconnected,
+            )
+            self._dropped_while_disconnected = 0
         try:
             if previous is not None:
                 await previous.close(

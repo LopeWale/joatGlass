@@ -439,7 +439,17 @@ class NewsService:
         for (category, url), result in zip(feeds, results, strict=True):
             if isinstance(result, BaseException):
                 failures += 1
-                log.info("feed unavailable category=%s (%s)", category, type(result).__name__)
+                # Name the feed's host (never the path or query) and the HTTP
+                # status: "category=custom (HTTPError)" logged ~1,900 times
+                # without saying which of four custom feeds was dead.
+                status = getattr(result, "code", None)
+                log.info(
+                    "feed unavailable category=%s host=%s (%s%s)",
+                    category,
+                    urllib.parse.urlsplit(url).hostname or "?",
+                    type(result).__name__,
+                    f" {status}" if isinstance(status, int) else "",
+                )
                 continue
             merged.extend(result)
         before = (tuple(h.guid for h in self._headlines), self._last_error, self._partial)

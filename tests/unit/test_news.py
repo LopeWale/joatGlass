@@ -143,6 +143,28 @@ class TestService:
         # A tap counts that row; opening counts headlines.
         assert svc.status_rows == 1
 
+    async def test_a_dead_feed_is_logged_by_host_and_status(self, tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+        # "category=custom (HTTPError)" was logged ~1,900 times without
+        # saying which of four custom feeds was dead.
+        import urllib.error
+
+        bbc, _npr, _google = CATEGORY_FEEDS["technology"]
+
+        def fetch(url: str, category: str) -> list[Headline]:
+            if url == bbc:
+                return [headline("Only story")]
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
+
+        svc = service(tmp_path, {})
+        svc._fetch_feed = fetch  # type: ignore[assignment]
+        with caplog.at_level("INFO", logger="joat.services.news"):
+            await svc.refresh_once()
+        lines = [record.getMessage() for record in caplog.records if "feed unavailable" in record.getMessage()]
+        assert lines and all("HTTPError 404" in line for line in lines)
+        assert all("host=" in line and "host=?" not in line for line in lines)
+        # The host only: never the feed's path or query.
+        assert all("/" not in line.split("host=", 1)[1].split(" ", 1)[0] for line in lines)
+
     async def test_all_feeds_dead_keeps_yesterdays_headlines(self, tmp_path: Path) -> None:
         bbc, _npr, _google = CATEGORY_FEEDS["technology"]
         svc = service(tmp_path, {bbc: [headline("Kept")]})

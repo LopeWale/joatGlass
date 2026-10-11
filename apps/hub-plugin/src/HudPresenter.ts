@@ -577,6 +577,9 @@ export class HudPresenter {
       (page) => layouts.nativeTerminalLayout(page),
       (page) => this.replaceNativePage(page, 'terminal-conversation-native'),
     );
+    // Header and column images just switched off (one hung on the glasses):
+    // redraw the page on the glass with both as firmware text.
+    if (visual) visual.onPagePartsDisabled = () => { void this.repaintRestoredSurface(); };
   }
 
   /** Switch from the image HUD to an SDK-native text page under the same

@@ -52,9 +52,12 @@ def test_same_inode_truncation_creates_a_new_generation(tmp_path: Path) -> None:
     append(path, {"at": 1_700_000_000.0, "app": "Mail", "title": "A", "body": "one"})
     first, cursor = store.read_new(cursor)
 
+    # Stamped "now", as the watcher stamps every banner it reads: since
+    # 2026-10-11 a reset never re-delivers a line older than the last read
+    # (see test_a_reset_rereads_without_delivering_what_was_already_seen).
     path.write_text(
         json.dumps(
-            {"at": 1_700_000_001.0, "app": "Mail", "title": "B", "body": "two"},
+            {"at": time.time(), "app": "Mail", "title": "B", "body": "two"},
             separators=(",", ":"),
         ) + "\n"
     )
@@ -119,4 +122,29 @@ def test_malformed_complete_line_is_reported_as_parse_degraded(tmp_path: Path) -
 
     assert [item.title for item in notifications] == ["valid"]
     assert store.health_after_read("healthy_best_effort") == "parse_degraded"
+    assert cursor["offset"] == path.stat().st_size
+
+
+def test_a_reset_rereads_without_delivering_what_was_already_seen(tmp_path: Path) -> None:
+    """On 2026-10-11 the cursor reset and the whole feed was read again from
+    the start: 1,130 banners from 46 days back. A reset must deliver only
+    lines newer than the last read, never the history again."""
+    path = tmp_path / "notifications.jsonl"
+    path.touch()
+    store = JsonlNotificationStore(path, require_heartbeat=False)
+    cursor = store.baseline()
+    seen_at = time.time() - 3600
+    append(path, {"at": seen_at - 86_400 * 46, "app": "Mail", "title": "history", "body": "x"})
+    append(path, {"at": seen_at, "app": "Mail", "title": "seen", "body": "y"})
+    first, cursor = store.read_new(cursor)
+    assert [item.title for item in first] == ["history", "seen"]
+    # The file is rewritten under the cursor (same bytes moved, plus one new
+    # banner): the prefix no longer matches and the store starts over.
+    lines = path.read_text().splitlines(keepends=True)
+    path.write_text("".join(reversed(lines)))
+    append(path, {"at": time.time(), "app": "Mail", "title": "new", "body": "z"})
+
+    again, cursor = store.read_new(cursor)
+
+    assert [item.title for item in again] == ["new"]
     assert cursor["offset"] == path.stat().st_size

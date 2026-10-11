@@ -376,6 +376,34 @@ class TestParseUplink:
                 },
             })
 
+    @pytest.mark.parametrize("container_id", [16, 17, 18, 19])
+    def test_g2_diagnostic_tile_upload_names_a_page_part(self, container_id: int) -> None:
+        # The header halves and Home's column are image page parts. On the
+        # glasses (2026-10-08/09) one of their writes hung and the link
+        # dropped every 15 s; every report of it was refused here.
+        message = parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "tile_upload", "frame": 4, "order": 0, "containerId": container_id,
+                "outcome": "error", "durationMs": 6000, "bytes": 812,
+            },
+        })
+        assert message == G2Diagnostic(event={
+            "type": "tile_upload", "frame": 4, "order": 0, "containerId": container_id,
+            "outcome": "error", "durationMs": 6000, "bytes": 812,
+        })
+
+    @pytest.mark.parametrize("container_id", [1, 2, 5, 7, 11, 15, 20])
+    def test_g2_diagnostic_tile_upload_refuses_a_text_container(self, container_id: int) -> None:
+        with pytest.raises(ProtocolError, match="containerId is invalid"):
+            parse_uplink({
+                "kind": "g2.diagnostic",
+                "event": {
+                    "type": "tile_upload", "frame": 4, "order": 0, "containerId": container_id,
+                    "outcome": "error",
+                },
+            })
+
     def test_g2_diagnostic_frame_timing_splits_one_frame_by_stage(self) -> None:
         # The whole-frame split the DEV-only console line cannot give us:
         # `[hud-timing]` never runs in a QR sideload or a packed .ehpk, and

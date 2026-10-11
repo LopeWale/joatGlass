@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-10-11 — A stuck header or column image no longer drops the Mac link; the log errors, fixed
+
+The wearer asked for every error in the current logs to be fixed. Each one below was traced in `brain.log` and to the code, and reproduced where it could be.
+
+- **Fixed: one stuck image write dropped the Mac link every 15 s** (about 2,350 drops on 2026-10-08/09, each 15.1 s after connecting). On the glasses, one image write to a header half or a Home column tile never got an answer. Every later page change waited up to 15 s for it (`withPageTransition`), MacLink's 15 s downlink watchdog dropped the link on the same beat, and the plugin reconnected into the same wait. Reproduced in the simulator by holding the first header write: on 0.1.120 the glasses never drew again. Now (`HudVisualSurface`):
+  - A header or column write gives up after 6 s, not 15 s (`PAGE_PART_UPLOAD_TIMEOUT_MS`).
+  - When one hangs, or three fail in a row, header and column images are switched off for the session. The page on the glass is redrawn with both as firmware text (Home's `>` rail and text header, as in 0.1.104), and the hung write no longer holds the lane, because its container is gone from the page.
+  - A full-tile write known to be hung is refused at once instead of waited on again. The one-writer rule stays.
+  - A page change waits at most 8 s for image writes (`PAGE_TRANSITION_IDLE_MS`), inside the watchdog. A refused page leaves the link up.
+  - Verified in the simulator with the first header write held forever: after 6 s Home came back in firmware text, swipes moved the rail and pane, a tap opened News, 2x tap went back, all on the one connection.
+- **Fixed: the Mac threw away the glasses' report of that stuck write** (1,711 times: "g2 diagnostic containerId is invalid"). The diagnostic schema only took the four full-frame tiles. It now also takes the header halves (16, 17) and Home's column (18, 19), in `protocol.py` and `G2DiagnosticTrace.ts` together. The plugin now reports a failed page-part send too, not only one that threw. With "Record G2 diagnostics" on, the next hang names its container.
+- **Fixed: JOAT froze for up to 12 s at a time** (368 "event loop stalled" warnings). The notification mux drained its backlog without ever yielding (`notification_mux._deliver`); each item is a few synchronous SQLite writes. At startup on 2026-10-11, 1,130 old banners froze JOAT for 9.7 s, and the 5–12 s freezes just after each glasses connection were the same drain. It now yields between items. The 2–4 s at startup while the local model loads is the model's own thread holding Python's lock, and is left alone.
+- **Fixed: a cursor reset re-read the whole banner feed.** On 2026-10-11 the Accessibility feed was read again from the start: 1,130 banners from 46 days back. They were held back as too stale, but each was processed. After a reset (`jsonl_source.read_new`), lines already in the file at the last read are skipped, and the reason (shrank, replaced, rewritten) is logged.
+- **Quieter logs.** "dropping … no plugin connected" is logged once per disconnected spell, with a count when the glasses return; it had logged ~1,500 times. The banner watcher's stale heartbeat while the Mac sleeps is logged once per spell, with "recovered after N failed polls"; it had logged once a second.
+- **News names a dead feed.** "feed unavailable category=custom (HTTPError)" had been logged about 1,900 times since 2026-09-05 without naming the feed. It now logs the host and status, never the path. The dead one was `thedecisionlab.com/feed/` (HTTP 404; the site no longer has a feed), and it was removed from this Mac's `news.json`; the other three custom feeds work.
+- Not code: the Mac mini's OpenClaw gateway answered HTTP 502 on 2026-10-08/09, and the Mini has been offline in Tailscale since. JOAT logs this once at startup. The glasses can reach this MacBook again: Tailscale is back on and the `/glasses` route answers.
+- Tests: plugin 1175 passed, typecheck clean, 5 new tests. Mac 3481 passed, 7 new tests; `test_whisper_cold_start::test_shutdown_after_foreground_timeout_reaps_child_and_stops_retries` fails the same way without these changes. mypy reports one unused `type: ignore` in `reply_engine.py`, a file this change does not touch. Version 0.1.121. **Both sides change: a new package and a JOAT restart.**
+
 ## 2026-10-11 — "Record G2 diagnostics" off now means off
 
 The wearer: the logs kept logging with "Record G2 diagnostics" turned off. They did. The toggle was off (`G2DiagnosticsEnabled` false, and the running engine had no `--g2-diagnostics`), yet `brain.log` held 8832 `tile_upload container=…` lines and 15 "paint diagnostics armed" lines, and `g2-diagnostics.json` was still being written.

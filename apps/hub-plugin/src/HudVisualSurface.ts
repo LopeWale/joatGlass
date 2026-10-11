@@ -3,7 +3,7 @@ import {
   ImageRawDataUpdateResult,
 } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
-import type { G2DiagnosticTrace } from './G2DiagnosticTrace';
+import type { G2DiagnosticTrace, TraceTileContainer } from './G2DiagnosticTrace';
 import type { HudStatusModel } from './HudStatus';
 import type { EvenReaderLine } from './EvenFont';
 import type { HomeColumnView } from './HomeImages';
@@ -171,6 +171,9 @@ export interface HudFramePainter {
   withPageTransition?(replacePage: () => Promise<boolean>, isCurrent: () => boolean): Promise<boolean>;
   suspendDisplay?(): void;
   resumeDisplay?(): void;
+  /** Set by the presenter: page parts were just switched off, so the page
+   * on the glass should be redrawn without its header and column images. */
+  onPagePartsDisabled?: () => void;
 }
 
 /** Converts one raw raster tile into an image format the native bridge and
@@ -193,6 +196,34 @@ export const PAINT_COALESCE_MS = 40;
  * lane drain.
  */
 export const TILE_UPLOAD_TIMEOUT_MS = 15_000;
+
+/**
+ * A page part (the header halves, Home's column tiles) is small: a send
+ * takes well under 2 s. One that has not answered in this long is not
+ * going to, and every page change waits for the lane to drain.
+ *
+ * On the glasses (2026-10-08/09) one such write never settled. Each page
+ * change then waited the full 15 s, MacLink's 15 s downlink watchdog
+ * dropped the Mac link on the same beat, and the plugin reconnected into
+ * the same wait: about 2,350 drops in two days. Page parts now give up
+ * sooner and switch themselves off (`pagePartsDisabled`).
+ */
+export const PAGE_PART_UPLOAD_TIMEOUT_MS = 6_000;
+
+/**
+ * How long a page change waits for image writes to drain before it is
+ * refused. Kept well inside MacLink's 15 s downlink watchdog: a refused
+ * page leaves the link up, a page change that outwaits the watchdog drops
+ * it.
+ */
+export const PAGE_TRANSITION_IDLE_MS = 8_000;
+
+/** Consecutive failed page-part sends (the host answered, but not with
+ * success) that switch page parts off for this session. */
+export const PAGE_PART_FAILURE_LIMIT = 3;
+
+/** A bounded wait that ran out; the work it waited on may still finish. */
+class SettleTimeout extends Error {}
 
 /**
  * Minimum spacing between two updateImageRawData calls. Even's display docs:
@@ -223,7 +254,7 @@ function elapsedSince(startedAt: number): number {
 function settleWithin<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms}ms`)), ms);
+    timer = setTimeout(() => reject(new SettleTimeout(`${what} did not settle within ${ms}ms`)), ms);
   });
   return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
@@ -320,6 +351,18 @@ export class HudVisualSurface implements HudFramePainter {
   private readonly idleWaiters: Array<() => void> = [];
   private wakeCoalescing?: () => void;
   private replacingPage = false;
+  /** A full-tile write the host has not answered past its timeout. Until
+   * it settles nothing else is written (one writer: a late old tile must
+   * not land behind newer pixels), but nothing waits on it either: a frame
+   * or page change is refused at once instead of after another full
+   * timeout, so the Mac message behind it never trips MacLink's watchdog. */
+  private hungWrite = false;
+  /** Header and column images are off for this session: one of them hung
+   * or kept failing on the glasses, and every page change waited on it.
+   * The presenter draws both as firmware text instead. */
+  private pagePartsDisabled = false;
+  private pagePartFailures = 0;
+  onPagePartsDisabled?: () => void;
   /** Two recent encodings per container support Back/reopen without growing
    * with the note archive. This is preparation only, never delivery evidence. */
   private readonly encodedTiles = new Map<number, Array<{ pixels: Uint8Array; bytes: Uint8Array }>>();
@@ -384,7 +427,12 @@ export class HudVisualSurface implements HudFramePainter {
         if (!await this.waitForPaintDrain(Math.max(0, deadline - now()))) return false;
         // Reporting a timeout does not settle the underlying SDK operation.
         // Include that operation even after the JavaScript drain has stopped.
-        await settleWithin(this.nativeUploadSettled, Math.max(0, deadline - now()), 'native display idle');
+        // A write already known to be hung is not waited on again.
+        await settleWithin(
+          this.nativeUploadSettled,
+          this.hungWrite ? 0 : Math.max(0, deadline - now()),
+          'native display idle',
+        );
         if (!this.painting) return true;
       } while (now() < deadline);
     } catch { /* An unresolved native write keeps the page unsafe to replace. */ }
@@ -397,7 +445,10 @@ export class HudVisualSurface implements HudFramePainter {
     this.suspendDisplay();
     const revision = this.displayRevision;
     try {
-      if (!await this.whenIdle(this.uploadTimeoutMs || 8000) || !isCurrent()) return false;
+      // Bounded below MacLink's 15 s downlink watchdog (PAGE_TRANSITION_IDLE_MS).
+      const idleMs = this.uploadTimeoutMs > 0
+        ? Math.min(this.uploadTimeoutMs, PAGE_TRANSITION_IDLE_MS) : PAGE_TRANSITION_IDLE_MS;
+      if (!await this.whenIdle(idleMs) || !isCurrent()) return false;
       // Display remains suspended across the native call, eliminating the
       // check-then-rebuild gap in which a new image upload could start.
       return await replacePage();
@@ -417,7 +468,7 @@ export class HudVisualSurface implements HudFramePainter {
   }
 
   canPaintHeader(): boolean {
-    return this.renderer.renderHeader !== undefined;
+    return !this.pagePartsDisabled && this.renderer.renderHeader !== undefined;
   }
 
   canPaintReader(): boolean {
@@ -425,12 +476,12 @@ export class HudVisualSurface implements HudFramePainter {
   }
 
   canPaintHomeColumn(): boolean {
-    return this.renderer.renderHomeColumn !== undefined;
+    return !this.pagePartsDisabled && this.renderer.renderHomeColumn !== undefined;
   }
 
   paintHomeColumn(view: HomeColumnView, isCurrent: () => boolean): Promise<boolean> {
     const render = this.renderer.renderHomeColumn;
-    if (!render) return Promise.resolve(false);
+    if (!render || this.pagePartsDisabled) return Promise.resolve(false);
     const pageRevision = this.pageRevision;
     return this.enqueue(
       { kind: 'strip', render: () => render.call(this.renderer, view) },
@@ -439,7 +490,7 @@ export class HudVisualSurface implements HudFramePainter {
   }
 
   paintHeader(model: HudStatusModel, label: string, isCurrent: () => boolean): Promise<boolean> {
-    if (!this.renderer.renderHeader) return Promise.resolve(false);
+    if (!this.renderer.renderHeader || this.pagePartsDisabled) return Promise.resolve(false);
     const pageRevision = this.pageRevision;
     return this.enqueue(
       { kind: 'header', model, label },
@@ -518,6 +569,41 @@ export class HudVisualSurface implements HudFramePainter {
     return bytes;
   }
 
+  /**
+   * The host has not answered an image write within its timeout. A host
+   * timeout does not cancel the SDK call, so the write may still land.
+   *
+   * A page part (header half, Home column tile) switches page parts off
+   * for the session and releases the one-writer boundary for that write:
+   * the presenter redraws the page without those containers, so a late
+   * write has nothing of ours left to overwrite. Waiting on it instead is
+   * what held every later page change and dropped the Mac link.
+   *
+   * A full tile keeps the boundary (nothing else is written until it
+   * settles), but is marked hung so nothing waits on it again.
+   */
+  private writeTimedOut(settled: Promise<void>, pagePart: boolean): void {
+    this.deliveredTiles.clear();
+    if (pagePart) {
+      this.disablePageParts();
+      if (this.nativeUploadSettled === settled) this.nativeUploadSettled = Promise.resolve();
+      return;
+    }
+    this.hungWrite = true;
+    void settled.then(() => {
+      if (this.nativeUploadSettled === settled) this.hungWrite = false;
+    });
+  }
+
+  private disablePageParts(): void {
+    if (this.pagePartsDisabled) return;
+    this.pagePartsDisabled = true;
+    console.warn('[HudVisualSurface] header and column images off for this session: '
+      + 'one hung or kept failing on the glasses; drawing them as firmware text');
+    // After the failing paint has returned, never inside it.
+    setTimeout(() => { this.onPagePartsDisabled?.(); }, 0);
+  }
+
   private async paintNow(frame: PaintWork, guard?: () => boolean, queuedAt = now()): Promise<boolean> {
     const frameNumber = ++this.frameNumber;
     const pageRevision = this.pageRevision;
@@ -527,7 +613,12 @@ export class HudVisualSurface implements HudFramePainter {
     let current: { order: number; tile: HudImageTile; startedAt: number; bytes: number } | undefined;
     try {
       if (!isCurrent()) return false;
-      await settleWithin(this.nativeUploadSettled, this.uploadTimeoutMs || 8000, 'previous display write');
+      // A write known to be hung is checked, not waited on: refused at once.
+      await settleWithin(
+        this.nativeUploadSettled,
+        this.hungWrite ? 0 : this.uploadTimeoutMs || 8000,
+        'previous display write',
+      );
       if (!isCurrent()) return false;
       if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'render-start', frame.kind, pageRevision);
       const renderStartedAt = now();
@@ -576,7 +667,11 @@ export class HudVisualSurface implements HudFramePainter {
         // single-writer boundary even after reporting failure, otherwise a
         // late old upload can overwrite newer pixels behind our cache.
         if (this.uploadTimeoutMs > 0) {
-          await settleWithin(this.nativeUploadSettled, this.uploadTimeoutMs, 'previous native upload');
+          await settleWithin(
+            this.nativeUploadSettled,
+            this.hungWrite ? 0 : this.uploadTimeoutMs,
+            'previous native upload',
+          );
         } else {
           await this.nativeUploadSettled;
         }
@@ -604,10 +699,20 @@ export class HudVisualSurface implements HudFramePainter {
             imageData: Array.from(imageData),
           }),
         );
-        this.nativeUploadSettled = upload.then(() => undefined, () => undefined);
-        const result = this.uploadTimeoutMs > 0
-          ? await settleWithin(upload, this.uploadTimeoutMs, `${containerName} upload`)
-          : await upload;
+        const settled = upload.then(() => undefined, () => undefined);
+        this.nativeUploadSettled = settled;
+        const timeoutMs = isPagePart(frame) && this.uploadTimeoutMs > 0
+          ? Math.min(this.uploadTimeoutMs, PAGE_PART_UPLOAD_TIMEOUT_MS)
+          : this.uploadTimeoutMs;
+        let result: ImageRawDataUpdateResult;
+        try {
+          result = timeoutMs > 0
+            ? await settleWithin(upload, timeoutMs, `${containerName} upload`)
+            : await upload;
+        } catch (error) {
+          if (error instanceof SettleTimeout) this.writeTimedOut(settled, isPagePart(frame));
+          throw error;
+        }
         timing.bridgeMs += elapsedSince(current.startedAt);
         if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'upload-result', tile.containerId, result);
         if (!isCurrent()) {
@@ -617,15 +722,21 @@ export class HudVisualSurface implements HudFramePainter {
           return false;
         }
         const outcome = result === ImageRawDataUpdateResult.success ? 'success' : 'failed';
-        if (!isPagePart(frame)) this.diagnostics?.record({
+        // Page parts report only failures: a header half on every minute
+        // would flood the bounded trace, a failed one is what support needs.
+        if (!isPagePart(frame) || outcome !== 'success') this.diagnostics?.record({
           type: 'tile_upload',
           frame: frameNumber,
           order,
-          containerId: tile.containerId as 4 | 8 | 9 | 10,
+          containerId: tile.containerId as TraceTileContainer,
           outcome,
           durationMs: elapsedSince(current.startedAt),
           bytes: current.bytes,
         });
+        if (isPagePart(frame)) {
+          this.pagePartFailures = outcome === 'success' ? 0 : this.pagePartFailures + 1;
+          if (this.pagePartFailures >= PAGE_PART_FAILURE_LIMIT) this.disablePageParts();
+        }
         if (outcome === 'failed') {
           this.deliveredTiles.clear();
           return false;
@@ -642,7 +753,7 @@ export class HudVisualSurface implements HudFramePainter {
           type: 'tile_upload',
           frame: frameNumber,
           order: current.order,
-          containerId: current.tile.containerId as 4 | 8 | 9 | 10,
+          containerId: current.tile.containerId as TraceTileContainer,
           outcome: 'error',
           durationMs: elapsedSince(current.startedAt),
           bytes: current.bytes,
