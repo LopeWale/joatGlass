@@ -183,17 +183,39 @@ export function railRows(tabs: readonly { label: string; active: boolean }[]): s
   return tabs.map(({ label, active }) => `${active ? cursor : indent}${label}`);
 }
 
+/** An unread notification as the Notifications tab lists it. */
+export interface OverviewUnreadCard {
+  app: string;
+  sender: string;
+  body: string;
+}
+
+export interface OverviewTextOptions {
+  /** Whether Main's content (a reply, a calendar line) heads the pane.
+   * Home pins it until the wearer swipes; after a swipe the pane follows
+   * the rail, so a swipe always shows the tab it lands on. */
+  pinMain?: boolean;
+  /** Unread notifications, newest first: the Notifications tab's rows. */
+  unread?: readonly OverviewUnreadCard[];
+}
+
 /**
  * What Home shows, from the same frame the image overview drew and with
  * the same priorities (resolveHudOverview): a link state first, then a
- * reply, a notification or a calendar line, then the lit tab's card.
+ * reply or a calendar line (until the wearer swipes), then the lit tab's
+ * card. A notification never heads the pane: its card over the page showed
+ * it, and the Notifications tab lists it while it is unread.
  */
 export function composeOverviewText(
   frame: Extract<HudVisualFrame, { kind: 'overview' }>,
   header: string,
   now: Date = new Date(),
+  options: OverviewTextOptions = {},
 ): OverviewTextView {
-  const overview = resolveHudOverview(frame);
+  const overview = resolveHudOverview(
+    frame.mainKind === 'notification' ? { ...frame, main: '' } : frame,
+  );
+  const unreadCards = options.unread ?? [];
   const rail = frame.rail;
   const tabs = PANEL_TABS.map((tab) => ({ label: PANEL_TAB_TITLES[tab], active: rail?.activeTab === tab }));
   const weather = frame.ambient
@@ -228,8 +250,18 @@ export function composeOverviewText(
           ...content.rows.map((row, index): PaneRow => [String(index + 1), row]),
         ];
       default:
-        // Notifications: the Mac's newest is in Main (handled above); at rest
-        // the pane says what Home is for.
+        // Notifications: the unread cards, newest first, the app in the
+        // label column; a tap opens the newest as its card.
+        if (unreadCards.length > 0) {
+          return [
+            ...unreadCards.slice(0, PANE_LINES - 1).map((card): PaneRow => {
+              const body = card.body.replace(/\s+/gu, ' ').trim();
+              return [card.app.trim(), card.sender.trim() ? `${card.sender.trim()}: ${body}` : body];
+            }),
+            ['', 'tap: read'],
+          ];
+        }
+        // Nothing unread: the pane says what Home is for.
         return overview.kind === 'empty'
           ? [['', overview.primary], ['', 'tap: open notifications']]
           : [['', 'No new notifications'], ['', 'tap: open notifications']];
@@ -250,7 +282,7 @@ export function composeOverviewText(
       hint: overview.hint,
     };
   }
-  if (overview.kind === 'content' && overview.main) {
+  if (overview.kind === 'content' && overview.main && options.pinMain !== false) {
     return {
       header, info, tabs,
       ...grid([

@@ -73,7 +73,7 @@ describe('Home column images', () => {
       expect(mark.x).toBeGreaterThanOrEqual(16);
       expect(mark.x + mark.width).toBeLessThanOrEqual(HOME_COLUMN.width - 16);
       expect(mark.y).toBeGreaterThanOrEqual(0);
-      expect(mark.y + Math.max(mark.height, mark.icon ? 0 : evenLineHeight())).toBeLessThanOrEqual(HOME_COLUMN.tileHeight);
+      expect(mark.y + Math.max(mark.height, mark.icon || mark.bar ? 0 : evenLineHeight())).toBeLessThanOrEqual(HOME_COLUMN.tileHeight);
     }
   });
 
@@ -86,6 +86,25 @@ describe('Home column images', () => {
     expect(rail[0]!.alpha).toBeGreaterThan(rail[1]!.alpha);
     expect(marks.filter((mark) => mark.tile === 1 && mark.icon).map((mark) => mark.icon))
       .toEqual(['notifications', 'news', 'pomodoro', 'search']);
+  });
+
+  it('underlines the lit tab, and the underline moves with a swipe', () => {
+    const underline = (active: number) => {
+      const view = homeColumnView(VIEW, '72f clear', 2);
+      const marks = homeColumnLayout({ ...view, tabs: view.tabs.map((tab, index) => ({ ...tab, active: index === active })) });
+      const bars = marks.filter((mark) => mark.bar);
+      expect(bars).toHaveLength(1);
+      const bar = bars[0]!;
+      // Under its own label, as wide as the label, below the glyphs.
+      const label = marks.find((mark) => mark.tile === 1 && mark.text && mark.y < bar.y && bar.y - mark.y < 26 && mark.x === bar.x);
+      expect(label?.width).toBe(bar.width);
+      expect(bar.y).toBeGreaterThanOrEqual(label!.y + evenLineHeight());
+      return { y: bar.y, label: label!.text };
+    };
+    expect(underline(0).label).toBe('NOTIFICATIONS');
+    expect(underline(1).label).toBe('NEWS');
+    expect(underline(3).label).toBe('SEARCH');
+    expect(underline(1).y).toBeGreaterThan(underline(0).y);
   });
 
   it('under JOAT\'s box, leaves out whole rows at or below the box', () => {

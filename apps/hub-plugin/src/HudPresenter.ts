@@ -24,7 +24,7 @@ import { hasImageHeader, withImageHeader } from './HeaderImage';
 import { hasHomeImages, homeColumnView, withHomeImages, type HomeColumnView } from './HomeImages';
 import { ASSISTANT_ANSWER_PAGE, READER_TEXT_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
 import { type HudStatusModel, hudStatusLabel, nativeStatusLine } from './HudStatus';
-import { composeOverviewText } from './OverviewText';
+import { composeOverviewText, type OverviewTextView } from './OverviewText';
 import {
   NOTIFICATION_CARD, NOTIFICATION_CARD_MS, cardFromRenderedText, notificationCardBottom,
   notificationCardLayout, overlayNotificationCard,
@@ -480,6 +480,10 @@ export class HudPresenter {
   private notificationId?: string;
   private paintedNotificationId?: string;
   private readonly retiredNotificationIds = new Set<string>();
+  /** Text Home: Main's content (a reply, a calendar line) heads the pane
+   * until the wearer swipes; from then on the pane follows the rail, until
+   * new Main content arrives. A swipe always shows the tab it lands on. */
+  private homePaneFollowsRail = false;
   private surface: HudSurface = { kind: 'default' };
   /** Margin facts (weather, unread) resolved by the Mac for the dashboard. */
   private ambient?: { temperature: string; condition: string; unread: number };
@@ -779,7 +783,7 @@ export class HudPresenter {
       if (frame.kind !== 'overview') return undefined;
       // Home as it is drawn: its text and its column images. The header
       // comes from the box's own status line (replaceNativePage).
-      const view = composeOverviewText(frame, this.overviewHeader());
+      const view = this.overviewView(frame);
       const layout = this.layouts.overviewTextLayout(view);
       return this.homeColumnFor(frame, view) ? withHomeImages(layout) : layout;
     }
@@ -821,7 +825,7 @@ export class HudPresenter {
     if (!hasHomeImages(page) || top === undefined || this.surface.kind !== 'default') return;
     const frame = this.visualFrame();
     if (frame.kind !== 'overview') return;
-    const column = this.homeColumnFor(frame, composeOverviewText(frame, this.overviewHeader()));
+    const column = this.homeColumnFor(frame, this.overviewView(frame));
     if (!column) return;
     const current = this.captureDisplayGuard();
     void this.paintHomeColumn({ ...column, clipBottom: top - OVERLAY_GAP }, current);
@@ -1035,6 +1039,8 @@ export class HudPresenter {
       this.notificationId = contentKind === 'notification' && /^[a-f0-9]{32}$/i.test(notificationId ?? '')
         ? notificationId : undefined;
       this.paintedNotificationId = undefined;
+      // New content heads Home's pane again; a notification never does.
+      if (contentKind !== 'notification' && text.trim()) this.homePaneFollowsRail = false;
     }
     return this.paint(containerId);
   }
@@ -1059,12 +1065,17 @@ export class HudPresenter {
       return true;
     }
     if (containerId === ContainerId.Main) {
+      // A stream that starts now heads Home's pane again; later chunks of
+      // the same stream leave a wearer who swiped away on their tab.
+      const starts = this.kinds.get(ContainerId.Main) !== 'assistant'
+        || !(this.streams.get(ContainerId.Main) ?? '').trim();
       const content = { streams: this.streams, brightness: this.brightness, kinds: this.kinds,
         notificationId: this.notificationId };
       this.prepareAssistantAppend(content);
       this.notificationId = undefined;
       this.paintedNotificationId = undefined;
       this.notificationReturn = undefined;
+      if (starts && chunk.trim()) this.homePaneFollowsRail = false;
     }
     this.streams.set(containerId, (this.streams.get(containerId) ?? '') + chunk);
     const now = Date.now();
@@ -1734,6 +1745,12 @@ export class HudPresenter {
       shown.card = full;
       shown.provisional = false;
       void this.paintNotificationCard();
+      return;
+    }
+    // Home's Notifications tab lists the unread cards: keep it current. A
+    // repaint that changes nothing sends nothing (paintOverviewAsText).
+    if (!shown && nativeOverviewEnabled && this.rail.active() === 'notifications') {
+      void this.repaintRestingPane();
     }
   }
 
@@ -1808,7 +1825,7 @@ export class HudPresenter {
     if (bottom !== undefined && hasHomeImages(page) && this.surface.kind === 'default') {
       const frame = this.visualFrame();
       if (frame.kind === 'overview') {
-        const column = this.homeColumnFor(frame, composeOverviewText(frame, this.overviewHeader()));
+        const column = this.homeColumnFor(frame, this.overviewView(frame));
         if (column) {
           void this.paintHomeColumn(
             { ...column, clipTop: bottom + NOTIFICATION_CARD.gap, dim: true }, this.captureDisplayGuard(),
@@ -1858,9 +1875,12 @@ export class HudPresenter {
 
   /** Only a fully visible Home card is tappable. Focus pages keep incoming
    * notifications deferred, assistant overlays keep their higher priority,
-   * and confirmations remain exclusive. */
+   * and confirmations remain exclusive. Home in firmware text never draws a
+   * notification in its pane (the card over the page shows it), so there
+   * is none there to tap away: Home's tap opens the lit tab. */
   hasVisibleNotification(): boolean {
-    return this.surface.kind === 'default'
+    return !(nativeOverviewEnabled && this.visual)
+      && this.surface.kind === 'default'
       && !this.confirmation
       && !this.assistantOverlay
       && !this.assistantConversation.isActive()
@@ -2826,16 +2846,27 @@ export class HudPresenter {
   }
 
   async setActiveTab(tab: PanelTab): Promise<boolean> {
-    if (!this.rail.setActive(tab)) return true;
+    const moved = this.rail.setActive(tab);
+    if (!this.followRail() && !moved) return true;
     return this.repaintRestingPane();
   }
 
   /** A swipe on the resting overview: one tab along the rail. Returns the
-   * tab now active, or undefined at either end of the rail. */
+   * tab now active, or undefined at either end of the rail. The pane
+   * shows the tab from this swipe on, even when the swipe was at an end
+   * and the tab stayed put (it may have held a reply until now). */
   async stepTab(delta: number): Promise<PanelTab | undefined> {
     const next = this.rail.step(delta);
-    if (next !== undefined) await this.repaintRestingPane();
+    const released = this.followRail();
+    if (next !== undefined || released) await this.repaintRestingPane();
     return next;
+  }
+
+  /** Home's pane follows the rail from now on. True when it did not before. */
+  private followRail(): boolean {
+    const released = !this.homePaneFollowsRail;
+    this.homePaneFollowsRail = true;
+    return released;
   }
 
   /** Cache a Mac push. Repaints only when the pushed tab is on the glass;
@@ -3643,6 +3674,9 @@ export class HudPresenter {
         navigation: this.cloneNavigation(this.surface.navigation),
       });
     }
+    // With Home in firmware text a notification is the card's to show, never
+    // the pane's, so an image page composited over Home leaves it out too.
+    const homeCard = nativeOverviewEnabled && this.kinds.get(ContainerId.Main) === 'notification';
     return this.withOverlays({
       kind: 'overview',
       status,
@@ -3650,8 +3684,8 @@ export class HudPresenter {
       ...(this.ambient ? { ambient: this.ambient } : {}),
       mainBrightness: this.brightness.get(ContainerId.Main)
         ?? DEFAULT_BRIGHTNESS[ContainerId.Main]!,
-      main: this.streams.get(ContainerId.Main) ?? '',
-      mainKind: this.kinds.get(ContainerId.Main),
+      main: homeCard ? '' : this.streams.get(ContainerId.Main) ?? '',
+      mainKind: homeCard ? undefined : this.kinds.get(ContainerId.Main),
       context: this.streams.get(ContainerId.Context) ?? '',
       tray: this.streams.get(ContainerId.Tray) ?? '',
       hint: this.streams.get(ContainerId.Hint) ?? '',
@@ -3791,6 +3825,15 @@ export class HudPresenter {
     return this.nativeHeader();
   }
 
+  /** Home's text view of a frame: Main's content heads the pane until the
+   * wearer swipes, and the Notifications tab lists the unread cards. */
+  private overviewView(frame: Extract<HudVisualFrame, { kind: 'overview' }>): OverviewTextView {
+    return composeOverviewText(frame, this.overviewHeader(), new Date(), {
+      pinMain: !this.homePaneFollowsRail,
+      unread: this.unreadNotifications(),
+    });
+  }
+
   /**
    * Home as six firmware text containers (HudPageBuilder.overviewTextLayout).
    *
@@ -3816,7 +3859,7 @@ export class HudPresenter {
       && !this.nativeTerminal.isActive()
       && (taking || this.pageOwner === 'visual' || this.visualPagePending());
     if (!stillOurs()) return false;
-    const view = composeOverviewText(frame, this.overviewHeader());
+    const view = this.overviewView(frame);
     let layout = this.withHeader(this.layouts.overviewTextLayout(view));
     const column = this.homeColumnFor(frame, view);
     if (column) layout = withHomeImages(layout);

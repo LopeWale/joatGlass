@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-11 — Home's tabs swipe and open again, with a notification on Home
+
+The wearer, on 0.1.119 on the glasses: Home's tabs no longer switched the right pane on a swipe, and a tap no longer opened the tab. The gestures did reach the plugin. A notification was blocking them, and on the glasses the Mac sends notifications all the time. The simulator runs had none, which is why they passed.
+
+- **Fixed: a notification's copy pinned Home's pane.** After its card closed (5 s), the notification stayed in Home's main slot, and Home shows that slot ahead of the lit tab. A swipe moved the lit tab, but the pane kept the notification. With Home in firmware text a notification is now the card's to show, never the pane's (`composeOverviewText`, `HudPresenter.baseVisualFrame`). The Notifications tab lists the unread cards instead, newest first, with the app in the label column and "tap: read" below.
+- **Fixed: every tap on Home was swallowed while that notification was there.** A Home tap first dismisses a visible Home notification, but only one marked as drawn. Only the old image Home marked it; the text Home (0.1.103) never did. So every tap was consumed as "not drawn yet", nothing was dismissed, and the lit tab never opened. Text Home now has no Home notification for a tap to take (`HudPresenter.hasVisibleNotification`), so a tap opens the lit tab.
+- **A swipe always shows the tab it lands on.** Other Main content (a calendar line, a Mac message) still heads the pane when it arrives. From the wearer's next swipe the pane follows the rail, even a swipe at either end of the rail, until new Main content arrives (`homePaneFollowsRail`).
+- **The lit tab is underlined on the rail** (`homeColumnLayout`). Since 0.1.114 the lit and unlit tab labels rendered at the same brightness in the simulator, so the rail looked the same after a swipe. The underline sits under the lit label, inside the column's margins, and moves with each swipe.
+- Verified in the official simulator, with the Mac's connect sequence, two unread cards and one new notification whose card closed. Down, down and up each changed the pane, and the underline followed. A tap opened News; 2x tap went back to Home. Up showed the Notifications tab's unread list. A tap opened the newest card, a tap read it and showed the next, and 2x tap closed it, with one card left on the list. Before the fix, the same run redrew nothing and opened nothing. Not verified on physical glasses.
+- Tests: plugin 1170 passed; typecheck clean. Five new tests fail without the fix. Plugin-only: no brain restart.
+
 ## 2026-10-08 — Build JOAT 0.1.119
 
 - Packed from `804f38c` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.119 above the last recorded build (0.1.118); app.json, package.json and package-lock.json all 0.1.119. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1166 tests passed.

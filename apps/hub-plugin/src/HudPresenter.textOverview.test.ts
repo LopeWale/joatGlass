@@ -26,13 +26,15 @@ type Page = RebuildPageContainer & { textObject?: Text[]; imageObject?: unknown[
 function harness() {
   const pages: Page[] = [];
   const upgrades: TextContainerUpgrade[] = [];
+  /** Every page write in the order the glass received it. */
+  const writes: ({ page: Page } | { upgrade: TextContainerUpgrade })[] = [];
   const canvas: HudVisualFrame[] = [];
   let epoch = 0;
   const client = {
     pageEpoch: () => epoch,
     require: () => ({
-      textContainerUpgrade: async (u: TextContainerUpgrade) => { upgrades.push(u); return true; },
-      rebuildPageContainer: async (page: Page) => { epoch += 1; pages.push(page); return true; },
+      textContainerUpgrade: async (u: TextContainerUpgrade) => { upgrades.push(u); writes.push({ upgrade: u }); return true; },
+      rebuildPageContainer: async (page: Page) => { epoch += 1; pages.push(page); writes.push({ page }); return true; },
       updateImageRawData: async () => 'success',
     }),
   } as unknown as BridgeClient;
@@ -46,7 +48,19 @@ function harness() {
   const named = (page: Page, name: string): Text | undefined =>
     page.textObject?.find((entry) => entry.containerName === name);
   const bumpEpoch = (): void => { epoch += 1; };
-  return { hud, pages, upgrades, canvas, last, named, bumpEpoch };
+  /** What a container shows now: its newest write, upgrade or page. */
+  const shown = (name: string): string => {
+    for (let index = writes.length - 1; index >= 0; index -= 1) {
+      const write = writes[index]!;
+      if ('upgrade' in write && write.upgrade.containerName === name) return write.upgrade.content ?? '';
+      if ('page' in write) {
+        const entry = named(write.page, name);
+        if (entry) return entry.content ?? '';
+      }
+    }
+    return '';
+  };
+  return { hud, pages, upgrades, canvas, last, named, bumpEpoch, shown };
 }
 
 const status = (clock: string, extra: Partial<HudStatusModel> = {}): HudStatusModel => ({
@@ -125,15 +139,66 @@ describe('Home as firmware text', () => {
     expect(canvas).toHaveLength(0);
   });
 
-  it('shows a Home notification in the pane instead of swallowing it', async () => {
-    const { hud, last, named, upgrades } = harness();
-    await hud.acceptPanel({ kind: 'hud.panel', tab: 'news', revision: 1, rows: ['[1m] A · BBC'] });
-    await hud.showText('Marta: lunch at noon?', ContainerId.Main, undefined, 'notification');
-    // The grid: the kind in the label column, the words in the value column.
-    const labels = upgrades.filter((u) => u.containerName === 'pane-l').pop()?.content ?? named(last(), 'pane-l')?.content;
-    const pane = upgrades.filter((u) => u.containerName === 'pane').pop()?.content ?? named(last(), 'pane')?.content;
-    expect(labels).toMatch(/^NOTICE/u);
-    expect(pane).toContain('Marta: lunch at noon?');
+  // The wearer's report (0.1.119, on glasses): Home's tabs stopped
+  // switching on a swipe and stopped opening on a tap. A notification's
+  // copy stayed in the pane after its card closed, pinning the pane, and a
+  // tap went to dismissing a Home notification the text Home had never
+  // marked as drawn, so every tap was swallowed and nothing opened.
+  const pane = (h: ReturnType<typeof harness>, name: 'pane' | 'pane-l' = 'pane'): string => h.shown(name);
+
+  it('a notification is the card\'s, not the pane\'s: the pane keeps the lit tab', async () => {
+    const h = harness();
+    await h.hud.acceptPanel({ kind: 'hud.panel', tab: 'news', revision: 1, rows: ['[1m] A · BBC'] });
+    await h.hud.stepTab(1);
+    await h.hud.showText('Marta: lunch at noon?', ContainerId.Main, undefined, 'notification');
+    expect(pane(h)).not.toContain('Marta');
+    expect(pane(h)).toContain('A');
+    expect(pane(h, 'pane-l')).not.toMatch(/NOTICE|MESSAGE/u);
+  });
+
+  it('after a notification, a swipe still changes the pane and a tap is not taken to dismiss it', async () => {
+    const h = harness();
+    await h.hud.acceptPanel({ kind: 'hud.panel', tab: 'news', revision: 1, rows: ['[1m] Headline one · BBC'] });
+    await h.hud.showText('Messages · Fixture One: First unread body', ContainerId.Main, undefined,
+      'notification', 'a'.repeat(32));
+    // Its card pops up over Home, then closes by itself.
+    expect(h.hud.hasNotificationCard()).toBe(true);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(h.hud.hasNotificationCard()).toBe(false);
+    expect(pane(h)).not.toContain('Fixture One');
+    // Nothing on Home for a tap to dismiss: EventRouter's tap reaches the
+    // lit tab (CapabilityMenu.openActiveTab).
+    expect(h.hud.hasVisibleNotification()).toBe(false);
+    expect(h.hud.visibleNotificationId()).toBeUndefined();
+    expect(await h.hud.stepTab(1)).toBe('news');
+    expect(pane(h)).toContain('Headline one');
+    expect(h.hud.activeTab()).toBe('news');
+  });
+
+  it('the Notifications tab lists the unread cards, newest first, the app in the label column', async () => {
+    const h = harness();
+    h.hud.acceptNotifications([
+      { id: 'a'.repeat(32), app: 'Messages', sender: 'Fixture One', body: 'First unread\nbody', at: 2, urgent: false },
+      { id: 'b'.repeat(32), app: 'Mail', sender: 'Fixture Two', body: 'Second unread body', at: 1, urgent: false },
+    ]);
+    await h.hud.setStatusModel(status('9:41'));
+    expect(pane(h).split('\n').slice(0, 3)).toEqual(['Fixture One: First unread body', 'Fixture Two: Second unread body', 'tap: read']);
+    expect(pane(h, 'pane-l').split('\n').slice(0, 2)).toEqual(['Messages', 'Mail']);
+  });
+
+  it('a reply heads the pane until the wearer swipes; then the pane follows the rail', async () => {
+    const h = harness();
+    await h.hud.acceptPanel({ kind: 'hud.panel', tab: 'news', revision: 1, rows: ['[1m] Headline one · BBC'] });
+    await h.hud.showText('Meeting starts in 19 minutes.', ContainerId.Main, 4);
+    expect(pane(h)).toContain('Meeting starts in 19 minutes.');
+    // A swipe up on the first tab moves nothing on the rail, yet shows the tab.
+    expect(await h.hud.stepTab(-1)).toBeUndefined();
+    expect(pane(h)).not.toContain('Meeting');
+    expect(await h.hud.stepTab(1)).toBe('news');
+    expect(pane(h)).toContain('Headline one');
+    // New Main content heads the pane again.
+    await h.hud.showText('Standup moved to 10:30.', ContainerId.Main, 4);
+    expect(pane(h)).toContain('Standup moved to 10:30.');
   });
 
   it('streams a Mac reply into the pane as upgrades', async () => {

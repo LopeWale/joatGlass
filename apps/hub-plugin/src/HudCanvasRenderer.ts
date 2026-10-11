@@ -301,6 +301,8 @@ export interface HomeColumnMark {
   alpha: number;
   text?: string;
   icon?: HudIconName;
+  /** A lit rule: the lit tab's underline. */
+  bar?: boolean;
 }
 
 /** Inside each column tile: 16 px from the screen's edge, 16 px short of
@@ -347,6 +349,14 @@ export function homeColumnLayout(view: HomeColumnView): HomeColumnMark[] {
     const alpha = tab.active ? 1 : DIM_WORDS;
     icon(1, rowY, tab.tab, alpha);
     words(1, COLUMN_TEXT_X, rowY, tab.label, alpha);
+    // The lit tab is underlined. Brightness alone does not mark it: in the
+    // simulator (0.1.119) the lit and unlit labels measured the same, so a
+    // swipe looked like it did nothing. The rule stays inside the column's
+    // margins, under the label it marks.
+    const label = marks[marks.length - 1];
+    if (tab.active && label?.text && label.tile === 1 && label.y === rowY) {
+      marks.push({ tile: 1, x: label.x, y: rowY + Math.ceil(line) + 1, width: label.width, height: 2, alpha: 1, bar: true });
+    }
   });
   if (view.dim) for (const mark of marks) mark.alpha *= UNDER_CARD_ALPHA;
   const { clipBottom, clipTop } = view;
@@ -355,7 +365,8 @@ export function homeColumnLayout(view: HomeColumnView): HomeColumnMark[] {
   // cut through a glyph.
   return marks.filter((mark) => {
     const top = HOME_COLUMN.top + mark.tile * HOME_COLUMN.tileHeight + mark.y;
-    return (clipBottom === undefined || top + Math.max(mark.height, line) <= clipBottom)
+    const extent = mark.bar ? mark.height : Math.max(mark.height, line);
+    return (clipBottom === undefined || top + extent <= clipBottom)
       && (clipTop === undefined || top >= clipTop);
   });
 }
@@ -1168,7 +1179,10 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillRect(0, 0, width, height);
       context.imageSmoothingEnabled = true;
       for (const mark of marks.filter((item) => item.tile === tile)) {
-        if (mark.icon) this.drawIcon(context, icons[mark.icon], mark.x, mark.y, mark.width, Math.round(mark.alpha * 255));
+        if (mark.bar) {
+          context.fillStyle = gray(mark.alpha * 255);
+          context.fillRect(mark.x, mark.y, mark.width, mark.height);
+        } else if (mark.icon) this.drawIcon(context, icons[mark.icon], mark.x, mark.y, mark.width, Math.round(mark.alpha * 255));
         else if (mark.text) {
           drawEvenText(context, atlas, mark.text, mark.x, mark.y, { alpha: mark.alpha, fallbackFont: TYPE.statusMeta });
         }
