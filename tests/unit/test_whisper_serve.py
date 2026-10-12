@@ -19,6 +19,7 @@ from joat.audio.whisper_serve import (
     MIN_UTTERANCE_BYTES,
     WhisperServeEngine,
     is_prompt_echo,
+    only_prompt_words,
 )
 from joat.core.interfaces import Transcript
 
@@ -712,3 +713,84 @@ class TestPromptEchoSurvivesWhisperFiller:
 
         assert not is_prompt_echo("anything at all here", None)
         assert not is_prompt_echo("", self.PROMPT)
+
+
+PROMPT = "JOAT. The wearer addresses the assistant as JOAT."
+
+
+class TestShortEchoIsHeardAgainWithoutThePrompt:
+    """2026-10-12, live model and prompt on a private serve: room hum came back
+    "JOAT" (5 of 5 at RMS 0.02), a wake the 24-character echo rule cannot see.
+    Without the prompt the same noise came back empty (15 of 15) while spoken
+    "JOAT" still came back as words. So a transcript made only of prompt words
+    is heard once more without the prompt, and dropped if nothing is there."""
+
+    @staticmethod
+    def engine(monkeypatch: pytest.MonkeyPatch, prompted: str, plain: str | Exception):
+        engine = WhisperServeEngine(base_url="http://127.0.0.1:1", prompt=PROMPT)
+        calls: list[bool] = []
+
+        def post(_payload: bytes, *, bias: bool = True) -> str:
+            calls.append(bias)
+            if bias:
+                return prompted
+            if isinstance(plain, Exception):
+                raise plain
+            return plain
+
+        monkeypatch.setattr(engine, "_post", post)
+        return engine, calls
+
+    @staticmethod
+    async def hear(engine: WhisperServeEngine) -> Transcript | None:
+        await engine.feed(b"\x01\x00" * (MIN_UTTERANCE_BYTES // 2 + 1600))
+        return await engine.flush()
+
+    async def test_the_name_out_of_noise_is_dropped(self, monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+        engine, calls = self.engine(monkeypatch, "JOAT.", "")
+        with caplog.at_level(logging.INFO, logger="joat.audio.whisper_serve"):
+            assert await self.hear(engine) is None
+        assert calls == [True, False]
+        assert "dropped prompt-word hallucination chars=5" in caplog.text
+        assert "JOAT" not in caplog.text  # counts only, never the words
+
+    async def test_a_spoken_name_is_kept_with_the_prompted_spelling(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        engine, calls = self.engine(monkeypatch, "JOAT.", "Chode.")
+        heard = await self.hear(engine)
+        assert heard is not None and heard.text == "JOAT."
+        assert calls == [True, False]
+
+    async def test_a_sound_annotation_without_the_prompt_counts_as_nothing(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        engine, _ = self.engine(monkeypatch, "JOAT", "[BLANK_AUDIO]")
+        assert await self.hear(engine) is None
+
+    async def test_a_request_is_not_heard_twice(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        engine, calls = self.engine(monkeypatch, "JOAT, what time is it?", "")
+        heard = await self.hear(engine)
+        assert heard is not None and heard.text == "JOAT, what time is it?"
+        assert calls == [True]
+
+    async def test_function_words_are_not_checked(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        engine, calls = self.engine(monkeypatch, "The", "")
+        heard = await self.hear(engine)
+        assert heard is not None and heard.text == "The"  # the gate ignores it
+        assert calls == [True]
+
+    async def test_the_whole_prompt_is_still_dropped_by_the_echo_rule_alone(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        engine, calls = self.engine(monkeypatch, "The wearer addresses the assistant as JOAT.", "")
+        assert await self.hear(engine) is None
+        assert calls == [True]
+
+    async def test_a_failed_check_keeps_todays_behaviour(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        engine, _ = self.engine(monkeypatch, "JOAT.", OSError("serve busy"))
+        heard = await self.hear(engine)
+        assert heard is not None and heard.text == "JOAT."
+
+    def test_which_transcripts_are_prompt_words_only(self) -> None:
+        assert only_prompt_words("JOAT.", PROMPT)
+        assert only_prompt_words("JOAT", PROMPT)
+        assert only_prompt_words("assistant as JOAT", PROMPT)
+        assert not only_prompt_words("The", PROMPT)
+        assert not only_prompt_words("Hey JOAT", PROMPT)
+        assert not only_prompt_words("JOAT, what time is it?", PROMPT)
+        assert not only_prompt_words("JOAT.", None)

@@ -322,3 +322,33 @@ def test_finish_now_closes_only_an_utterance_in_progress() -> None:
     # a tap is never mistaken for silence by the next prompt's fence.
     vad.fence_prompt()
     assert vad.prompt_discarding
+
+
+class TestRoomBeforeSpeech:
+    """2026-10-12: after every brain start (7 of 7) the first utterance opened
+    within a second of the mic at the bare 0.004 trigger — room tone, sent to
+    Whisper, which once returned "JOAT." and woke JOAT."""
+
+    ROOM = batch(300)    # G2 room tone sits around 0.01-0.02; this is ~0.009
+    SPEECH = batch(4000)
+
+    def test_without_the_guard_room_tone_opens_an_utterance_at_once(self) -> None:
+        vad = RmsVad()
+        assert rms(self.ROOM) > vad.speech_rms
+        for _ in range(3):
+            vad.feed(self.ROOM)
+        assert vad.in_speech  # the old behaviour, still the QuickNote default
+
+    def test_with_the_guard_room_tone_never_opens_one(self) -> None:
+        vad = RmsVad(arm_after_floor=True)
+        for _ in range(60):
+            assert vad.feed(self.ROOM) is None
+            assert not vad.in_speech
+
+    def test_with_the_guard_speech_after_the_room_is_known_still_opens(self) -> None:
+        vad = RmsVad(arm_after_floor=True)
+        for _ in range(10):
+            vad.feed(self.ROOM)
+        for _ in range(3):
+            vad.feed(self.SPEECH)
+        assert vad.in_speech

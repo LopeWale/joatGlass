@@ -161,6 +161,26 @@ def is_prompt_echo(text: str, prompt: str | None) -> bool:
     return run >= ECHO_RUN_CHARS and run / len(heard) >= ECHO_COVERAGE
 
 
+def only_prompt_words(text: str, prompt: str | None) -> bool:
+    """Whether every word heard is a word of the bias prompt, at least one
+    of them a content word: what a SHORT echo looks like.
+
+    `is_prompt_echo` needs 24 characters of the prompt, so the shortest
+    echoes passed it, and the shortest is the dangerous one: the prompt
+    opens with the wake word, and Whisper hands back "JOAT." on room tone.
+    Measured 2026-10-12 on the live model and prompt (private serve):
+    7 of 40 noise clips at room level came back as "JOAT"/"JOAT." (low hum
+    at RMS 0.02: 5 of 5), each one the name alone, each one a wake. Function
+    words ("The", "as") are left alone: the gate already ignores them, and
+    checking them would cost a second pass for most coughs.
+    """
+    if not prompt or not text:
+        return False
+    heard = re.findall(r"[a-z0-9']+", text.lower())
+    bias = set(re.findall(r"[a-z0-9']+", prompt.lower()))
+    return bool(heard) and all(w in bias for w in heard) and any(len(w) >= 4 for w in heard)
+
+
 def wav_bytes(pcm: bytes) -> bytes:
     """16 kHz mono s16le PCM → in-memory WAV."""
     buf = io.BytesIO()
@@ -534,7 +554,35 @@ class WhisperServeEngine(SttEngine):
             except Exception as exc2:
                 log.error("whisper serve retry failed error=%s", type(exc2).__name__)
                 return None
+        if (text and not is_prompt_echo(text, self._prompt)
+                and only_prompt_words(text, self._prompt)):
+            text = await self._confirm_without_prompt(payload, text)
         return Transcript(text=text, is_final=True) if text else None
+
+    async def _confirm_without_prompt(self, payload: bytes, text: str) -> str:
+        """Hear the same audio again with no prompt; keep `text` only if
+        something is there.
+
+        The prompt is what puts the name into noise: with it, room hum came
+        back "JOAT"; without it, 15 of 15 noise clips came back empty, while
+        every spoken "JOAT"/"Hey JOAT" still came back as words ("Chode.",
+        "Jode.", "Jolts.", 9 of 9 — synthetic voices, clean and over hum).
+        The prompted text is kept for its spelling. Costs one more pass only
+        for transcripts made of prompt words — the name alone, in practice.
+        If the check itself fails, the transcript is kept (today's behaviour).
+        """
+        try:
+            plain = await asyncio.to_thread(self._post, payload, bias=False)
+        except Exception as exc:
+            log.warning("prompt-word check failed error=%s — keeping transcript",
+                        type(exc).__name__)
+            return text
+        if not plain.strip() or is_sound_event(plain):
+            log.info("dropped prompt-word hallucination chars=%d (nothing heard without the prompt)",
+                     len(text))
+            return ""
+        log.info("prompt-word transcript confirmed without the prompt chars=%d", len(text))
+        return text
 
     async def _batch_transcribe(self, pcm: bytes) -> Transcript | None:
         if self._closed or (self._shutdown is not None and self._shutdown.is_set()):

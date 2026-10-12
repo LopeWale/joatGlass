@@ -384,7 +384,7 @@ class VoiceOrchestrator:
         # find out whether it was the front half of one that was.
         self._unaddressed_tail: tuple[str, float] | None = None
         self._stt = stt
-        self._vad = vad or RmsVad()
+        self._vad = vad or RmsVad(arm_after_floor=True)
         # The words so far of the utterance being spoken, for an open
         # prompt's card: one transcription in flight, dropped once the
         # utterance it belongs to has ended.

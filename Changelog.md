@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-10-12 — Room noise no longer wakes JOAT: the bias prompt was putting the name into it
+
+The wearer, after the "hearing you…" fix: "it is still fucking doing it because it just did it again … please research and stop guessing."
+
+**What happened at 15:35:40 (brain restarted 15:35:27, glasses connected 15:35:36).** The first "utterance" opened 0.27 s after the mic, at `trigger=0.00400`. Whisper returned 5 characters, which were not ignored and reached no reply. That is the one branch that writes no log line: the name alone, which opens the JOAT card ("Yes?") and takes the next sentence without the name for 8 s.
+
+**Why, established step by step.**
+1. *Only one line puts "hearing you…" on the glass* (`VoiceOrchestrator._acknowledge`; nothing in the plugin or JOATShell). The running brain is this checkout (`.venv`, `apps/mac/joat`) with `6437400` in it.
+2. *The speech detector opens on room tone right after every brain start.* `RmsVad.floor` is 0 until 10 batches (~2 s) of history, so the trigger is the bare `speech_rms` minimum, 0.004. G2 room tone is above that. The log shows this after every brain start today, 7 of 7 (07:44, 11:27, 12:06, 13:03, 14:23, 15:17, 15:35): the first utterance opens at 0.004, and Whisper returns 3–8 characters of nothing ("The"), or at 15:35, 5.
+3. *Whisper puts the name into noise because our prompt does.* The conversational bias prompt is `"JOAT. The wearer addresses the assistant as JOAT."`. It opens with the wake word, as a 5-character sentence. `is_prompt_echo` needs 24 characters, so the full 43-character echo is dropped (logged) but "JOAT." passes. **Reproduced on the live model** (private `whisperkit-cli serve` on :50061, same model and flags, the real prompt, the brain's own echo filter and gate): 40 synthetic room-noise clips (2.4 s like turn 1; white noise and low hum at RMS 0.006–0.02) gave the full prompt (13), "The" (20), and **"JOAT"/"JOAT." 7 times, each a wake**. Low hum at RMS 0.02 gave "JOAT" 5 of 5.
+4. *The prompt is the cause, and it is also what makes the name spell right.* The same noise with no prompt came back empty, 15 of 15. But macOS voices saying "JOAT." / "Hey JOAT." / "JOAT, what time is it?" (Samantha, Daniel, Moira; clean and over hum) were recognised 17 of 18 with the prompt and only 7 of 18 without it ("Chode", "Jobe", "Jules"…). Every spoken name still came back as *some* word without the prompt (9 of 9), while noise came back as nothing.
+5. *Whisper's own scores do not separate them here.* The serve reports `no_speech_prob` 0 for everything. `avg_logprob` was −0.28 to −0.29 for hum "JOAT" and as low as −0.26 for a spoken one.
+
+Outside sources agree. OpenAI's Whisper prompting guide treats the prompt as prior transcript ("intended to help stitch together multiple audio segments"), which is why it can come back on audio with no speech. A study of Whisper large-v3 on non-speech audio (arXiv 2501.11378) found hallucinations on 40.3% of 301,317 files, with an effective VAD as the largest mitigation.
+
+**Changes**
+- `whisper_serve.only_prompt_words` + `WhisperServeEngine._confirm_without_prompt`: a conversational transcript made only of prompt words, at least one a content word ("JOAT.", "assistant as JOAT"), is heard once more **without** the prompt. If nothing is there (empty or a sound annotation), it is dropped (`dropped prompt-word hallucination chars=N`). Otherwise the prompted spelling is kept (`… confirmed without the prompt`). Requests ("JOAT, what time is it?") and function words ("The") are not checked, so they cost nothing. A failed check keeps the transcript.
+- `RmsVad.arm_after_floor` (on for JOAT's conversation VAD, off for QuickNotes' fresh per-note VAD): no utterance starts until the room's floor is known (10 batches).
+- **Re-run on the live model with the fixed engine:** noise 0 of 13 wakes (the five hum "JOAT"s all dropped). Spoken names 17 of 18, the same as before the fix (the one miss, "JOAT." over hum → "Chau.", was misheard before the change too).
+- Tests: `TestShortEchoIsHeardAgainWithoutThePrompt` (noise name dropped and logged without content; spoken name kept with prompted spelling; sound annotation counts as nothing; requests and "The" heard once; full echo still dropped by the old rule; failed check keeps it), `TestRoomBeforeSpeech` (room tone opens nothing with the guard, speech after the floor still opens; the old default unchanged). Full Mac suite 3605 passed, 1 failure in `test_whisper_cold_start` (pre-existing, recorded above); mypy clean. **Mac only: takes effect when JOAT restarts.**
+
 ## 2026-10-12 — Build JOAT 0.1.128
 
 - Packed from `cb37801` (clean tree) with `scripts/pack.sh`, the `com.example.joat` manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.128 above the last recorded build (0.1.127); app.json, package.json and package-lock.json all 0.1.128. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1227 tests passed, typecheck clean.

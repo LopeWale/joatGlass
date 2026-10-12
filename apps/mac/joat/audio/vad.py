@@ -80,6 +80,15 @@ class RmsVad:
     hangover never elapsed; 1.8x puts it at ~0.020, just above the median
     room level and below the speech band."""
 
+    arm_after_floor: bool = False
+    """Do not start an utterance until the room's floor is known (10 batches,
+    ~2 s). Until then `trigger` is the bare `speech_rms` minimum, 0.004,
+    and G2 room tone sits above it: after every brain start on 2026-10-12
+    (7 of 7) the first "utterance" opened at that trigger within a second of
+    the mic, was room tone, and went to Whisper — which returned "The", or
+    once "JOAT.", and woke JOAT. On for JOAT's conversation VAD; off for a
+    QuickNote's fresh VAD, whose first words must not wait."""
+
     floor_window: int = 100
     """Batches of history (100 x 200ms = 20s) used to estimate the floor."""
 
@@ -162,6 +171,8 @@ class RmsVad:
         # speech to know what is NOT speech.
         self._recent.append(level)
         loud = level >= self.trigger
+        if loud and self.arm_after_floor and self.adaptive and len(self._recent) < 10:
+            loud = False  # the room is not known yet: nothing is "loud"
 
         # Prompt ownership needs an actual quiet boundary, independent of
         # ordinary segmentation's hard cap and isolated-noise tolerance.
