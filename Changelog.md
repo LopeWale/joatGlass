@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-11 — Build JOAT 0.1.123
+
+- Packed from `56de7ed` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.123 above the last recorded build (0.1.122); app.json, package.json and package-lock.json all 0.1.123. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1194 tests passed, typecheck clean. Mac 3557 passed, 1 deselected (the known `test_whisper_cold_start` failure); 1 failed, `test_message_tools.py::test_controller_review_limit_remains_a_truthful_failed_status`, from FEAT-001's `10023e4` (the Messages review limit), not these changes.
+- Canonical `apps/hub-plugin/joat.ehpk`: 184915 bytes, SHA-256 `ce84d7695b40f78335725f374cf46743d0a67158df08480af68efd4b2929c642`. Adds to 0.1.122 QuickNotes matched to Even's QuickNote and Conversate, QuickNotes on the overview's rail with Search in the menu, and FEAT-001's long-draft review and scrolling thread. **The Mac side changed too: restart JOAT from this revision** (migration 16 runs on start). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-11 — QuickNotes is on the overview's rail; Search moves into the menu
 
 The wearer: "replace the search on the overview tab with the quicknote instead then move the search to the menu option in place of the quicknote so now the overview has a way to quickly get to the quicknote."
