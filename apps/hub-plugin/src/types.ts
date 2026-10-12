@@ -77,6 +77,10 @@ export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;
 export const VOICE_REQUEST_PREFIX = 'voice-';
 /** JavaScript UTF-16 code units. Longer previews must fail, never truncate. */
 export const CONFIRM_PROMPT_MAX_UNITS = 120;
+/** A Messages draft reviewed in JOAT's box (seven rows), not on the native
+ * confirmation page the 120 above was sized for. Mac twin:
+ * MESSAGE_REVIEW_PROMPT_MAX_UTF16_UNITS in core/protocol.py. */
+export const MESSAGE_REVIEW_PROMPT_MAX_UNITS = 280;
 
 /**
  * How listening resumes after the wearer puts the glasses back on.

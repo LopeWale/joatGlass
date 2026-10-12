@@ -3,7 +3,7 @@ import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/
 import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder, PROMPT_QUESTION_HINT, READER_TEXT_PAGE } from './HudPageBuilder';
 import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
-import { paginateHanging } from './FirmwareText';
+import { paginateHanging, paginateMeasured } from './FirmwareText';
 import { getTextWidth } from '@evenrealities/pretext';
 import { ContainerId } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
@@ -11,8 +11,10 @@ import { readerParagraphs } from './EvenFont';
 
 /** A Messages reader's firmware pages: explicit lines at the inset reader
  * width, each message's rows hanging under its first word. */
+// A Messages page scrolls on the glass (2026-10-11): it is cut only by the
+// container's byte cap (900 units), never into seven-line pages.
 const readerPages = (rows: readonly string[]) => paginateHanging(
-  readerParagraphs(rows).join('\n'), READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity,
+  readerParagraphs(rows).join('\n'), READER_TEXT_PAGE.textWidth - 10, 40, 900, // 10: the firmware scrollbar
 );
 
 // These tests pin the IMAGE overview (VITE_NATIVE_OVERVIEW=0). The text
@@ -71,7 +73,9 @@ function text(page: RebuildPageContainer | undefined, name: string): string | un
   return page?.textObject?.find((container) => container.containerName === name)?.content;
 }
 
-const longMessage = Array.from({ length: 10 }, (_, index) => (
+// Long enough to pass the scrolling page's byte cap, so it still splits
+// into local pages: the fallback for a Mac page the container cannot hold.
+const longMessage = Array.from({ length: 24 }, (_, index) => (
   `Row ${index + 1} of a long message that the Mac cut into sixty-two column rows.`
 ));
 const READER = { title: 'MESSAGES · MESSAGE', hint: 'swipe: more · say reply · 2x tap: back', selectable: false, nativeTextPage: true };
@@ -186,7 +190,10 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
 
   it('reads every swipe the Mac offers, and forgets an earlier page once another is on the glass', async () => {
     const r = rig();
-    const pages = readerPages(longMessage);
+    // Not a Messages page: seven-line local pages, as before.
+    const pages = paginateMeasured(
+      readerParagraphs(longMessage).join('\n'), READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity,
+    );
     // The Mac's promises need not sit side by side to count.
     expect(await r.hud.showList(longMessage, {
       ...READER, title: 'BRAINSTORM · SAVED', hint: 'up previous · tap: continue · down more · 2x tap: back',

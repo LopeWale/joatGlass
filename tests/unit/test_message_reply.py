@@ -491,7 +491,8 @@ class TestMessageReplyController:
         replies = MessageReplyController(sender, confirm)
         replies.select(THREAD, trace_id="hud-visibility")
 
-        result = await replies.handle_command(f"reply saying {'x' * 120}")
+        # Past the box's seven rows (MESSAGE_REVIEW_PROMPT_MAX_UTF16_UNITS, 280).
+        result = await replies.handle_command(f"reply saying {'x' * 300}")
 
         assert result == (
             "Reply is too long for the confirmation screen. Shorten it and try again."
@@ -504,7 +505,7 @@ class TestMessageReplyController:
         replies = MessageReplyController(sender, confirm)
         replies.select(THREAD, trace_id="hud-emoji")
 
-        result = await replies.handle_command(f"reply saying {'🥽' * 60}")
+        result = await replies.handle_command(f"reply saying {'🥽' * 150}")
 
         assert result == (
             "Reply is too long for the confirmation screen. Shorten it and try again."
@@ -1079,7 +1080,7 @@ class TestPreparedMessages:
         replies = MessageReplyController(sender, confirm)
         replies.select(THREAD, trace_id="overflow")
 
-        await replies.prepare_selected_reply(action_id="long-action", body="x" * 120)
+        await replies.prepare_selected_reply(action_id="long-action", body="x" * 300)
 
         assert await _completed_message(replies, "long-action") == "failed"
         assert sender.sent == []

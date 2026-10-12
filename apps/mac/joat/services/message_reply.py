@@ -18,7 +18,9 @@ from ..channels.imessage import MessageThread
 from ..channels.message_sender import MessageSendError
 from ..core.interfaces import MessageSender
 from ..core.confirmation import ConfirmationResult
-from ..core.protocol import CONFIRM_PROMPT_MAX_UTF16_UNITS, utf16_units
+from ..core.protocol import (
+    CONFIRM_PROMPT_MAX_UTF16_UNITS, MESSAGE_REVIEW_PROMPT_MAX_UTF16_UNITS, utf16_units,
+)
 from ..persistence.actions import (
     ActionConflictError,
     ActionDraft,
@@ -946,8 +948,10 @@ class MessageReplyController:
         action_id = idempotency_key
         recipient_label = f"group {thread.sender}" if thread.is_group else thread.sender
         prompt = f"Send to {recipient_label}? “{body}”"
-        if utf16_units(prompt) > CONFIRM_PROMPT_MAX_UTF16_UNITS:
-            # Too long for the confirmation screen: show the whole draft in
+        # The draft is reviewed in JOAT's box (the wearer's ruling, 2026-10-11),
+        # which holds far more than the native confirmation page did.
+        if utf16_units(prompt) > MESSAGE_REVIEW_PROMPT_MAX_UTF16_UNITS:
+            # Too long even for the box: show the whole draft in
             # the reader first and let the wearer tap to proceed; the
             # confirmation then carries the opening words and says the rest
             # was reviewed. Without a reviewer the old refusal stands —

@@ -88,6 +88,7 @@ from ..core.protocol import (
     ReminderDueComplete,
     SavedPlace,
     CONFIRM_PROMPT_MAX_UTF16_UNITS,
+    MESSAGE_REVIEW_PROMPT_MAX_UTF16_UNITS,
     PLUGIN_REPLACED_CLOSE_CODE,
     parse_uplink,
     utf16_units,
@@ -866,7 +867,13 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
     ) -> ConfirmationResult | None:
         """Return durable evidence only for an explicit bound HUD decision."""
 
-        if utf16_units(prompt) > CONFIRM_PROMPT_MAX_UTF16_UNITS:
+        # A Messages draft is drawn in JOAT's box, which holds more than the
+        # native confirmation page; the box's own cap applies to it.
+        prompt_cap = (
+            MESSAGE_REVIEW_PROMPT_MAX_UTF16_UNITS if diagnostic_kind == "messages"
+            else CONFIRM_PROMPT_MAX_UTF16_UNITS
+        )
+        if utf16_units(prompt) > prompt_cap:
             log.warning(
                 "confirm %s declined — exact preview exceeds HUD capacity",
                 action_id,

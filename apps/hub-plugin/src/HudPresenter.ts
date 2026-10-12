@@ -42,6 +42,7 @@ import {
 } from './PanelRail';
 import {
   CONFIRM_PROMPT_MAX_UNITS,
+  MESSAGE_REVIEW_PROMPT_MAX_UNITS,
   ContainerId,
   type BrainstormHudModel,
   type ConfirmationPurpose,
@@ -253,6 +254,23 @@ const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', 'QUICKNOTES · LIVE'])
 function speakerPaged(title: string): boolean {
   return title.startsWith('MESSAGES') || title.trim().toUpperCase() === 'QUICKNOTES · LIVE';
 }
+/**
+ * A Messages page scrolls on the glass instead of turning seven-line pages
+ * (the wearer's ruling, 2026-10-11). The firmware scrolls an overflowing
+ * capture text container one line a swipe and draws its own scrollbar
+ * (docs/EVEN_RESEARCH_QUESTIONS.md, "What the firmware scrolls by itself"),
+ * and only the boundary swipe reaches the plugin, which then asks the Mac
+ * for the next chunk. The page is cut only by the container's byte cap.
+ */
+function scrollsOnGlass(title: string): boolean {
+  return title.startsWith('MESSAGES');
+}
+const SCROLLING_PAGE_MAX_LINES = 40;
+/** Under TEXT_CONTAINER_MAX_BYTES (999) with room for the page's wide glyphs. */
+const SCROLLING_PAGE_MAX_UNITS = 900;
+/** The firmware's scrollbar (4 px at the container's right edge) and a
+ * breath beside it: the words wrap short of it instead of under it. */
+const SCROLLBAR_INSET_PX = 10;
 /** Home's left column as images in Even's font (HomeImages.ts);
  * `VITE_HOME_IMAGES=0` keeps it firmware text. */
 const homeImagesEnabled = String(import.meta.env.VITE_HOME_IMAGES ?? '1') !== '0';
@@ -2134,8 +2152,12 @@ export class HudPresenter {
     // A Messages page stands each message's wrapped rows under its words,
     // after the sender's name (the wearer's ruling, 2026-10-07).
     const paginate = speakerPaged(surface.options.title) ? paginateHanging : paginateMeasured;
+    const scrolls = scrollsOnGlass(surface.options.title);
     const pages = paginate(
-      readerParagraphs(surface.items).join('\n'), READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity,
+      readerParagraphs(surface.items).join('\n'),
+      scrolls ? READER_TEXT_PAGE.textWidth - SCROLLBAR_INSET_PX : READER_TEXT_PAGE.textWidth,
+      scrolls ? SCROLLING_PAGE_MAX_LINES : READER_TEXT_PAGE.lineCapacity,
+      scrolls ? SCROLLING_PAGE_MAX_UNITS : undefined,
     );
     const page = this.nativeTextPage?.source === source
       ? Math.min(this.nativeTextPage.page, pages.length - 1)
@@ -3098,7 +3120,8 @@ export class HudPresenter {
     // A new decision gate supersedes any lingering outcome strip.
     this.clearActionOverlay();
     const safePrompt = prompt.trim() || 'Confirm requested action.';
-    if (safePrompt.length > CONFIRM_PROMPT_MAX_UNITS) {
+    const promptCap = diagnosticKind === 'messages' ? MESSAGE_REVIEW_PROMPT_MAX_UNITS : CONFIRM_PROMPT_MAX_UNITS;
+    if (safePrompt.length > promptCap) {
       console.error('[HudPresenter] exact confirmation preview exceeds HUD capacity');
       return Promise.resolve(false);
     }

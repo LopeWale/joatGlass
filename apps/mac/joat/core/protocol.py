@@ -37,6 +37,11 @@ PLUGIN_REPLACED_CLOSE_CODE = 4409
 # counterpart: VOICE_REQUEST_PREFIX in apps/hub-plugin/src/types.ts.
 VOICE_REQUEST_PREFIX = "voice-"
 CONFIRM_PROMPT_MAX_UTF16_UNITS = 120
+# A Messages draft is reviewed in JOAT's box, which holds up to seven rows
+# (the question, then the words wrapped under "You:"), not on the native
+# confirmation page the 120 above was sized for. Plugin twin:
+# MESSAGE_REVIEW_PROMPT_MAX_UNITS in apps/hub-plugin/src/types.ts.
+MESSAGE_REVIEW_PROMPT_MAX_UTF16_UNITS = 280
 
 
 def utf16_units(text: str) -> int:
