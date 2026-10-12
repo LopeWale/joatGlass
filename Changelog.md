@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-11 — Build JOAT 0.1.122
+
+- Packed from `6dd1eb4` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.122 above the last recorded build (0.1.121); app.json, package.json and package-lock.json all 0.1.122. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1190 tests passed, typecheck clean. Mac 3546 passed, 1 deselected (the known `test_whisper_cold_start` failure).
+- Canonical `apps/hub-plugin/joat.ehpk`: 184309 bytes, SHA-256 `3f6e8d526c7e85f5da53c4e060db37dd47e53d43d7bccf40c71c9f163069b33e`. Adds to 0.1.121 QuickNotes as one note (FEAT-002: live words, hold to talk, title and summary, Apple Notes copy) and reply by voice's tap to review / tap to send / 2x tap to retry with ▷ ▶ × in the thread (FEAT-001). **The Mac side changed too: restart JOAT from this revision** (migration 15 runs on start). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-11 — QuickNotes is one note: words while you talk, hold to talk, a title and summary, and a copy in Apple Notes
 
 The wearer: QuickNotes should be "like the Even Conversate + QuickNote features in one and saves it to my notes app". Design and tasks: `docs/features/FEAT-002-quicknotes-conversate/`.

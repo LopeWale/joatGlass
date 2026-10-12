@@ -20,6 +20,7 @@ Checkbox state is the position. Design: `technical-design.md` in this folder.
   wiring. Done-when: `test_capabilities.py` QuickNotes cases green. ✔ 2026-10-11.
 - [x] **T5** Plugin: LIVE in-place text upgrade, double-tap → finish,
   long press → hold events. Done-when: vitest + `tsc` green. ✔ 2026-10-11 (1190 tests).
-- [ ] **T6** Simulator: AC1 + AC2 with synthetic audio; full Mac + plugin
-  suites; Changelog; build 0.1.122.
+- [x] **T6** Simulator: AC1 + AC2 with synthetic audio; full Mac + plugin
+  suites; Changelog; build 0.1.122. ✔ 2026-10-11 (Mac 3546, plugin 1190;
+  `joat.ehpk` 184309 bytes, SHA-256 3f6e8d52…9b33e).
 - [ ] **T7** Hardware (wearer): AC1–AC5 on the G2.
