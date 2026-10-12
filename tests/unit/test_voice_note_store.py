@@ -666,3 +666,26 @@ def test_note_exports_remember_one_apple_note_per_note(tmp_path: Path) -> None:
         assert exports.external_id("text", "capture-1") == "x-coredata://A/ICNote/p3"
         with pytest.raises(ValueError):
             exports.record("voice", "capture-1", " ", now_us=4)
+
+
+def test_a_paragraph_can_be_revised_in_place_but_never_shrinks(tmp_path: Path) -> None:
+    """The settle pass rewrites a paragraph's words over the same audio."""
+    durable, notes = open_store(tmp_path / "joat.sqlite3")
+    with durable:
+        _recording_with_frames(notes, 4)
+        section = notes.append_transcript(
+            "capture-1", text="We ship. On Friday.", first_frame_ordinal=0,
+            last_frame_ordinal=3, now_us=20,
+        )
+
+        notes.extend_transcript(
+            "capture-1", ordinal=section.ordinal, text="We ship on Friday.",
+            last_frame_ordinal=3, now_us=21,
+        )
+
+        assert [s.text for s in notes.segments("capture-1")] == ["We ship on Friday."]
+        with pytest.raises(VoiceNoteConflictError, match="never shrinks"):
+            notes.extend_transcript(
+                "capture-1", ordinal=section.ordinal, text="We ship.",
+                last_frame_ordinal=2, now_us=22,
+            )

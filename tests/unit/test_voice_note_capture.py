@@ -507,9 +507,11 @@ class ScriptedStt(FakeStt):
         super().__init__()
         self.answers = answers
         self.calls = 0
+        self.sizes: list[int] = []
 
     async def transcribe_once(self, pcm: bytes) -> Transcript | None:
         self.calls += 1
+        self.sizes.append(len(pcm))
         answer = self.answers.pop(0) if self.answers else "more words"
         if isinstance(answer, Exception):
             raise answer
@@ -901,3 +903,148 @@ async def test_the_rec_timer_counts_listening_time_not_audio_bytes(tmp_path: Pat
         capture.control_resume()
         clock[0] = 152.0
         assert capture.snapshot.recorded_s == 5
+
+
+# The settle pass ------------------------------------------------------------
+
+
+def quiet(source: FakeFrameSource, seq: int, frames: int) -> int:
+    for _ in range(frames):
+        source.emit(seq, pcm=QUIET_200MS, speaker=None)
+        seq += 1
+    return seq
+
+
+def transcript_texts(notes: VoiceNoteStore) -> list[str]:
+    return [s.text for s in notes.segments("capture-1") if s.kind == "transcript"]
+
+
+async def test_a_pause_settles_the_stretch_as_one_reading(tmp_path: Path) -> None:
+    """Chunk by chunk, every pause starts a new sentence ("Friday. And
+    then"). Read again whole in the next real pause, the sentence keeps its
+    own case and punctuation."""
+    stt = ScriptedStt([
+        "We ship on Friday.", "And then the review.",
+        "We ship on Friday and then the review.",
+    ])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start()
+        seq = speak_and_pause(source, 0)
+        seq = speak_and_pause(source, seq)
+        await settle()
+        assert [line.text for line in capture.live_lines()] == [
+            "We ship on Friday. And then the review.",
+        ]
+        assert stt.calls == 2
+
+        quiet(source, seq, 4)  # about two seconds of quiet in all: a real pause
+        await settle()
+
+        assert [line.text for line in capture.live_lines()] == [
+            "We ship on Friday and then the review.",
+        ]
+        # One reading of both chunks' audio together.
+        assert stt.calls == 3 and stt.sizes[2] == stt.sizes[0] + stt.sizes[1]
+        await capture.control_stop()
+        assert stt.calls == 3  # nothing left to settle at save
+        assert transcript_texts(notes) == ["We ship on Friday and then the review."]
+
+
+async def test_the_settle_pass_gives_way_to_new_words(tmp_path: Path) -> None:
+    """whisper serve takes one request at a time: when the wearer talks on,
+    their new words come first, and Save settles what the pause could not."""
+    stt = ScriptedStt([
+        "We ship on Friday.", "And then the review.", "Then lunch.",
+        "We ship on Friday and then the review, then lunch.",
+    ])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start()
+        seq = speak_and_pause(source, 0)
+        seq = speak_and_pause(source, seq)
+        seq = quiet(source, seq, 4)      # the pause asks for a settle...
+        speak_and_pause(source, seq)     # ...but the wearer talks on first
+        await settle()
+
+        assert stt.calls == 3
+        assert [line.text for line in capture.live_lines()] == [
+            "We ship on Friday. And then the review. Then lunch.",
+        ]
+        await capture.control_stop()
+        assert stt.calls == 4
+        assert transcript_texts(notes) == [
+            "We ship on Friday and then the review, then lunch.",
+        ]
+
+
+async def test_a_settled_reading_that_loses_words_keeps_the_draft(tmp_path: Path) -> None:
+    stt = ScriptedStt(["We ship on Friday.", "And then the review.", "We ship."])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start()
+        seq = speak_and_pause(source, 0)
+        seq = speak_and_pause(source, seq)
+        quiet(source, seq, 4)
+        await settle()
+
+        assert [line.text for line in capture.live_lines()] == [
+            "We ship on Friday. And then the review.",
+        ]
+        await capture.control_stop()
+        assert stt.calls == 3  # tried once, never again
+        assert transcript_texts(notes) == ["We ship on Friday. And then the review."]
+
+
+async def test_the_settle_pass_never_reads_across_a_hole(tmp_path: Path) -> None:
+    stt = ScriptedStt(["We ship on Friday.", "And then the review."])
+    durable, _notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start()
+        for seq in range(4):
+            source.emit(seq, pcm=SPEECH_200MS)
+        seq = speak_and_pause(source, 10)  # frames 4-9 never arrived
+        quiet(source, seq, 4)
+        await settle()
+
+        assert stt.calls == 2
+        await capture.control_stop()
+        assert stt.calls == 2
+
+
+class GatedStt(ScriptedStt):
+    """Holds one request open until the test releases it."""
+
+    def __init__(self, answers: list[str | None | Exception], *, gate_call: int) -> None:
+        super().__init__(answers)
+        self.gate_call = gate_call
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def transcribe_once(self, pcm: bytes) -> Transcript | None:
+        if self.calls + 1 == self.gate_call:
+            self.entered.set()
+            await self.release.wait()
+        return await super().transcribe_once(pcm)
+
+
+async def test_undo_while_a_stretch_settles_keeps_its_words_gone(tmp_path: Path) -> None:
+    stt = GatedStt([
+        "We ship on Friday.", "And then the review.",
+        "We ship on Friday and then the review.",
+    ], gate_call=3)
+    durable, _notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start()
+        seq = speak_and_pause(source, 0)
+        seq = speak_and_pause(source, seq)
+        quiet(source, seq, 4)
+        await asyncio.wait_for(stt.entered.wait(), 1.0)
+        # Its words are on the page already: settling is not "transcribing".
+        assert capture.snapshot.transcribing is False
+
+        assert capture.control_undo() == "Removed the last paragraph."
+        stt.release.set()
+        await settle()
+
+        assert capture.live_lines() == ()

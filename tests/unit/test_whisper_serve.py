@@ -166,6 +166,20 @@ class TestTranscribeOnce:
         assert await engine.transcribe_once(b"\x01\x02" * 10) is None
         assert len(StubHandler.requests) == 1
 
+    async def test_a_note_chunk_is_sent_without_the_wake_word_bias(self, stub_server) -> None:
+        """Dictation is not addressed to JOAT: the bias prompt only slowed
+        every chunk (~0.6 s measured) and once leaked into a note."""
+        engine = WhisperServeEngine(base_url=stub_server, prompt="JOAT. Bias text.")
+
+        assert await engine.transcribe_once(SPEECH) is not None
+        await engine.feed(SPEECH)
+        assert await engine.flush() is not None
+
+        note_body, conversation_body = StubHandler.requests
+        assert b'name="prompt"' not in note_body
+        assert b'name="prompt"' in conversation_body
+        assert b"JOAT. Bias text." in conversation_body
+
     async def test_a_dead_server_raises_instead_of_reporting_silence(self) -> None:
         from joat.core.interfaces import SttUnavailableError
 

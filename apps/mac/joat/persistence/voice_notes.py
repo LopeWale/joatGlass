@@ -399,10 +399,13 @@ class VoiceNoteStore:
         last_frame_ordinal: int,
         now_us: int,
     ) -> VoiceNoteSegment:
-        """Continue an open note's newest paragraph with the next words.
+        """Continue an open note's paragraph with the next words, or revise
+        its words in place.
 
         A continuous stretch of speech is one paragraph, as Conversate shows
-        it; the pause detector's cuts are not the speaker's sentences.
+        it; the pause detector's cuts are not the speaker's sentences. The
+        settle pass rewrites a paragraph's words over the same audio, so the
+        range may stay where it is; it never shrinks.
         """
         _identifier("transcript", text, maximum=20_000)
         _timestamp(now_us)
@@ -420,8 +423,8 @@ class VoiceNoteStore:
             if row is None:
                 raise VoiceNoteConflictError("no transcript section to extend")
             first, last = cast(int, row[0]), cast(int, row[1])
-            if last_frame_ordinal <= last:
-                raise VoiceNoteConflictError("a paragraph only grows forward")
+            if last_frame_ordinal < last:
+                raise VoiceNoteConflictError("a paragraph never shrinks")
             self._require_journaled(db, capture_id, first, last_frame_ordinal)
             db.execute(
                 "UPDATE voice_note_segments SET text=?,last_frame_ordinal=? "

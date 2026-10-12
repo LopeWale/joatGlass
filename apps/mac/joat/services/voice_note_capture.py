@@ -90,6 +90,18 @@ DEFAULT_TITLE = re.compile(r"^Note \d{2}:\d{2}$")
 _BYTES_PER_SECOND = 16_000 * 2
 #: A paragraph stops growing near the store's section limit (20,000).
 _MAX_PARAGRAPH_CHARS = 18_000
+#: The settle pass: after a pause, the newest stretch of a paragraph is read
+#: again as ONE piece of audio, up to this long (Whisper hears 30 s at a
+#: time). Chunk by chunk, Whisper starts every chunk as a new sentence: a
+#: capital after each pause, a full stop before it. Heard whole, the sentence
+#: keeps its own case and punctuation, and a word split by the 15 s cut is
+#: heard whole again. Measured 2026-10-12 on dictation with thinking pauses:
+#: wrong capitals 15 -> 4, punctuation errors 25 -> 8, no word lost.
+_SETTLE_WINDOW_BYTES = 28 * _BYTES_PER_SECOND
+#: Quiet after the pause detector closes an utterance before the settle pass
+#: runs (about 2 s of silence in all). whisper serve takes one request at a
+#: time, so the pass waits for a real pause instead of delaying new words.
+_SETTLE_QUIET_BYTES = 1 * _BYTES_PER_SECOND
 
 NoteMode = Literal["continuous", "hold"]
 
@@ -129,6 +141,61 @@ class _Chunk:
     in_hold: bool = False
     #: The paragraph its words join: one hold, or one continuous stretch.
     paragraph: int = -1
+    #: Bytes of audio in it, counted when it is cut.
+    size: int = 0
+    #: The first audio after a hole (a gap, a new connection): the settle
+    #: pass never reads it together with the audio before the hole.
+    after_hole: bool = False
+
+
+@dataclass(slots=True)
+class _Piece:
+    """The words of one span of a paragraph: a live chunk's, or a settled
+    window's that replaced several of them."""
+
+    first: int
+    last: int
+    text: str
+    size: int
+    settled: bool = False
+    after_hole: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _Settle:
+    """A queue marker: settle once the chunks cut before it have words."""
+
+
+_SETTLE = _Settle()
+
+
+def _settle_window(pieces: list[_Piece]) -> tuple[int, int] | None:
+    """The newest run of pieces worth reading again, as [start, end).
+
+    At most one Whisper window of audio, never back across a hole, at least
+    two pieces (one alone was already heard whole), and not all settled.
+    """
+    end = start = len(pieces)
+    size = 0
+    while start > 0:
+        piece = pieces[start - 1]
+        if size + piece.size > _SETTLE_WINDOW_BYTES:
+            break
+        size += piece.size
+        start -= 1
+        if piece.after_hole:
+            break
+    if end - start < 2 or all(piece.settled for piece in pieces[start:end]):
+        return None
+    return start, end
+
+
+def _keeps_the_words(draft: str, settled: str) -> bool:
+    """A settled reading may fix case and punctuation and mend a cut word;
+    it may not lose words or run on. Heard as one piece, Whisper can drop a
+    stretch or invent past the audio, so its count must stay near the draft's."""
+    drafted, heard = len(draft.split()), len(settled.split())
+    return heard > 0 and 0.8 * drafted <= heard <= 1.25 * drafted + 2
 
 
 class VoiceNoteCaptureController:
@@ -191,7 +258,7 @@ class VoiceNoteCaptureController:
         self._chunk: _Chunk | None = None
         self._chunk_bytes = 0
         self._vad = RmsVad()
-        self._queue: deque[_Chunk] = deque()
+        self._queue: deque[_Chunk | _Settle] = deque()
         self._failed: list[_Chunk] = []
         self._worker: asyncio.Task[None] | None = None
         # "Undo last input" (Even's QuickNote): the frame range of each input
@@ -207,6 +274,14 @@ class VoiceNoteCaptureController:
         self._hold_first: int | None = None
         self._hold_last: int | None = None
         self._hold_loud = False
+        # The settle pass: each paragraph's pieces by section ordinal; bytes
+        # of quiet since the pause detector last closed an utterance (None
+        # while speaking, or once asked); the next chunk follows a hole; a
+        # chunk is in STT now.
+        self._pieces: dict[int, list[_Piece]] = {}
+        self._quiet_bytes: int | None = None
+        self._after_hole = False
+        self._drafting = False
         # Monotonic seconds: when capture last (re)started, when the newest
         # frame arrived. The no-audio guard reads these.
         self._capture_began: float | None = None
@@ -373,6 +448,7 @@ class VoiceNoteCaptureController:
     def _close_paragraph(self, paragraph: int) -> None:
         """Words after an undone paragraph start a new one."""
         if self._open_para is not None and self._open_para[1] == paragraph:
+            self._pieces.pop(self._open_para[0], None)
             self._open_para = None
         if paragraph == self._paragraph:
             self._paragraph += 1
@@ -544,6 +620,8 @@ class VoiceNoteCaptureController:
         self._last_seq = None
         self._last_received_at_us = None
         self._vad = RmsVad()
+        self._quiet_bytes = None
+        self._after_hole = False
         self._capture_began = self._monotonic()
         self._last_audio = None
         try:
@@ -570,6 +648,8 @@ class VoiceNoteCaptureController:
         self._capture_began = None
         self._last_audio = None
         self._cut()
+        # The wearer stopped (pause, released hold): a real pause to settle in.
+        self._request_settle()
 
     def _pause(self) -> str:
         note = self._active_note()
@@ -832,6 +912,7 @@ class VoiceNoteCaptureController:
                     # sides of it into one invented sentence.
                     self._cut()
                     self._vad = RmsVad()
+                    self._after_hole = True
             journaled = self._notes.append_frame(
                 capture_id,
                 connection_generation=frame.connection_generation,
@@ -866,8 +947,10 @@ class VoiceNoteCaptureController:
             chunk = self._chunk = _Chunk(
                 journaled.ordinal, journaled.ordinal, False,
                 in_hold=self._holding, paragraph=self._paragraph,
+                after_hole=self._after_hole,
             )
             self._chunk_bytes = 0
+            self._after_hole = False
         chunk.last = journaled.ordinal
         self._chunk_bytes += len(frame.pcm)
         if rms(frame.pcm) >= _SILENCE_RMS:
@@ -877,14 +960,41 @@ class VoiceNoteCaptureController:
         utterance_closed = self._vad.feed(frame.pcm) is not None
         if utterance_closed or self._chunk_bytes >= _MAX_CHUNK_BYTES:
             self._cut()
+        self._watch_quiet(len(frame.pcm), closed=utterance_closed)
+
+    def _watch_quiet(self, size: int, *, closed: bool) -> None:
+        """Ask for the settle pass once the wearer has paused a moment."""
+        if closed:
+            self._quiet_bytes = 0
+            return
+        if self._quiet_bytes is None:
+            return
+        if self._vad.in_speech:
+            self._quiet_bytes = None
+            return
+        self._quiet_bytes += size
+        if self._quiet_bytes >= _SETTLE_QUIET_BYTES:
+            self._quiet_bytes = None
+            self._request_settle()
+
+    def _request_settle(self) -> None:
+        """Settle behind the chunks already cut, once their words are in."""
+        if not self._pieces and not self._queue:
+            return
+        if self._queue and isinstance(self._queue[-1], _Settle):
+            return
+        self._queue.append(_SETTLE)
+        self._ensure_worker()
 
     def _cut(self) -> None:
         """Close the open chunk and hand it to the transcription worker."""
         chunk = self._chunk
+        size = self._chunk_bytes
         self._chunk = None
         self._chunk_bytes = 0
         if chunk is None:
             return
+        chunk.size = size
         if not chunk.in_hold:
             if chunk.loud:
                 # A continuous stretch is one input, grown chunk by chunk; a
@@ -898,6 +1008,9 @@ class VoiceNoteCaptureController:
                 # A long silence (a whole chunk of it) ends the paragraph.
                 self._paragraph += 1
         self._queue.append(chunk)
+        self._ensure_worker()
+
+    def _ensure_worker(self) -> None:
         if self._worker is None or self._worker.done():
             try:
                 loop = asyncio.get_running_loop()
@@ -907,20 +1020,97 @@ class VoiceNoteCaptureController:
             self._worker = loop.create_task(self._drain())
 
     def _transcribing(self) -> bool:
-        return bool(self._queue) or (self._worker is not None and not self._worker.done())
+        """Words still to come: a chunk waiting for STT, or in it. Not the
+        settle pass, whose words are already on the page."""
+        return self._drafting or any(isinstance(item, _Chunk) for item in self._queue)
 
     async def _drain(self) -> None:
         capture_id = self._capture_id
         while self._queue:
-            chunk = self._queue.popleft()
+            item = self._queue.popleft()
             if capture_id is None or capture_id != self._capture_id:
                 return
+            if isinstance(item, _Settle):
+                try:
+                    await self._settle(capture_id, final=False)
+                except Exception:
+                    log.exception("note settle pass failed")
+                continue
+            self._drafting = True
             try:
-                await self._transcribe_chunk(capture_id, chunk, final=False)
+                await self._transcribe_chunk(capture_id, item, final=False)
             except Exception:
                 log.exception("live note transcription failed")
-                self._failed.append(chunk)
+                self._failed.append(item)
+            finally:
+                self._drafting = False
             self._notify()
+
+    def _words_waiting(self) -> bool:
+        """New words come first: the wearer is speaking, or a chunk waits."""
+        speaking = self._listen_since is not None and self._vad.in_speech
+        return speaking or any(isinstance(item, _Chunk) for item in self._queue)
+
+    async def _settle(self, capture_id: str, *, final: bool) -> None:
+        """Read each paragraph's newest stretch again as one piece of audio.
+
+        Live it runs only in a real pause, and gives way whenever new words
+        wait: whisper serve takes one request at a time, and the next pause
+        settles what this one skipped. At save it always runs, once.
+        """
+        for ordinal, pieces in tuple(self._pieces.items()):
+            if not final and self._words_waiting():
+                return
+            window = _settle_window(pieces)
+            if window is not None:
+                await self._settle_paragraph(capture_id, ordinal, pieces, window)
+
+    async def _settle_paragraph(
+        self, capture_id: str, ordinal: int, pieces: list[_Piece], window: tuple[int, int],
+    ) -> None:
+        start, end = window
+        first, last = pieces[start].first, pieces[end - 1].last
+        if self._notes.is_undone(capture_id, first, last):
+            return
+        frames = self._notes.frames_between(capture_id, first, last)
+        if len(self._transcription_groups(frames, limit=_SETTLE_WINDOW_BYTES)) != 1:
+            return
+        try:
+            transcript = await self._stt.transcribe_once(b"".join(frame.pcm for frame in frames))
+        except Exception as exc:
+            log.info("note settle skipped error=%s", type(exc).__name__)
+            return
+        if (
+            capture_id != self._capture_id
+            or self._pieces.get(ordinal) is not pieces
+            or len(pieces) < end
+            or (pieces[start].first, pieces[end - 1].last) != (first, last)
+            or self._notes.is_undone(capture_id, first, last)
+        ):
+            return
+        draft = " ".join(piece.text for piece in pieces[start:end])
+        text = transcript.text.strip() if transcript is not None else ""
+        if not _keeps_the_words(draft, text):
+            text = draft
+        merged = _Piece(
+            first, last, text, sum(piece.size for piece in pieces[start:end]),
+            settled=True, after_hole=pieces[start].after_hole,
+        )
+        revised = [*pieces[:start], merged, *pieces[end:]]
+        paragraph = " ".join(piece.text for piece in revised)
+        if len(paragraph) > _MAX_PARAGRAPH_CHARS:
+            return
+        if text != draft:
+            self._notes.extend_transcript(
+                capture_id, ordinal=ordinal, text=paragraph,
+                last_frame_ordinal=revised[-1].last,
+                now_us=self._now(self._notes.get(capture_id)),
+            )
+        pieces[:] = revised
+        para = self._open_para
+        if para is not None and para[0] == ordinal:
+            self._open_para = (para[0], para[1], para[2], paragraph)
+        self._notify()
 
     async def _transcribe_chunk(self, capture_id: str, chunk: _Chunk, *, final: bool) -> bool:
         """Account for one chunk. False when it stays untranscribed."""
@@ -973,6 +1163,10 @@ class VoiceNoteCaptureController:
         para = self._open_para
         if para is not None and para[1] == chunk.paragraph and chunk.first == para[2] + 1:
             self._open_para = (para[0], para[1], chunk.last, para[3])
+            pieces = self._pieces.get(para[0])
+            if pieces:
+                pieces[-1].last = chunk.last
+                pieces[-1].size += chunk.size
 
     def _add_words(self, capture_id: str, chunk: _Chunk, words: str) -> None:
         """The chunk's words continue its paragraph, or begin a new one.
@@ -995,6 +1189,9 @@ class VoiceNoteCaptureController:
                 last_frame_ordinal=chunk.last, now_us=now_us,
             )
             self._open_para = (para[0], para[1], chunk.last, text)
+            self._pieces.setdefault(para[0], []).append(_Piece(
+                chunk.first, chunk.last, words, chunk.size, after_hole=chunk.after_hole,
+            ))
             return
         segment = self._notes.append_transcript(
             capture_id,
@@ -1004,6 +1201,7 @@ class VoiceNoteCaptureController:
             now_us=now_us,
         )
         self._open_para = (segment.ordinal, chunk.paragraph, chunk.last, words)
+        self._pieces[segment.ordinal] = [_Piece(chunk.first, chunk.last, words, chunk.size)]
 
     async def _finish_transcription(self, capture_id: str) -> bool:
         """Save's half of transcription: drain, retry, then account for the rest.
@@ -1021,7 +1219,14 @@ class VoiceNoteCaptureController:
             except Exception:
                 log.exception("live note transcription worker failed")
         while self._queue:
-            await self._transcribe_chunk(capture_id, self._queue.popleft(), final=False)
+            item = self._queue.popleft()
+            if isinstance(item, _Chunk):
+                await self._transcribe_chunk(capture_id, item, final=False)
+        try:
+            await self._settle(capture_id, final=True)
+        except Exception:
+            # The draft words are already saved; settling is only polish.
+            log.exception("note settle pass failed at save")
         retry, self._failed = self._failed, []
         unaccounted: list[_Chunk] = []
         for chunk in retry:
@@ -1062,6 +1267,7 @@ class VoiceNoteCaptureController:
     @staticmethod
     def _transcription_groups(
         frames: tuple[VoiceNoteFrame, ...],
+        limit: int = _MAX_TRANSCRIBE_BYTES,
     ) -> tuple[tuple[VoiceNoteFrame, ...], ...]:
         groups: list[tuple[VoiceNoteFrame, ...]] = []
         current: list[VoiceNoteFrame] = []
@@ -1073,7 +1279,7 @@ class VoiceNoteCaptureController:
                 or frame.seq != prior.seq + 1
                 or frame.ordinal != prior.ordinal + 1
             )
-            over_limit = bool(current) and current_bytes + len(frame.pcm) > _MAX_TRANSCRIBE_BYTES
+            over_limit = bool(current) and current_bytes + len(frame.pcm) > limit
             if discontinuity or over_limit:
                 groups.append(tuple(current))
                 current = []
@@ -1116,6 +1322,10 @@ class VoiceNoteCaptureController:
         self._failed = []
         self._inputs = []
         self._open_para = None
+        self._pieces = {}
+        self._quiet_bytes = None
+        self._after_hole = False
+        self._drafting = False
         self._hold_first = self._hold_last = None
         self._hold_loud = False
         self._capture_began = None

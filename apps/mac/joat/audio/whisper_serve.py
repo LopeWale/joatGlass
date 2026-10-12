@@ -472,6 +472,13 @@ class WhisperServeEngine(SttEngine):
         respawns or falls back to the batch CLI either: lifecycle belongs
         to the conversational path, and a failure here is reported, so the
         caller keeps the raw audio instead of treating it as silence.
+
+        Sent WITHOUT the wake-word bias prompt. WhisperKit decodes prompt
+        tokens one at a time, so the 12-token bias cost every chunk ~0.6 s
+        (measured 2026-10-12 on an M4 Pro: median 1.70 s with it, 1.06 s
+        without), and the bias text itself leaked into a dictated note ("The
+        wearer can also see…"). Dictation is not addressed to JOAT; the
+        conversational path keeps the bias.
         """
         if self._closed or (self._shutdown is not None and self._shutdown.is_set()):
             raise SttUnavailableError("whisper serve is closed")
@@ -482,7 +489,7 @@ class WhisperServeEngine(SttEngine):
         if len(pcm) < MIN_UTTERANCE_BYTES:
             return None
         try:
-            text = await asyncio.to_thread(self._post, wav_bytes(pcm))
+            text = await asyncio.to_thread(self._post, wav_bytes(pcm), bias=False)
         except Exception as exc:
             log.warning("note chunk transcription failed error=%s", type(exc).__name__)
             raise SttUnavailableError("whisper serve request failed") from exc
@@ -595,9 +602,9 @@ class WhisperServeEngine(SttEngine):
             await self._stop_resident()
             return await self.start() and self._ready
 
-    def _post(self, wav_payload: bytes) -> str:
+    def _post(self, wav_payload: bytes, *, bias: bool = True) -> str:
         fields = {"model": self._model, "response_format": "json"}
-        if self._prompt:
+        if bias and self._prompt:
             fields["prompt"] = self._prompt
         body, content_type = multipart(
             fields, "file", "utterance.wav", wav_payload,

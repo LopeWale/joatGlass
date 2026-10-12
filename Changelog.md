@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-12 — QuickNotes: words reach the glasses ~0.6 s sooner, and a pause no longer starts a new sentence
+
+The wearer: "the latency between when I say something and when it shows on the glasses … reduce it a little bit. It is very important that we do not lose quality", and from their first note: "the only thing is capitalization when a period or [comma] is needed".
+
+**Measured first** (private whisper serve on ports 50061–50063, same large-v3_turbo model and flags, synthesized dictation with room tone, cut exactly as `VoiceNoteCaptureController` cuts; live brain untouched; numbers in the project doc `quicknotes-latency-bench-2026-10-12.md`). Each chunk paid ~0.6 s for the wake-word bias prompt: WhisperKit decodes prompt tokens one at a time. Prompting with the previous text (OpenAI's documented way to stitch segments) cost +0.5–3 s and did not fix the capitals. Decoder or encoder on the GPU was 40–60 % slower with identical text. Live partial transcripts: whisper serve answers one request at a time, so a partial delayed the real words (3.6 → 5.4 s). Cutting at the quietest frame before the 15 s cap was no better (WER 3.9 % vs 3.4 %).
+
+**Changes**
+- `WhisperServeEngine.transcribe_once` (QuickNote chunks only) is sent without the bias prompt (`_post(bias=False)`); the conversational path keeps it. The bias also leaked into a note once ("The wearer can also see…").
+- **Settle pass** (`VoiceNoteCaptureController`): once the wearer has been quiet ~2 s, or pauses, releases a hold or saves, the paragraph's newest stretch (up to 28 s, never across a hole, at least two chunks) is read again as one piece of audio and replaces the chunk-by-chunk draft. Whisper heard each chunk as a new sentence ("Friday. And then …"); heard whole, the sentence keeps its case and punctuation, and a word split by the 15 s cut is heard whole. It gives way to new words (runs only when no chunk waits and the wearer is not speaking; Save settles what is left), keeps the draft when the new reading loses words or runs on (`_keeps_the_words`), and never writes a paragraph that was undone meanwhile. `VoiceNoteStore.extend_transcript` may now revise a paragraph in place (it still never shrinks). The live page's "…" shows only while new words are on their way, not during a settle.
+- Tests: bias absent on note chunks, present on conversation; settle on a pause, giving way to new words, keeping the draft, never across a hole, undo during a settle; store revision in place. Voice-note, store, commands and whisper suites pass; full Mac suite 3590 passed, 1 failure in `test_whisper_cold_start` that also fails intermittently on its own (unrelated spawn timing).
+
+**Through the real recorder, fed in real time** (2 voices × 2 dictations with 1.3 s and 2.6 s pauses, before = bias + no settle): words stored after the cut median 1.58 → 0.99 s, p90 1.82 → 1.27 s; 4 of 32 chunks waited behind a settle (worst 2.44 s vs 1.92 s before). Wrong capitals 18 → 4, punctuation errors 16 → 7, WER 0.5 % → 0 %. Save median 1.31 → 1.86 s. Add ~1.0 s of pause detection before and ~0.25 s of repaint after. Synthesized voices; to be confirmed on the wearer's next real note. **Mac only: takes effect when JOAT restarts.**
+
 ## 2026-10-12 — JOAT answers only when named: "JOAT", "Hey JOAT", "Hey Joke"
 
 The wearer: "it just randomly pops up thinking that I said the word 'The' … only trigger when I say 'Hey Joat/Joke' … investigate why it just triggers randomly."
