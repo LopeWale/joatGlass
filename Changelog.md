@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-12 — The Mac measures the glasses' microphone (content-free)
+
+The wearer: "use the skills to understand how the mics [work] and measure."
+
+- Even Hub's device-features contract: `audioControl(true, Glasses)` opens the G2 four-mic array (after `createStartUpPageContainer`); PCM arrives as `audioEvent` buffers, 16 kHz s16le mono; the plugin batches ~200 ms per `audio` message. It does not say how long `audioControl(true)` takes on the glasses, or whether PCM keeps flowing while nobody speaks — which decides whether the plugin's 1.5 s silent-stream re-arm (`STREAM_STALE_MS`, `b4058c3`) is safe.
+- `joat/ble/mic_meter.py` (new, `e61cfdd`), wired into `HubGatewayTransport`: on every Mac `audio.control open`, `mic open: plugin ack +X ms, first pcm +Y ms (link rtt Z ms)` — ack is the plugin's `device mic=true`, sent once the host call resolved; the WebSocket ping round trip is beside it so the network can be subtracted. While the mic streams, `mic cadence: N messages, P s of pcm in W s (%), longest gap G ms, gaps over 1.5 s: K` 60 s after each open, then every 5 min, and on close/disconnect. Counts and times only; never audio content.
+- Tests: `tests/unit/test_mic_meter.py` (open timing, a continuous stream at 100 % with no stale gaps, a 4 s host silence counted, the 5-minute cadence, nothing logged without audio); gateway 92 passed; mypy clean. Mac only; running since 13:03:07.
+
 ## 2026-10-12 — Build JOAT 0.1.126
 
 - Packed from `556d21c` (clean tree) with `scripts/pack.sh`, the `com.example.joat` manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.126 above the last recorded build (0.1.125); app.json, package.json and package-lock.json all 0.1.126. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1224 tests passed, typecheck clean.
