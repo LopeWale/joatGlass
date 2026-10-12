@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-12 — Build JOAT 0.1.126
+
+- Packed from `556d21c` (clean tree) with `scripts/pack.sh`, the `com.example.joat` manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.126 above the last recorded build (0.1.125); app.json, package.json and package-lock.json all 0.1.126. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1224 tests passed, typecheck clean.
+- Canonical `apps/hub-plugin/joat.ehpk`: 178106 bytes, SHA-256 `4ed2b9e5785fa599a5d2bfe66b0788a0d2c2e786bf0dbe75c57a2a3986e928eb`. Adds to 0.1.125 the fixes below (`482e7ac`). Plugin only: no Mac restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-12 — Even's rules applied: cancel works on every card, no card is declined unseen, accented Messages pages keep their last lines, bridge calls have time limits
 
 The wearer: "use [Even's guidelines] to evaluate and improve and fix any buggy process we have without destroying the interface." Every glasses page was checked against the installed SDK 0.0.16, the simulator's measured limits and Even's glasses-ui, handle-input and design guidance. These are the fixes the wearer chose (cards, Messages in accented text, hardening). Nothing on the glass looks different. Each fix reuses what was there; no second copy of a helper.
