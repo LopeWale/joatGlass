@@ -193,3 +193,50 @@ describe('navigation frames before the live map', () => {
     expect(r.frames.map((frame) => frame.kind)).toEqual(['navigation']);
   });
 });
+
+describe('the live page of an open QuickNote (FEAT-002)', () => {
+  const live = { title: 'QUICKNOTES · LIVE', hint: '● REC 00:00 · tap: pause · left x2: finish', nativeTextPage: true };
+
+  it('takes newer words as in-place upgrades, never a rebuilt page', async () => {
+    const r = rig();
+    expect(await r.hud.showList(['Listening — your words appear here.'], live)).toBe(true);
+    expect(r.writes()).toEqual(['rebuild:0:3:0']);
+    r.reset();
+
+    expect(await r.hud.updateLiveTextPage(
+      ['Them: We can deliver on the 14th.\n', 'You: Great, book it.'],
+      { ...live, hint: '● REC 00:05 · tap: pause · left x2: finish' },
+    )).toBe(true);
+    expect(r.writes()).toEqual(['upgrade:main', 'upgrade:hint']);
+
+    r.reset();
+    // Only the clock moved: one upgrade, of the footer.
+    expect(await r.hud.updateLiveTextPage(
+      ['Them: We can deliver on the 14th.\n', 'You: Great, book it.'],
+      { ...live, hint: '● REC 00:10 · tap: pause · left x2: finish' },
+    )).toBe(true);
+    expect(r.writes()).toEqual(['upgrade:hint']);
+    expect(r.frames).toEqual([]);
+  });
+
+  it('declines when another page is on the glass, so the caller draws it', async () => {
+    const r = rig();
+    expect(await r.hud.showList(['A short note'], {
+      title: 'QUICKNOTES · DETAIL', hint: '2x tap: back', nativeTextPage: true,
+    })).toBe(true);
+    r.reset();
+    expect(await r.hud.updateLiveTextPage(['words'], live)).toBe(false);
+    expect(r.writes()).toEqual([]);
+  });
+
+  it('always shows the newest words: the last page', async () => {
+    const r = rig();
+    expect(await r.hud.showList(['Listening.'], live)).toBe(true);
+    const many = Array.from({ length: 18 }, (_, i) => `Them: sentence number ${i + 1} of a long meeting.\n`);
+    expect(await r.hud.updateLiveTextPage(many, live)).toBe(true);
+    const upgrades = (r.hud as unknown as { nativeTextPage?: { page: number; pages: string[]; body: string } })
+      .nativeTextPage;
+    expect(upgrades?.page).toBe((upgrades?.pages.length ?? 1) - 1);
+    expect(upgrades?.body).toContain('sentence number 18');
+  });
+});

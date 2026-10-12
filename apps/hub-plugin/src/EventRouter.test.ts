@@ -1355,3 +1355,52 @@ describe('the notification card owns the taps while it is up', () => {
     expect(r.sent).toEqual([]);
   });
 });
+
+describe('EventRouter — a long press held on an open QuickNote talks into it (FEAT-002)', () => {
+  function liveNote() {
+    const r = make(true);
+    const holds: Array<'start' | 'end'> = [];
+    Object.assign(r.menu, {
+      isQuickNotesLive: vi.fn(() => true),
+      sendQuickNotesHold: vi.fn((phase: 'start' | 'end') => { holds.push(phase); }),
+    });
+    return { ...r, holds };
+  }
+
+  it('starts on the press and ends on the release; the mic is never toggled', () => {
+    const r = liveNote();
+    r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+    expect(r.holds).toEqual(['start']);
+    r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+    expect(r.holds).toEqual(['start', 'end']);
+    expect(r.audio.stop).not.toHaveBeenCalled();
+    expect(r.audio.start).not.toHaveBeenCalled();
+  });
+
+  it('works through the text-capture envelope too', () => {
+    const r = liveNote();
+    r.fire({ textEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+    r.fire({ textEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+    expect(r.holds).toEqual(['start', 'end']);
+    expect(r.sent).toEqual([]);
+  });
+
+  it('ends the hold when the OS contextual menu claims the gesture', () => {
+    const r = liveNote();
+    r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+    r.fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_ENTER_EVENT } });
+    expect(r.holds).toEqual(['start', 'end']);
+    expect(r.lifecycle.onContextualMenu).toHaveBeenCalledWith(true);
+    // The overlay's own release is not a second end.
+    r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+    expect(r.holds).toEqual(['start', 'end']);
+  });
+
+  it('elsewhere a long press is still the mic', () => {
+    const r = make();
+    Object.assign(r.menu, { isQuickNotesLive: vi.fn(() => false), sendQuickNotesHold: vi.fn() });
+    r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+    r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+    expect(r.audio.stop).toHaveBeenCalledOnce();
+  });
+});

@@ -15,7 +15,7 @@ import { PANEL_TAB_TITLES, panelTabForTitle, pomodoroBlockLabel, pomodoroRemaini
  * on one of them reaches the Mac as its row zero (the Navigation control,
  * a reader's "tap: continue" / "tap: confirm"). */
 const TEXT_PAGE_TITLES = new Set([
-  'MESSAGES · CONVERSATION', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
+  'MESSAGES · CONVERSATION', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL', 'QUICKNOTES · LIVE',
   'NOTIFICATIONS · DETAIL', 'NAVIGATION', 'NEWS · ARTICLE', 'SEARCH · RESULT',
   'MESSAGES · REVIEW', 'MESSAGES · COMPOSE', 'MESSAGES · SETUP', 'MESSAGES · ACCESS',
   'MESSAGES · RETRY', 'MESSAGES · SENT', 'MESSAGES · FAILED', 'MESSAGES · CANCELLED',
@@ -65,6 +65,14 @@ export function usesFirmwareList(
 function isImageMonth(title: string, grid: readonly unknown[] | undefined, selectable: boolean): boolean {
   return parsePlanningMonthTitle(title) !== undefined && grid?.length === 42 && selectable;
 }
+
+/** An open QuickNote (FEAT-002): its words as they are heard, a text page
+ * the Mac repaints in place. A tap pauses or resumes it, 2x tap asks what
+ * to do with it, and a long press held on it talks into it. */
+const LIVE_NOTE_TITLE = 'QUICKNOTES · LIVE';
+/** The rows 2x tap leaves through to the open note: the finish question and
+ * the discard confirmation. 2x tap on them returns to the note. */
+const NOTE_QUESTION_TITLES = new Set(['QUICKNOTES · DISCARD?', 'QUICKNOTES · FINISH']);
 
 /** The QuickNotes reader pages: a note the Mac pages, shown as a text page. */
 function isQuickNotesReaderTitle(title: string): boolean {
@@ -728,6 +736,21 @@ export class CapabilityMenu {
     const matches = normalized === this.pendingTitle
       || normalized.startsWith(`${this.pendingTitle} ·`);
     if (!matches) return false;
+    if (normalized === LIVE_NOTE_TITLE && this.view === 'data'
+      && this.dataSurface?.title.trim().toUpperCase() === LIVE_NOTE_TITLE
+      && await this.hud.updateLiveTextPage?.(items, { title, hint, selectable })) {
+      // The same live note, newer words (or its tap's answer): updated in
+      // place, never rebuilt.
+      if (this.view === 'data' && this.pendingRequestId === requestId && this.dataSurface) {
+        this.clearResponseTimeout();
+        this.dataItemCount = items.length;
+        this.dataRowsSelectable = selectable;
+        this.dataSelectionPending = false;
+        this.dataHint = hint;
+        this.dataSurface = { ...this.dataSurface, items: [...items], hint, selectable };
+      }
+      return true;
+    }
     if (this.pendingTitle !== 'BRAINSTORM') this.retireBrainstormSurface();
     const messagesState = this.pendingTitle === 'MESSAGES'
       ? resolveMessagesViewState(title, selectable)
@@ -814,8 +837,10 @@ export class CapabilityMenu {
     const firmwareList = !this.dashboard && !nativeTextPage;
     // The Mac answered a swipe up with its previous page: open on its last
     // local page, as the raster prose pager did.
-    const textPageFromEnd = nativeTextPage && this.messagePageDirection < 0
-      && this.dataPagePending && this.dataSurface?.title === title;
+    const textPageFromEnd = nativeTextPage && ((this.messagePageDirection < 0
+      && this.dataPagePending && this.dataSurface?.title === title)
+      // A live note's newest words are its last page.
+      || normalized === LIVE_NOTE_TITLE);
     const refreshSelection = normalized === 'NOTIFICATIONS'
       && this.notificationRefreshSelection?.requestId === requestId
       ? this.notificationRefreshSelection.index : undefined;
@@ -1090,7 +1115,29 @@ export class CapabilityMenu {
     } else if (
       this.view === 'data'
       && this.pendingTitle === 'QUICKNOTES'
-      && this.dataSurface?.title.trim().toUpperCase() === 'QUICKNOTES · DISCARD?'
+      && this.dataSurface?.title.trim().toUpperCase() === LIVE_NOTE_TITLE
+      && this.pendingRequestId
+    ) {
+      // 2x tap on an open note asks what to do with it (the Mac draws Save /
+      // Keep / Discard); it never leaves a recording running unseen.
+      if (this.dataSelectionPending) return;
+      this.dataReturn = undefined;
+      this.dataGrandparent = undefined;
+      this.dataRowsSelectable = false;
+      this.dataSelectionPending = true;
+      this.link.send({
+        kind: 'input',
+        event: {
+          containerName: 'capability-lifecycle',
+          selectedName: 'quicknotes-finish',
+          requestId: this.pendingRequestId,
+        },
+      });
+      this.armResponseTimeout('QUICKNOTES', this.pendingRequestId);
+    } else if (
+      this.view === 'data'
+      && this.pendingTitle === 'QUICKNOTES'
+      && NOTE_QUESTION_TITLES.has(this.dataSurface?.title.trim().toUpperCase() ?? '')
       && this.pendingRequestId
     ) {
       if (this.dataSelectionPending) return;
@@ -1737,6 +1784,28 @@ export class CapabilityMenu {
     this.armResponseTimeout('QUICKNOTES', this.pendingRequestId);
   }
 
+  /** An open QuickNote's live page is on the glass (FEAT-002): a long press
+   * there talks into the note instead of toggling the microphone. */
+  isQuickNotesLive(): boolean {
+    return this.view === 'data' && this.pendingTitle === 'QUICKNOTES'
+      && this.pendingRequestId !== undefined
+      && this.dataSurface?.title.trim().toUpperCase() === LIVE_NOTE_TITLE;
+  }
+
+  /** The held touchpad on the live page: press starts listening, release
+   * ends the paragraph. The Mac owns the note; only the gesture travels. */
+  sendQuickNotesHold(phase: 'start' | 'end'): void {
+    if (!this.pendingRequestId) return;
+    this.link.send({
+      kind: 'input',
+      event: {
+        containerName: 'capability-lifecycle',
+        selectedName: phase === 'start' ? 'quicknotes-hold-start' : 'quicknotes-hold-end',
+        requestId: this.pendingRequestId,
+      },
+    });
+  }
+
   private isQuickNotesReader(): boolean {
     return this.view === 'data' && this.pendingTitle === 'QUICKNOTES'
       && this.dataSurface !== undefined
@@ -2047,6 +2116,7 @@ export class CapabilityMenu {
       this.pendingTitle === 'QUICKNOTES'
       && [current, next].some((title) => [
         'QUICKNOTES · RECORDING', 'QUICKNOTES · PAUSED', 'QUICKNOTES · DISCARD?',
+        LIVE_NOTE_TITLE, 'QUICKNOTES · FINISH',
       ].includes(title))
     ) {
       this.dataReturn = undefined;

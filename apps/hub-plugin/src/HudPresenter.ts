@@ -246,7 +246,12 @@ let evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '0') =
  * the firmware text pages in place (one upgrade per swipe) and draws every
  * stroke at full brightness, where the 55% image's thin strokes look faded
  * (the wearer, 2026-10-07). */
-const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE']);
+const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', 'QUICKNOTES · LIVE']);
+/** Text pages laid out as speakers' turns ("Them: …" with its wrapped rows
+ * under the words): a Messages thread, and an open QuickNote's live words. */
+function speakerPaged(title: string): boolean {
+  return title.startsWith('MESSAGES') || title.trim().toUpperCase() === 'QUICKNOTES · LIVE';
+}
 /** Home's left column as images in Even's font (HomeImages.ts);
  * `VITE_HOME_IMAGES=0` keeps it firmware text. */
 const homeImagesEnabled = String(import.meta.env.VITE_HOME_IMAGES ?? '1') !== '0';
@@ -2127,7 +2132,7 @@ export class HudPresenter {
     // the page's own width: a slice per line left ragged short lines.
     // A Messages page stands each message's wrapped rows under its words,
     // after the sender's name (the wearer's ruling, 2026-10-07).
-    const paginate = surface.options.title.startsWith('MESSAGES') ? paginateHanging : paginateMeasured;
+    const paginate = speakerPaged(surface.options.title) ? paginateHanging : paginateMeasured;
     const pages = paginate(
       readerParagraphs(surface.items).join('\n'), READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity,
     );
@@ -2164,6 +2169,42 @@ export class HudPresenter {
     this.nativeTextPage = { source, pages, page, body, hint };
     this.recordPageTransition(from, 'list', 'show_list', 'success');
     return true;
+  }
+
+  /** An open QuickNote's live page, newer words in place (FEAT-002): two
+   * `textContainerUpgrade`s (the words, the footer) instead of a rebuilt
+   * page. Only while that same page is the firmware text page on the glass;
+   * false otherwise, and the caller draws it as a new page. The newest
+   * words are the last page, so that is the page shown. */
+  async updateLiveTextPage(
+    items: string[], options: { title: string; hint?: string; selectable?: boolean },
+  ): Promise<boolean> {
+    const state = this.nativeTextPage;
+    const surface = this.surface;
+    if (this.confirmation || this.promptQuestion || !state || this.pageOwner !== 'text-page-native'
+      || surface.kind !== 'list' || surface.options.title !== options.title
+      || !this.usesNativeTextPage(surface.options)) return false;
+    const displayCurrent = this.captureDisplayGuard();
+    const pages = paginateHanging(
+      readerParagraphs(items).join('\n'), READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity,
+    );
+    const page = Math.max(0, pages.length - 1);
+    const body = pages[page] ?? ' ';
+    const macHint = options.hint ?? '';
+    const hint = textPageHint(page, pages.length, macHint);
+    const previous = { body: state.body, hint: state.hint };
+    this.surface = { ...surface, items: [...items], options: { ...surface.options, hint: macHint } };
+    this.nativeTextPage = { source: items.join('\n'), pages, page, body, hint };
+    this.streams.set(ContainerId.Hint, macHint);
+    let ok = true;
+    if (previous.body !== body) {
+      ok = await this.upgradeNativeText(ContainerId.Main, 'main', body, previous.body) && ok;
+      if (!displayCurrent()) return false;
+    }
+    if (previous.hint !== hint) {
+      ok = await this.upgradeNativeText(ContainerId.Hint, 'hint', hint, previous.hint) && ok;
+    }
+    return ok && displayCurrent();
   }
 
   /** Whether the firmware text page shows its last local page, where a

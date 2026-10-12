@@ -1049,6 +1049,77 @@ describe('CapabilityMenu', () => {
     expect(menu.isOpen()).toBe(false); // The abandoned discard dialog is not in Back history.
   });
 
+  it('an open QuickNote updates its live page in place; 2x tap asks how to finish (FEAT-002)', async () => {
+    const { menu, hud, lists, listOptions, sent } = rig();
+    const updates: Array<{ items: string[]; hint?: string }> = [];
+    Object.assign(hud, {
+      updateLiveTextPage: vi.fn(async (items: string[], options: { hint?: string }) => {
+        updates.push({ items, hint: options.hint });
+        return true;
+      }),
+    });
+    const requestId = 'voice-notes-live';
+    await menu.presentList('QUICKNOTES · LIVE', ['Listening — your words appear here.'], requestId,
+      true, '● REC 00:00 · tap: pause · left x2: finish');
+    // Drawn once as a firmware text page that opens on its newest words.
+    expect(listOptions[listOptions.length - 1]).toMatchObject({
+      title: 'QUICKNOTES · LIVE', nativeTextPage: true, nativeTextPageFromEnd: true,
+    });
+    expect(menu.isQuickNotesLive()).toBe(true);
+    const paints = lists.length;
+
+    await menu.presentList('QUICKNOTES · LIVE', ['We ship Friday.'], requestId,
+      true, '● REC 00:05 · tap: pause · left x2: finish');
+    expect(lists).toHaveLength(paints); // newer words never rebuild the page
+    expect(updates).toEqual([
+      { items: ['We ship Friday.'], hint: '● REC 00:05 · tap: pause · left x2: finish' },
+    ]);
+
+    // A tap is the note's own toggle: row zero of the live page.
+    menu.handleClick();
+    expect(sent[sent.length - 1]).toMatchObject({ event: {
+      containerName: 'capdata', selectedName: 'QUICKNOTES', selectedIndex: 0, requestId,
+    } });
+    await menu.presentList('QUICKNOTES · LIVE', ['We ship Friday.'], requestId,
+      true, '00:05 · hold: talk · tap: record · left x2: finish');
+    expect(lists).toHaveLength(paints);
+    const taps = sent.length;
+    menu.handleClick(); // the answer re-enabled the tap
+    expect(sent).toHaveLength(taps + 1);
+    await menu.presentList('QUICKNOTES · LIVE', ['We ship Friday.'], requestId,
+      true, '● REC 00:06 · tap: pause · left x2: finish');
+
+    await menu.toggle();
+    expect(sent[sent.length - 1]).toEqual({ kind: 'input', event: {
+      containerName: 'capability-lifecycle', selectedName: 'quicknotes-finish', requestId,
+    } });
+    expect(menu.isOpen()).toBe(true); // 2x tap never leaves a recording unseen
+    await menu.presentList('QUICKNOTES · FINISH', ['Save note', 'Keep recording', 'Discard note'],
+      requestId, true);
+    expect(menu.isQuickNotesLive()).toBe(false);
+    await menu.toggle();
+    expect(sent[sent.length - 1]).toEqual({ kind: 'input', event: {
+      containerName: 'capability-lifecycle', selectedName: 'quicknotes-back', requestId,
+    } });
+  });
+
+  it('turns a held touchpad on the live note into hold events', async () => {
+    const { menu, sent } = rig();
+    const requestId = 'voice-notes-hold';
+    await menu.presentList('QUICKNOTES · LIVE', ['Hold the touchpad and speak.'], requestId,
+      true, '00:00 · hold: talk · tap: record · left x2: finish');
+    menu.sendQuickNotesHold('start');
+    menu.sendQuickNotesHold('end');
+    expect(sent.slice(-2)).toEqual([
+      { kind: 'input', event: {
+        containerName: 'capability-lifecycle', selectedName: 'quicknotes-hold-start', requestId,
+      } },
+      { kind: 'input', event: {
+        containerName: 'capability-lifecycle', selectedName: 'quicknotes-hold-end', requestId,
+      } },
+    ]);
+  });
+
   it('leaves QuickNotes retry after the Mac keep response is lost', async () => {
     vi.useFakeTimers();
     try {

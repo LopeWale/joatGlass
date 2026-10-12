@@ -120,6 +120,8 @@ export class EventRouter {
   private readonly gestures = new GesturePolicy();
   private backPending = false;
   private pendingMicLongPress = false;
+  /** A long press is talking into an open QuickNote (FEAT-002). */
+  private pendingNoteHold = false;
   private contextualMenuOverlayOpen = false;
 
   constructor(
@@ -162,6 +164,12 @@ export class EventRouter {
    */
   private handleLongPress(eventType: number | undefined, via: string): boolean {
     const type = eventType ?? 0;
+    if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT && this.pendingNoteHold) {
+      // Letting go ends the paragraph; the mic was never the gesture's.
+      this.pendingMicLongPress = false;
+      this.endNoteHold(via);
+      return true;
+    }
     if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT) {
       const toggleMic = this.pendingMicLongPress && !this.contextualMenuOverlayOpen;
       this.pendingMicLongPress = false;
@@ -191,8 +199,29 @@ export class EventRouter {
       return true;
     }
     if (type !== OsEventTypeList.LONG_PRESS_EVENT) return false;
+    if (!this.contextualMenuOverlayOpen && !this.promptedInput?.isActive()
+      && this.menu.isQuickNotesLive?.()) {
+      // The third carve-out (FEAT-002, the wearer's Even QuickNote): on an
+      // open note the held touchpad talks into it, from the PRESS — the
+      // words must not wait for the release. `pendingMicLongPress` still
+      // lets the OS contextual menu (tap, then long press) claim the
+      // gesture, which then ends the hold.
+      this.pendingNoteHold = true;
+      this.pendingMicLongPress = true;
+      console.info('[EventRouter] long-press on a live note — listening');
+      this.menu.sendQuickNotesHold?.('start');
+      return true;
+    }
     this.pendingMicLongPress = !this.contextualMenuOverlayOpen;
     return true;
+  }
+
+  /** End a held note paragraph exactly once. */
+  private endNoteHold(via: string): void {
+    if (!this.pendingNoteHold) return;
+    this.pendingNoteHold = false;
+    console.info(`[EventRouter] long-press released via ${via} — note paragraph done`);
+    this.menu.sendQuickNotesHold?.('end');
   }
 
   /** A decision gate that offers retry (a Messages draft) takes the 2x tap
@@ -541,6 +570,9 @@ export class EventRouter {
         if (this.pendingMicLongPress) {
           // OS contextual overlay, not an app foreground transition. Do not
           // pause location or repaint underneath the still-mounted HUD.
+          // A note hold the overlay interrupted ends here: its release
+          // belongs to the menu now.
+          this.endNoteHold('contextual-menu');
           this.pendingMicLongPress = false;
           this.contextualMenuOverlayOpen = true;
           this.lifecycle?.onContextualMenu?.(true);

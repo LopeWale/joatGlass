@@ -18,8 +18,8 @@ Checkbox state is the position. Design: `technical-design.md` in this folder.
 - [x] **T4** Capability router pages: list rows, LIVE (throttled repaint),
   FINISH, hold events, Apple Notes row, detail tap → reminders, `__main__`
   wiring. Done-when: `test_capabilities.py` QuickNotes cases green. ✔ 2026-10-11.
-- [ ] **T5** Plugin: LIVE in-place text upgrade, double-tap → finish,
-  long press → hold events. Done-when: vitest + `tsc` green.
+- [x] **T5** Plugin: LIVE in-place text upgrade, double-tap → finish,
+  long press → hold events. Done-when: vitest + `tsc` green. ✔ 2026-10-11 (1190 tests).
 - [ ] **T6** Simulator: AC1 + AC2 with synthetic audio; full Mac + plugin
   suites; Changelog; build 0.1.122.
 - [ ] **T7** Hardware (wearer): AC1–AC5 on the G2.
