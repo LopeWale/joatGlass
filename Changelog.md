@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-12 — A tapped reply is no longer thrown away for one stray `other` speaker frame
+
+The wearer: "the messaging function for tap to speak still does not work? It shows the little animation like it's listening, but doesn't show me what I'm saying and gets stuck a lot."
+
+- **What the log said** (`scripts/reply_trace.py --since "2026-10-12 07:49"`): two tapped replies on the glasses, both transcribed (37 and 88 chars — the second after a tap on the box, `prompt commit by tap`), both then `prompted answer not taken owner=messages reason=other_speaker`. The words were heard; the Mac refused them.
+- **Cause.** `PromptedInputDispatcher.dispatch` refused a prompted answer if ANY frame of the utterance carried the host's `other` speaker tag, and `_maybe_publish_partial` suppressed the live words on the box by the same test. The Even app's speaker role is "an app algorithm result, not a firmware identity assertion" (SDK 0.0.16 `AudioEvent.speakerRole`); on the glasses it tags a frame or two of the wearer's own reply `other`. The utterances had reached Whisper at all only because the ambient gate already used the sane rule (`other` present and `self` absent).
+- **Fix.** The prompt path uses the ambient rule: another speaker's words are the ones the host named `other` and never `self`. A reply the wearer tapped for, with `self` frames in it, is shown as it is heard and taken at the end; the review box is still the gate before anything is sent.
+- Tests: `test_prompted_input.py` (`{self, other, unknown}` is now taken; `{other}` and `{unknown, other}` still refused), `test_orchestrator.py` (a stray `other` frame in a `self` reply keeps the words on the box); prompted/messages suites 235 passed, mypy clean. **Mac only: restart JOAT.** Not yet verified on physical glasses.
+- Background state: already in place (`BackgroundState.ts` implements `__getStateSnapshot`/`__restoreState`; the SDK still exports no helpers in 0.0.16), not a factor here.
+
 ## 2026-10-12 — Build JOAT 0.1.124
 
 - Packed from `d10a3fe` (clean tree) with `scripts/pack.sh`, the `com.example.joat` manifest and the MacBook-first, Mac Mini-second private WSS candidates (2 validated). Version guard: 0.1.124 above the last recorded build (0.1.123); app.json, package.json and package-lock.json all 0.1.124. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1195 tests passed, typecheck clean.

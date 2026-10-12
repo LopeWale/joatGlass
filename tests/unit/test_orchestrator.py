@@ -2124,6 +2124,36 @@ class TestPromptPartials:
             await drain()
         assert not any(isinstance(m, PromptPartial) for m in transport.sent)
 
+    async def test_a_stray_other_frame_keeps_the_wearers_words_on_the_box(self) -> None:
+        """The wearer's own reply with one frame the host tagged `other`
+        (the glasses do this, 2026-10-12): the words stay on the box and the
+        final answer is taken. Only `other` with no `self` is a bystander."""
+        dispatcher, prompt_id = self._prompt()
+        transport = FakeTransport()
+        orchestrator = VoiceOrchestrator(
+            transport, PartialEngine(), vad=TEST_VAD(), prompted_input=dispatcher, wake_words=("joat",),
+        )
+        seq = 0
+        for _ in range(6):
+            orchestrator._ingest_audio(
+                LOUD, seq, source="glasses", speaker="self", connection_generation="g1", audio_epoch=prompt_id,
+            )
+            seq += 1
+            await drain()
+        orchestrator._ingest_audio(
+            LOUD, seq, source="glasses", speaker="other", connection_generation="g1", audio_epoch=prompt_id,
+        )
+        seq += 1
+        await drain()
+        for _ in range(6):
+            orchestrator._ingest_audio(
+                LOUD, seq, source="glasses", speaker="self", connection_generation="g1", audio_epoch=prompt_id,
+            )
+            seq += 1
+            await drain()
+        partials = [m for m in transport.sent if isinstance(m, PromptPartial)]
+        assert [p.text for p in partials] == ["words 1", "words 2"]
+
     async def test_a_rejected_final_clears_the_words_shown(self) -> None:
         dispatcher, prompt_id = self._prompt()
         transport = FakeTransport()

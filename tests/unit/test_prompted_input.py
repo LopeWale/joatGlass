@@ -228,7 +228,6 @@ class TestPromptedInputDispatcher:
             {"first_ingress_ordinal": -1}, {"first_ingress_ordinal": True},
             {"last_ingress_ordinal": 10},
             {"speaker_roles": frozenset({"other"})},
-            {"speaker_roles": frozenset({"self", "other"})},
             {"speaker_roles": frozenset({"unknown", "other"})},
             {"mixed": True},
         ],
@@ -246,6 +245,19 @@ class TestPromptedInputDispatcher:
         assert fixture.received == []
         assert await fixture.dispatcher.dispatch(Transcript("Fresh answer", True), receipt(ticket)) is True
         assert fixture.received == ["Fresh answer"]
+
+    async def test_a_stray_other_frame_does_not_refuse_the_wearers_own_answer(self) -> None:
+        """The host's speaker tag is an app heuristic, not identity. On the
+        glasses it marks a frame or two of the wearer's reply `other`; the
+        gate used to refuse the whole answer for it (2026-10-12), after
+        Whisper had it, and the box listened forever. `self` present wins."""
+        fixture = PromptFixture()
+        ticket = fixture.begin()
+        assert fixture.acknowledge(ticket) is True
+        mostly_self = replace(receipt(ticket), speaker_roles=frozenset({"self", "other", "unknown"}))
+
+        assert await fixture.dispatcher.dispatch(Transcript("On my way", True), mostly_self) is True
+        assert fixture.received == ["On my way"]
 
     @pytest.mark.parametrize(
         "roles", [frozenset(), frozenset({"self"}), frozenset({"unknown"}), frozenset({"self", "unknown"})],

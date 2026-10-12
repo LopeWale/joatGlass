@@ -190,10 +190,22 @@ class PromptedInputDispatcher:
             or not self._valid_ordinal(provenance.last_ingress_ordinal)
         ):
             return refused("no_ordinals")
-        # SDK speaker attribution is optional and is not biometric identity.
-        # Unknown/absent attribution stays eligible; any explicit other-speaker
-        # frame disqualifies this complete utterance without spending the lease.
-        if any(not isinstance(role, str) or role.casefold() == "other" for role in provenance.speaker_roles):
+        # SDK speaker attribution is optional and is not biometric identity
+        # ("App algorithm result; this is not a firmware identity assertion",
+        # SDK 0.0.16). Unknown/absent attribution stays eligible. The gate
+        # used to refuse on ANY explicit other-speaker frame: on the glasses
+        # the host tags a stray frame of the wearer's own reply `other`
+        # often enough that every tapped reply was thrown away after Whisper
+        # had it (2026-10-12, "reason=other_speaker" twice in a row; the
+        # wearer saw a box that listened and never filled). Same rule as the
+        # ambient path now: another speaker's words are the ones the host
+        # named `other` and never `self`. The wearer reviews before anything
+        # is sent.
+        roles = provenance.speaker_roles
+        if any(not isinstance(role, str) for role in roles):
+            return refused("other_speaker")
+        lowered = {role.casefold() for role in roles}
+        if "other" in lowered and "self" not in lowered:
             return refused("other_speaker")
         first, last = provenance.first_ingress_ordinal, provenance.last_ingress_ordinal
         assert first is not None and last is not None

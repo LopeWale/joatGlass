@@ -706,7 +706,10 @@ class VoiceOrchestrator:
             or provenance.source != ticket.source
             or provenance.connection_generation != ticket.connection_generation
             or provenance.audio_epoch != ticket.prompt_id
-            or any(role == "other" for role in provenance.speaker_roles)
+            # The dispatcher's rule, not "any other frame": the host tags a
+            # stray frame of the wearer's own reply `other` (2026-10-12), and
+            # that used to blank the box for the rest of the answer.
+            or ("other" in provenance.speaker_roles and "self" not in provenance.speaker_roles)
         ):
             return
         speech = self._vad.speech_so_far()
