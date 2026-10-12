@@ -181,11 +181,12 @@ describe('HudPresenter Messages reply in the conversation card', () => {
     expect(page?.textObject?.map((c) => c.containerName)).toEqual(CARD);
     expect(text(page, 'joat-turns')).toContain('What do you want to say back to Adele?');
     // JOAT's name in front of its question, then the working glyph on the
-    // wearer's row until their words come. No gesture footer in the box.
+    // wearer's row until their words come. The box's footer names the
+    // listening state's gestures (the wearer's ruling, 2026-10-11).
     const wearer = text(page, 'wearer-turns')?.split('\n') ?? [];
     expect(wearer[0]).toBe('JOAT:');
     expect(wearer[1]).toMatch(/^You: +[■□]/u);
-    expect(text(page, 'generation')?.trim()).toBe('');
+    expect(text(page, 'generation')?.trim()).toBe('tap: review · 2x tap: cancel');
   });
 
   it('keeps an ordinary question on the plain question page', async () => {
@@ -198,7 +199,7 @@ describe('HudPresenter Messages reply in the conversation card', () => {
   it.each([
     ['plain', 'Send to Adele? “On my way.”'],
     ['reviewed', 'Send to Adele? (reviewed) “On my way.”'],
-  ])('draws a %s messages confirmation as the question, then the wearer\'s words, no gestures', async (_form, prompt) => {
+  ])('draws a %s messages confirmation as the question, then the wearer\'s words, then the review gestures', async (_form, prompt) => {
     const r = rig();
     expect(await r.hud.showConfirmation(prompt, 'reply-consent', 'messages')).toBe(true);
     const gate = r.rebuilds[r.rebuilds.length - 1];
@@ -208,8 +209,8 @@ describe('HudPresenter Messages reply in the conversation card', () => {
     expect(text(gate, 'joat-turns')).not.toContain('On my way.');
     expect(text(gate, 'wearer-turns')).toContain('On my way.');
     expect(text(gate, 'wearer-turns')).not.toContain('(reviewed)');
-    // No gesture footer in the box: the wearer knows tap sends.
-    expect(text(gate, 'generation')?.trim()).toBe('');
+    // The footer names the review state's gestures: tap confirms, 2x tap retries.
+    expect(text(gate, 'generation')?.trim()).toBe('tap: confirm · 2x tap: retry');
   });
 
   it('keeps the plain decision page for a non-messages confirmation and an unparsed messages one', async () => {

@@ -33,6 +33,7 @@ import urllib.request
 
 from joat.ble.hub_gateway import HubGatewayTransport
 from joat.channels.cards import CardLog
+from joat.channels.message_sender import MessageSendError
 from joat.core.interfaces import MessageSender, Transcript
 from joat.core.protocol import PromptPartial
 from joat.services.capabilities import CapabilityRouter
@@ -52,10 +53,14 @@ WORDS = "On my way, see you at four thirty."
 class RecordingSender(MessageSender):
     """The last boundary before Messages.app, replaced: nothing is sent."""
 
-    def __init__(self) -> None:
+    def __init__(self, fail: bool = False) -> None:
         self.sent: list[int] = []
+        self.fail = fail
 
     async def send(self, recipient: str, body: str) -> None:
+        if self.fail:
+            log.info("stage=recording-sender-refused chars=%d (nothing sent)", len(body))
+            raise MessageSendError("simulator: Messages refused it", possible_external_commit=False)
         self.sent.append(len(body))
         log.info("stage=recording-sender-reached chars=%d (nothing sent)", len(body))
 
@@ -68,7 +73,7 @@ def _input(base: str, action: str) -> None:
     urllib.request.urlopen(request, timeout=5).read()
 
 
-async def run(port: int, *, auto: str | None, words: str) -> None:
+async def run(port: int, *, auto: str | None, words: str, fail: bool, flow: str) -> None:
     connected = asyncio.Event()
     with tempfile.TemporaryDirectory(prefix="joat-voice-reply-sim-") as root:
         base = Path(root)
@@ -76,7 +81,7 @@ async def run(port: int, *, auto: str | None, words: str) -> None:
         gateway = HubGatewayTransport(host="127.0.0.1", port=port)
         gateway.on_hello(lambda _hello: connected.set())
         hud = HudWriter(gateway)
-        sender = RecordingSender()
+        sender = RecordingSender(fail=fail)
         fence = {"n": 0}
 
         def fence_audio() -> int:
@@ -86,6 +91,8 @@ async def run(port: int, *, auto: str | None, words: str) -> None:
         message_ui: MessageUIController | None = None
         replies = MessageReplyController(
             sender, gateway.request_confirmation,
+            contact_search=lambda query: [("Simulator Contact", "fixture-recipient")]
+            if query.casefold() == "simulator contact" else [],
             begin_reply=lambda: message_ui.begin_reply() if message_ui else asyncio.sleep(0, ""),
             selection_on_glass=lambda: bool(message_ui and message_ui.conversation_on_glass()),
             on_status=lambda status: message_ui.on_status(status) if message_ui else None,
@@ -163,7 +170,13 @@ async def run(port: int, *, auto: str | None, words: str) -> None:
                     await asyncio.to_thread(_input, auto, action)
                     await asyncio.sleep(wait)
                 await asyncio.sleep(2)
-                for action, wait in (("context_menu", 2.5), ("click", 3), ("down", 1.5), ("click", 3), ("click", 2)):
+                # reply: Dele (10 messages); compose: row 0; the thread's tap replies.
+                gestures = (
+                    (("context_menu", 2.5), ("click", 3), ("click", 2.5))
+                    if flow == "compose"
+                    else (("context_menu", 2.5), ("click", 3), ("down", 1.0), ("down", 1.0), ("click", 3), ("click", 2))
+                )
+                for action, wait in gestures:
                     await step(action, wait)
                 log.info("stage=auto-reply-tapped — listening box up; words arrive; review follows")
             while True:
@@ -181,9 +194,11 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=18791)
     parser.add_argument("--auto", metavar="AUTOMATION_BASE", help="e.g. http://127.0.0.1:9901: drive the gestures up to the listening box")
     parser.add_argument("--words", default=WORDS)
+    parser.add_argument("--fail", action="store_true", help="the sender refuses: the thread should show ×")
+    parser.add_argument("--flow", choices=("reply", "compose"), default="reply")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
-    asyncio.run(run(args.port, auto=args.auto, words=args.words))
+    asyncio.run(run(args.port, auto=args.auto, words=args.words, fail=args.fail, flow=args.flow))
 
 
 if __name__ == "__main__":

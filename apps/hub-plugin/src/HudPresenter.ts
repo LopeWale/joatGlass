@@ -14,6 +14,7 @@ import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
 import {
   AssistantConversationSurface,
   replyDraftView,
+  REPLY_REVIEW_HINT,
   validAssistantConversationSnapshot,
   type ConversationExitResult,
 } from './AssistantConversationSurface';
@@ -3196,7 +3197,7 @@ export class HudPresenter {
       ? overlayConversation(this.layouts.assistantConversationLayout(replyDraftView([
         { role: 'assistant', text: `What do you want to say back to ${draft.recipient}?` },
         { role: 'user', text: draft.body },
-      ]), header), this.conversationUnderlay())
+      ], undefined, REPLY_REVIEW_HINT), header), this.conversationUnderlay())
       : this.layouts.confirmationLayout(current.prompt, header, current.purpose);
     const ok = this.visual
       ? await this.replaceNativePage(layout, 'confirmation-native')

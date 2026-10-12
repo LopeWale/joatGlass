@@ -4,6 +4,7 @@ import {
 } from '@evenrealities/even_hub_sdk';
 import { getTextWidth } from '@evenrealities/pretext';
 import type { BridgeClient } from './BridgeClient';
+import { GesturePolicy } from './GesturePolicy';
 import {
   ASSISTANT_CONVERSATION_GEOMETRY,
   AssistantConversationContainerId,
@@ -114,6 +115,10 @@ interface ConversationViewportOptions {
   /** The wearer is speaking into the card (a Messages reply): the working
    * glyph, at this frame, stands on their row until their words arrive. */
   listeningFrame?: number;
+  /** The box's gestures for its current state, inside its border (a
+   * Messages draft: listening or review). The wearer's ruling, 2026-10-11:
+   * the template, on the box, for the step it is on. */
+  footerHint?: string;
   textWidth?: number;
   measureTextWidth?: TextMeasure;
 }
@@ -278,10 +283,12 @@ export function conversationViewport(
     })
     .join('\n');
   const geometry = ASSISTANT_CONVERSATION_GEOMETRY;
-  // The footer holds only the continuation question, inside the box, which
-  // grows a row to hold it. Never gestures; the working indicator is not a
-  // footer either: it stands on the row the words will take (above).
-  const sentence = continuePrompt ? CONTINUE_COPY : undefined;
+  // The footer holds the continuation question, or a draft's gestures for
+  // its state, inside the box, which grows a row to hold it. The working
+  // indicator is not a footer: it stands on the row the words will take.
+  const sentence = continuePrompt
+    ? CONTINUE_COPY
+    : options.footerHint ? GesturePolicy.formatHint(options.footerHint) : undefined;
   const footer = sentence ?? ' ';
   const cardHeight = (
     lineCapacity * geometry.lineHeight
@@ -309,12 +316,19 @@ export function conversationViewport(
   };
 }
 
+/** The draft box's gestures, one line each for its two states. */
+export const REPLY_LISTENING_HINT = 'tap: review · 2x tap: cancel';
+export const REPLY_REVIEW_HINT = 'tap: confirm · 2x tap: retry';
+
 /** A Messages reply drafted in JOAT's own conversation card: JOAT's
  * question, then the wearer's words, or the working glyph on their row
- * while they have yet to speak (`listeningFrame`). No gesture footer.
- * Only the page is shared with the assistant conversation; the draft keeps
- * its own question and consent owners underneath. */
-export function replyDraftView(turns: AssistantConversationTurn[], listeningFrame?: number): ConversationViewport {
+ * while they have yet to speak (`listeningFrame`), and the gestures of the
+ * state it is in as its footer. Only the page is shared with the assistant
+ * conversation; the draft keeps its own question and consent owners
+ * underneath. */
+export function replyDraftView(
+  turns: AssistantConversationTurn[], listeningFrame?: number, footerHint: string = REPLY_LISTENING_HINT,
+): ConversationViewport {
   return conversationViewport({
     conversationId: 'message-reply',
     revision: 0,
@@ -322,7 +336,7 @@ export function replyDraftView(turns: AssistantConversationTurn[], listeningFram
     continueAfterMs: 120_000,
     turns,
     earlierTurnsOmitted: false,
-  }, 0, 0, false, { listeningFrame });
+  }, 0, 0, false, { listeningFrame, footerHint });
 }
 
 export function validAssistantConversationSnapshot(value: AssistantConversationSnapshot): boolean {
