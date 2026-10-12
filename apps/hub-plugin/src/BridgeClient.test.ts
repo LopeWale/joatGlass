@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ImageRawDataUpdateResult, StartUpPageCreateResult } from '@evenrealities/even_hub_sdk';
-import { BridgeClient } from './BridgeClient';
+import { BRIDGE_CALL_TIMEOUT_MS, BridgeClient } from './BridgeClient';
 import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudVisualSurface } from './HudVisualSurface';
@@ -170,4 +170,70 @@ describe('retired display ownership', () => {
       }
     },
   );
+});
+
+describe('bridge calls that never answer', () => {
+  it('fails a rebuild or a text update that has not answered in time, and distrusts the page', async () => {
+    vi.useFakeTimers();
+    try {
+      bridge({
+        rebuildPageContainer: () => new Promise<boolean>(() => {}),
+        textContainerUpgrade: () => new Promise<boolean>(() => {}),
+      });
+      const c = new BridgeClient();
+      await c.init();
+      const before = c.pageEpoch();
+      const rebuild = c.require().rebuildPageContainer({} as never);
+      const text = c.require().textContainerUpgrade({} as never);
+      await vi.advanceTimersByTimeAsync(BRIDGE_CALL_TIMEOUT_MS);
+      await expect(rebuild).resolves.toBe(false);
+      await expect(text).resolves.toBe(false);
+      // Either may still land late: no in-place update may trust the page.
+      expect(c.pageEpoch()).toBeGreaterThan(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('BridgeClient.storage', () => {
+  it('writes a value the host does not hold yet, and never the same value twice', async () => {
+    const set = vi.fn(async () => true);
+    bridge({ getLocalStorage: async () => 'wss://mac-a/glasses', setLocalStorage: set });
+    const c = new BridgeClient();
+    await c.init();
+    expect(await c.storage.get('joat.brain')).toBe('wss://mac-a/glasses');
+    // Every reconnect wrote the preferred Mac again; the host holds it.
+    expect(await c.storage.set('joat.brain', 'wss://mac-a/glasses')).toBe(true);
+    expect(set).not.toHaveBeenCalled();
+    expect(await c.storage.set('joat.brain', 'wss://mac-b/glasses')).toBe(true);
+    expect(await c.storage.set('joat.brain', 'wss://mac-b/glasses')).toBe(true);
+    expect(set).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes one key after another, and writes a failed value again next time', async () => {
+    const order: string[] = [];
+    let release: (() => void) | undefined;
+    let fail = true;
+    bridge({
+      setLocalStorage: (key: string) => new Promise<boolean>((resolve) => {
+        order.push(`start ${key}`);
+        const finish = () => { order.push(`end ${key}`); resolve(!(fail && key === 'b')); };
+        if (key === 'a') release = finish; else finish();
+      }),
+    });
+    const c = new BridgeClient();
+    await c.init();
+    const a = c.storage.set('a', '1');
+    const b = c.storage.set('b', '2');
+    await Promise.resolve();
+    expect(order).toEqual(['start a']);
+    release?.();
+    expect(await a).toBe(true);
+    expect(await b).toBe(false);
+    expect(order).toEqual(['start a', 'end a', 'start b', 'end b']);
+    fail = false;
+    expect(await c.storage.set('b', '2')).toBe(true);
+    expect(order).toHaveLength(6);
+  });
 });

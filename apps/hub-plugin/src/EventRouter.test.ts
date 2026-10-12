@@ -24,7 +24,7 @@ function make(
   // expanded but excluded from the carve-out, so it keeps the mic.
   panelRefreshable = panelExpanded,
   promptedInput?: { isActive(): boolean; cancel(reason?: string): void },
-  confirmationRetry?: () => boolean,
+  confirmationRetry?: () => (() => boolean) | undefined,
 ) {
   let dispatch: (e: EvenHubEvent) => void = () => {};
   const sent: UplinkMessage[] = [];
@@ -355,9 +355,23 @@ describe('EventRouter — confirm gestures', () => {
     expect(sent).toEqual([]);
   });
 
-  const withRetry = (retry: () => boolean) => make(
-    false, undefined, false, false, false, false, false, false, false, undefined, retry,
+  // Wired as the app wires it: the router asks for the open gate's retry,
+  // which is undefined for every gate but a Messages reply draft.
+  const withRetry = (retry: (() => boolean) | undefined) => make(
+    false, undefined, false, false, false, false, false, false, false, undefined, () => retry,
   );
+
+  it.each([
+    ['2x tap', OsEventTypeList.DOUBLE_CLICK_EVENT],
+    ['swipe up', OsEventTypeList.SCROLL_TOP_EVENT],
+    ['swipe down', OsEventTypeList.SCROLL_BOTTOM_EVENT],
+  ] as const)('a %s refuses a gate that offers no retry, wired as the app wires it', (_name, eventType) => {
+    const { fire, imu } = withRetry(undefined);
+    imu.isPending.mockReturnValue(true);
+    fire({ textEvent: { eventType } });
+    expect(imu.declineByTap).toHaveBeenCalledTimes(1);
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
+  });
 
   it.each(['textEvent', 'sysEvent'] as const)('a 2x tap (%s) on a reply draft is retry, never the mic and never a refusal', (via) => {
     const retry = vi.fn(() => true);
@@ -575,6 +589,31 @@ describe('EventRouter — lifecycle', () => {
     fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_EXIT_EVENT } });
     expect(lifecycle.onForegroundEnter).toHaveBeenCalledTimes(1);
     expect(lifecycle.onForegroundExit).toHaveBeenCalledTimes(1);
+  });
+
+  // A press whose release never comes (JOAT went to the background mid-press,
+  // or a decision card took the release) must not make the next return to
+  // JOAT look like the glasses' menu opening: that skipped the repaint and
+  // then dropped every gesture.
+  it('a press cut short by going to the background does not swallow the return', () => {
+    const { fire, lifecycle } = make();
+    fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+    fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_EXIT_EVENT } });
+    fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_ENTER_EVENT } });
+    expect(lifecycle.onForegroundExit).toHaveBeenCalledTimes(1);
+    expect(lifecycle.onForegroundEnter).toHaveBeenCalledTimes(1);
+    expect(lifecycle.onContextualMenu).not.toHaveBeenCalled();
+  });
+
+  it('a press released while a decision card owns input does not swallow the next return', () => {
+    const { fire, lifecycle, imu } = make();
+    fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
+    imu.isPending.mockReturnValue(true);
+    fire({ textEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+    imu.isPending.mockReturnValue(false);
+    fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_ENTER_EVENT } });
+    expect(lifecycle.onForegroundEnter).toHaveBeenCalledTimes(1);
+    expect(lifecycle.onContextualMenu).not.toHaveBeenCalled();
   });
 
   it('system exit tears down', () => {

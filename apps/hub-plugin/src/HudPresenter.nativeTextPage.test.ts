@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
+import { utf8ByteLength, type RebuildPageContainer, type TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
+import { TEXT_CONTAINER_MAX_BYTES } from './FirmwareLimits';
 import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder, PROMPT_QUESTION_HINT, READER_TEXT_PAGE } from './HudPageBuilder';
 import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
@@ -28,7 +29,7 @@ setNativeOverviewForTest(false);
  * paging, the hand-back to the Mac at a local edge, and the return to the
  * retained feature on dismissal.
  */
-function rig() {
+function rig(accepts: (update: TextContainerUpgrade) => boolean = () => true) {
   const operations: string[] = [];
   const rebuilds: RebuildPageContainer[] = [];
   const upgrades: TextContainerUpgrade[] = [];
@@ -42,7 +43,7 @@ function rig() {
       textContainerUpgrade: vi.fn(async (update: TextContainerUpgrade) => {
         operations.push(`upgrade:${update.containerName ?? update.containerID}`);
         upgrades.push(update);
-        return true;
+        return accepts(update);
       }),
     }),
   } as unknown as BridgeClient;
@@ -186,6 +187,41 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     expect(r.hud.isTextPageAtEnd()).toBe(true);
     await vi.waitFor(() => expect(r.upgrades.some((u) => u.containerName === 'hint'
       && u.content === `${pages.length}/${pages.length} · tap: confirm · swipe: previous · 2x tap: back`)).toBe(true));
+  });
+
+  it('puts a Cyrillic thread page on the glass whole: no line lost to the byte cap', async () => {
+    const r = rig();
+    const sentence = 'Договорились, позвоню тебе вечером, когда закончу работу.';
+    const thread = [
+      '1/1 · Анна',
+      ...Array.from({ length: 12 }, () => `Анна: ${sentence}`),
+      'Вы: Договорились, позвоню в девять.',
+    ];
+    expect(await r.hud.showList(thread, { ...READER, title: 'MESSAGES · CONVERSATION' })).toBe(true);
+    const pages = readerPages(thread);
+    const body = text(r.rebuilds[r.rebuilds.length - 1], 'main') ?? '';
+    // The page the glass gets is the page the plugin counted, not one the
+    // byte cap cut short with "…".
+    expect(body).toBe(pages[0]);
+    expect(utf8ByteLength(body)).toBeLessThanOrEqual(TEXT_CONTAINER_MAX_BYTES);
+    expect(pages.join('\n')).toContain('Вы: Договорились, позвоню в девять.');
+  });
+
+  it('keeps the page count with the glass when a page turn is refused', async () => {
+    const r = rig((update) => update.containerName !== 'main');
+    const REVIEW = {
+      title: 'MESSAGES · REVIEW', hint: 'up previous · tap: confirm · 2x tap: back',
+      selectable: true, nativeTextPage: true, reviewTapOnLastPage: true,
+    };
+    expect(await r.hud.showList(longMessage, REVIEW)).toBe(true);
+    const pages = readerPages(longMessage);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(r.hud.scrollTextPage('down')).toBe(true);
+    await vi.waitFor(() => expect(r.upgrades.some((u) => u.containerName === 'main')).toBe(true));
+    // The words never changed, so neither do the count and the review's tap.
+    await vi.waitFor(() => expect(r.hud.isTextPageAtEnd()).toBe(false));
+    expect(r.upgrades.some((u) => u.containerName === 'hint')).toBe(false);
+    expect(r.hud.scrollTextPage('up')).toBe(false);
   });
 
   it('reads every swipe the Mac offers, and forgets an earlier page once another is on the glass', async () => {

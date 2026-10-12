@@ -138,9 +138,11 @@ export class EventRouter {
     private readonly assistantOverlay?: AssistantOverlayInputOwner,
     private readonly transcriptScroll?: (direction: 'up' | 'down') => boolean,
     private readonly promptedInput?: PromptInputOwner,
-    /** Long-press on a decision gate that offers it — a Messages reply's
-     * consent: say it again. True when the gate took the gesture. */
-    private readonly confirmationRetry?: () => boolean,
+    /** The open decision gate's retry, if it offers one — a Messages
+     * reply's consent: say it again. Undefined for every other gate, which
+     * keeps 2x tap and swipe as its refusal. The retry is true when the
+     * gate took the gesture. */
+    private readonly confirmationRetry?: () => (() => boolean) | undefined,
   ) {}
 
   attach(): void {
@@ -217,6 +219,14 @@ export class EventRouter {
     return true;
   }
 
+  /** A press that ends without its release reaching handleLongPress: the
+   * flag it left must not read the next return to JOAT as the glasses' menu
+   * opening. A held note paragraph ends with the words already said. */
+  private endPress(via: string): void {
+    this.pendingMicLongPress = false;
+    this.endNoteHold(via);
+  }
+
   /** End a held note paragraph exactly once: kept on release, dropped when
    * the press turned out to open the glasses' menu. */
   private endNoteHold(via: string, phase: 'end' | 'cancel' = 'end'): void {
@@ -233,8 +243,9 @@ export class EventRouter {
    * before, so the mic never toggles behind the decision. */
   private retryOrDeclineConfirmation(): void {
     this.pendingMicLongPress = false;
-    if (this.confirmationRetry === undefined) { this.imu.declineByTap(); return; }
-    if (this.confirmationRetry()) {
+    const retry = this.confirmationRetry?.();
+    if (retry === undefined) { this.imu.declineByTap(); return; }
+    if (retry()) {
       console.info('[EventRouter] 2x tap on a reply draft — retry');
     }
   }
@@ -277,6 +288,12 @@ export class EventRouter {
     }
 
 
+    // A decision card takes a press's release too: the press ends here.
+    if (this.imu.isPending() && [event.sysEvent, event.textEvent, event.listEvent]
+      .some((envelope) => envelope?.eventType === OsEventTypeList.LONG_PRESS_RELEASE_EVENT)) {
+      this.endPress('decision');
+    }
+
     // The decision surface owns every non-lifecycle input. A G2 swipe is the
     // explicit refusal gesture; all other non-system input is consumed so no
     // list or contextual-menu state can mutate behind the prompt.
@@ -289,7 +306,7 @@ export class EventRouter {
         } else if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
           this.retryOrDeclineConfirmation();
         } else if (
-          this.confirmationRetry === undefined && (
+          this.confirmationRetry?.() === undefined && (
             eventType === OsEventTypeList.SCROLL_TOP_EVENT ||
             eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
           )
@@ -592,6 +609,9 @@ export class EventRouter {
           this.lifecycle?.onContextualMenu?.(false);
           return;
         }
+        // Gone to the background mid-press: its release will not come, and
+        // the next return to JOAT must not read as the glasses' menu opening.
+        this.endPress('background');
         this.lifecycle?.onForegroundExit();
         return;
       case OsEventTypeList.SYSTEM_EXIT_EVENT:

@@ -29,6 +29,29 @@ function hostCall(method: string, detail?: number): void {
   if (import.meta.env.DEV) console.info('[host-call]', method, detail ?? '');
 }
 
+/** A bounded wait that ran out; the work it waited on may still finish. */
+export class SettleTimeout extends Error {}
+
+/** Resolve with `work`, or reject once `ms` have passed without it settling. */
+export function settleWithin<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new SettleTimeout(`${what} did not settle within ${ms}ms`)), ms);
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * How long a bridge call to the glasses may take before it counts as failed.
+ * Even: "a single flaky hop can hang ~30s; wrap calls in Promise.race with a
+ * few-second cap". A rebuild normally answers in about 165 ms and a text
+ * update in about 83 ms. Together with a page change's image drain
+ * (PAGE_TRANSITION_IDLE_MS, 8 s) this stays inside MacLink's 15 s downlink
+ * watchdog, and a hung call no longer holds every later page change behind
+ * it. Image writes keep their own limits (HudVisualSurface).
+ */
+export const BRIDGE_CALL_TIMEOUT_MS = 5_000;
+
 /** A rejected rebuild leaves the glass on its previous page with no visible
  * error. Name the limit that was crossed (FirmwareLimits) so the failure is
  * never silent again — the News tab card and list both failed this way for
@@ -62,6 +85,37 @@ export class BridgeClient {
   private pageEpochValue = 0;
   private readonly unsubscribes: Unsubscribe[] = [];
   private launchSource?: string;
+  /** What the host's storage holds, as far as this session has read or
+   * written it. */
+  private readonly storedValues = new Map<string, string>();
+  private storageWrites: Promise<unknown> = Promise.resolve();
+
+  /**
+   * The Even host's storage, the one door for every key. A write shares the
+   * glasses' link with the page writes, and Even warns that racing them can
+   * drop the connection: so a value the host already holds is not written
+   * again (the preferred Mac was rewritten on every reconnect), and writes go
+   * one after another.
+   */
+  readonly storage = {
+    get: async (key: string): Promise<string> => {
+      const value = await this.require().getLocalStorage(key);
+      this.storedValues.set(key, value);
+      return value;
+    },
+    set: (key: string, value: string): Promise<boolean> => {
+      if (this.storedValues.get(key) === value) return Promise.resolve(true);
+      this.storedValues.set(key, value);
+      const forget = (): false => {
+        if (this.storedValues.get(key) === value) this.storedValues.delete(key);
+        return false;
+      };
+      const write = this.storageWrites.then(() => this.require().setLocalStorage(key, value))
+        .then((stored) => stored || forget(), forget);
+      this.storageWrites = write;
+      return write;
+    },
+  };
 
   /** Step 1. Also registers onLaunchSource, which fires exactly once.
    *
@@ -159,10 +213,12 @@ export class BridgeClient {
             return accepted;
           },
           false,
+          'rebuildPageContainer',
         ),
         textContainerUpgrade: (text) => this.writeDisplay(
           () => { hostCall('textContainerUpgrade', text.containerID); return native.textContainerUpgrade(text); },
           false,
+          'textContainerUpgrade',
         ),
         updateImageRawData: (image) => this.writeDisplay(
           () => { hostCall('updateImageRawData', image.containerID); return native.updateImageRawData(image); },
@@ -205,10 +261,24 @@ export class BridgeClient {
     return () => active && this.displayActive && this.displayRevision === revision;
   }
 
-  private async writeDisplay<T>(write: () => Promise<T>, declined: T): Promise<T> {
+  /** Every display write. `bounded` names a page or text write, which fails
+   * after BRIDGE_CALL_TIMEOUT_MS instead of holding the glass forever. */
+  private async writeDisplay<T>(write: () => Promise<T>, declined: T, bounded?: string): Promise<T> {
     const current = this.captureDisplayGuard();
     if (!current()) return declined;
-    const result = await write();
+    let result: T;
+    try {
+      result = bounded === undefined
+        ? await write()
+        : await settleWithin(write(), BRIDGE_CALL_TIMEOUT_MS, bounded);
+    } catch (error) {
+      if (!(error instanceof SettleTimeout)) throw error;
+      // The host may still apply it late: nothing may trust the page on the
+      // glass to be the one last drawn, so the next write rebuilds it whole.
+      this.pageEpochValue += 1;
+      console.warn('[bridge]', error.message);
+      return declined;
+    }
     // A call already handed to the host cannot be recalled. Its late result
     // cannot authorize another tile, fallback rebuild, or visible receipt.
     return current() ? result : declined;

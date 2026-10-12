@@ -3,7 +3,7 @@ import { GesturePolicy } from './GesturePolicy';
 
 import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder } from './HudPageBuilder';
-import { TEXT_CONTAINER_MAX_BYTES, fitUtf8Tail } from './FirmwareLimits';
+import { TEXT_CONTAINER_MAX_BYTES, fitUtf8, fitUtf8Tail } from './FirmwareLimits';
 import type {
   AssistantOverlayPresentation,
   AssistantOverlayVisual,
@@ -275,7 +275,9 @@ function scrollsOnGlass(title: string): boolean {
   return title.startsWith('MESSAGES');
 }
 const SCROLLING_PAGE_MAX_LINES = 40;
-/** Under TEXT_CONTAINER_MAX_BYTES (999) with room for the page's wide glyphs. */
+/** Code units a scrolling page holds. The paginators also end a page at the
+ * glasses' byte cap (TEXT_CONTAINER_MAX_BYTES), so wide glyphs never push
+ * one over it. */
 const SCROLLING_PAGE_MAX_UNITS = 900;
 /** The firmware's scrollbar (4 px at the container's right edge) and a
  * breath beside it: the words wrap short of it instead of under it. */
@@ -626,22 +628,43 @@ export class HudPresenter {
   /** Switch from the image HUD to an SDK-native text page under the same
    * serialized display barrier. This is the path Even's own text-heavy and
    * AI surfaces use for responsive content and scroll updates. */
-  /** The page replacement in flight, if any (replaceNativePage). */
+  /** The page change in flight, if any: every rebuild goes through
+   * `pageTransition` or `replaceNativePage`, which record it here. */
   private pageReplacement?: Promise<boolean>;
 
-  /** Replace the whole page with a native one. The visual surface refuses a
-   * second replacement while one runs; `pageReplacement` lets a surface
-   * that must not be refused (the consent card) wait for it first. */
-  private replaceNativePage(
-    page: RebuildPageContainer,
-    owner: Exclude<DisplayPageOwner, 'visual'>,
-  ): Promise<boolean> {
-    const replacement = this.replaceNativePageNow(page, owner);
+  private trackPageReplacement(replacement: Promise<boolean>): Promise<boolean> {
     this.pageReplacement = replacement;
     void replacement.finally(() => {
       if (this.pageReplacement === replacement) this.pageReplacement = undefined;
     }).catch(() => undefined);
     return replacement;
+  }
+
+  /** One page change through the image lane's barrier. The barrier refuses
+   * a second change while one runs; recording it lets a surface that must
+   * not be refused (the consent card, Home after Back) wait for it first
+   * (settlePageReplacement). */
+  private pageTransition(replace: () => Promise<boolean>, isCurrent: () => boolean): Promise<boolean> {
+    const transition = this.visual?.withPageTransition?.(replace, isCurrent) ?? Promise.resolve(false);
+    return this.trackPageReplacement(transition);
+  }
+
+  /** Wait out the page change in flight, and any that follows it. */
+  private async settlePageReplacement(): Promise<void> {
+    while (this.pageReplacement) {
+      const running = this.pageReplacement;
+      await running.catch(() => false);
+      if (this.pageReplacement === running) break;
+    }
+  }
+
+  /** Replace the whole page with a native one, recorded as the page change
+   * in flight. */
+  private replaceNativePage(
+    page: RebuildPageContainer,
+    owner: Exclude<DisplayPageOwner, 'visual'>,
+  ): Promise<boolean> {
+    return this.trackPageReplacement(this.replaceNativePageNow(page, owner));
   }
 
   private async replaceNativePageNow(
@@ -693,10 +716,14 @@ export class HudPresenter {
     const visual = this.visual;
     const displayCurrent = this.captureDisplayGuard();
     if (!visual || !displayCurrent()) return false;
+    // A handoff must not be turned away by a page change still running
+    // (Home redrawing as a card arrives): wait for it, then decide.
+    await this.settlePageReplacement();
+    if (!displayCurrent()) return false;
     if (this.pageOwner === 'visual' && !this.overviewTextOnGlass()) return true;
     if (!visual.withPageTransition) return false;
     try {
-      const rebuilt = await visual.withPageTransition(
+      const rebuilt = await this.pageTransition(
         () => this.client.require().rebuildPageContainer(this.layouts.visualLayout()),
         displayCurrent,
       );
@@ -1694,8 +1721,10 @@ export class HudPresenter {
     containerID: number, containerName: string, content: string, previous = '',
   ): Promise<boolean> {
     // Every page's gestures in the one template (GesturePolicy.formatHint).
+    // The glasses hold an update to the same byte cap as a rebuild, and
+    // refuse one over it whole: the page would stay as it was.
     const hint = containerID === ContainerId.Hint;
-    const replacement = (hint ? GesturePolicy.formatHint(content) : content) || ' ';
+    const replacement = fitUtf8((hint ? GesturePolicy.formatHint(content) : content) || ' ', TEXT_CONTAINER_MAX_BYTES);
     const before = hint ? Math.max(previous.length, GesturePolicy.formatHint(previous).length) : previous.length;
     return this.client.require().textContainerUpgrade(new TextContainerUpgrade({
       containerID,
@@ -2288,7 +2317,7 @@ export class HudPresenter {
       void this.paintVisual();
       return true;
     }
-    const previous = { body: state.body, hint: state.hint };
+    const previous = { page: state.page, body: state.body, hint: state.hint };
     const review = this.surface.kind === 'list' && this.surface.options.reviewTapOnLastPage === true;
     state.page = page;
     state.body = state.pages[page] ?? ' ';
@@ -2296,8 +2325,16 @@ export class HudPresenter {
       ? liveNoteHint(page, state.pages.length, macHint)
       : textPageHint(page, state.pages.length, macHint, review);
     void (async () => {
-      await this.upgradeNativeText(ContainerId.Main, 'main', state.body, previous.body);
+      const shown = await this.upgradeNativeText(ContainerId.Main, 'main', state.body, previous.body)
+        .catch(() => false);
       if (this.nativeTextPage !== state) return;
+      if (!shown) {
+        // The glass kept the page it had, so the page count stays with it:
+        // the next swipe turns from there, and a review's last-page tap is
+        // never offered for words that were not shown.
+        if (state.page === page) Object.assign(state, previous);
+        return;
+      }
       await this.upgradeNativeText(ContainerId.Hint, 'hint', state.hint, previous.hint);
     })().catch(() => undefined);
     return true;
@@ -3043,6 +3080,11 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
     if (!await this.prepareNativeTerminalHandoff(true)) return false;
+    // A page change still running (a notification card, a list's minute
+    // repaint) would make the barrier turn Home away, and the page Back
+    // left would stay on the glass. Let it finish first.
+    await this.settlePageReplacement();
+    if (!displayCurrent()) return false;
     if (this.confirmation) {
       this.confirmation.surface = { kind: 'default' };
       if (this.focusReturn) {
@@ -3225,11 +3267,7 @@ export class HudPresenter {
     // flight, the card is refused, and the draft is cancelled — the wearer
     // speaks and the card just goes away (simulator, 2026-10-08). Let it
     // finish; the consent card then replaces it.
-    while (this.pageReplacement) {
-      const running = this.pageReplacement;
-      await running.catch(() => false);
-      if (this.pageReplacement === running) break;
-    }
+    await this.settlePageReplacement();
     if (!displayCurrent()) return false;
     const current = this.confirmation;
     if (!current || current.id !== id || (claimed && current !== claimed)) return !claimed?.isCurrent;
@@ -3457,7 +3495,7 @@ export class HudPresenter {
     if (!this.visual) return replace();
     if (!this.visual.withPageTransition) return false;
     try {
-      const rebuilt = await this.visual.withPageTransition(replace, current);
+      const rebuilt = await this.pageTransition(replace, current);
       if (rebuilt && current()) this.imageHeaderShown = false;
       return rebuilt && current();
     } catch { return false; }
@@ -4020,7 +4058,11 @@ export class HudPresenter {
     let ok = false;
     if (!this.visual?.withPageTransition) ok = await replace();
     else {
-      try { ok = await this.visual.withPageTransition(replace, stillOurs); } catch { ok = false; }
+      // The barrier is given the display's own guard, not stillOurs: a card
+      // that claims the glass mid-rebuild makes `replace` stand down, and the
+      // barrier still hands the glass back when it ends. Given stillOurs, it
+      // kept the image lane shut for the rest of the session (2026-10-12).
+      try { ok = await this.pageTransition(replace, current); } catch { ok = false; }
     }
     if (!ok || !stillOurs()) return false;
     this.overviewText = { epoch: this.client.pageEpoch?.(), bands };
@@ -4059,7 +4101,12 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     // Keep the local elapsed counter moving between Mac frames.
     this.armPanelTicker();
-    if (!ok && !this.healing) return this.healAndRetry(ContainerId.Main);
+    // A frame the host could not deliver (sendFailed, or out of time) is not
+    // a missing page: a rebuild would only wipe the last good frame, on every
+    // frame of a weak link. The next frame sends it again.
+    if (!ok && !this.healing && this.visual.lastPaintFailure?.() !== 'transport') {
+      return this.healAndRetry(ContainerId.Main);
+    }
     return ok;
   }
 

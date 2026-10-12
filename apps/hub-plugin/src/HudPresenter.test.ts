@@ -1212,6 +1212,36 @@ describe('HudPresenter self-heals a missing page', () => {
   });
 });
 
+describe('HudPresenter keeps the last frame when the link drops a send', () => {
+  /**
+   * A frame the host could not deliver (sendFailed, or out of time) is not a
+   * missing page. Rebuilding for it wiped the last good frame on every frame
+   * of a weak link; only an image the host turned down calls for it.
+   */
+  it.each([
+    ['could not deliver', 'transport', 0],
+    ['turned down', 'refused', 1],
+  ] as const)('a frame the host %s rebuilds the page %i times', async (_name, failure, expected) => {
+    let pageRebuilds = 0;
+    const client = {
+      require: () => ({
+        rebuildPageContainer: vi.fn(async () => { pageRebuilds += 1; return true; }),
+        textContainerUpgrade: vi.fn(async () => true),
+      }),
+    } as unknown as BridgeClient;
+    const visual = {
+      paint: vi.fn(async () => false),
+      lastPaintFailure: () => failure,
+      forgetPage: vi.fn(),
+      whenIdle: vi.fn(async () => true),
+      withPageTransition: vi.fn(async (replace: () => Promise<boolean>) => replace()),
+    };
+    const hud = new HudPresenter(client, new HudPageBuilder(), visual);
+    expect(await hud.showText('home', ContainerId.Main)).toBe(false);
+    expect(pageRebuilds).toBe(expected);
+  });
+});
+
 describe('HudPresenter diagnostic page transitions', () => {
   it('records the layout transition but never list text', async () => {
     const events: unknown[] = [];

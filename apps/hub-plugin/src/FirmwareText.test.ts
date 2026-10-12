@@ -1,11 +1,15 @@
+import { utf8ByteLength } from '@evenrealities/even_hub_sdk';
 import { getTextWidth, measureTextWrap } from '@evenrealities/pretext';
 import { describe, expect, it } from 'vitest';
+import { TEXT_CONTAINER_MAX_BYTES } from './FirmwareLimits';
 import {
   NATIVE_PAGE_MAX_UNITS,
   containerLineCapacity,
   firmwareLineCount,
   firmwareLineWidth,
   fitLines,
+  paginateFromEnd,
+  paginateHanging,
   paginateMeasured,
 } from './FirmwareText';
 import { ASSISTANT_ANSWER_PAGE } from './HudPageBuilder';
@@ -125,5 +129,41 @@ describe('single lines and containers', () => {
     expect(containerLineCapacity(258, 8, 1)).toBe(8);
     expect(containerLineCapacity(10, 4)).toBe(0);
     expect(ASSISTANT_ANSWER_PAGE.lineCapacity).toBe(containerLineCapacity(ASSISTANT_ANSWER_PAGE.bodyHeight, 4));
+  });
+});
+
+/**
+ * A page is one text container, and the glasses refuse a container over
+ * TEXT_CONTAINER_MAX_BYTES of UTF-8. Accented letters, Cyrillic and Greek
+ * take two or three bytes a code unit, so a page counted in units alone
+ * passed the unit budget and came out over the byte cap: the rebuild then cut
+ * its last lines and the next page started after them (2026-10-12).
+ */
+describe('pages within the glasses\' byte cap', () => {
+  const sentence = 'Договорились, позвоню тебе вечером, когда закончу работу. ';
+  const thread = `Анна: ${sentence.repeat(12).trim()}\nВы: Договорились, позвоню в девять.`;
+  const cyrillic = Array.from({ length: 6 }, () => sentence.repeat(6).trim()).join('\n');
+
+  const underCap = (pages: readonly string[]) => {
+    for (const page of pages) expect(utf8ByteLength(page)).toBeLessThanOrEqual(TEXT_CONTAINER_MAX_BYTES);
+  };
+
+  it('pages a Messages thread by bytes too, and loses no line', () => {
+    const pages = paginateHanging(thread, WIDTH - 10, 40, 900);
+    underCap(pages);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(words(pages.join('\n'))).toEqual(words(thread));
+  });
+
+  it('pages measured prose by bytes too, and keeps every word in order', () => {
+    const pages = paginateMeasured(cyrillic, WIDTH, 30);
+    underCap(pages);
+    expect(words(pages.join('\n'))).toEqual(words(cyrillic));
+  });
+
+  it('pages live words from the end by bytes too', () => {
+    const pages = paginateFromEnd(cyrillic, WIDTH, 30);
+    underCap(pages);
+    expect(words(pages.join('\n'))).toEqual(words(cyrillic));
   });
 });

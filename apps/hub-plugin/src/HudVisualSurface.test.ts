@@ -686,3 +686,28 @@ describe('HudVisualSurface', () => {
 
 
 });
+
+describe('why a frame failed', () => {
+  const frame: HudVisualFrame = {
+    kind: 'overview', status: '', micOn: true, mainBrightness: 4,
+    main: 'home', context: '', tray: '', hint: '',
+  };
+  const renderer: HudFrameRenderer = {
+    render: async () => [4, 8, 9, 10].map((containerId) => ({ containerId, pixels: new Uint8Array([containerId]) })),
+  };
+
+  it.each([
+    [ImageRawDataUpdateResult.sendFailed, 'transport'],
+    [ImageRawDataUpdateResult.imageException, 'refused'],
+    [ImageRawDataUpdateResult.imageSizeInvalid, 'refused'],
+  ] as const)('names %s as %s, and a later good frame clears it', async (result, failure) => {
+    let answer: ImageRawDataUpdateResult = result;
+    const client = { require: () => ({ updateImageRawData: async () => answer }) } as unknown as BridgeClient;
+    const surface = new HudVisualSurface(client, renderer);
+    expect(await surface.paint(frame)).toBe(false);
+    expect(surface.lastPaintFailure()).toBe(failure);
+    answer = ImageRawDataUpdateResult.success;
+    expect(await surface.paint({ ...frame, main: 'home again' })).toBe(true);
+    expect(surface.lastPaintFailure()).toBeUndefined();
+  });
+});

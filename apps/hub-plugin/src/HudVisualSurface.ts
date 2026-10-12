@@ -2,7 +2,7 @@ import {
   ImageRawDataUpdate,
   ImageRawDataUpdateResult,
 } from '@evenrealities/even_hub_sdk';
-import type { BridgeClient } from './BridgeClient';
+import { SettleTimeout, settleWithin, type BridgeClient } from './BridgeClient';
 import type { G2DiagnosticTrace, TraceTileContainer } from './G2DiagnosticTrace';
 import type { HudStatusModel } from './HudStatus';
 import type { EvenReaderLine } from './EvenFont';
@@ -174,7 +174,12 @@ export interface HudFramePainter {
   /** Set by the presenter: page parts were just switched off, so the page
    * on the glass should be redrawn without its header and column images. */
   onPagePartsDisabled?: () => void;
+  /** Why the last full frame failed (HudVisualSurface.lastPaintFailure). */
+  lastPaintFailure?(): PaintFailure | undefined;
 }
+
+/** A frame the host could not deliver ('transport') or turned down ('refused'). */
+export type PaintFailure = 'transport' | 'refused';
 
 /** Converts one raw raster tile into an image format the native bridge and
  * the official simulator both decode. */
@@ -222,9 +227,6 @@ export const PAGE_TRANSITION_IDLE_MS = 8_000;
  * success) that switch page parts off for this session. */
 export const PAGE_PART_FAILURE_LIMIT = 3;
 
-/** A bounded wait that ran out; the work it waited on may still finish. */
-class SettleTimeout extends Error {}
-
 /**
  * Minimum spacing between two updateImageRawData calls. Even's display docs:
  * The SDK documents a 100ms image-path pacing window. Retain a 10ms margin
@@ -248,15 +250,6 @@ function now(): number {
 
 function elapsedSince(startedAt: number): number {
   return Math.max(0, Math.round(now() - startedAt));
-}
-
-/** Resolve with `work`, or reject once `ms` have passed without it settling. */
-function settleWithin<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new SettleTimeout(`${what} did not settle within ${ms}ms`)), ms);
-  });
-  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
 
 interface PendingPaint {
@@ -604,7 +597,22 @@ export class HudVisualSurface implements HudFramePainter {
     setTimeout(() => { this.onPagePartsDisabled?.(); }, 0);
   }
 
+  /** Why the last full frame failed, if it did: 'transport' when the host
+   * answered sendFailed or a write ran out of time — the image was fine and
+   * the next frame sends it again — and 'refused' when the host turned the
+   * image down, which a missing page explains and a rebuild repairs. */
+  lastPaintFailure(): PaintFailure | undefined {
+    return this.lastFrameFailure;
+  }
+
+  private lastFrameFailure: PaintFailure | undefined;
+
   private async paintNow(frame: PaintWork, guard?: () => boolean, queuedAt = now()): Promise<boolean> {
+    if (!isPagePart(frame)) this.lastFrameFailure = undefined;
+    const failed = (kind: PaintFailure): false => {
+      if (!isPagePart(frame)) this.lastFrameFailure = kind;
+      return false;
+    };
     const frameNumber = ++this.frameNumber;
     const pageRevision = this.pageRevision;
     const isCurrent = (): boolean => pageRevision === this.pageRevision && (guard?.() ?? true);
@@ -739,7 +747,7 @@ export class HudVisualSurface implements HudFramePainter {
         }
         if (outcome === 'failed') {
           this.deliveredTiles.clear();
-          return false;
+          return failed(result === ImageRawDataUpdateResult.sendFailed ? 'transport' : 'refused');
         }
         this.deliveredTiles.set(tile.containerId, tile.pixels.slice());
       }
@@ -763,7 +771,7 @@ export class HudVisualSurface implements HudFramePainter {
         '[HudVisualSurface] frame paint failed:',
         error instanceof Error ? error.message : 'unknown error',
       );
-      return false;
+      return failed(error instanceof SettleTimeout ? 'transport' : 'refused');
     } finally {
       timing.totalMs = elapsedSince(queuedAt);
       // Development performance evidence contains no text, identifiers or

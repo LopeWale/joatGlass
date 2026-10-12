@@ -1,5 +1,5 @@
 import { AudioInputSource } from '@evenrealities/even_hub_sdk';
-import { BridgeClient } from './BridgeClient';
+import { BRIDGE_CALL_TIMEOUT_MS, BridgeClient, settleWithin } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
 import { MinimalHudPresenter } from './MinimalHudPresenter';
@@ -279,9 +279,9 @@ async function boot(): Promise<void> {
   let preferredUrl = loadRememberedBrain();
   try {
     const [hostedTokensRaw, hostedPreferredRaw, hostedLegacy] = await Promise.all([
-      client.require().getLocalStorage(PAIRING_TOKENS_KEY),
-      client.require().getLocalStorage(PREFERRED_BRAIN_KEY),
-      client.require().getLocalStorage(TOKEN_KEY),
+      client.storage.get(PAIRING_TOKENS_KEY),
+      client.storage.get(PREFERRED_BRAIN_KEY),
+      client.storage.get(TOKEN_KEY),
     ]);
     // The Even host is the common persistence layer between an installed
     // package and its development webview, so let its valid per-origin map
@@ -312,6 +312,12 @@ async function boot(): Promise<void> {
   let audioRef: AudioStreamer | undefined;
   let imuRef: ImuMonitor | undefined;
 
+  /** The host's copy of the pairing map, and the retired single token cleared. */
+  const mirrorPairingTokens = (encoded: string): void => {
+    void client.storage.set(PAIRING_TOKENS_KEY, encoded);
+    void client.storage.set(TOKEN_KEY, '');
+  };
+
   const persistPairingTokens = (next: Readonly<Record<string, string>>): void => {
     const encoded = encodePairingTokens(next);
     try {
@@ -320,8 +326,7 @@ async function boot(): Promise<void> {
     } catch {
       // Storage unavailable — MacLink's in-memory map still remains correct.
     }
-    void client.require().setLocalStorage(PAIRING_TOKENS_KEY, encoded).catch(() => {});
-    void client.require().setLocalStorage(TOKEN_KEY, '').catch(() => {});
+    mirrorPairingTokens(encoded);
   };
 
   // A token the Mac no longer honours must not outlive the session, but only
@@ -373,7 +378,7 @@ async function boot(): Promise<void> {
       } catch {
         // The active authenticated session remains usable without storage.
       }
-      void client.require().setLocalStorage(PREFERRED_BRAIN_KEY, active).catch(() => {});
+      void client.storage.set(PREFERRED_BRAIN_KEY, active);
       announce?.();
     }
     else {
@@ -544,7 +549,7 @@ async function boot(): Promise<void> {
         // Remember user intent before authentication, including an offline Mac.
         // A stale host mirror must not replace this choice on the next launch.
         try { localStorage.setItem(PREFERRED_BRAIN_KEY, url); } catch { /* session selection still holds */ }
-        void client.require().setLocalStorage(PREFERRED_BRAIN_KEY, url).catch(() => {});
+        void client.storage.set(PREFERRED_BRAIN_KEY, url);
       }
       return selected;
     },
@@ -557,14 +562,8 @@ async function boot(): Promise<void> {
   // Durable resume policy: the Even host's storage survives Android WebView
   // kills and is shared across the dev/packed origins, unlike the browser
   // localStorage mirror. Best-effort and async — boot never waits on it.
-  void settings.attachHostStorage({
-    get: (key) => client.require().getLocalStorage(key),
-    set: (key, value) => client.require().setLocalStorage(key, value),
-  });
-  void places.attachHostStorage({
-    get: (key) => client.require().getLocalStorage(key),
-    set: (key, value) => client.require().setLocalStorage(key, value),
-  });
+  void settings.attachHostStorage(client.storage);
+  void places.attachHostStorage(client.storage);
   const menu = new CapabilityMenu(hud, settings, link);
   menuRef = menu;
   const navigation = new NavigationController(hud, link, location, g2Diagnostics);
@@ -644,7 +643,7 @@ async function boot(): Promise<void> {
     hud,
     (direction) => hud.scrollTranscript(direction),
     promptedInput,
-    () => confirmationRetry?.() ?? false,
+    () => confirmationRetry,
   ).attach();
 
   // Official-simulator visual gate. This is DEV-only and drives the same
@@ -1048,8 +1047,7 @@ async function boot(): Promise<void> {
           } catch {
             // The v1 map was already durably written before this callback.
           }
-          void client.require().setLocalStorage(PAIRING_TOKENS_KEY, encoded).catch(() => {});
-          void client.require().setLocalStorage(TOKEN_KEY, '').catch(() => {});
+          mirrorPairingTokens(encoded);
         });
         break;
       case 'control.state':
@@ -1214,10 +1212,14 @@ async function boot(): Promise<void> {
     exiting = true;
     chromeRef?.stop();
     promptedInput.cancel('exit');
-    await audio.stop();
     imu.dispose();
-    await imu.stop();
-    await location.shutdown();
+    // One after another, as Even asks of bridge calls, but each bounded: on
+    // an abnormal exit a call to the glasses may never answer, and one that
+    // hangs must not keep the motion sensor or the phone's location running.
+    const stops: Array<() => Promise<unknown>> = [() => audio.stop(), () => imu.stop(), () => location.shutdown()];
+    for (const stop of stops) {
+      await settleWithin(stop(), BRIDGE_CALL_TIMEOUT_MS, 'exit stop').catch(() => undefined);
+    }
     link.close();
     client.dispose();
   }

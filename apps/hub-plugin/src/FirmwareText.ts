@@ -1,4 +1,6 @@
+import { utf8ByteLength } from '@evenrealities/even_hub_sdk';
 import { getTextWidth, measureTextWrap } from '@evenrealities/pretext';
+import { TEXT_CONTAINER_MAX_BYTES } from './FirmwareLimits';
 
 /**
  * Text as the firmware lays it out.
@@ -22,6 +24,15 @@ export const NATIVE_PAGE_MAX_UNITS = 1000;
 
 const NEWLINE = '\n';
 const ELLIPSIS = '…';
+
+/** Whether `page` fits one text container: at most `maxUnits` code units
+ * and the glasses' byte cap. Accented letters, Cyrillic and Greek are two or
+ * three UTF-8 bytes a unit, so a page within the units can still be over the
+ * bytes, and the glass would cut it (2026-10-12). Every paginator here asks
+ * this one question. */
+function pageFits(page: string, maxUnits: number): boolean {
+  return page.length <= maxUnits && utf8ByteLength(page) <= TEXT_CONTAINER_MAX_BYTES;
+}
 
 /** Lines the firmware renders `text` on inside a container `innerWidth` wide. */
 export function firmwareLineCount(text: string, innerWidth: number): number {
@@ -111,7 +122,7 @@ function splitWord(
   const points = Array.from(word);
   const fits = (count: number) => {
     const head = points.slice(0, count).join('');
-    return head.length <= maxUnits && firmwareLineCount(head, innerWidth) <= maxLines;
+    return pageFits(head, maxUnits) && firmwareLineCount(head, innerWidth) <= maxLines;
   };
   const count = Math.max(1, largestFitting(points.length - 1, fits));
   return [points.slice(0, count).join(''), points.slice(count).join('')];
@@ -140,7 +151,7 @@ export function paginateMeasured(
     if (start >= tokens.length) break;
     const fits = (count: number) => {
       const page = join(tokens, start, start + count);
-      return page.length <= units && firmwareLineCount(page, innerWidth) <= lines;
+      return pageFits(page, units) && firmwareLineCount(page, innerWidth) <= lines;
     };
     let count = largestFitting(tokens.length - start, fits);
     if (count === 0) {
@@ -176,7 +187,7 @@ export function paginateFromEnd(
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index]!;
     if (page.length > 0 && (page.length >= Math.max(1, maxLines)
-      || [line, ...page].join(NEWLINE).length > maxUnits)) {
+      || !pageFits([line, ...page].join(NEWLINE), maxUnits))) {
       pages.unshift(page.join(NEWLINE));
       page = [];
     }
@@ -251,7 +262,8 @@ export function hangingLines(paragraph: string, width: number): string[] {
 /**
  * Text as firmware pages of explicit lines, each speaker's words hanging
  * under the first row's (hangingLines): at most `maxLines` lines and
- * `maxUnits` code units a page. Pages break between lines.
+ * `maxUnits` code units a page, within the glasses' byte cap (pageFits).
+ * Pages break between lines.
  */
 export function paginateHanging(
   text: string,
@@ -266,7 +278,7 @@ export function paginateHanging(
   let page: string[] = [];
   for (const line of lines) {
     const candidate = [...page, line].join(NEWLINE);
-    if (page.length > 0 && (page.length >= Math.max(1, maxLines) || candidate.length > maxUnits)) {
+    if (page.length > 0 && (page.length >= Math.max(1, maxLines) || !pageFits(candidate, maxUnits))) {
       pages.push(page.join(NEWLINE));
       page = [];
     }
