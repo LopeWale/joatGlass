@@ -10,6 +10,7 @@ import {
   MenuItemProperty,
 } from '@evenrealities/even_hub_sdk';
 import { pxTruncate } from '@evenrealities/pretext';
+import { utf8ByteLength } from '@evenrealities/even_hub_sdk';
 import { TEXT_CONTAINER_MAX_BYTES, fitUtf8 } from './FirmwareLimits';
 import { FIRMWARE_LINE_HEIGHT, containerLineCapacity, fitLines } from './FirmwareText';
 import {
@@ -86,7 +87,17 @@ const LIST_ROW_TEXT_WIDTH = CANVAS.width - 2 * 8 - 2 * 12 - 12;
  * breaks the row there), then the row is cut to the measured width. */
 export function fitListRow(row: string): string {
   const flat = row.replace(/\s+/gu, ' ').trim();
-  return pxTruncate(clampUtf8Bytes(flat, LIST_ROW_MAX_UTF8_BYTES), LIST_ROW_TEXT_WIDTH);
+  // The byte cap has the last word. `pxTruncate` appends "..." (3 bytes)
+  // after it cuts to the width, so a row clamped to 63 bytes came back at
+  // 64 and the firmware refused the WHOLE page: the News tab did nothing on
+  // a tap whenever two headlines carried a "…" or an accent (2026-10-12).
+  let budget = LIST_ROW_MAX_UTF8_BYTES;
+  let fitted = pxTruncate(clampUtf8Bytes(flat, budget), LIST_ROW_TEXT_WIDTH);
+  while (utf8ByteLength(fitted) > LIST_ROW_MAX_UTF8_BYTES && budget > 0) {
+    budget -= 1;
+    fitted = pxTruncate(clampUtf8Bytes(flat, budget), LIST_ROW_TEXT_WIDTH);
+  }
+  return fitted;
 }
 /**
  * The host's real per-row limit, measured in the official simulator on

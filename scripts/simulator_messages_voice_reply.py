@@ -73,7 +73,7 @@ def _input(base: str, action: str) -> None:
     urllib.request.urlopen(request, timeout=5).read()
 
 
-async def run(port: int, *, auto: str | None, words: str, fail: bool, flow: str) -> None:
+async def run(port: int, *, auto: str | None, words: str, fail: bool, flow: str, retry_words: str = "") -> None:
     connected = asyncio.Event()
     with tempfile.TemporaryDirectory(prefix="joat-voice-reply-sim-") as root:
         base = Path(root)
@@ -128,6 +128,7 @@ async def run(port: int, *, auto: str | None, words: str, fail: bool, flow: str)
         async def speak_when_asked() -> None:
             """The stand-in microphone: words for every question the plugin acknowledges."""
             answered: set[str] = set()
+            body_takes = {"n": 0}
             while True:
                 await asyncio.sleep(0.2)
                 ticket = runtime.dispatcher.current_ticket
@@ -137,7 +138,12 @@ async def run(port: int, *, auto: str | None, words: str, fail: bool, flow: str)
                     continue
                 answered.add(ticket.prompt_id)
                 log.info("stage=question-armed field=%s — speaking", ticket.field)
-                text = "Simulator Contact" if ticket.field == "recipient" else words
+                if ticket.field == "recipient":
+                    text = "Simulator Contact"
+                else:
+                    # A retry asks the body again: the second take says something else, so the review visibly changes.
+                    text = retry_words if (body_takes["n"] and retry_words) else words
+                    body_takes["n"] += 1
                 pieces = text.split()
                 for n in range(1, len(pieces)):
                     await asyncio.sleep(0.45)
@@ -194,11 +200,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=18791)
     parser.add_argument("--auto", metavar="AUTOMATION_BASE", help="e.g. http://127.0.0.1:9901: drive the gestures up to the listening box")
     parser.add_argument("--words", default=WORDS)
+    parser.add_argument("--retry-words", default="", help="what the second take says after a 2x-tap retry (default: --words again)")
     parser.add_argument("--fail", action="store_true", help="the sender refuses: the thread should show ×")
     parser.add_argument("--flow", choices=("reply", "compose"), default="reply")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
-    asyncio.run(run(args.port, auto=args.auto, words=args.words, fail=args.fail, flow=args.flow))
+    asyncio.run(run(args.port, auto=args.auto, words=args.words, fail=args.fail, flow=args.flow, retry_words=args.retry_words))
 
 
 if __name__ == "__main__":

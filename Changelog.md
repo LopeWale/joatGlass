@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-12 — The News tab opens again: a list row could leave the width cut one byte over the firmware cap
+
+The wearer: "when I click on the news tab, it does not open the news page … the timer actually opens."
+
+- **Cause.** `fitListRow` clamped a row to the firmware's 63 bytes and *then* cut it to the row's pixel width; `pxTruncate` appends `...` (three bytes) after it cuts, so a 63-byte headline came back at 64. One such row makes the firmware refuse the whole `rebuildPageContainer` — silently; the glass stays on the overview. Any News push with two headlines carrying a `…`, a `·` source separator and an accent did it (`[page-rejected] … row 10 64B > 63B; row 16 64B > 63B` in the plugin console). Pomodoro rows are short ASCII and never reached the cap.
+- **Fix.** The byte cap has the last word: the budget steps down until the width-cut row measures ≤ 63 bytes (`HudPageBuilder.fitListRow`). Every firmware list goes through it — Messages threads and Search rows included.
+- Reproduced and verified in the official simulator with the wearer's real feeds (`scripts/simulator_news_tab_probe.py`, new: a loopback brain that fetches `news.json` and pushes the tab as `publish_all` does, then swipes to News and taps): before, N1/N2/N3 frames identical after the tap; after, the NEWS list paints with `tap: open · long tap: refresh · 2x tap: back`. Not verified on physical glasses.
+- Tests: `HudPageBuilder.test.ts` with the three rows that failed; plugin 1195 passed, typecheck clean. **Plugin only: a new package.**
+- Also: `scripts/simulator_messages_voice_reply.py --retry-words` makes the second take after a 2x-tap retry say something else, so the retry is visibly a retry.
+
 ## 2026-10-11 — Build JOAT 0.1.123
 
 - Packed from `56de7ed` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.123 above the last recorded build (0.1.122); app.json, package.json and package-lock.json all 0.1.123. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1194 tests passed, typecheck clean. Mac 3557 passed, 1 deselected (the known `test_whisper_cold_start` failure); 1 failed, `test_message_tools.py::test_controller_review_limit_remains_a_truthful_failed_status`, from FEAT-001's `10023e4` (the Messages review limit), not these changes.

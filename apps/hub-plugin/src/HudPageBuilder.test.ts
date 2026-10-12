@@ -225,6 +225,21 @@ describe('HudPageBuilder invariants', () => {
     expect(fitListRow('  a\r\n\tb  ')).toBe('a b');
   });
 
+  it('keeps a row under the firmware byte cap after the width cut adds its "..."', () => {
+    // The News rows the glass refused on 2026-10-12: 63 and 64 bytes in,
+    // 64 bytes out of pxTruncate, and the whole page rejected.
+    const rows = [
+      '[36m] Russell Brand arrives at a London court for… · AP News',
+      '[48m] Points pile-ups, old-school Saracens and a royal… · BBC',
+      '[18m] They came to Washington to dismantle… · The Washington…',
+    ];
+    for (const row of rows) {
+      const fitted = fitListRow(row);
+      expect(new TextEncoder().encode(fitted).length).toBeLessThanOrEqual(LIST_ROW_MAX_UTF8_BYTES);
+      expect(fitted.startsWith(row.slice(0, 20))).toBe(true);
+    }
+  });
+
   it('keeps every firmware list row under the host\'s 63-byte cap, on a code-point boundary', () => {
     // Measured in the official simulator: a 64-byte row fails the whole
     // rebuild. "·" is two bytes, so a 64-character Messages row overflows.
