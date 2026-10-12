@@ -81,6 +81,8 @@ export interface AssistantOverlayInputOwner {
 export interface PromptInputOwner {
   isActive(): boolean;
   cancel(reason?: string): void;
+  /** Tap on the listening box: the acknowledged question's ID to close now. */
+  commit?(): string | undefined;
 }
 
 /**
@@ -452,7 +454,9 @@ export class EventRouter {
     return type === OsEventTypeList.SCROLL_TOP_EVENT || type === OsEventTypeList.SCROLL_BOTTOM_EVENT;
   }
 
-  /** Questions retain the feature underneath; only Back releases this owner. */
+  /** Questions retain the feature underneath; only Back releases this owner.
+   * The listening box's contract (the wearer's ruling, 2026-10-11): tap =
+   * review what was heard now, 2x tap = cancel. Swipes are consumed. */
   private handlePromptInput(eventType: number | undefined): boolean {
     if (!this.promptedInput?.isActive()) return false;
     const type = eventType ?? OsEventTypeList.CLICK_EVENT;
@@ -460,8 +464,14 @@ export class EventRouter {
       this.promptedInput.cancel('back');
       return true;
     }
-    return type === OsEventTypeList.CLICK_EVENT
-      || type === OsEventTypeList.SCROLL_TOP_EVENT
+    if (type === OsEventTypeList.CLICK_EVENT) {
+      const promptId = this.promptedInput.commit?.();
+      if (promptId !== undefined && this.link.linkState === 'connected') {
+        this.link.send({ kind: 'input', event: { containerName: 'prompt-commit', selectedName: promptId } });
+      }
+      return true;
+    }
+    return type === OsEventTypeList.SCROLL_TOP_EVENT
       || type === OsEventTypeList.SCROLL_BOTTOM_EVENT;
   }
 

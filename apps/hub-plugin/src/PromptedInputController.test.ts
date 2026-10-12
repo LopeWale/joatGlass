@@ -113,6 +113,37 @@ describe('PromptedInputController diagnostics', () => {
   });
 });
 
+describe('PromptedInputController tap to review', () => {
+  it('names the acknowledged question on a tap, and nothing before or after it', async () => {
+    const r = rig();
+    expect(r.controller.commit()).toBeUndefined();
+    const message = present();
+    const ctx = context().value;
+    r.controller.observe(message, ctx);
+    // Observed but not yet painted or acknowledged: a tap closes nothing.
+    expect(r.controller.commit()).toBeUndefined();
+    await r.controller.handle(message, ctx);
+    expect(r.controller.commit()).toBe(message.promptId);
+    // Committing does not retire the question: the Mac decides.
+    expect(r.controller.isActive()).toBe(true);
+    expect(r.controller.commit()).toBe(message.promptId);
+    r.controller.cancel('back');
+    expect(r.controller.commit()).toBeUndefined();
+  });
+
+  it('does not name a question whose acknowledgement was refused or which has expired', async () => {
+    const r = rig();
+    r.state.accepted = false;
+    await r.publish(present({ promptId: 'refused' }));
+    expect(r.controller.commit()).toBeUndefined();
+    r.state.accepted = true;
+    await r.publish(present({ promptId: 'expiring', expiresInMs: 1000 }));
+    expect(r.controller.commit()).toBe('expiring');
+    await r.elapse(1001);
+    expect(r.controller.commit()).toBeUndefined();
+  });
+});
+
 describe('PromptedInputController application owner binding', () => {
   it('rejects a stale application owner synchronously before it can stage a question', async () => {
     const r = rig({ isOwnerCurrent: () => false });

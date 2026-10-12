@@ -1981,6 +1981,13 @@ async def main() -> None:
         if departing or (event.container_name == "menu" and event.selected_name == "closed"):
             prompted_speech.revoke_current()
             sessions.clear_topic_capture()
+        if event.container_name == "prompt-commit":
+            # A tap on the listening box: review what was heard so far. The
+            # tap names the question; the orchestrator closes its utterance
+            # now instead of at the next quiet boundary. No feature input.
+            if event.selected_name:
+                orchestrator.commit_prompt_answer(event.selected_name)
+            return
         terminal_was_current = terminal_opening.current
         capabilities.on_input(event)
         if terminal_was_current and not terminal_opening.current:

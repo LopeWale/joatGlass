@@ -1268,6 +1268,27 @@ describe('EventRouter prompt ownership', () => {
     expect(f.sent).toEqual([]);
   });
 
+  it('a tap on the listening box asks the Mac to review the words so far, by the question it names', () => {
+    const owner = { isActive: vi.fn(() => true), cancel: vi.fn(), commit: vi.fn(() => 'q-7') };
+    const f = { owner, ...make(false, undefined, true, true, true, true, true, true, true, owner) };
+    (f.link as unknown as { linkState: string }).linkState = 'connected';
+    f.fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
+    expect(owner.commit).toHaveBeenCalledOnce();
+    expect(owner.cancel).not.toHaveBeenCalled();
+    expect(f.sent).toEqual([{ kind: 'input', event: { containerName: 'prompt-commit', selectedName: 'q-7' } }]);
+    expect(f.menu.handleList).not.toHaveBeenCalled();
+  });
+
+  it('a tap before the question is acknowledged sends nothing and still goes nowhere else', () => {
+    const owner = { isActive: vi.fn(() => true), cancel: vi.fn(), commit: vi.fn(() => undefined) };
+    const f = { owner, ...make(false, undefined, true, true, true, true, true, true, true, owner) };
+    (f.link as unknown as { linkState: string }).linkState = 'connected';
+    f.fire({ textEvent: {} });
+    expect(owner.commit).toHaveBeenCalledOnce();
+    expect(f.sent).toEqual([]);
+    expect(f.menu.handleList).not.toHaveBeenCalled();
+  });
+
   it('keeps hold-to-mute instead of refreshing the hidden News page', () => {
     const f = question();
     f.fire({ textEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });

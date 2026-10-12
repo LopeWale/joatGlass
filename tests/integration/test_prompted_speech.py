@@ -673,3 +673,66 @@ async def test_authenticated_gateway_questions_accept_immediately_following_pcm(
             await asyncio.gather(worker, return_exceptions=True)
         await replies.aclose()
         await gateway.stop()
+
+
+# --- Tap to review (2026-10-11): the listening box's tap closes the utterance now ---
+
+
+async def test_a_tap_on_the_listening_box_reviews_the_words_so_far_without_waiting_for_quiet() -> None:
+    journey = Journey("On my way")
+    try:
+        ticket = journey.arm()
+        # Two loud batches open speech; no quiet batch follows, so the VAD
+        # alone would still be waiting when the wearer taps.
+        journey.transport.emit(LOUD, epoch=ticket.prompt_id)
+        journey.transport.emit(LOUD, epoch=ticket.prompt_id)
+        journey.transport.emit(LOUD, epoch=ticket.prompt_id)
+        assert journey.voice._vad.in_speech
+        assert journey.received == []
+
+        assert journey.voice.commit_prompt_answer(ticket.prompt_id) is True
+
+        await journey.idle()
+        await until(lambda: journey.received == ["On my way"])
+        assert not journey.voice._vad.in_speech
+        assert journey.dispatcher.current_ticket is None  # consumed, not left armed
+        assert journey.command_calls == journey.replier.queries == []
+    finally:
+        await journey.aclose()
+
+
+async def test_a_tap_before_any_speech_or_for_another_question_changes_nothing() -> None:
+    journey = Journey("later words")
+    try:
+        ticket = journey.arm()
+        # Nothing heard yet: the box keeps listening and the question stays armed.
+        assert journey.voice.commit_prompt_answer(ticket.prompt_id) is False
+        assert journey.dispatcher.current_ticket is ticket
+        assert journey.dispatcher.is_armed
+
+        journey.transport.emit(LOUD, epoch=ticket.prompt_id)
+        journey.transport.emit(LOUD, epoch=ticket.prompt_id)
+        assert journey.voice._vad.in_speech
+        # A tap naming a different question is ignored; speech continues.
+        assert journey.voice.commit_prompt_answer("some-other-question") is False
+        assert journey.voice._vad.in_speech
+        assert journey.received == []
+
+        # Quiet still closes it the ordinary way afterwards.
+        journey.transport.emit(QUIET, epoch=ticket.prompt_id)
+        journey.transport.emit(QUIET, epoch=ticket.prompt_id)
+        await journey.idle()
+        await until(lambda: journey.received == ["later words"])
+    finally:
+        await journey.aclose()
+
+
+async def test_a_tap_with_no_armed_question_is_refused() -> None:
+    journey = Journey("x")
+    try:
+        journey.transport.emit(LOUD, epoch=None)
+        journey.transport.emit(LOUD, epoch=None)
+        assert journey.voice.commit_prompt_answer("nobody") is False
+        assert journey.voice._vad.in_speech
+    finally:
+        await journey.aclose()

@@ -24,6 +24,8 @@ interface Publication {
   readonly abort: () => void;
   timer?: ReturnType<typeof setTimeout>;
   started: boolean;
+  /** The Mac accepted the acknowledgement: its audio epoch is live. */
+  acknowledged: boolean;
   microphone?: PromptMicrophone;
 }
 
@@ -154,7 +156,7 @@ export class PromptedInputController {
     const captured = Object.freeze({ generation: context.generation, signal: context.signal });
     const publication: Publication = {
       message: Object.freeze(message), context: captured,
-      deadline: this.now() + message.expiresInMs, started: false,
+      deadline: this.now() + message.expiresInMs, started: false, acknowledged: false,
       abort: () => this.retire(publication, false),
     };
     this.latestContext = captured;
@@ -213,6 +215,7 @@ export class PromptedInputController {
         });
       });
       this.stage(message, activated ? 'acknowledged' : 'ack_refused');
+      if (activated) publication.acknowledged = true;
       if (!activated && this.current === publication) {
         // Once a success receipt was attempted, do not issue a contradictory
         // second receipt or retry it on another connection.
@@ -226,6 +229,17 @@ export class PromptedInputController {
         else this.fail(publication);
       }
     }
+  }
+
+  /** The wearer tapped the listening box: review what was heard now, without
+   * waiting for quiet. The ID of the question the Mac should close, or
+   * undefined when no acknowledged question owns the microphone. The
+   * question stays open; the Mac's answer (review, or nothing heard yet)
+   * decides what happens next. */
+  commit(): string | undefined {
+    const publication = this.current;
+    if (!publication || !publication.acknowledged || !this.isCurrent(publication)) return undefined;
+    return publication.message.promptId;
   }
 
   isActive(): boolean {

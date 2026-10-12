@@ -575,6 +575,34 @@ class VoiceOrchestrator:
         if utterance is None:
             self._maybe_publish_partial(audio_epoch, connection_generation)
             return
+        self._complete_utterance(utterance)
+
+    def commit_prompt_answer(self, prompt_id: str) -> bool:
+        """The wearer tapped the listening box: review the words so far.
+
+        Closes the utterance now instead of at the next quiet boundary and
+        runs it through the same path a quiet boundary would, so every
+        eligibility check still applies. Only for the acknowledged question
+        the tap names. False, and nothing changes, when no such question is
+        armed or nothing has been heard yet (the box keeps listening).
+        """
+        dispatcher = self._prompted_input
+        ticket = dispatcher.current_ticket if dispatcher is not None else None
+        if (
+            dispatcher is None or ticket is None or ticket.prompt_id != prompt_id
+            or not dispatcher.is_armed
+        ):
+            return False
+        utterance = self._vad.finish_now()
+        if utterance is None:
+            log.info("prompt commit before any speech owner=%s", ticket.owner_kind)
+            return False
+        log.info("prompt commit by tap owner=%s bytes=%d", ticket.owner_kind, len(utterance))
+        self._complete_utterance(utterance)
+        return True
+
+    def _complete_utterance(self, utterance: bytes) -> None:
+        """A finished utterance (quiet boundary, cap, or the wearer's tap)."""
         self._end_partials()
         provenance = self._completed_provenance(self._utterance_frames)
         utterance_source: AudioSource | None = (

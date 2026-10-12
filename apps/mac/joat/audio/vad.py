@@ -215,6 +215,18 @@ class RmsVad:
             return self._finish()
         return None
 
+    def finish_now(self) -> bytes | None:
+        """Close the utterance being spoken, without waiting for quiet.
+
+        The wearer tapped the listening box: what was heard so far is the
+        answer. None between utterances, so a tap before speech changes
+        nothing. The prompt's quiet-boundary bookkeeping is kept, as for a
+        maximum-duration cut, so the tap is never mistaken for silence.
+        """
+        if not self._in_speech:
+            return None
+        return self._finish()
+
     def reset(self) -> None:
         """Drop any partial utterance — call on an audio seq gap, so a
         dropped-frame discontinuity never splices into one bogus utterance."""

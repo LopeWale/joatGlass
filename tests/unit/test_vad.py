@@ -304,3 +304,21 @@ class TestPromptFence:
         assert vad.prompt_discarding is False
         assert vad.in_speech is False
         assert vad.floor == before
+
+
+def test_finish_now_closes_only_an_utterance_in_progress() -> None:
+    """A tap on the listening box ends speech without a quiet boundary."""
+    vad = RmsVad(adaptive=False, start_batches=2, hangover_batches=2)
+    loud = struct.pack("<" + "h" * 320, *([8000] * 320))
+    assert vad.finish_now() is None  # nothing being said
+    assert vad.feed(loud) is None
+    assert vad.feed(loud) is None
+    assert vad.in_speech
+    taken = vad.finish_now()
+    assert taken is not None and len(taken) >= 2 * len(loud)
+    assert not vad.in_speech
+    assert vad.finish_now() is None
+    # The quiet-boundary bookkeeping survives, as after a maximum-duration cut:
+    # a tap is never mistaken for silence by the next prompt's fence.
+    vad.fence_prompt()
+    assert vad.prompt_discarding
