@@ -73,7 +73,7 @@ from .channels.biome import DEFAULT_STREAM_DIR, BiomeNotificationStore
 from .channels.cards import CardLog
 from .channels.contacts import RelationshipBook
 from .channels.imessage import IMessageStore
-from .channels.message_sender import MessagesAppSender
+from .channels.message_sender import AUTOMATION_SETTINGS_PATH, MessagesAppSender
 from .channels.jsonl_source import JsonlNotificationStore
 from .channels.notification_mux import NotificationLane, NotificationMux
 from .channels.notifications import NotificationStore
@@ -1492,8 +1492,27 @@ async def main() -> None:
     transport.on_navigation_route_ack(on_navigation_route_ack)
     transport.on_navigation_state(on_navigation_state)
     transport.on_navigation_reroute(on_navigation_reroute)
+    # Sending is an Apple Event to Messages: macOS's Automation permission,
+    # not the Full Disk Access that reads chat.db. Ask it now, while the
+    # wearer is likely at the Mac (JOAT just started), so the consent prompt
+    # is answered here and not left blocking a send from the glasses. Every
+    # send also checks first and fails at once, unsent, if it is missing.
+    messages_sender = MessagesAppSender(preflight=True)
+
+    async def check_messages_automation() -> None:
+        state = await messages_sender.check_permission(timeout_s=180.0)
+        status.set(messages_send=state)
+        if state == "granted":
+            log.info("messages automation granted — replies from the glasses can send")
+        else:
+            log.warning(
+                "messages automation %s — replies from the glasses cannot send until JOAT "
+                "may control Messages: %s", state, AUTOMATION_SETTINGS_PATH,
+            )
+
+    asyncio.get_running_loop().create_task(check_messages_automation())
     message_replies = MessageReplyController(
-        MessagesAppSender(),
+        messages_sender,
         transport.request_confirmation,
         action_journal,
         begin_reply=lambda: message_ui.begin_reply(),

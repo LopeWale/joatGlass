@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-12 — A reply that cannot be sent fails at once, unsent, instead of sitting on "sending"
+
+The wearer: "i have a message sending but still not sent based on the indicator arrow; it prompted my mac for permission even though the JOAT mac app has the messages access already granted; the message is still unsent."
+
+- **What happened** (11:58): the reply was heard, reviewed and confirmed (11:58:43); `stage=send-failed error=MessageSendError` 15 s later. This was the first send the brain has ever attempted — the log holds no earlier send. Sending is an Apple Event to Messages (`osascript` → `tell application "Messages"`), gated by macOS's **Automation** permission (JOAT may control Messages). The access JOAT already had is Full Disk Access, which reads chat.db. macOS put the Automation consent prompt up on the Mac; `osascript` blocked on it until the 15 s deadline killed it; a killed send is "possibly submitted", so the glasses stayed on ▷.
+- **Fix** (`MessagesAppSender`): a read-only probe, `tell application "Messages" to count accounts` (no recipient, no body), reads the permission. The engine runs it at start in the background with a 3-minute window, while the wearer is likely at the Mac, so the prompt is answered there; the outcome goes to the log and `status.json` (`messages_send`). With `preflight=True` (production), every send probes first with a 3 s limit: denied, pending or no answer is a definite "not sent" (`possible_external_commit=False`) → × on the glasses, at once. A send refused with errAEEventNotPermitted (-1743) is likewise definite. The send-failed log line now carries a content-free `code=` and `possible_commit=`.
+- The wearer's grant: System Settings → Privacy & Security → Automation → JOAT → Messages (one time; JOAT.app is Developer ID–signed, so it holds across rebuilds).
+- Also fixed: `test_message_tools.py::test_controller_review_limit_remains_a_truthful_failed_status`, broken since `10023e4` raised the Messages review limit to 280 — it now drafts 300 characters, the length that is still too long for the box.
+- Tests: the probe's four states, its read-only argv, the preflight failing fast without spawning the send, a granted preflight sending as before, a -1743 refusal as a definite not-sent. Messages suites 236 passed, mypy clean. **Mac only: restart JOAT.**
+
 ## 2026-10-12 — The plugin no longer freezes after a second copy of it takes the glasses; a mic the host stopped is re-armed
 
 The wearer: "the background state is causing the project, the plugin to freeze. I'm the one that I've seen that. So do an investigation."

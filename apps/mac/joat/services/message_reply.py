@@ -1113,9 +1113,11 @@ class MessageReplyController:
                 if not exc.possible_external_commit:
                     self._journal.purge_payload(action_id)
             log.warning(
-                "message reply trace=%s stage=send-failed error=%s",
+                "message reply trace=%s stage=send-failed error=%s code=%s possible_commit=%s",
                 action_id,
                 type(exc).__name__,
+                getattr(exc, "code", "send"),
+                exc.possible_external_commit,
             )
             if exc.possible_external_commit:
                 message = (

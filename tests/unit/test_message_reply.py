@@ -684,6 +684,101 @@ class TestMessagesAppSender:
         with pytest.raises(MessageSendError, match="Messages is not signed in"):
             await MessagesAppSender().send("+14055550123", "hello")
 
+    async def test_a_refused_apple_event_is_a_definite_not_sent(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """errAEEventNotPermitted: the Apple Event never reached Messages, so
+        the glasses may show ×, not a stuck "sending"."""
+        class Process:
+            returncode = 1
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"", b"execution error: Not authorized to send Apple events to Messages. (-1743)"
+
+        async def spawn(*_args: object, **_kwargs: object) -> Process:
+            return Process()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        with pytest.raises(MessageSendError) as caught:
+            await MessagesAppSender().send("+14055550123", "hello")
+        assert caught.value.possible_external_commit is False
+        assert caught.value.code == "automation-denied"
+        assert "Automation" in str(caught.value)
+
+    @pytest.mark.parametrize(
+        ("probe", "state"),
+        [
+            ((0, b""), "granted"),
+            ((1, b"Not authorized to send Apple events to Messages. (-1743)"), "denied"),
+            ((1, b"Messages got an error: Connection is invalid. (-609)"), "unavailable"),
+            (None, "pending"),  # the consent prompt is up and nobody answers
+        ],
+    )
+    async def test_permission_probe_reads_the_automation_state(
+        self, monkeypatch: pytest.MonkeyPatch, probe: tuple[int, bytes] | None, state: str,
+    ) -> None:
+        calls: list[tuple[object, ...]] = []
+
+        async def spawn(*args: object, **_kwargs: object) -> object:
+            calls.append(args)
+            if probe is None:
+                return _ControlledMessageProcess()  # blocks until killed
+
+            class Process:
+                returncode = probe[0]
+
+                async def communicate(self) -> tuple[bytes, bytes]:
+                    return b"", probe[1]
+            return Process()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        sender = MessagesAppSender(terminate_grace_s=0.01, kill_grace_s=0.1)
+        assert await sender.check_permission(timeout_s=0.02) == state
+        # Read-only: no recipient, no body ever rides the probe.
+        assert calls == [("osascript", "-e", 'tell application "Messages" to count accounts')]
+
+    @pytest.mark.parametrize("probe_state", ["denied", "pending", "unavailable"])
+    async def test_preflight_fails_fast_and_unsent_without_spawning_the_send(
+        self, monkeypatch: pytest.MonkeyPatch, probe_state: str,
+    ) -> None:
+        """2026-10-12: the consent prompt sat on the Mac, the send blocked on
+        it for its whole deadline, and the glasses stayed on "sending"."""
+        spawned: list[tuple[object, ...]] = []
+
+        async def spawn(*args: object, **_kwargs: object) -> object:
+            spawned.append(args)
+            raise AssertionError("the send must not be spawned")
+
+        sender = MessagesAppSender(preflight=True, preflight_timeout_s=0.5)
+
+        async def probe(timeout_s: float) -> str:
+            assert timeout_s == 0.5
+            return probe_state
+
+        monkeypatch.setattr(sender, "check_permission", probe)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        with pytest.raises(MessageSendError) as caught:
+            await sender.send_chat("iMessage;-;+14055550123", "on my way")
+        assert caught.value.possible_external_commit is False
+        assert caught.value.code == f"automation-{probe_state}"
+        assert spawned == []
+
+    async def test_preflight_granted_sends_as_before(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple[object, ...]] = []
+
+        async def spawn(*args: object, **_kwargs: object) -> _ControlledMessageProcess:
+            calls.append(args)
+            process = _ControlledMessageProcess()
+            process.returncode = 0
+            process.exited.set()
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        await MessagesAppSender(preflight=True).send_chat("iMessage;-;+14055550123", "on my way")
+        assert [c[2] for c in calls] == [
+            'tell application "Messages" to count accounts',
+            calls[1][2],
+        ]
+        assert calls[1][-2:] == ("iMessage;-;+14055550123", "on my way")
+
     @pytest.mark.parametrize(
         ("recipient", "body"),
         [

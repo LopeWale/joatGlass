@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
+from typing import Literal
 
 from ..core.interfaces import MessageSender
+
+
+log = logging.getLogger(__name__)
+
+AutomationState = Literal["granted", "denied", "pending", "unavailable"]
 
 
 class MessageSendError(RuntimeError):
@@ -16,9 +23,29 @@ class MessageSendError(RuntimeError):
         message: str,
         *,
         possible_external_commit: bool = True,
+        code: str = "send",
     ) -> None:
         super().__init__(message)
         self.possible_external_commit = possible_external_commit
+        #: Content-free reason for logs and traces (never the body).
+        self.code = code
+
+
+# Sending is an Apple Event to Messages, so macOS's Automation permission
+# ("JOAT" may control "Messages") gates it. That is NOT the Full Disk Access
+# that lets JOAT read chat.db. Until it is decided, the first send shows a
+# consent prompt on the Mac and osascript blocks on it — with the wearer away,
+# the send hit its deadline and the glasses sat on "sending" (2026-10-12).
+# This read-only event carries no message body, so asking it is harmless.
+_PERMISSION_PROBE_SCRIPT = 'tell application "Messages" to count accounts'
+# errAEEventNotPermitted, as osascript reports a refused Apple Event.
+_NOT_PERMITTED_MARKERS = ("-1743", "Not authorized to send Apple events")
+AUTOMATION_SETTINGS_PATH = "System Settings > Privacy & Security > Automation > JOAT > Messages"
+
+
+def _not_permitted(stderr: bytes) -> bool:
+    text = stderr.decode("utf-8", errors="replace")
+    return any(marker in text for marker in _NOT_PERMITTED_MARKERS)
 
 
 _SEND_SCRIPT = """
@@ -59,16 +86,46 @@ class MessagesAppSender(MessageSender):
     def __init__(
         self, *, timeout_s: float = 15.0,
         terminate_grace_s: float = 1.0, kill_grace_s: float = 1.0,
+        preflight: bool = False, preflight_timeout_s: float = 3.0,
     ) -> None:
         for name, value in (
             ("timeout_s", timeout_s), ("terminate_grace_s", terminate_grace_s),
-            ("kill_grace_s", kill_grace_s),
+            ("kill_grace_s", kill_grace_s), ("preflight_timeout_s", preflight_timeout_s),
         ):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive and finite")
         self._timeout_s = timeout_s
         self._terminate_grace_s = terminate_grace_s
         self._kill_grace_s = kill_grace_s
+        self._preflight = preflight
+        self._preflight_timeout_s = preflight_timeout_s
+
+    async def check_permission(self, timeout_s: float) -> AutomationState:
+        """Whether this process may control Messages, by asking it something
+        harmless. ``pending``: macOS is showing (or would show) the consent
+        prompt and nobody answered in time. Run at start with a long timeout
+        while the wearer is at the Mac; before a send with a short one."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "osascript", "-e", _PERMISSION_PROBE_SCRIPT,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+        except (OSError, ValueError, RuntimeError):
+            return "unavailable"
+        communication = asyncio.create_task(process.communicate())
+        try:
+            _stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=timeout_s)
+        except asyncio.CancelledError:
+            await self._cleanup_owned_process(process, communication)
+            raise
+        except Exception:
+            _reaped, cancelled = await self._cleanup_owned_process(process, communication)
+            if cancelled:
+                raise asyncio.CancelledError from None
+            return "pending"
+        if process.returncode == 0:
+            return "granted"
+        return "denied" if _not_permitted(stderr) else "unavailable"
 
     async def send(self, recipient: str, text: str) -> None:
         await self._send(_SEND_SCRIPT, recipient, text, strip_recipient=True)
@@ -102,6 +159,20 @@ class MessagesAppSender(MessageSender):
         # The confirmation binds the body byte for byte. Whitespace used only
         # for the nonblank check above must never change the submitted argv.
         body = text
+        if self._preflight:
+            # Nothing has been handed to Messages yet: a failure here is a
+            # definite "not sent", shown at once instead of a stuck "sending".
+            state = await self.check_permission(self._preflight_timeout_s)
+            if state != "granted":
+                reasons = {
+                    "denied": f"The Mac is not allowed to control Messages. Allow it in {AUTOMATION_SETTINGS_PATH}.",
+                    "pending": "macOS is asking on the Mac whether JOAT may control Messages. Answer it there, then send again.",
+                    "unavailable": "Messages on the Mac did not answer.",
+                }
+                log.warning("messages automation %s — reply not sent (%s)", state, AUTOMATION_SETTINGS_PATH)
+                raise MessageSendError(
+                    reasons[state], possible_external_commit=False, code=f"automation-{state}",
+                )
         try:
             process = await asyncio.create_subprocess_exec(
                 "osascript",
@@ -136,8 +207,14 @@ class MessagesAppSender(MessageSender):
                 reason += "; owned child cleanup could not be confirmed"
             # After spawn, even a killed executor might already have handed
             # the message to Messages. Never turn this into an automatic retry.
-            raise MessageSendError(reason, possible_external_commit=True) from exc
+            raise MessageSendError(reason, possible_external_commit=True, code="timeout") from exc
         if process.returncode != 0:
+            if _not_permitted(stderr):
+                # A refused Apple Event never reached Messages: definitely not sent.
+                raise MessageSendError(
+                    f"The Mac is not allowed to control Messages. Allow it in {AUTOMATION_SETTINGS_PATH}.",
+                    possible_external_commit=False, code="automation-denied",
+                )
             detail = stderr.decode("utf-8", errors="replace").strip()
             raise MessageSendError(detail or "Messages rejected the send")
 

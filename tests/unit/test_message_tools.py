@@ -231,7 +231,7 @@ async def test_status_preserves_sending_then_uncertainty_when_cancelled_during_s
 
 async def test_controller_review_limit_remains_a_truthful_failed_status(rig: Rig) -> None:
     rig.replies.select(THREAD, trace_id="review-cap")
-    await rig.call("prepare_message", mode="reply", action_id="long-1", body="x" * 120)
+    await rig.call("prepare_message", mode="reply", action_id="long-1", body="x" * 300)
     status = await completed(rig, "long-1")
     assert status["state"] == "failed" and "confirmation screen" in status["message"]
     assert rig.confirm.calls == [] and rig.sender.attempts == []
