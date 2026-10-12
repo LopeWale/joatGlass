@@ -328,7 +328,8 @@ async def test_send_to_notes_exports_summary_and_transcript(tmp_path: Path) -> N
         assert receipt is not None and receipt.startswith("Sent “Launch sync”")
         title, body = exporter.exports[0]
         assert title == "Launch sync"
-        assert "Summary" in body
+        assert "Overview" in body
+        assert "Next steps" in body
         assert any("ship on Friday" in line for line in body)
         assert "Transcript" in body
         assert any("QA signs off Thursday" in line for line in body)
@@ -347,3 +348,134 @@ async def test_schedule_summarize_runs_in_the_background(tmp_path: Path) -> None
         stored = notes.insights("capture-1")
         assert stored is not None
         assert stored.engine == "mlx-local"
+
+
+# ── FEAT-002: title, Conversate-style sections, follow-on steps ─────────────
+
+_CONVERSATE_SHAPED = (
+    "TITLE: \"Launch plan review.\"\n"
+    "**OVERVIEW:**\n"
+    "The team agreed to ship on Friday.\n"
+    "KEY POINTS:\n"
+    "- Ship on Friday\n"
+    "NEXT STEPS:\n"
+    "- Email the release notes\n"
+)
+
+
+def test_parse_insights_reads_title_overview_and_next_steps() -> None:
+    parsed = parse_insights(_CONVERSATE_SHAPED)
+    assert parsed is not None
+    assert parsed.title == "Launch plan review"
+    assert parsed.summary == "The team agreed to ship on Friday."
+    assert parsed.key_points == ("Ship on Friday",)
+    assert parsed.todos == ("Email the release notes",)
+
+
+def test_a_key_point_that_merely_starts_with_a_header_word_stays_a_point() -> None:
+    parsed = parse_insights(
+        "OVERVIEW:\nShip it.\nKEY POINTS:\nSummary of costs was approved\n"
+    )
+    assert parsed is not None
+    assert parsed.key_points == ("Summary of costs was approved",)
+
+
+async def test_a_clock_title_is_replaced_by_the_generated_one(tmp_path: Path) -> None:
+    completer = FakeCompleter([_CONVERSATE_SHAPED])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    with durable:
+        retained_note(notes)
+        notes.rename("capture-1", "Note 09:30", now_us=50)
+
+        receipt = await insights.summarize("capture-1")
+
+        assert receipt.startswith("Summarized “Launch plan review”")
+        assert notes.get("capture-1").title == "Launch plan review"
+
+
+async def test_a_spoken_title_is_never_replaced(tmp_path: Path) -> None:
+    completer = FakeCompleter([_CONVERSATE_SHAPED])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    with durable:
+        retained_note(notes)
+
+        await insights.summarize("capture-1")
+
+        assert notes.get("capture-1").title == "Launch sync"
+
+
+async def test_the_post_summary_step_runs_even_when_the_summary_fails(
+    tmp_path: Path,
+) -> None:
+    followed: list[str] = []
+
+    async def after(capture_id: str) -> None:
+        followed.append(capture_id)
+
+    durable = DurableStore(tmp_path / "joat.sqlite3")
+    notes = VoiceNoteStore(durable)
+    insights = NoteInsightsService(
+        notes, FakeCompleter(["unusable"]), clock_us=lambda: 999, after_summary=after,
+    )
+    with durable:
+        retained_note(notes)
+        insights.schedule_summarize("capture-1")
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if followed:
+                break
+
+        assert followed == ["capture-1"]
+        assert notes.insights("capture-1") is None
+
+
+async def test_reminders_can_come_from_any_note_not_only_the_last(tmp_path: Path) -> None:
+    completer = FakeCompleter([_SHAPED])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    productivity = FakeProductivity()
+    commands = NoteInsightCommandController(
+        insights,
+        productivity=productivity,  # type: ignore[arg-type]
+        local_time_zone=lambda: "America/Chicago",
+        now=lambda: datetime(2026, 8, 31, 20, 0, tzinfo=timezone.utc),
+    )
+    with durable:
+        retained_note(notes, "older", base_us=10)
+        retained_note(notes, "newer", base_us=100)
+        await insights.summarize("older")
+
+        receipt = await commands.create_reminders_for("older")
+
+        assert receipt.startswith("Created 2 of 2 reminders from “Launch sync”")
+        assert {origin.identifier for _, origin in productivity.intents if origin} == {"older"}
+
+
+class FakeSync:
+    def __init__(self) -> None:
+        self.synced: list[tuple[str, bool]] = []
+        self.toggles: list[str] = []
+
+    async def sync_voice(self, capture_id: str, *, force: bool = False) -> str | None:
+        self.synced.append((capture_id, force))
+        return "Sent “Launch sync” to Apple Notes (JOAT folder)."
+
+    def handle_toggle(self, text: str) -> str | None:
+        self.toggles.append(text)
+        return "toggled" if "apple notes" in text.casefold() else None
+
+
+async def test_send_to_notes_and_resummarize_go_through_the_sync(tmp_path: Path) -> None:
+    completer = FakeCompleter([_SHAPED])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    sync = FakeSync()
+    commands = NoteInsightCommandController(insights, sync=sync)
+    with durable:
+        retained_note(notes)
+
+        assert (await commands.handle_command("send the last note to my notes") or "").startswith(
+            "Sent “Launch sync”"
+        )
+        await commands.handle_command("summarize the last note")
+        assert sync.synced == [("capture-1", True), ("capture-1", False)]
+        assert await commands.handle_command("stop saving notes to Apple Notes") == "toggled"
+        assert await commands.handle_command("what time is it") is None

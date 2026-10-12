@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 
 from ..core.interfaces import (
@@ -30,6 +31,11 @@ class AudioRouter(AudioFrameSource):
     duration — a live meeting recording must not also drive assistant replies.
     """
 
+    #: How much recent audio the router remembers for a capture that asks
+    #: for pre-roll. A held-touchpad note (FEAT-002) begins only once the
+    #: press registers as long, after the wearer has already started talking.
+    RECENT_AUDIO_US = 2_000_000
+
     def __init__(
         self, source: AudioFrameSource, *,
         on_capture_started: Callable[[], None] | None = None,
@@ -39,6 +45,7 @@ class AudioRouter(AudioFrameSource):
         self._on_capture_started = on_capture_started
         self._conversation: list[AudioCallback] = []
         self._conversation_frames: list[AudioFrameCallback] = []
+        self._recent: deque[AudioFrame] = deque()
         source.on_audio_frame(self._route)
 
     @property
@@ -57,9 +64,21 @@ class AudioRouter(AudioFrameSource):
         callback: AudioFrameCallback,
         *,
         exclusive: bool = True,
+        preroll_us: int = 0,
+        now_us: int | None = None,
     ) -> None:
+        """Take the capture lane.
+
+        ``preroll_us`` > 0 first hands the new owner the most recent frames
+        of the CURRENT connection that arrived within that window before
+        ``now_us`` (or before the newest frame when no clock is given),
+        oldest first — audio the conversation consumers already saw, now
+        also journaled by the capture.
+        """
         if self._capture is not None:
             raise AudioRouteConflictError("an audio capture is already active")
+        if isinstance(preroll_us, bool) or not isinstance(preroll_us, int) or preroll_us < 0:
+            raise ValueError("preroll_us must be a non-negative integer")
         self._capture = callback
         self._capture_exclusive = exclusive
         try:
@@ -73,6 +92,9 @@ class AudioRouter(AudioFrameSource):
             self._capture = None
             self._capture_exclusive = False
             raise
+        if preroll_us:
+            for frame in self._preroll(preroll_us, now_us):
+                callback(frame)
 
     def end_capture(self, callback: AudioFrameCallback) -> None:
         if self._capture is not callback:
@@ -80,7 +102,39 @@ class AudioRouter(AudioFrameSource):
         self._capture = None
         self._capture_exclusive = False
 
+    def _preroll(self, window_us: int, now_us: int | None) -> list[AudioFrame]:
+        """Recent frames of the newest connection, within the window, in order.
+
+        A pre-roll must never splice two connections: frames from an older
+        generation, or older than a sequence gap, are left out.
+        """
+        if not self._recent:
+            return []
+        newest = self._recent[-1]
+        reference = now_us if now_us is not None else newest.received_at_us
+        picked: list[AudioFrame] = []
+        for frame in reversed(self._recent):
+            if (
+                frame.connection_generation != newest.connection_generation
+                or reference - frame.received_at_us > window_us
+            ):
+                break
+            if picked and frame.seq + 1 != picked[-1].seq:
+                break
+            picked.append(frame)
+        picked.reverse()
+        return picked
+
+    def _remember(self, frame: AudioFrame) -> None:
+        recent = self._recent
+        recent.append(frame)
+        while recent and frame.received_at_us - recent[0].received_at_us > self.RECENT_AUDIO_US:
+            recent.popleft()
+        while len(recent) > 256:
+            recent.popleft()
+
     def _route(self, frame: AudioFrame) -> None:
+        self._remember(frame)
         capture = self._capture
         if capture is not None:
             capture(frame)

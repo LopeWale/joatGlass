@@ -177,7 +177,9 @@ class TestVoiceCommandRouter:
             def emit(self, seq: int) -> None:
                 assert self.callback is not None
                 self.callback(AudioFrame(
-                    pcm=b"\x01\x00" * 40,
+                    # Speech-level audio: live transcription (FEAT-002) never
+                    # sends near-silence to STT.
+                    pcm=b"\xb8\x0b\x48\xf4" * 20,
                     connection_generation="socket-a",
                     seq=seq,
                     source="glasses",

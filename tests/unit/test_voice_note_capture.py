@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 import stat
+import struct
+import time
 
 from joat.audio.router import AudioRouter
 from joat.core.interfaces import (
@@ -12,11 +15,23 @@ from joat.core.interfaces import (
     AudioFrameCallback,
     AudioFrameSource,
     SttEngine,
+    SttUnavailableError,
     Transcript,
 )
 from joat.persistence.store import DurableStore
 from joat.persistence.voice_notes import VoiceNoteStore
-from joat.services.voice_note_capture import VoiceNoteCaptureController
+from joat.services.voice_note_capture import (
+    LiveLine,
+    VoiceNoteCaptureController,
+    speaker_label,
+)
+
+
+#: 40 samples at ±3000 — well above the near-silence floor, so a chunk of
+#: it goes to STT. (Live transcription never sends near-silence to STT.)
+SPEECH = struct.pack("<40h", *([3000, -3000] * 20))
+#: 40 samples of digital near-silence: accounted for, never transcribed.
+SILENCE = b"\x01\x00" * 40
 
 
 class FakeFrameSource(AudioFrameSource):
@@ -26,15 +41,18 @@ class FakeFrameSource(AudioFrameSource):
     def on_audio_frame(self, callback: AudioFrameCallback) -> None:
         self.callback = callback
 
-    def emit(self, seq: int, *, generation: str = "socket-a") -> None:
+    def emit(
+        self, seq: int, *, generation: str = "socket-a", pcm: bytes = SPEECH,
+        speaker: str | None = "wearer", received_at_us: int | None = None,
+    ) -> None:
         assert self.callback is not None
         self.callback(AudioFrame(
-            pcm=b"\x01\x00" * 40,
+            pcm=pcm,
             connection_generation=generation,
             seq=seq,
             source="glasses",
-            speaker="wearer",
-            received_at_us=100 + seq,
+            speaker=speaker,
+            received_at_us=100 + seq if received_at_us is None else received_at_us,
         ))
 
 
@@ -474,3 +492,276 @@ async def test_whisper_terminal_punctuation_never_deafens_the_grammar(
         assert await capture.handle_command("Resume recording!") == "Resumed Voice Note: Standup."
         receipt = await capture.handle_command("Stop the quicknote.")
         assert receipt is not None and receipt.startswith("Saved Voice Note")
+
+
+# ── FEAT-002: live transcription, hold-to-talk ──────────────────────────────
+
+#: 200 ms batches, the transport's real cadence: speech and silence.
+SPEECH_200MS = struct.pack("<3200h", *([3000, -3000] * 1600))
+QUIET_200MS = b"\x00\x00" * 3200
+
+
+class ScriptedStt(FakeStt):
+    """A stateless engine (whisper serve's shape): one answer per chunk."""
+
+    def __init__(self, answers: list[str | None | Exception]) -> None:
+        super().__init__()
+        self.answers = answers
+        self.calls = 0
+
+    async def transcribe_once(self, pcm: bytes) -> Transcript | None:
+        self.calls += 1
+        answer = self.answers.pop(0) if self.answers else "more words"
+        if isinstance(answer, Exception):
+            raise answer
+        return Transcript(answer, True) if answer is not None else None
+
+
+async def settle() -> None:
+    """Let the transcription worker run."""
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+
+def build(path: Path, stt: FakeStt) -> tuple[
+    DurableStore, VoiceNoteStore, FakeFrameSource, VoiceNoteCaptureController,
+]:
+    durable = DurableStore(path)
+    notes = VoiceNoteStore(durable)
+    source = FakeFrameSource()
+    capture = VoiceNoteCaptureController(
+        notes, AudioRouter(source), stt, id_factory=lambda: "capture-1",
+    )
+    return durable, notes, source, capture
+
+
+async def test_a_sentence_reaches_the_live_page_while_recording(tmp_path: Path) -> None:
+    stt = ScriptedStt(["We ship on Friday."])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    changes: list[int] = []
+    capture.add_listener(lambda: changes.append(1))
+    with durable:
+        capture.control_start()
+        seq = 0
+        for _ in range(4):
+            source.emit(seq, pcm=SPEECH_200MS, speaker="self")
+            seq += 1
+        # One second of quiet closes the utterance: the chunk is cut and
+        # transcribed while the note is still recording.
+        for _ in range(6):
+            source.emit(seq, pcm=QUIET_200MS, speaker=None)
+            seq += 1
+        await settle()
+
+        assert capture.snapshot.state == "recording"
+        assert capture.live_lines() == (LiveLine("We ship on Friday.", "self"),)
+        assert stt.calls == 1
+        assert changes, "the live page is told about every change"
+
+        receipt = await capture.control_stop()
+
+        assert receipt.startswith("Saved Voice Note")
+        saved = notes.get("capture-1")
+        assert saved.state == "saved" and saved.raw_retained is False
+        # The trailing quiet was accounted for without another STT call.
+        assert stt.calls == 1
+
+
+async def test_near_silence_is_accounted_for_without_stt(tmp_path: Path) -> None:
+    stt = ScriptedStt([])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start()
+        for seq in range(3):
+            source.emit(seq, pcm=SILENCE)
+
+        receipt = await capture.control_stop()
+
+        assert stt.calls == 0
+        assert receipt.startswith("Saved Voice Note: ")
+        assert notes.get("capture-1").state == "saved"
+
+
+async def test_no_words_is_complete_but_an_engine_failure_keeps_the_audio(
+    tmp_path: Path,
+) -> None:
+    stt = ScriptedStt([None])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start()
+        source.emit(0)
+        await capture.control_stop()
+        assert notes.get("capture-1").state == "saved"
+
+    failing = ScriptedStt([SttUnavailableError("down"), SttUnavailableError("still down")])
+    durable2, notes2, source2, capture2 = build(tmp_path / "joat-2.sqlite3", failing)
+    with durable2:
+        capture2.control_start()
+        source2.emit(0)
+        receipt = await capture2.control_stop()
+        assert receipt.startswith("Saved Voice Note with gaps")
+        degraded = notes2.get("capture-1")
+        assert degraded.state == "saved_degraded" and degraded.raw_retained is True
+        assert any(
+            s.kind == "gap" and s.text.startswith("[transcription_gap]")
+            for s in notes2.segments("capture-1")
+        )
+
+
+async def test_a_chunk_the_engine_missed_live_is_retried_at_save(tmp_path: Path) -> None:
+    stt = ScriptedStt([SttUnavailableError("warming"), "Second try worked."])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start()
+        source.emit(0)
+        capture.control_pause()
+        await settle()
+        assert capture.live_lines() == ()
+
+        await capture.control_stop()
+
+        assert [s.text for s in notes.segments("capture-1") if s.kind == "transcript"] == [
+            "Second try worked."
+        ]
+        assert notes.get("capture-1").state == "saved"
+
+
+async def test_hold_to_talk_makes_one_paragraph_per_hold(tmp_path: Path) -> None:
+    stt = ScriptedStt(["Buy milk.", "Call the plumber."])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        opened = capture.control_start("hold")
+        assert opened.startswith("Opened QuickNote: Note ")
+        assert capture.snapshot.state == "paused" and capture.snapshot.mode == "hold"
+        # Paused: nothing is journaled.
+        source.emit(0)
+        assert notes.frame_count("capture-1") == 0
+
+        assert capture.control_hold_start() is not None
+        assert capture.snapshot.holding is True
+        source.emit(10)
+        source.emit(11)
+        capture.control_hold_end()
+        await settle()
+        assert capture.snapshot.state == "paused"
+
+        capture.control_hold_start()
+        source.emit(20)
+        capture.control_hold_end()
+        await settle()
+
+        assert [line.text for line in capture.live_lines()] == ["Buy milk.", "Call the plumber."]
+        receipt = await capture.control_stop()
+        assert receipt.startswith("Saved Voice Note")
+        assert notes.get("capture-1").transcribed_segments == 2
+
+
+async def test_a_hold_keeps_the_words_spoken_before_it_registered(tmp_path: Path) -> None:
+    stt = ScriptedStt(["Remember the keys."])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    now = time.time_ns() // 1_000
+    with durable:
+        capture.control_start("hold")
+        source.emit(0, received_at_us=now - 900_000)   # within the pre-roll
+        source.emit(1, received_at_us=now - 700_000)
+        capture.control_hold_start()
+        source.emit(2, received_at_us=now)
+        capture.control_hold_end()
+        await capture.control_stop()
+
+        frames_seen = notes.get("capture-1").journaled_frames
+        assert frames_seen == 3
+
+
+async def test_a_hold_never_journals_the_same_frame_twice(tmp_path: Path) -> None:
+    """Pause, then hold at once: the pre-roll reaches back over audio the
+    continuous stretch already journaled. No duplicate, no false gap."""
+    stt = ScriptedStt(["First.", "Second."])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    now = time.time_ns() // 1_000
+    with durable:
+        capture.control_start()
+        source.emit(0, received_at_us=now - 400_000)
+        source.emit(1, received_at_us=now - 300_000)
+        capture.control_pause()
+        source.emit(2, received_at_us=now - 100_000)
+        capture.control_hold_start()
+        capture.control_hold_end()
+        await capture.control_stop()
+
+        note = notes.get("capture-1")
+        assert note.journaled_frames == 3
+        assert note.gap_count == 0
+
+
+async def test_a_quick_note_nobody_held_is_not_kept(tmp_path: Path) -> None:
+    saved: list[str] = []
+    durable = DurableStore(tmp_path / "joat.sqlite3")
+    notes = VoiceNoteStore(durable)
+    capture = VoiceNoteCaptureController(
+        notes, AudioRouter(FakeFrameSource()), FakeStt(),
+        id_factory=lambda: "capture-1", on_saved=saved.append,
+    )
+    with durable:
+        capture.control_start("hold")
+
+        receipt = await capture.control_stop()
+
+        assert receipt == "Nothing was recorded, so the note was discarded."
+        assert notes.get("capture-1").state == "discarded"
+        assert saved == []
+        assert capture.active is False
+
+
+async def test_tap_toggles_recording_and_a_hold_is_ignored_while_recording(
+    tmp_path: Path,
+) -> None:
+    durable, _notes, source, capture = build(tmp_path / "joat.sqlite3", FakeStt())
+    with durable:
+        capture.control_start()
+        assert capture.control_hold_start() is None
+        assert capture.control_toggle().startswith("Paused Voice Note")
+        assert capture.control_toggle().startswith("Resumed Voice Note")
+        source.emit(0)
+        assert capture.snapshot.state == "recording"
+
+
+async def test_keep_after_discard_resumes_only_a_recording(tmp_path: Path) -> None:
+    durable, _notes, _source, capture = build(tmp_path / "joat.sqlite3", FakeStt())
+    with durable:
+        capture.control_start("hold")
+        capture.control_request_discard()
+
+        assert capture.control_keep() == f"Kept Voice Note: {capture.snapshot.title}."
+        assert capture.snapshot.state == "paused"
+
+
+async def test_speaker_labels_need_clear_agreement() -> None:
+    from collections import Counter
+
+    assert speaker_label(Counter({"self": 8, "other": 1}), 10) == "self"
+    assert speaker_label(Counter({"other": 6}), 8) == "other"
+    assert speaker_label(Counter({"self": 5, "other": 5}), 10) is None
+    assert speaker_label(Counter({"self": 2}), 10) is None   # mostly unlabelled
+    assert speaker_label(Counter({"wearer": 10}), 10) is None
+
+
+async def test_silence_watch_reports_a_capture_with_no_audio(tmp_path: Path) -> None:
+    clock = [100.0]
+    durable = DurableStore(tmp_path / "joat.sqlite3")
+    notes = VoiceNoteStore(durable)
+    source = FakeFrameSource()
+    capture = VoiceNoteCaptureController(
+        notes, AudioRouter(source), FakeStt(), id_factory=lambda: "capture-1",
+        monotonic=lambda: clock[0],
+    )
+    with durable:
+        assert capture.silent_for_s() == 0.0
+        capture.control_start()
+        clock[0] = 103.5
+        assert capture.silent_for_s() == 3.5
+        source.emit(0)
+        clock[0] = 104.0
+        assert capture.silent_for_s() == 0.5
+        capture.control_pause()
+        assert capture.silent_for_s() == 0.0

@@ -618,6 +618,53 @@ _MIGRATION_14 = (
     """,
 )
 
+_MIGRATION_15 = (
+    # Live QuickNote transcription (FEAT-002). A recording is now transcribed
+    # in chunks while it runs. A chunk with no words (near-silence, or audio
+    # the STT engine heard no words in) is still ACCOUNTED FOR, so a quiet
+    # pause does not turn a complete recording into a degraded one: these
+    # spans count as covered at finalization exactly like transcript ranges.
+    """
+    CREATE TABLE voice_note_quiet_spans (
+        capture_id TEXT NOT NULL REFERENCES voice_notes(capture_id) ON DELETE CASCADE,
+        first_frame_ordinal INTEGER NOT NULL CHECK (first_frame_ordinal >= 0),
+        last_frame_ordinal INTEGER NOT NULL CHECK (
+            last_frame_ordinal >= first_frame_ordinal
+        ),
+        reason TEXT NOT NULL CHECK (reason IN ('silence','no_words')),
+        created_at_us INTEGER NOT NULL CHECK (created_at_us >= 0),
+        PRIMARY KEY (capture_id, first_frame_ordinal)
+    ) STRICT
+    """,
+    # Who a transcript section is attributed to — the Even app's per-frame
+    # speaker guess, aggregated. Derived, so it lives beside the segment
+    # rather than inside its capture-time text.
+    """
+    CREATE TABLE voice_note_segment_speakers (
+        capture_id TEXT NOT NULL REFERENCES voice_notes(capture_id) ON DELETE CASCADE,
+        segment_ordinal INTEGER NOT NULL CHECK (segment_ordinal >= 0),
+        speaker TEXT NOT NULL CHECK (speaker IN ('self','other')),
+        PRIMARY KEY (capture_id, segment_ordinal)
+    ) STRICT
+    """,
+    # Where a note was written outside JOAT (Apple Notes), so a re-send
+    # updates that note instead of creating a duplicate.
+    """
+    CREATE TABLE note_exports (
+        note_kind TEXT NOT NULL CHECK (note_kind IN ('voice','text')),
+        note_id TEXT NOT NULL CHECK (
+            typeof(note_id) = 'text' AND length(note_id) > 0
+        ),
+        target TEXT NOT NULL CHECK (target IN ('apple_notes')),
+        external_id TEXT NOT NULL CHECK (
+            typeof(external_id) = 'text' AND length(external_id) BETWEEN 1 AND 512
+        ),
+        exported_at_us INTEGER NOT NULL CHECK (exported_at_us >= 0),
+        PRIMARY KEY (note_kind, note_id, target)
+    ) STRICT
+    """,
+)
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
@@ -633,6 +680,7 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (12, "durable_terminal_conversations", _MIGRATION_12),
     (13, "durable_pomodoro_lengths", _MIGRATION_13),
     (14, "durable_saved_places", _MIGRATION_14),
+    (15, "live_quicknote_transcription", _MIGRATION_15),
 )
 
 

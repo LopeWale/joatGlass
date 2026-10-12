@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import secrets
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,12 +39,15 @@ class NoteCommandController:
         notes: NoteStore,
         *,
         export_directory: Path | None = None,
+        on_saved: Callable[[str], None] | None = None,
     ) -> None:
         self._notes = notes
         self._export_directory = export_directory or (
             Path.home() / "Library/Application Support/JOAT/Exports"
         )
         self._last_deleted_id: str | None = None
+        # Fired with the new note's id (FEAT-002: its Apple Notes copy).
+        self._on_saved = on_saved
 
     async def handle_command(self, text: str) -> str | None:
         stripped = text.strip()
@@ -102,6 +106,12 @@ class NoteCommandController:
             source=NoteSource(kind="hud.quick-note", identifier=identifier),
             now_us=time.time_ns() // 1_000,
         )
+        if self._on_saved is not None:
+            try:
+                self._on_saved(identifier)
+            except Exception:
+                # A post-save hook must never cost the wearer their receipt.
+                pass
         preview = visible_text if len(visible_text) <= 72 else visible_text[:69] + "…"
         return f"Saved QuickNote: {preview}"
 

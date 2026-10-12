@@ -141,6 +141,39 @@ class TestFlush:
         assert transcript is not None
         assert transcript.text == "eventual transcript"
 
+class TestTranscribeOnce:
+    """A QuickNote chunk (FEAT-002): stateless, and honest about failure."""
+
+    async def test_transcribes_without_touching_the_utterance_buffer(self, stub_server) -> None:
+        engine = WhisperServeEngine(base_url=stub_server)
+        await engine.feed(SPEECH)  # a conversational utterance in progress
+
+        chunk = await engine.transcribe_once(SPEECH)
+
+        assert chunk is not None and chunk.text == "hello from stub"
+        assert len(StubHandler.requests) == 1
+        # The wearer's own utterance is still there, untouched.
+        assert await engine.flush() is not None
+        assert len(StubHandler.requests) == 2
+
+    async def test_no_words_is_none_and_a_short_chunk_never_posts(self, stub_server) -> None:
+        engine = WhisperServeEngine(base_url=stub_server)
+        StubHandler.response_text = "   "
+        try:
+            assert await engine.transcribe_once(SPEECH) is None
+        finally:
+            StubHandler.response_text = "hello from stub"
+        assert await engine.transcribe_once(b"\x01\x02" * 10) is None
+        assert len(StubHandler.requests) == 1
+
+    async def test_a_dead_server_raises_instead_of_reporting_silence(self) -> None:
+        from joat.core.interfaces import SttUnavailableError
+
+        engine = WhisperServeEngine(base_url=f"http://127.0.0.1:{free_port()}")
+        with pytest.raises(SttUnavailableError):
+            await engine.transcribe_once(SPEECH)
+
+
 STUB_SERVER_SCRIPT = textwrap.dedent("""
     import json, sys
     from http.server import BaseHTTPRequestHandler, HTTPServer

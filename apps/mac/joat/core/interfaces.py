@@ -147,6 +147,32 @@ class SttEngine(ABC):
         buffered utterance. None when this engine cannot say them yet."""
         return None
 
+    async def transcribe_once(self, pcm: bytes) -> Transcript | None:
+        """Transcribe one complete chunk of durable audio (a QuickNote).
+
+        None means the engine heard no words. Raises ``SttUnavailableError``
+        when it could not transcribe at all, so a caller never mistakes an
+        engine failure for silence and purges audio it should have kept.
+
+        This default goes through the stateful buffer, so it must only run
+        while no conversational utterance shares it; engines that can do a
+        stateless request (whisper serve) override it.
+        """
+        self.reset()
+        try:
+            await self.feed(pcm)
+            transcript = await self.flush()
+        finally:
+            self.reset()
+        if transcript is None or not transcript.text.strip():
+            # A buffered engine cannot tell "no words" from a failed run.
+            raise SttUnavailableError("the engine returned no transcript")
+        return transcript
+
+
+class SttUnavailableError(RuntimeError):
+    """The STT engine could not transcribe a chunk (not: it heard nothing)."""
+
 
 class Confirmer(ABC):
     """Explicit human approval for a consequential action (RULES.md #6)."""

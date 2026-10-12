@@ -45,6 +45,36 @@ async def test_export_success_names_the_folder_and_sync_path(tmp_path: Path) -> 
     assert argv[0] == "-"
     assert argv[1] == "Launch sync"
     assert "Ship &quot;Friday&quot;" in argv[2]
+    assert argv[3] == "JOAT"
+    assert argv[4] == ""  # no earlier note to update
+
+
+async def test_write_returns_the_note_id_and_updates_by_it(tmp_path: Path) -> None:
+    """FEAT-002: the id the script prints comes back, and sending it again
+    asks the script to update that note rather than make a duplicate."""
+    recorded = tmp_path / "argv.txt"
+    exporter = AppleNotesExporter(
+        osascript=_stub(
+            tmp_path,
+            f'printf "%s\\n" "$@" > "{recorded}"; echo "x-coredata://ABC/ICNote/p42"',
+        ),
+    )
+    first = await exporter.write(title="Standup", body_lines=("x",), folder="Meetings")
+    assert first.ok and first.note_id == "x-coredata://ABC/ICNote/p42"
+    assert first.receipt.startswith("Sent “Standup” to Apple Notes (Meetings folder)")
+
+    again = await exporter.write(
+        title="Standup", body_lines=("y",), existing_id="x-coredata://ABC/ICNote/p42",
+    )
+    argv = recorded.read_text(encoding="utf-8").splitlines()
+    assert argv[4] == "x-coredata://ABC/ICNote/p42"
+    assert again.receipt.startswith("Updated “Standup” in Apple Notes")
+
+
+async def test_a_failed_write_carries_no_id(tmp_path: Path) -> None:
+    exporter = AppleNotesExporter(osascript=_stub(tmp_path, "exit 3"))
+    result = await exporter.write(title="Broken", body_lines=("x",))
+    assert result.ok is False and result.note_id is None
 
 
 async def test_export_translates_automation_denial_into_guidance(tmp_path: Path) -> None:

@@ -480,3 +480,155 @@ def test_recent_retained_orders_newest_first_and_skips_discards(tmp_path: Path) 
 
         recent = notes.recent_retained(5)
         assert [note.capture_id for note in recent] == ["capture-2", "capture-1"]
+
+
+# ── FEAT-002: quiet spans, speakers, rename, exports ────────────────────────
+
+def _recording_with_frames(notes: VoiceNoteStore, count: int) -> None:
+    notes.create(
+        capture_id="capture-1", idempotency_key="voice-note:capture-1",
+        title="Note 09:30", source_kind="g2.microphone", now_us=10,
+    )
+    notes.transition("capture-1", "recording", now_us=11)
+    for seq in range(count):
+        notes.append_frame(
+            "capture-1", connection_generation="socket-a", seq=seq,
+            source="glasses", speaker="self", pcm=b"\x01\x00", received_at_us=12 + seq,
+        )
+
+
+def test_quiet_spans_count_as_covered_so_a_pause_is_not_a_degraded_note(
+    tmp_path: Path,
+) -> None:
+    durable, notes = open_store(tmp_path / "joat.sqlite3")
+    with durable:
+        _recording_with_frames(notes, 4)
+        notes.append_transcript(
+            "capture-1", text="Hello there", first_frame_ordinal=0,
+            last_frame_ordinal=1, now_us=20, speaker="self",
+        )
+        assert [f.ordinal for f in notes.uncovered_frames("capture-1")] == [2, 3]
+        notes.append_quiet_span(
+            "capture-1", first_frame_ordinal=2, last_frame_ordinal=3,
+            reason="silence", now_us=21,
+        )
+        assert notes.uncovered_frames("capture-1") == ()
+        notes.transition("capture-1", "finalizing", now_us=22)
+
+        saved = notes.finalize(
+            "capture-1", complete=True,
+            completion_code="transcript_checkpointed_raw_purged", now_us=23,
+        )
+
+        assert saved.state == "saved" and saved.raw_retained is False
+        segment = notes.segments("capture-1")[0]
+        assert segment.speaker == "self"
+
+
+def test_an_uncovered_frame_still_degrades_the_note(tmp_path: Path) -> None:
+    durable, notes = open_store(tmp_path / "joat.sqlite3")
+    with durable:
+        _recording_with_frames(notes, 3)
+        notes.append_quiet_span(
+            "capture-1", first_frame_ordinal=0, last_frame_ordinal=1,
+            reason="no_words", now_us=20,
+        )
+        notes.transition("capture-1", "finalizing", now_us=21)
+
+        saved = notes.finalize(
+            "capture-1", complete=True,
+            completion_code="transcript_checkpointed_raw_purged", now_us=22,
+        )
+
+        assert saved.state == "saved_degraded" and saved.raw_retained is True
+
+
+def test_quiet_spans_and_speakers_must_be_backed_and_valid(tmp_path: Path) -> None:
+    durable, notes = open_store(tmp_path / "joat.sqlite3")
+    with durable:
+        _recording_with_frames(notes, 2)
+        with pytest.raises(VoiceNoteConflictError, match="not backed"):
+            notes.append_quiet_span(
+                "capture-1", first_frame_ordinal=1, last_frame_ordinal=5,
+                reason="silence", now_us=20,
+            )
+        with pytest.raises(ValueError, match="reason"):
+            notes.append_quiet_span(
+                "capture-1", first_frame_ordinal=0, last_frame_ordinal=0,
+                reason="music", now_us=20,
+            )
+        with pytest.raises(ValueError, match="speaker"):
+            notes.append_transcript(
+                "capture-1", text="x", first_frame_ordinal=0,
+                last_frame_ordinal=0, now_us=20, speaker="wearer",
+            )
+
+
+def test_a_hold_to_talk_note_opens_paused_and_frames_can_be_read_by_range(
+    tmp_path: Path,
+) -> None:
+    durable, notes = open_store(tmp_path / "joat.sqlite3")
+    with durable:
+        notes.create(
+            capture_id="capture-1", idempotency_key="voice-note:capture-1",
+            title="Note 09:30", source_kind="g2.microphone", now_us=10,
+        )
+        assert notes.transition("capture-1", "paused", now_us=11).state == "paused"
+        notes.transition("capture-1", "recording", now_us=12)
+        for seq in range(5):
+            notes.append_frame(
+                "capture-1", connection_generation="socket-a", seq=seq,
+                source="glasses", speaker=None, pcm=bytes([seq, 0]), received_at_us=13,
+            )
+
+        assert [f.seq for f in notes.frames_between("capture-1", 1, 3)] == [1, 2, 3]
+
+
+def test_rename_replaces_a_clock_title_but_never_revives_a_discard(tmp_path: Path) -> None:
+    durable, notes = open_store(tmp_path / "joat.sqlite3")
+    with durable:
+        _recording_with_frames(notes, 1)
+        assert notes.rename("capture-1", "Plumber and milk", now_us=30).title == (
+            "Plumber and milk"
+        )
+        notes.discard("capture-1", now_us=31)
+        with pytest.raises(VoiceNoteConflictError):
+            notes.rename("capture-1", "Back from the dead", now_us=32)
+
+
+def test_discard_purges_quiet_spans_and_speaker_labels(tmp_path: Path) -> None:
+    durable, notes = open_store(tmp_path / "joat.sqlite3")
+    with durable:
+        _recording_with_frames(notes, 2)
+        notes.append_transcript(
+            "capture-1", text="Private", first_frame_ordinal=0,
+            last_frame_ordinal=0, now_us=20, speaker="other",
+        )
+        notes.append_quiet_span(
+            "capture-1", first_frame_ordinal=1, last_frame_ordinal=1,
+            reason="silence", now_us=21,
+        )
+        notes.discard("capture-1", now_us=22)
+
+        for table in ("voice_note_quiet_spans", "voice_note_segment_speakers"):
+            row = durable.execute(
+                f"SELECT count(*) FROM {table} WHERE capture_id='capture-1'"
+            ).fetchone()
+            assert row is not None and row[0] == 0
+
+
+def test_note_exports_remember_one_apple_note_per_note(tmp_path: Path) -> None:
+    from joat.persistence.note_exports import NoteExportStore
+
+    durable = DurableStore(tmp_path / "joat.sqlite3")
+    exports = NoteExportStore(durable)
+    with durable:
+        assert exports.external_id("voice", "capture-1") is None
+        exports.record("voice", "capture-1", "x-coredata://A/ICNote/p1", now_us=1)
+        exports.record("voice", "capture-1", "x-coredata://A/ICNote/p2", now_us=2)
+        exports.record("text", "capture-1", "x-coredata://A/ICNote/p3", now_us=3)
+
+        assert exports.external_id("voice", "capture-1") == "x-coredata://A/ICNote/p2"
+        assert exports.external_id("text", "capture-1") == "x-coredata://A/ICNote/p3"
+        with pytest.raises(ValueError):
+            exports.record("voice", "capture-1", " ", now_us=4)

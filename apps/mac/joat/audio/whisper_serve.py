@@ -31,7 +31,7 @@ import wave
 from pathlib import Path
 from typing import Any
 
-from ..core.interfaces import SttEngine, Transcript
+from ..core.interfaces import SttEngine, SttUnavailableError, Transcript
 from .whisperkit import (
     CHANNELS, DEFAULT_INFERENCE_DEADLINE_S, SAMPLE_RATE, SAMPLE_WIDTH, WhisperKitEngine,
 )
@@ -463,6 +463,32 @@ class WhisperServeEngine(SttEngine):
             return None
         transcript = self._filter_echo(Transcript(text=text, is_final=False)) if text else None
         return transcript.text if transcript is not None else None
+
+    async def transcribe_once(self, pcm: bytes) -> Transcript | None:
+        """One durable chunk through the warm server, statelessly.
+
+        Never touches the conversational utterance buffer, so a QuickNote
+        can transcribe while the wearer talks to JOAT. Never spawns,
+        respawns or falls back to the batch CLI either: lifecycle belongs
+        to the conversational path, and a failure here is reported, so the
+        caller keeps the raw audio instead of treating it as silence.
+        """
+        if self._closed or (self._shutdown is not None and self._shutdown.is_set()):
+            raise SttUnavailableError("whisper serve is closed")
+        if self._started and not self._ready:
+            # Spawned and still warming (or recovering): the conversational
+            # path owns the batch fallback; this chunk waits for Save's retry.
+            raise SttUnavailableError("whisper serve is not ready")
+        if len(pcm) < MIN_UTTERANCE_BYTES:
+            return None
+        try:
+            text = await asyncio.to_thread(self._post, wav_bytes(pcm))
+        except Exception as exc:
+            log.warning("note chunk transcription failed error=%s", type(exc).__name__)
+            raise SttUnavailableError("whisper serve request failed") from exc
+        if not text or not text.strip():
+            return None
+        return self._filter_echo(Transcript(text=text, is_final=True))
 
     def _filter_echo(self, transcript: Transcript | None) -> Transcript | None:
         if transcript is not None and is_prompt_echo(transcript.text, self._prompt):

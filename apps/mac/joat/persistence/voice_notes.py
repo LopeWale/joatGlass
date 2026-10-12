@@ -15,7 +15,9 @@ _FINAL_STATES = frozenset(
     {"saved", "saved_degraded", "interrupted", "discarded", "failed"}
 )
 _TRANSITIONS: dict[str, frozenset[str]] = {
-    "preparing": frozenset({"recording", "failed", "discarded"}),
+    # A hold-to-talk QuickNote opens paused: nothing is captured until the
+    # wearer holds the touchpad (FEAT-002).
+    "preparing": frozenset({"recording", "paused", "failed", "discarded"}),
     "recording": frozenset(
         {"paused", "finalizing", "interrupted", "failed", "discarded"}
     ),
@@ -80,6 +82,14 @@ class VoiceNoteSegment:
     first_frame_ordinal: int | None
     last_frame_ordinal: int | None
     created_at_us: int
+    #: "self" / "other" when the frames' speaker guess agreed; None otherwise.
+    speaker: str | None = None
+
+
+#: Speaker labels a transcript section may carry (the Even app's guess).
+SEGMENT_SPEAKERS = frozenset({"self", "other"})
+#: Why a covered frame range has no transcript text.
+QUIET_REASONS = frozenset({"silence", "no_words"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +128,18 @@ def _identifier(name: str, value: str, *, maximum: int = 256) -> None:
 def _timestamp(now_us: int) -> None:
     if isinstance(now_us, bool) or not isinstance(now_us, int) or now_us < 0:
         raise ValueError("timestamp must be a non-negative integer")
+
+
+def _frame_range(first: int, last: int) -> None:
+    if (
+        isinstance(first, bool)
+        or not isinstance(first, int)
+        or first < 0
+        or isinstance(last, bool)
+        or not isinstance(last, int)
+        or last < first
+    ):
+        raise ValueError("transcript frame range is invalid")
 
 
 class VoiceNoteStore:
@@ -360,17 +382,12 @@ class VoiceNoteStore:
         first_frame_ordinal: int,
         last_frame_ordinal: int,
         now_us: int,
+        speaker: str | None = None,
     ) -> VoiceNoteSegment:
         _identifier("transcript", text, maximum=20_000)
-        if (
-            isinstance(first_frame_ordinal, bool)
-            or not isinstance(first_frame_ordinal, int)
-            or first_frame_ordinal < 0
-            or isinstance(last_frame_ordinal, bool)
-            or not isinstance(last_frame_ordinal, int)
-            or last_frame_ordinal < first_frame_ordinal
-        ):
-            raise ValueError("transcript frame range is invalid")
+        _frame_range(first_frame_ordinal, last_frame_ordinal)
+        if speaker is not None and speaker not in SEGMENT_SPEAKERS:
+            raise ValueError("speaker must be 'self' or 'other'")
         return self._append_segment(
             capture_id,
             kind="transcript",
@@ -378,7 +395,109 @@ class VoiceNoteStore:
             first_frame_ordinal=first_frame_ordinal,
             last_frame_ordinal=last_frame_ordinal,
             now_us=now_us,
+            speaker=speaker,
         )
+
+    def append_quiet_span(
+        self,
+        capture_id: str,
+        *,
+        first_frame_ordinal: int,
+        last_frame_ordinal: int,
+        reason: str,
+        now_us: int,
+    ) -> None:
+        """Account for journaled frames that carry no words.
+
+        Near-silence is never sent to STT, and a chunk the engine heard no
+        words in has nothing to transcribe; both are still covered, so the
+        recording can be proven complete and its raw audio purged.
+        """
+        _identifier("capture_id", capture_id)
+        _frame_range(first_frame_ordinal, last_frame_ordinal)
+        if reason not in QUIET_REASONS:
+            raise ValueError("quiet span reason must be 'silence' or 'no_words'")
+        _timestamp(now_us)
+        with self._store.transaction() as db:
+            current = self._get_with(db, capture_id)
+            if current.state not in {"recording", "paused", "finalizing"}:
+                raise VoiceNoteConflictError(
+                    "quiet spans cannot be recorded after Voice Note completion"
+                )
+            self._require_journaled(db, capture_id, first_frame_ordinal, last_frame_ordinal)
+            db.execute(
+                "INSERT OR IGNORE INTO voice_note_quiet_spans("
+                "capture_id,first_frame_ordinal,last_frame_ordinal,reason,"
+                "created_at_us) VALUES (?,?,?,?,?)",
+                (capture_id, first_frame_ordinal, last_frame_ordinal, reason, now_us),
+            )
+
+    def frames_between(
+        self, capture_id: str, first_frame_ordinal: int, last_frame_ordinal: int,
+    ) -> tuple[VoiceNoteFrame, ...]:
+        """Retained raw frames in one inclusive ordinal range, in order."""
+        _identifier("capture_id", capture_id)
+        _frame_range(first_frame_ordinal, last_frame_ordinal)
+        rows = self._store.execute(
+            "SELECT capture_id,ordinal,connection_generation,seq,source,speaker,"
+            "received_at_us,pcm_digest,pcm FROM voice_note_frames "
+            "WHERE capture_id=? AND ordinal BETWEEN ? AND ? ORDER BY ordinal",
+            (capture_id, first_frame_ordinal, last_frame_ordinal),
+        ).fetchall()
+        return tuple(self._frame(row) for row in rows)
+
+    def uncovered_frames(self, capture_id: str) -> tuple[VoiceNoteFrame, ...]:
+        """Journaled frames no transcript section or quiet span accounts for."""
+        _identifier("capture_id", capture_id)
+        rows = self._store.execute(
+            "SELECT capture_id,ordinal,connection_generation,seq,source,speaker,"
+            "received_at_us,pcm_digest,pcm FROM voice_note_frames AS frame "
+            "WHERE frame.capture_id=? "
+            f"AND NOT {self._COVERED_FRAME} ORDER BY frame.ordinal",
+            (capture_id,),
+        ).fetchall()
+        return tuple(self._frame(row) for row in rows)
+
+    def rename(self, capture_id: str, title: str, *, now_us: int) -> VoiceNote:
+        """Give a retained or active note a better title (a generated one)."""
+        _identifier("capture_id", capture_id)
+        _identifier("title", title, maximum=200)
+        _timestamp(now_us)
+        with self._store.transaction() as db:
+            current = self._get_with(db, capture_id)
+            if current.state in {"discarded", "failed"} or current.title is None:
+                raise VoiceNoteConflictError("a discarded Voice Note cannot be renamed")
+            db.execute(
+                "UPDATE voice_notes SET title=?,updated_at_us=MAX(updated_at_us,?) "
+                "WHERE capture_id=?",
+                (title, now_us, capture_id),
+            )
+            return self._get_with(db, capture_id)
+
+    #: SQL predicate: `frame` is covered by a transcript range or a quiet span.
+    _COVERED_FRAME = (
+        "(EXISTS (SELECT 1 FROM voice_note_segments AS segment "
+        "WHERE segment.capture_id=frame.capture_id AND segment.kind='transcript' "
+        "AND frame.ordinal BETWEEN segment.first_frame_ordinal "
+        "AND segment.last_frame_ordinal) "
+        "OR EXISTS (SELECT 1 FROM voice_note_quiet_spans AS quiet "
+        "WHERE quiet.capture_id=frame.capture_id "
+        "AND frame.ordinal BETWEEN quiet.first_frame_ordinal "
+        "AND quiet.last_frame_ordinal))"
+    )
+
+    @staticmethod
+    def _require_journaled(
+        db: sqlite3.Connection, capture_id: str, first: int, last: int,
+    ) -> None:
+        covered = db.execute(
+            "SELECT count(*) FROM voice_note_frames WHERE capture_id=? "
+            "AND ordinal BETWEEN ? AND ?",
+            (capture_id, first, last),
+        ).fetchone()
+        assert covered is not None
+        if covered[0] != last - first + 1:
+            raise VoiceNoteConflictError("frame range is not backed by journaled audio")
 
     def append_system(
         self,
@@ -408,6 +527,7 @@ class VoiceNoteStore:
         first_frame_ordinal: int | None,
         last_frame_ordinal: int | None,
         now_us: int,
+        speaker: str | None = None,
     ) -> VoiceNoteSegment:
         _identifier("capture_id", capture_id)
         _timestamp(now_us)
@@ -459,6 +579,12 @@ class VoiceNoteStore:
                     "WHERE capture_id=?",
                     (now_us, capture_id),
                 )
+                if speaker is not None:
+                    db.execute(
+                        "INSERT INTO voice_note_segment_speakers("
+                        "capture_id,segment_ordinal,speaker) VALUES (?,?,?)",
+                        (capture_id, ordinal, speaker),
+                    )
             elif kind == "gap":
                 db.execute(
                     "UPDATE voice_notes SET gap_count=gap_count+1,"
@@ -473,6 +599,7 @@ class VoiceNoteStore:
                 first_frame_ordinal=first_frame_ordinal,
                 last_frame_ordinal=last_frame_ordinal,
                 created_at_us=now_us,
+                speaker=speaker if kind == "transcript" else None,
             )
 
     def finalize(
@@ -495,15 +622,11 @@ class VoiceNoteStore:
                 raise VoiceNoteConflictError(
                     "finalization timestamp precedes durable Voice Note state"
                 )
+            # A frame is accounted for by a transcript range or by a quiet
+            # span (near-silence, or audio with no words in it).
             covered_row = db.execute(
-                "SELECT count(DISTINCT frame.ordinal) "
-                "FROM voice_note_frames AS frame "
-                "JOIN voice_note_segments AS segment "
-                "ON segment.capture_id=frame.capture_id "
-                "AND segment.kind='transcript' "
-                "AND frame.ordinal BETWEEN segment.first_frame_ordinal "
-                "AND segment.last_frame_ordinal "
-                "WHERE frame.capture_id=?",
+                "SELECT count(*) FROM voice_note_frames AS frame "
+                f"WHERE frame.capture_id=? AND {self._COVERED_FRAME}",
                 (capture_id,),
             ).fetchone()
             assert covered_row is not None
@@ -552,6 +675,10 @@ class VoiceNoteStore:
                 )
             db.execute("DELETE FROM voice_note_frames WHERE capture_id=?", (capture_id,))
             db.execute("DELETE FROM voice_note_segments WHERE capture_id=?", (capture_id,))
+            db.execute(
+                "DELETE FROM voice_note_segment_speakers WHERE capture_id=?", (capture_id,),
+            )
+            db.execute("DELETE FROM voice_note_quiet_spans WHERE capture_id=?", (capture_id,))
             db.execute(
                 "UPDATE voice_notes SET title=NULL,state='discarded',updated_at_us=?,"
                 "ended_at_us=?,received_frames=0,journaled_frames=0,"
@@ -604,9 +731,14 @@ class VoiceNoteStore:
     def segments(self, capture_id: str) -> tuple[VoiceNoteSegment, ...]:
         _identifier("capture_id", capture_id)
         rows = self._store.execute(
-            "SELECT capture_id,ordinal,kind,text,first_frame_ordinal,"
-            "last_frame_ordinal,created_at_us FROM voice_note_segments "
-            "WHERE capture_id=? ORDER BY ordinal",
+            "SELECT segment.capture_id,segment.ordinal,segment.kind,segment.text,"
+            "segment.first_frame_ordinal,segment.last_frame_ordinal,"
+            "segment.created_at_us,speaker.speaker "
+            "FROM voice_note_segments AS segment "
+            "LEFT JOIN voice_note_segment_speakers AS speaker "
+            "ON speaker.capture_id=segment.capture_id "
+            "AND speaker.segment_ordinal=segment.ordinal "
+            "WHERE segment.capture_id=? ORDER BY segment.ordinal",
             (capture_id,),
         ).fetchall()
         return tuple(self._segment(row) for row in rows)
@@ -811,10 +943,13 @@ class VoiceNoteStore:
             first_frame_ordinal=(cast(int, row[4]) if row[4] is not None else None),
             last_frame_ordinal=(cast(int, row[5]) if row[5] is not None else None),
             created_at_us=cast(int, row[6]),
+            speaker=(cast(str, row[7]) if len(row) > 7 and row[7] is not None else None),
         )
 
 
 __all__ = [
+    "QUIET_REASONS",
+    "SEGMENT_SPEAKERS",
     "VoiceNote",
     "VoiceNoteConflictError",
     "VoiceNoteError",

@@ -18,7 +18,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -35,6 +35,8 @@ from .productivity_actions import (
     ProductivityActionController,
     ReminderIntent,
 )
+from .notes_sync import voice_document
+from .voice_note_capture import DEFAULT_TITLE, labelled
 
 log = logging.getLogger(__name__)
 
@@ -62,13 +64,17 @@ _ASK_TAIL_CHARS = 18_000
 _MAX_REMINDER_HANDOFF = 8
 
 _INSIGHTS_SYSTEM = (
-    "You distill a recorded speech or meeting transcript. Reply in EXACTLY "
-    "this plain-text shape, with these three headers:\n"
-    "SUMMARY:\n"
-    "3 to 6 sentences capturing what was discussed and decided.\n"
+    "You distill the transcript of a recorded conversation, meeting, speech or "
+    "dictated note. Lines may start with 'You:' (the person who recorded it) "
+    "or 'Them:' (someone else). Reply in EXACTLY this plain-text shape, with "
+    "these four headers:\n"
+    "TITLE:\n"
+    "2 to 6 words naming what it is about\n"
+    "OVERVIEW:\n"
+    "2 to 5 sentences capturing what was said, discussed and decided.\n"
     "KEY POINTS:\n"
-    "- one point per line, 2 to 8 lines\n"
-    "TODOS:\n"
+    "- one point per line, 1 to 8 lines\n"
+    "NEXT STEPS:\n"
     "- one actionable task per line, at most 8 lines; write '- none' if the "
     "transcript contains no tasks\n"
     "No markdown emphasis, no extra sections, no commentary, no preamble."
@@ -110,28 +116,58 @@ class ParsedInsights:
     summary: str
     key_points: tuple[str, ...]
     todos: tuple[str, ...]
+    #: A short generated title; "" when the model gave none.
+    title: str = ""
+
+
+#: Header words the model may use, mapped to the section they fill. The
+#: FEAT-002 prompt asks for TITLE / OVERVIEW / KEY POINTS / NEXT STEPS; the
+#: older SUMMARY / TODOS shape still parses.
+_HEADERS = {
+    "title": "title",
+    "summary": "summary",
+    "overview": "summary",
+    "key points": "key points",
+    "todos": "todos",
+    "next steps": "todos",
+}
 
 
 def parse_insights(raw: str) -> ParsedInsights | None:
-    """Tolerant section parser for the fixed SUMMARY/KEY POINTS/TODOS shape.
+    """Tolerant section parser for the fixed TITLE/OVERVIEW/KEY POINTS/NEXT STEPS shape.
 
     Models decorate headers unpredictably (case, bold markers, trailing
     colons). Parse by header word, strip bullet glyphs, and refuse only when
     no usable summary text exists — a wrong summary is worse than a retry.
     """
-    sections: dict[str, list[str]] = {"summary": [], "key points": [], "todos": []}
+    sections: dict[str, list[str]] = {
+        "title": [], "summary": [], "key points": [], "todos": [],
+    }
     current: str | None = None
     for line in raw.splitlines():
         text = line.strip()
-        header = re.sub(r"[*_#:\s]+$", "", re.sub(r"^[*_#\s]+", "", text)).casefold()
-        if header in sections and (
-            text.rstrip().endswith(":") or header == text.casefold() or len(text) <= len(header) + 4
-        ):
-            current = header
-            remainder = text[text.casefold().find(header) + len(header):]
-            remainder = remainder.lstrip(":*_# ").strip()
+        undecorated = re.sub(r"^[*_#\s]+", "", text)
+        lowered = undecorated.casefold()
+        word: str | None = None
+        remainder = ""
+        for candidate in _HEADERS:
+            if not lowered.startswith(candidate):
+                continue
+            tail = undecorated[len(candidate):]
+            if re.fullmatch(r"[*_#:\s]*", tail):
+                # A header alone on its line ("## Summary:", "**KEY POINTS**").
+                word = candidate
+                break
+            inline = re.match(r"[*_\s]*:[*_\s]*", tail)
+            if inline is not None:
+                # A header with its content after the colon ("TITLE: Launch").
+                word = candidate
+                remainder = tail[inline.end():].strip()
+                break
+        if word is not None:
+            current = _HEADERS[word]
             if remainder:
-                sections[header].append(remainder)
+                sections[current].append(remainder)
             continue
         if current is not None and text:
             sections[current].append(text)
@@ -152,7 +188,18 @@ def parse_insights(raw: str) -> ParsedInsights | None:
         summary=summary[:4_000],
         key_points=bullets(sections["key points"]),
         todos=bullets(sections["todos"]),
+        title=clean_title(" ".join(sections["title"])),
     )
+
+
+def clean_title(raw: str) -> str:
+    """A generated title fit for a list row and an Apple Note: one line,
+    no quotes or trailing punctuation, at most 80 characters."""
+    text = " ".join(raw.split()).strip("\"'“”‘’*_#").strip()
+    text = text.rstrip(".:;,!").strip()
+    if len(text) > 80:
+        text = text[:80].rsplit(" ", 1)[0] or text[:80]
+    return text
 
 
 class NoteInsightsService:
@@ -165,16 +212,27 @@ class NoteInsightsService:
         *,
         claude: TaskCompleter | None = None,
         clock_us: Callable[[], int] | None = None,
+        after_summary: Callable[[str], Awaitable[object]] | None = None,
     ) -> None:
         self._notes = notes
         self._local = local
         self._claude = claude
         self._clock_us = clock_us or (lambda: time.time_ns() // 1_000)
         self._summarizing: set[str] = set()
+        # What follows the automatic summary of a just-saved note, whether
+        # or not the summary worked (FEAT-002: the Apple Notes copy).
+        self._after_summary = after_summary
 
     @property
     def claude_available(self) -> bool:
         return self._claude is not None
+
+    @property
+    def store(self) -> VoiceNoteStore:
+        return self._notes
+
+    def note(self, capture_id: str) -> VoiceNote:
+        return self._notes.get(capture_id)
 
     def latest_retained(self) -> VoiceNote | None:
         notes = self._notes.recent_retained(1)
@@ -188,7 +246,7 @@ class NoteInsightsService:
         parts: list[str] = []
         for segment in self._notes.segments(capture_id):
             if segment.kind == "transcript":
-                parts.append(segment.text)
+                parts.append(labelled(segment.text, segment.speaker))
             elif segment.kind == "gap":
                 parts.append("[recording gap]")
         return "\n".join(parts)
@@ -199,6 +257,11 @@ class NoteInsightsService:
         async def run() -> None:
             receipt = await self.summarize(capture_id, engine="local")
             log.info("auto-summary: %s", receipt)
+            if self._after_summary is not None:
+                try:
+                    await self._after_summary(capture_id)
+                except Exception:
+                    log.exception("post-summary step failed for a saved note")
 
         try:
             task = asyncio.get_running_loop().create_task(run())
@@ -256,6 +319,15 @@ class NoteInsightsService:
         except (VoiceNoteError, ValueError):
             log.exception("storing insights failed for %s", capture_id)
             return "The summary could not be stored. Say: summarize the last note, to retry."
+        if parsed.title and DEFAULT_TITLE.fullmatch(title):
+            # A tapped start is titled by the clock until there is something
+            # better; a title the wearer spoke is never replaced.
+            try:
+                title = self._notes.rename(
+                    capture_id, parsed.title, now_us=self._clock_us(),
+                ).title or title
+            except (VoiceNoteError, ValueError):
+                log.warning("generated title was not applied")
         points = len(stored.key_points)
         todos = len(stored.todos)
         return (
@@ -346,6 +418,14 @@ def _log_task_failure(task: asyncio.Task[None]) -> None:
         log.error("auto-summary task failed", exc_info=task.exception())
 
 
+class NoteSync(Protocol):
+    """The Apple Notes copy (``notes_sync.NotesSync``), as this module needs it."""
+
+    async def sync_voice(self, capture_id: str, *, force: bool = False) -> str | None: ...
+
+    def handle_toggle(self, text: str) -> str | None: ...
+
+
 class NoteInsightCommandController:
     """Exact spoken commands over the last retained note."""
 
@@ -355,12 +435,14 @@ class NoteInsightCommandController:
         *,
         productivity: ProductivityActionController | None = None,
         exporter: NoteExporter | None = None,
+        sync: NoteSync | None = None,
         local_time_zone: Callable[[], str | None] | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._insights = insights
         self._productivity = productivity
         self._exporter = exporter
+        self._sync = sync
         self._local_time_zone = local_time_zone or (lambda: None)
         self._now = now or (lambda: datetime.now().astimezone())
 
@@ -372,24 +454,47 @@ class NoteInsightCommandController:
         summarize = _SUMMARIZE.fullmatch(normalized)
         if summarize is not None:
             engine = "claude" if summarize.group("claude") else "local"
-            return await self._insights.summarize_last(engine=engine)
+            receipt = await self._insights.summarize_last(engine=engine)
+            await self._refresh_apple_note()
+            return receipt
         if _RESUMMARIZE_CLAUDE.fullmatch(normalized) is not None:
-            return await self._insights.summarize_last(engine="claude")
+            receipt = await self._insights.summarize_last(engine="claude")
+            await self._refresh_apple_note()
+            return receipt
         ask = _ASK.fullmatch(normalized)
         if ask is not None:
             return await self._insights.ask_last(ask.group("question"))
         if _REMINDERS.fullmatch(normalized) is not None:
-            return await self._create_reminders()
+            note = self._insights.latest_retained()
+            if note is None:
+                return "There is no retained note to create reminders from."
+            return await self.create_reminders_for(note.capture_id)
         if _EXPORT_NOTES.fullmatch(normalized) is not None:
             return await self._export_to_notes()
+        if self._sync is not None:
+            return self._sync.handle_toggle(normalized)
         return None
 
-    async def _create_reminders(self) -> str:
-        if self._productivity is None:
-            return "Reminders are unavailable on this Mac."
+    async def _refresh_apple_note(self) -> None:
+        """A new summary rewrites the note's existing Apple Note (if any)."""
+        if self._sync is None:
+            return
         note = self._insights.latest_retained()
         if note is None:
-            return "There is no retained note to create reminders from."
+            return
+        try:
+            await self._sync.sync_voice(note.capture_id)
+        except Exception:
+            log.exception("refreshing the Apple Note after a summary failed")
+
+    async def create_reminders_for(self, capture_id: str) -> str:
+        """Each next step of one note becomes a confirmed, due-tomorrow reminder."""
+        if self._productivity is None:
+            return "Reminders are unavailable on this Mac."
+        try:
+            note = self._insights.note(capture_id)
+        except VoiceNoteError:
+            return "That note no longer exists."
         title = note.title or "Untitled"
         stored = self._insights.insights(note.capture_id)
         if stored is None:
@@ -429,40 +534,27 @@ class NoteInsightCommandController:
         )
 
     async def _export_to_notes(self) -> str:
+        note = self._insights.latest_retained()
+        if self._sync is not None:
+            if note is None:
+                return "There is no retained note to send to Notes."
+            receipt = await self._sync.sync_voice(note.capture_id, force=True)
+            return receipt or "Notes export is unavailable on this Mac."
         if self._exporter is None:
             return "Notes export is unavailable on this Mac."
-        note = self._insights.latest_retained()
         if note is None:
             return "There is no retained note to send to Notes."
-        title = note.title or "Untitled"
-        stored = self._insights.insights(note.capture_id)
-        transcript = self._insights.transcript_text(note.capture_id)
-        lines: list[str] = []
-        if stored is not None:
-            lines.append("Summary")
-            lines.append(stored.summary)
-            if stored.key_points:
-                lines.append("")
-                lines.append("Key points")
-                lines.extend(f"• {point}" for point in stored.key_points)
-            if stored.todos:
-                lines.append("")
-                lines.append("Todos")
-                lines.extend(f"• {todo}" for todo in stored.todos)
-            lines.append("")
-        if note.state != "saved":
-            lines.append("Transcript (incomplete — recording had gaps)")
-        else:
-            lines.append("Transcript")
-        lines.extend(transcript.splitlines() or ["(no transcript)"])
-        return await self._exporter.export(title=title, body_lines=tuple(lines))
+        document = voice_document(self._insights.store, note.capture_id)
+        return await self._exporter.export(title=document.title, body_lines=document.lines)
 
 
 __all__ = [
     "NoteExporter",
     "NoteInsightCommandController",
     "NoteInsightsService",
+    "NoteSync",
     "ParsedInsights",
     "TaskCompleter",
+    "clean_title",
     "parse_insights",
 ]
