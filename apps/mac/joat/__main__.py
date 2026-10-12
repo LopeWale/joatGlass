@@ -1529,6 +1529,16 @@ async def main() -> None:
         voice_notes=voice_note_store, text_notes=note_store,
     )
     note_commands = NoteCommandController(note_store, on_saved=notes_sync.schedule_text)
+
+    async def after_note_summary(capture_id: str) -> None:
+        # The summary may have renamed the note ("Note 21:10" → its title):
+        # copy it to Apple Notes, then show the new title if the list is up.
+        await notes_sync.sync_voice(capture_id)
+        router = capabilities_ref.get("router")
+        if router is not None:
+            await router.refresh_notes_list()
+
+    capabilities_ref: dict[str, CapabilityRouter] = {}
     # QuickNote recorder: journal-first meeting/speech capture. The router
     # interposes on the transport's frame stream so an exclusive recording
     # owns the microphone (nothing said mid-meeting reaches the assistant);
@@ -1550,7 +1560,7 @@ async def main() -> None:
         voice_note_store,
         local_completer,
         claude=ClaudeCompleter(claude_binary) if claude_binary else None,
-        after_summary=notes_sync.sync_voice,
+        after_summary=after_note_summary,
     )
     voice_capture = VoiceNoteCaptureController(
         voice_note_store,
@@ -1949,6 +1959,7 @@ async def main() -> None:
         navigate=start_route_from_tap,
         places=place_store.list,
     )
+    capabilities_ref["router"] = capabilities
     if belt is not None:
         for tool in feature_tools(
             capabilities=capabilities,

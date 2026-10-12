@@ -2660,14 +2660,34 @@ class TestCapabilityViews:
             router._notes_sync = switch  # type: ignore[assignment]
             await router.open("QuickNotes", request_id="notes-sync")
             page = [m for m in transport.sent if isinstance(m, HudList)][-1]
-            assert page.items == [*NOTE_CONTROL_ROWS, "⇪ Save to Apple Notes: On"]
+            assert page.items == [*NOTE_CONTROL_ROWS, "Save to Apple Notes: On"]
 
             await router._select_capability_row("QUICKNOTES", 2, "hud", "notes-sync")
 
             assert switch.enabled is False
             assert receipts(transport) == ["Saved notes now stay on this Mac."]
             page = [m for m in transport.sent if isinstance(m, HudList)][-1]
-            assert page.items[2] == "⇪ Save to Apple Notes: Off"
+            assert page.items[2] == "Save to Apple Notes: Off"
+
+    async def test_a_generated_title_reaches_the_open_list(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        store = DurableStore(tmp_path / "durable.sqlite3")
+        voice_notes = VoiceNoteStore(store)
+        _retained_voice_note(voice_notes, "capture-1", base_us=20)
+        router, transport, _ = make_router(tmp_path, voice_notes=voice_notes)
+        await router.open("QuickNotes", request_id="notes-rename")
+        voice_notes.rename("capture-1", "Delivery and van booking", now_us=50)
+
+        await router.refresh_notes_list()
+
+        listing = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert "● Delivery and van booking" in listing.items[2]
+        assert listing.request_id == "notes-rename"
+        # Not on the list (a note's page is open): nothing is repainted.
+        await router._select_capability_row("QUICKNOTES", 2, "rec", "notes-rename")
+        before = len(transport.sent)
+        await router.refresh_notes_list()
+        assert len(transport.sent) == before
+        store.close()
 
     async def test_a_recordings_page_tap_adds_its_next_steps_to_reminders(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         asked: list[str] = []

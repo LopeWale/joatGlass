@@ -2396,7 +2396,7 @@ class CapabilityRouter:
         if self._notes_sync is not None:
             state = "On" if self._notes_sync.enabled else "Off"
             controls.append(_NoteRow(
-                label=f"⇪ Save to Apple Notes: {state}", kind="control", control="toggle_sync",
+                label=f"Save to Apple Notes: {state}", kind="control", control="toggle_sync",
             ))
         return controls
 
@@ -2459,6 +2459,21 @@ class CapabilityRouter:
                 self._request_context.reset(token)
         finally:
             state.page_pending = False
+
+    async def refresh_notes_list(self) -> None:
+        """A saved note's summary renamed it: show the new title if the
+        QuickNotes list is what the wearer is looking at."""
+        if (
+            self._note_page != "list"
+            or self._note_reader is not None
+            or self._active_capability != "QUICKNOTES"
+        ):
+            return
+        token = self._request_context.set(self._active_request_id)
+        try:
+            await self._show_notes()
+        finally:
+            self._request_context.reset(token)
 
     async def _note_back(self, request_id: str | None) -> None:
         """2x tap on a DISCARD? or FINISH page: back to the open note."""
