@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-12 — Build JOAT 0.1.125
+
+- Packed from `db549fd` (clean tree) with `scripts/pack.sh`, the `com.example.joat` manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.125 above the last recorded build (0.1.124); app.json, package.json and package-lock.json all 0.1.125. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1203 tests passed, typecheck clean.
+- Canonical `apps/hub-plugin/joat.ehpk`: 176244 bytes, SHA-256 `7a1f7ddc5de150f0ba4d6ac9ef6fd986980e49b7dcbc4847a517ab8853c55da9`. Adds to 0.1.124 the standby takeover and mic re-arm (`b4058c3`). The Mac side of `b4058c3`, the speaker-gate fix (`097e190`) and the send preflight (`652b3ef`) are already running: JOAT restarted 12:06:50, `messages automation granted`. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-12 — A reply that cannot be sent fails at once, unsent, instead of sitting on "sending"
 
 The wearer: "i have a message sending but still not sent based on the indicator arrow; it prompted my mac for permission even though the JOAT mac app has the messages access already granted; the message is still unsent."
