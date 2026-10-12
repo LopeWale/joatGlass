@@ -102,6 +102,20 @@ REMINDER_DUE_ACK_MIN_INTERVAL_SECONDS = 5.0
 # WebSocket -> gateway; matching the SDK deadline races a valid late fix.
 EVEN_LOCATION_ONE_SHOT_TIMEOUT_S = 5.0
 DEFAULT_LOCATION_REFRESH_TIMEOUT_S = 7.0
+# The Hub plugin drops the Mac link when one Mac->plugin message has not been
+# handled within this long (``downlinkHandlerTimeoutMs`` in
+# apps/hub-plugin/src/MacLink.ts). From the Mac that looks like an
+# authenticated connection that lives ~15 s and closes with code 1005 (the
+# socket closed with no close frame), over and over: 2,352 times on
+# 2026-10-08/09 while a page-part image write hung on the glasses, and every
+# open question (a spoken Messages reply, a Brainstorm topic) was cancelled by
+# the reconnect. Nothing in brain.log named the pattern; this does.
+PLUGIN_DOWNLINK_WATCHDOG_S = 15.0
+# How far a connection's life may sit from the watchdog and still count.
+PLUGIN_WATCHDOG_TOLERANCE_S = 3.0
+# Consecutive watchdog-shaped drops before the warning. Two can be a phone
+# backgrounding its WebView twice; three in a row is the loop.
+PLUGIN_WATCHDOG_LOOP_THRESHOLD = 3
 
 
 ImuCallback = Callable[[Imu], None]
@@ -194,6 +208,11 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._conn: ServerConnection | None = None
         # Downlinks sent while no plugin was connected, since the last one was.
         self._dropped_while_disconnected = 0
+        # Authenticated connections in a row that ended the way the plugin's
+        # downlink watchdog ends them (~15 s, no close frame), and whether
+        # the current streak has been named in the log.
+        self._watchdog_shaped_drops = 0
+        self._watchdog_loop_warned = False
 
         self._audio_cbs: list[AudioCallback] = []
         self._audio_frame_cbs: list[AudioFrameCallback] = []
@@ -1258,12 +1277,50 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             # no explanation on record. The close code and reason are the
             # WebSocket peer's own words; the duration says whether this was
             # a stable link that dropped or a dial that never settled.
+            lifetime_s = time.monotonic() - connected_at
+            close_code = getattr(conn, "close_code", None)
             log.info(
                 "plugin disconnected code=%s reason=%r after=%.1fs replaced=%s",
-                getattr(conn, "close_code", None),
+                close_code,
                 getattr(conn, "close_reason", None) or "",
-                time.monotonic() - connected_at,
+                lifetime_s,
                 self._conn is not None and self._conn is not conn,
+            )
+            self._note_link_end(lifetime_s, close_code)
+
+    def _note_link_end(self, lifetime_s: float, close_code: object) -> None:
+        """Name the plugin's downlink-watchdog loop when the link keeps dying
+        on its beat. Content-free: a duration and a close code only."""
+        watchdog_shaped = (
+            isinstance(lifetime_s, (int, float))
+            and abs(lifetime_s - PLUGIN_DOWNLINK_WATCHDOG_S) <= PLUGIN_WATCHDOG_TOLERANCE_S
+            # 1005: the peer closed the TCP socket without a WebSocket close
+            # frame, which is how MacLink.expireSocket ends a connection.
+            and close_code in (1005, 1006)
+        )
+        if not watchdog_shaped:
+            if self._watchdog_loop_warned and self._watchdog_shaped_drops:
+                log.info(
+                    "plugin link held past the watchdog after %d watchdog-shaped drops",
+                    self._watchdog_shaped_drops,
+                )
+            self._watchdog_shaped_drops = 0
+            self._watchdog_loop_warned = False
+            return
+        self._watchdog_shaped_drops += 1
+        if (
+            self._watchdog_shaped_drops >= PLUGIN_WATCHDOG_LOOP_THRESHOLD
+            and not self._watchdog_loop_warned
+        ):
+            self._watchdog_loop_warned = True
+            log.warning(
+                "plugin link dropped %d times in a row about %.0f s after connecting "
+                "(code %s): the plugin's downlink watchdog is firing because one "
+                "Mac->plugin message is not handled in time on the glasses. Every open "
+                "question (a spoken reply, a topic) is cancelled by each reconnect. "
+                "Turn on Record G2 diagnostics and run scripts/reply_trace.py to see "
+                "which write hangs.",
+                self._watchdog_shaped_drops, PLUGIN_DOWNLINK_WATCHDOG_S, close_code,
             )
 
     def _dispatch(self, raw: str | bytes, session_id: str) -> None:
