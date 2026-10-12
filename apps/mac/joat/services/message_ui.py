@@ -41,7 +41,8 @@ class MessageUIController:
                  connection_generation: Callable[[], str | None],
                  fence_audio: Callable[[], int], capturing: Callable[[], bool],
                  revoke_prompt: Callable[[str], None],
-                 on_sent: Callable[[str], Awaitable[None]] | None = None) -> None:
+                 on_sent: Callable[[str], Awaitable[None]] | None = None,
+                 on_reply_status: Callable[[str, str], Awaitable[None]] | None = None) -> None:
         self._replies = replies
         self._publish = publish
         self._after_input = after_input
@@ -51,6 +52,8 @@ class MessageUIController:
         self._revoke_prompt = revoke_prompt
         # Back on the thread with the sent reply as its newest message.
         self._on_sent = on_sent
+        # The thread's one-glyph state for a message going out or refused.
+        self._on_reply_status = on_reply_status
         # The draft the wearer chose to say again; its question is asked
         # afresh once the draft has ended.
         self._retry: str | None = None
@@ -241,9 +244,20 @@ class MessageUIController:
         if action.status == status:
             return
         action.status = status
-        if status.state not in _TERMINAL or not self._current(action.visit):
+        if not self._current(action.visit):
             return
-        body = self._replies.message_action_body(status.action_id) if status.state == "sent" else None
+        if status.state == "sending" and self._on_reply_status is not None:
+            # The thread shows the message going out (▷) the moment consent is given.
+            draft = self._replies.message_action_body(status.action_id)
+            if draft is not None:
+                self._spawn(self._on_reply_status(draft, "sending"))
+            return
+        if status.state not in _TERMINAL:
+            return
+        body = (
+            self._replies.message_action_body(status.action_id)
+            if status.state in {"sent", "failed", "uncertain"} else None
+        )
 
         async def publish() -> None:
             if (self._action is not action or not self._current(action.visit)
@@ -264,8 +278,20 @@ class MessageUIController:
                     await self._on_sent(body)
                 except Exception as exc:
                     log.warning("Messages thread refresh failed error=%s", type(exc).__name__)
+            elif (status.state in {"failed", "uncertain"} and body is not None
+                    and self._on_reply_status is not None):
+                # × when Messages refused it; ▷ stays when the outcome is unknown.
+                try:
+                    await self._on_reply_status(body, "failed" if status.state == "failed" else "sending")
+                except Exception as exc:
+                    log.warning("Messages thread status failed error=%s", type(exc).__name__)
 
         task = asyncio.create_task(publish())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _spawn(self, work: Awaitable[None]) -> None:
+        task = asyncio.ensure_future(work)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 

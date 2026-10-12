@@ -76,6 +76,8 @@ class Rig:
         self.transport = Transport()
         #: Bodies the controller reported as sent, in order.
         self.sent_bodies: list[str] = []
+        #: (body, state) the controller reported while going out or refused.
+        self.status_bodies: list[tuple[str, str]] = []
         self.generation = 'ui-connection'
         self.fence = 10
         self.capturing = False
@@ -117,7 +119,7 @@ class Rig:
                 revoke_prompt=lambda action_id: self.runtime.dispatcher.revoke(self.runtime.dispatcher.current_ticket.prompt_id)
                 if self.runtime.dispatcher.current_ticket is not None
                 and self.runtime.dispatcher.current_ticket.owner_id == action_id else None,
-                on_sent=self.on_sent)
+                on_sent=self.on_sent, on_reply_status=self.on_reply_status)
         self.router = CapabilityRouter(self.hud, self.transport,
             SimpleNamespace(get=lambda key: ''), Messages(), CardLog(), replies=self.replies,
             message_ui=self.ui)
@@ -140,6 +142,14 @@ class Rig:
         # Production wires this to the router: the thread repaints with the reply.
         self.sent_bodies.append(body)
         await self.router.show_sent_reply(body)
+
+    async def on_reply_status(self, body: str, state: str) -> None:
+        # Production wires this to the router: the thread shows ▷ or ×.
+        self.status_bodies.append((body, state))
+        await self.router.show_reply_status(body, state)
+
+    def thread_frames(self) -> list[Any]:
+        return [m for m in self.transport.sent if getattr(m, 'title', None) == 'MESSAGES · CONVERSATION']
 
     def receipts(self) -> list[str]:
         return [m.to_wire().get('text', '') for m in self.transport.sent
@@ -372,11 +382,12 @@ async def test_a_sent_reply_reports_its_body_and_shows_on_the_thread(
         await until(lambda: rig.sent_bodies)
         assert rig.sent_bodies == [body]
         assert rig.submitted == [('synthetic-contact', body)]
+        # The thread first shows the message going out (▷), then sent (▶).
         await until(lambda: [m for m in rig.transport.sent
                              if getattr(m, 'title', None) == 'MESSAGES · CONVERSATION'][-1].items[1]
-                    .startswith('You: '))
+                    .endswith('▶\n'))
         frame = [m for m in rig.transport.sent if getattr(m, 'title', None) == 'MESSAGES · CONVERSATION'][-1]
-        assert frame.items == ['1/1 · Sam', f'You: {body}\n', 'Sam: Are you coming?']
+        assert frame.items == ['1/1 · Sam', f'You: {body} ▶\n', 'Sam: Are you coming?']  # ▶: sent
         assert frame.reader_page == ('selection-message', 0, 1)
         assert frame.request_id == 'request-messages'
     finally:
@@ -740,4 +751,65 @@ async def test_group_read_disarms_previous_reply_and_cannot_rearm_after_navigati
         assert rig.transport.questions == []
     finally:
         release.set()
+        await rig.close()
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_message_shows_on_the_thread_going_out_then_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tap on the consent box: the thread comes back at once with the message
+    as its newest row and one glyph — ▷ while Messages has it, ▶ once sent.
+    No status text anywhere (the wearer's ruling, 2026-10-11)."""
+    import joat.services.capabilities as capabilities
+    monkeypatch.setattr(capabilities, '_SENT_REPLY_WAIT_S', 0.0)
+    rig = Rig()
+    try:
+        rig.confirm_result = True
+        await rig.select(1)
+        await until(lambda: rig.ui._reply_fence is not None)
+        rig.tap_thread()
+        await until(lambda: rig.transport.questions)
+        assert await rig.answer('On my way')
+        await until(lambda: rig.confirmations)
+        rig.confirm_release.set()
+        await until(lambda: rig.sent_bodies)
+        assert rig.status_bodies[0] == ('On my way', 'sending')
+        rows = [frame.items[1] for frame in rig.thread_frames() if frame.items[1].startswith('You: ')]
+        assert rows[0] == 'You: On my way ▷\n'
+        await until(lambda: rig.thread_frames()[-1].items[1] == 'You: On my way ▶\n')
+        # One own row, not a ▷ row and a ▶ row.
+        assert rig.thread_frames()[-1].items == ['1/1 · Sam', 'You: On my way ▶\n', 'Sam: Are you coming?']
+        assert not any(getattr(m, 'state', None) in {'sent', 'failed'} and 'sent' in getattr(m, 'text', '').lower()
+                       and getattr(m, 'title', None) for m in rig.transport.sent)
+    finally:
+        await rig.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_send_marks_the_row_failed_on_the_thread() -> None:
+    rig = Rig()
+
+    from joat.channels.message_sender import MessageSendError
+
+    class RefusingSender:
+        async def send(self, recipient: str, body: str) -> None:
+            # A definite refusal; a send that may have gone out stays ▷.
+            raise MessageSendError('Messages refused', possible_external_commit=False)
+
+    rig.replies._sender = RefusingSender()  # type: ignore[attr-defined]
+    try:
+        rig.confirm_result = True
+        await rig.select(1)
+        await until(lambda: rig.ui._reply_fence is not None)
+        rig.tap_thread()
+        await until(lambda: rig.transport.questions)
+        assert await rig.answer('On my way')
+        await until(lambda: rig.confirmations)
+        rig.confirm_release.set()
+        await until(lambda: ('On my way', 'failed') in rig.status_bodies)
+        await until(lambda: rig.thread_frames()[-1].items[1] == 'You: On my way ×\n')
+        assert rig.sent_bodies == []
+        assert rig.thread_frames()[-1].items == ['1/1 · Sam', 'You: On my way ×\n', 'Sam: Are you coming?']
+    finally:
         await rig.close()

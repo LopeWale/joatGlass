@@ -79,6 +79,9 @@ class MessageEntry:
     attachment_count: int = 0
     sender: str | None = None
     """Incoming participant display label, independent of the private reply target."""
+    send_status: Literal["sending", "failed"] | None = None
+    """A row the wearer just sent from the glasses, before Messages records it:
+    in flight, or refused. None for every row Messages itself holds."""
 
 
 @dataclass(frozen=True, slots=True)

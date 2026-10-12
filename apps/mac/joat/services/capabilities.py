@@ -83,6 +83,9 @@ MESSAGES_RETRY_ITEMS = [
     "Tap to try Messages again.",
 ]
 NEW_MESSAGE_ROW = "New message · voice recipient + text"
+# The newest own message's state as one glyph from the firmware font's
+# geometric set (no check marks exist in it; unsupported glyphs vanish).
+_OWN_MESSAGE_GLYPHS: dict[str, str] = {"sending": "▷", "sent": "▶", "failed": "×"}
 
 
 # These strings are the only explanation of a terminal health state that
@@ -1298,7 +1301,10 @@ class CapabilityRouter:
     @staticmethod
     def _paginate_thread(state: _MessageHistoryState) -> None:
         text = "\n".join(
-            CapabilityRouter._message_thread_line(state.thread, entry) for entry in state.entries
+            CapabilityRouter._message_thread_line(
+                state.thread, entry, newest_own=(index == 0 and entry.from_me),
+            )
+            for index, entry in enumerate(state.entries)
         ) or "No messages in this conversation yet."
         state.pages = paginate_reader_text(text)
         state.index = min(state.index, len(state.pages) - 1)
@@ -1328,6 +1334,36 @@ class CapabilityRouter:
         refused = await self._message_ui.begin_reply()
         if refused:
             await self._hud.receipt(refused)
+
+    async def show_reply_status(self, body: str, state: str) -> None:
+        """The thread while the wearer's message is still going out (▷) or
+        after Messages refused it (×): the draft is the newest row at once,
+        before Messages records anything. ``show_sent_reply`` replaces the
+        row with the real one when the send lands."""
+        history = self._message_history
+        request_id = self._active_request_id
+        if history is None or self._active_capability != "MESSAGES":
+            return
+        entry = MessageEntry(
+            text=body, at=time.time(), from_me=True,
+            send_status="failed" if state == "failed" else "sending",
+        )
+        if history.entries and self._is_provisional_own_row(history.entries[0]):
+            history.entries[0] = entry
+        else:
+            history.entries.insert(0, entry)
+        history.index = 0
+        self._paginate_thread(history)
+        token = self._request_context.set(request_id)
+        try:
+            await self._show_message_history_page()
+        finally:
+            self._request_context.reset(token)
+
+    @staticmethod
+    def _is_provisional_own_row(entry: MessageEntry) -> bool:
+        """A row this Mac drew from the send itself, not read from Messages."""
+        return entry.from_me and entry.row_id == 0
 
     async def show_sent_reply(self, body: str) -> None:
         """Back on the thread after a send, the reply its newest message.
@@ -1363,7 +1399,11 @@ class CapabilityRouter:
             state.entries = list(page.entries)
             state.has_older = page.has_older
         else:
-            state.entries.insert(0, MessageEntry(text=body, at=time.time(), from_me=True))
+            sent = MessageEntry(text=body, at=time.time(), from_me=True)
+            if state.entries and self._is_provisional_own_row(state.entries[0]):
+                state.entries[0] = sent  # the ▷ row becomes the ▶ row
+            else:
+                state.entries.insert(0, sent)
         state.index = 0
         self._paginate_thread(state)
         token = self._request_context.set(request_id)
@@ -1537,8 +1577,15 @@ class CapabilityRouter:
         )
 
     @staticmethod
-    def _message_thread_line(thread: MessageThread, entry: MessageEntry) -> str:
-        """One whole message on the thread: who, then every word of it."""
+    def _message_thread_line(
+        thread: MessageThread, entry: MessageEntry, *, newest_own: bool = False,
+    ) -> str:
+        """One whole message on the thread: who, then every word of it.
+
+        The newest message, when it is the wearer's, ends in one glyph for
+        its state and nothing else (the wearer's ruling, 2026-10-11): ▷ still
+        going out, ▶ sent, × Messages refused it. Older rows carry none.
+        """
         label = "You" if entry.from_me else CapabilityRouter._message_sender(thread, entry)
         parts = [entry.text] if entry.text else []
         if entry.attachment_count:
@@ -1548,7 +1595,8 @@ class CapabilityRouter:
             )
         body = " ".join(parts) or "Message unavailable"
         marker = "● " if entry.unread else ""
-        return f"{marker}{label}: {body}"
+        status = f" {_OWN_MESSAGE_GLYPHS.get(entry.send_status or 'sent', '')}" if newest_own else ""
+        return f"{marker}{label}: {body}{status}"
 
     def _clear_message_page_pending(self) -> None:
         self._message_page_pending = False

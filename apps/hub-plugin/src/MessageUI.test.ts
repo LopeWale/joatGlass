@@ -234,51 +234,7 @@ describe('Messages action ownership at wire ingress', () => {
 });
 
 describe('Messages terminal receipts and contextual Back', () => {
-  it.each(['failed', 'uncertain'] as const)('shows full %s text read-only and Back restores the actual retained conversation', async (state) => {
-    const r = rig();
-    const requestId = await picker(r);
-    const selected = select(r);
-    const conversation = ['Alex', 'Alex · Existing received message.'];
-    await r.menu.presentList('MESSAGES · CONVERSATION', conversation, requestId, true);
-    expect(observe(r.menu, ui(selected))).toBe(true);
-    const text = ('Long safe status; keep this part. '.repeat(20) + 'FINAL STATUS MARKER').slice(0, 1000);
-    const message = ui(selected, { state, text });
-    expect(observe(r.menu, message)).toBe(true);
-    expect(await show(r.menu, message)).toBe(true);
-    // The receipt is the full-width prose reader (2026-09-12): a counter row
-    // names the state and the part, the rows beneath are lossless slices of
-    // the text, and a long receipt pages on swipe instead of being cut off.
-    const receipt = r.frames[r.frames.length - 1]!;
-    expect(receipt.title).toBe(`MESSAGES · ${state.toUpperCase()}`);
-    expect(receipt.items[0]).toMatch(/^1\/1 · [A-Za-z]+( · part 1\/\d+)?$/);
-    expect(receipt.selectable).toBe(false);
-    let read = receipt.items.slice(1).join('');
-    while (!read.endsWith('FINAL STATUS MARKER')) {
-      const shown = r.frames.length;
-      r.menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-      await vi.waitFor(() => expect(r.frames.length).toBe(shown + 1));
-      const part = r.frames[r.frames.length - 1]!;
-      expect(part.title).toBe(receipt.title);
-      expect(part.selectable).toBe(false);
-      read += part.items.slice(1).join('');
-    }
-    expect(read).toBe(text);
-    const sends = events(r, 'capdata').length;
-    r.menu.handleClick();
-    expect(events(r, 'capdata')).toHaveLength(sends);
-    await r.menu.toggle();
-    expect(r.frames[r.frames.length - 1]?.items).toEqual(conversation);
-    expect(events(r, 'capability-lifecycle')).toContainEqual(expect.objectContaining({
-      selectedName: 'messages-conversation', requestId, traceId: selected.traceId,
-    }));
-    await r.menu.toggle();
-    expect(r.frames[r.frames.length - 1]?.title).toBe('MESSAGES');
-    expect(events(r, 'capability-lifecycle')).toContainEqual(expect.objectContaining({
-      selectedName: 'messages-list', requestId, traceId: selected.traceId,
-    }));
-  });
-
-  it.each(['sent', 'cancelled'] as const)('paints no page for a %s reply: the thread stays and takes a tap again', async (state) => {
+  it.each(['sent', 'cancelled', 'failed', 'uncertain'] as const)('paints no page for a %s reply: the thread stays and takes a tap again', async (state) => {
     const r = rig();
     const requestId = await picker(r);
     const selected = select(r);
@@ -290,7 +246,7 @@ describe('Messages terminal receipts and contextual Back', () => {
     expect(observe(r.menu, ui(selected))).toBe(true);
     expect(observe(r.menu, ui(selected, { state: 'awaiting_confirmation', text: 'Send to Alex?' }))).toBe(true);
     const frames = r.frames.length;
-    const message = ui(selected, { state, text: state === 'sent' ? 'Sent. Delivery is unverified.' : 'Cancelled.' });
+    const message = ui(selected, { state, text: `${state}: the Mac's receipt text, never a page` });
     expect(observe(r.menu, message)).toBe(true);
     expect(await show(r.menu, message)).toBe(true);
     // No receipt page: the Mac repaints the thread itself.
@@ -425,30 +381,4 @@ describe('Messages terminal receipts and contextual Back', () => {
     if (exit === 'disconnect') expect(events(r, 'message-cancel')).toEqual([]);
   });
 
-  it('checks the bound renderer guard during a held receipt paint so Home remains visible', async () => {
-    const r = rig();
-    await picker(r);
-    const selected = select(r);
-    expect(observe(r.menu, ui(selected))).toBe(true);
-    const receipt = ui(selected, { state: 'failed', text: 'Not sent. Messages refused it.' });
-    expect(observe(r.menu, receipt)).toBe(true);
-    const held = deferred();
-    let entered = false;
-    r.hooks.paint = async (title) => {
-      if (title === 'MESSAGES · FAILED') { entered = true; await held.promise; }
-    };
-    const work = show(r.menu, receipt);
-    try {
-      await Promise.resolve();
-      expect(entered).toBe(true);
-      const guard = r.guards[r.guards.length - 1];
-      expect(guard?.()).toBe(true);
-      await r.menu.toggle();
-      expect(guard?.()).toBe(false);
-      held.release();
-      expect(await work).toBe(false);
-      expect(r.menu.isOpen()).toBe(false);
-      expect(r.visible()).toBe('Overview');
-    } finally { held.release(); await work; }
-  });
 });

@@ -1520,7 +1520,7 @@ class TestCapabilityViews:
 
         first = conversation_frames(transport)[-1]
         assert first.items[0] == "1/1+ · Dele"
-        assert first.items[1] == "You: Newest 30\n"
+        assert first.items[1] == "You: Newest 30 ▶\n"  # the newest own row carries its one-glyph state
         assert first.items[-1] == "Dele: Newest 21"
         assert len(first.items) == 11
         assert first.reader_page == ("hud-older", 0, 2)
@@ -1546,7 +1546,7 @@ class TestCapabilityViews:
         # Back up to the newest page without another read.
         router.on_input(page_event(EventType.SCROLL_TOP, "hud-older", "messages-older"))
         await wait_until(lambda: len(conversation_frames(transport)) == 3)
-        assert conversation_frames(transport)[-1].items[:2] == ["1/2 · Dele", "You: Newest 30\n"]
+        assert conversation_frames(transport)[-1].items[:2] == ["1/2 · Dele", "You: Newest 30 ▶\n"]
         assert messages.page_calls == [None, 21]
 
     async def test_a_sent_reply_shows_as_the_newest_message_once_chat_db_has_it(
@@ -1568,7 +1568,7 @@ class TestCapabilityViews:
         frame = conversation_frames(transport)[-1]
         assert frame.request_id == "messages-sent"
         assert frame.items[0] == "1/2 · Dele"
-        assert frame.items[1] == "You: On my way!\n"
+        assert frame.items[1] == "You: On my way! ▶\n"
         assert frame.reader_page == ("hud-sent", 0, 2)
         assert frame.hint == "down more · tap: reply · left x2: back"
         state = router._message_history
@@ -1594,7 +1594,7 @@ class TestCapabilityViews:
         frame = conversation_frames(transport)[-1]
         assert frame.request_id == "messages-fallback"
         assert frame.items[0] == "1/2 · Dele"
-        assert frame.items[1] == "You:   Running late  \n"
+        assert frame.items[1] == "You:   Running late   ▶\n"
         assert frame.items[2].startswith("Dele: word word")
         assert frame.reader_page == ("hud-fallback", 0, 2)
         state = router._message_history

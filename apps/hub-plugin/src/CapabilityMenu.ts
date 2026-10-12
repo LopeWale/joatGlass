@@ -525,51 +525,13 @@ export class CapabilityMenu {
       } catch { return false; }
     };
     if (!current()) return false;
-    // Questions and confirmation own intermediate states. Only final receipts
-    // replace the underlying feature, and Back retains its actual Mac rows.
-    if (!messageFinished(accepted.state)) return true;
-    // A sent reply lands back on the thread, which the Mac repaints with the
-    // reply as its newest message; a cancelled one is simply the thread
-    // again. Neither is a page of its own.
-    if (accepted.state === 'sent' || accepted.state === 'cancelled') {
-      this.dataSelectionPending = false;
-      return true;
-    }
-    let parent = this.dataSurface;
-    let grandparent = this.dataReturn;
-    if (this.messagesScreen === 'review' || this.messagesScreen === 'compose'
-      || this.messagesScreen === 'read_only') {
-      parent = this.dataReturn;
-      grandparent = this.dataGrandparent;
-    }
-    if (parent === this.dataSurface && parent) parent = { ...parent, selectedIndex: this.selectedIndex };
-    const rows = [`1/1 · ${accepted.state}`, accepted.text];
-    const title = `MESSAGES · ${accepted.state.toUpperCase()}`;
-    const hint = '2x tap: back';
-    const transition = this.beginTransition();
-    const stillCurrent = () => current() && this.transitionId === transition;
-    // The result is Even's own text page, paged in place by swipe; it used
-    // to be a raster prose pager drawn with four image tiles.
-    const shown = await this.hud.showList(rows, {
-      title, hint, selectable: false, nativeTextPage: true,
-    }, stillCurrent);
-    if (!stillCurrent()) return false;
-    this.view = 'data';
-    if (!shown) return false;
-    this.dataReturn = parent;
-    this.dataGrandparent = grandparent;
-    this.selectedIndex = 0;
-    this.dataRowsSelectable = false;
-    this.dataItemCount = rows.length;
-    this.dataSelectionPending = false;
-    this.dataPagePending = false;
-    this.messagesRetry = false;
-    this.messagesScreen = 'read_only';
-    this.dataHint = hint;
-    this.dataSurface = {
-      title, items: rows, hint, selectable: false, selectedIndex: 0, messagesRetry: false,
-      messagesScreen: 'read_only', nativeTextPage: true,
-    };
+    // Questions and confirmation own intermediate states. A finished draft
+    // paints no page of its own: the thread is already back under the
+    // consent box, and the Mac repaints it with the message as its newest
+    // row and one glyph for its state (▷ going out, ▶ sent, × refused). No
+    // status text page (the wearer's ruling, 2026-10-11); Back keeps the
+    // thread's actual Mac rows.
+    if (messageFinished(accepted.state)) this.dataSelectionPending = false;
     return true;
   }
 

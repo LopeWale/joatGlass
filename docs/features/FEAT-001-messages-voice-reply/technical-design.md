@@ -25,9 +25,10 @@ Wire kinds live twice by design (`apps/hub-plugin/src/types.ts`,
 | Reply | tap the Reply row, or say "reply" | `MessageUIController.begin_reply` → `MessageReplyController.prepare_selected_reply` → `stage=reply-prompt-armed` |
 | New message | tap row 0 | `begin_new` → `prepare_new_message` → recipient question (`field=recipient`), then body |
 | Question | `prompt.present` → `PromptedInputController.handle`: paint (`showPromptQuestion`), open the glasses mic (`AudioStreamer.openPromptMicrophone`), arm the epoch, send `prompt.ack{success, audioEpoch=promptId}` | `PromptedSpeechRuntime` publishes via `PromptedInputDispatcher`; the ack sets the ingress fence; VAD is fenced (`fence_prompt_audio`) |
-| Listening | `audio` uplinks carry `audioEpoch`, `seq`, `source`, `speaker` | frames before the fence / another epoch / another mic are refused; partials every ~1 s → `prompt.partial` → "You: …" on the card (`showPromptPartial`) |
+| Listening | JOAT's box: "JOAT: What do you want to say back to X?" then "You: …" filling as the words arrive. **tap = review now** (`input` `prompt-commit`, `selectedName` = the question's ID), **2x tap = cancel**; swipes consumed | frames before the fence / another epoch / another mic are refused; partials every ~1 s → `prompt.partial`; a `prompt-commit` closes the utterance at once (`RmsVad.finish_now`) and runs the ordinary completion path; silence still closes it as before |
 | Answer | — | final transcript → `dispatch` eligibility (acknowledged, owner current, not mixed, same mic, same connection, same epoch, no `other` speaker frame, started after the fence) → `consume` → `stage=review-requested` → `stage=confirmation-requested` |
-| Consent card | `confirmation` with `diagnosticKind=messages`: **tap = send**, **long tap = say it again** (`confirmationRetry`), **swipe = cancel**; no gesture notes are printed (wearer's ruling, 2026-10-06) | `confirm` → `stage=submitted delivery=unverified` via `channels/message_sender`; `send-failed`/`cancelled` otherwise |
+| Review (consent) | the same box with the draft: **tap = send**, **2x tap = retry** (`input` `message-retry`; the Mac re-asks and the listening box returns). Long tap and swipe do nothing on a draft. No gesture notes printed (wearer's rulings 2026-10-06, 2026-10-11) | `confirm` → `stage=submitted delivery=unverified` via `channels/message_sender`; `send-failed`/`cancelled` otherwise |
+| After confirm | the thread, no page of its own; the Mac repaints it. A `message.ui` receipt of any finished state paints nothing | `MessageUIController.on_status`: `sending` → `show_reply_status(body, "sending")` draws the draft as the newest row with **▷**; `sent` → `show_sent_reply` replaces it with the real row, **▶**; `failed` → **×**; `uncertain` keeps ▷. The glyph sits after the newest own row only; no status word anywhere (firmware font has no check marks) |
 | Diagnostics | `prompt_stage` events: presented, painted/paint_refused, mic_ready/mic_refused, acknowledged/ack_refused, retired; `messages_confirmation` accepted/declined/timed_out | `prompted answer not taken owner=… reason=…`; `g2-diagnostics.json` when the toggle is on |
 
 Mac-side tests already pin this path end to end with synthetic audio:
@@ -62,7 +63,7 @@ firmware text, page transitions wait at most 8 s (`PAGE_TRANSITION_IDLE_MS`),
 and the trace accepts containers 16–19. Verified in the simulator with the
 first header write held forever; not yet on physical glasses (that is §5).
 
-## 4. What this feature adds (this round)
+## 4. What this feature adds (2026-10-11)
 
 1. `joat/ble/hub_gateway.py` `_note_link_end`: three consecutive authenticated
    connections that end 15 ± 3 s after connecting with code 1005/1006 log one
@@ -74,6 +75,11 @@ first header write held forever; not yet on physical glasses (that is §5).
    reply stages, the glasses-side `prompt_stage` steps, refusal reasons,
    consent decisions, voice-path counts, and a plain-words verdict. Content-free:
    no bodies, recipients, question text, transcripts, or serials.
+
+3. Gesture contract on the box (T7, T8): listening tap = review now, 2x = cancel;
+   review tap = send, 2x = retry. One template, two states of the same box.
+4. Thread status glyph (T9): ▷ / ▶ / × on the newest own row; finished
+   receipts paint no page.
 
 ## 5. Acceptance criteria (hardware)
 
@@ -87,9 +93,13 @@ the revision that includes §3's fix. Then `.venv/bin/python scripts/reply_trace
 - AC3 Listening: `prompt_stage` shows `presented → painted → mic_ready →
   acknowledged → retired`; the wearer saw their words appear on the card
   while speaking (photograph through the lens).
-- AC4 Say it again: a long tap on the consent card re-asks the question; only
-  the restatement is sent (`a misheard reply is asked for again` on hardware).
-- AC5 Cancel: a swipe on the consent card sends nothing (`stage=cancelled`).
+- AC4 Retry: a 2x tap on the review box re-asks the question and the
+  listening box returns; only the restatement is sent.
+- AC5 Cancel: a 2x tap on the listening box sends nothing (`stage=cancelled`).
+- AC5b Review now: a tap while speaking closes the words so far and shows the
+  review box without waiting for silence.
+- AC5c Thread: after tap-send the thread shows "You: <message> ▷" at once and
+  "You: <message> ▶" once Messages records it; no status text page.
 - AC6 Compose: row 0 → recipient question → body question → consent → sent.
 - AC7 No refusal reasons in the window other than ones the wearer caused on
   purpose (e.g. speaking before the card).
