@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-12 — Build JOAT 0.1.124
+
+- Packed from `d10a3fe` (clean tree) with `scripts/pack.sh`, the `com.example.joat` manifest and the MacBook-first, Mac Mini-second private WSS candidates (2 validated). Version guard: 0.1.124 above the last recorded build (0.1.123); app.json, package.json and package-lock.json all 0.1.124. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1195 tests passed, typecheck clean.
+- Canonical `apps/hub-plugin/joat.ehpk`: 175753 bytes, SHA-256 `79345e6e4f3c20792e632fc6b7aa4fa43a99b13ce8393e96a7d99b72144f1ac1`. Adds to 0.1.123 the News tab fix below (`70bb24f`). Plugin only — no Mac restart needed for this one. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+- Note: this package is 9 KB smaller than the committed 0.1.123 one although a vite build of `56de7ed` (552.15 kB JS) matches this build (552.25 kB); the 0.1.123 package was packed before its commit and may hold more than that revision.
+
 ## 2026-10-12 — The News tab opens again: a list row could leave the width cut one byte over the firmware cap
 
 The wearer: "when I click on the news tab, it does not open the news page … the timer actually opens."
