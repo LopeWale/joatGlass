@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-12 — Build JOAT 0.1.128
+
+- Packed from `cb37801` (clean tree) with `scripts/pack.sh`, the `com.example.joat` manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.128 above the last recorded build (0.1.127); app.json, package.json and package-lock.json all 0.1.128. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1227 tests passed, typecheck clean.
+- Canonical `apps/hub-plugin/joat.ehpk`: 176799 bytes, SHA-256 `41d0c67948a0df734e220ed5b2007309fbdcd55e6f1d9f4e77acd2d8d531450f`. Adds to 0.1.127: a route runs on one-shot phone fixes when the location stream will not start (`72f3904`). The Mac's navigation step logs take effect when JOAT restarts. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-12 — A route starts when the phone's location stream will not
 
 The wearer: navigation "does not work anymore"; tapping a saved place ends on "Navigation could not start · The route was not installed on the phone". The phone's Places page is fine (the Mac holds the place, with its address and pin).
