@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-12 — The overview's QuickNotes ages keep counting
+
+The wearer: "the quick notes time does not update on the overview when it is the current active tab. But when I click to go to the actual quick note page, I see the updated time."
+
+**Why.** The age on each row ("[5m] Title") is text the Mac writes into the `hud.panel` push (`QuickNotesPanel.snapshot`), and the plugin paints the last push it cached. The tab was pushed only when a note was saved, summarized, or the glasses connected. So "5m" stayed "5m" until the next save. The QuickNotes page computes ages when it opens, which is why it showed the right time.
+
+**Change** (`QuickNotesPanel.run`, `__main__`): a background task wakes when the first shown age would turn over (the next minute under an hour, the next hour under a day), never more than 60 s apart so a new "now" becomes "1m" on time. It pushes the tab only when its rows would read differently, through the same `panels.publish("quicknotes")` the save already uses. The plugin's existing `acceptPanel` repaints the overview only when QuickNotes is the tab on the glass, the same per-minute repaint the Pomodoro tab already does. Nothing is pushed before the first publish (the plugin's connect fills the tab). The task is cancelled at shutdown with the news task.
+
+Tests: ages pushed at each minute boundary (30 s, then 60 s, 60 s), nothing pushed when "[3h]" still reads "[3h]", nothing before the first publish. `tests/unit`: 3268 passed. **Mac only: takes effect when JOAT restarts; no plugin build.**
+
 ## 2026-10-12 — A QuickNote cut off by a JOAT restart is saved at the next start
 
 The wearer: notes "come back with the title 'Note [timestamp] gaps'" and "none of the new notes come back on to the Mac … What did you break?"

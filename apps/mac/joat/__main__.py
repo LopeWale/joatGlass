@@ -2157,6 +2157,11 @@ async def main() -> None:
     news_task = asyncio.get_running_loop().create_task(
         news.run(on_refreshed=lambda: panels.publish("news")),
     )
+    # The QuickNotes tab's ages ("5m") are written here, so they are pushed
+    # again when one would read differently, not only when a note is saved.
+    quicknotes_ages_task = asyncio.get_running_loop().create_task(
+        quicknotes_panel.run(on_changed=lambda: panels.publish("quicknotes")),
+    )
 
     # NOT started: macOS already owns calendar alerting. An event carries its
     # own EKAlarm(s) (EKCalendarItem.alarms, with relativeOffset/absoluteDate),
@@ -2322,6 +2327,7 @@ async def main() -> None:
         task_monitor_task.cancel()
         news.stop()
         news_task.cancel()
+        quicknotes_ages_task.cancel()
         # Stop timer callbacks and drain publications before their owners
         # close. Preserve the saved deadline for the next engine start.
         await pomodoro.aclose()
