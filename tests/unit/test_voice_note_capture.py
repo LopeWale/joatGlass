@@ -1048,3 +1048,56 @@ async def test_undo_while_a_stretch_settles_keeps_its_words_gone(tmp_path: Path)
         await settle()
 
         assert capture.live_lines() == ()
+
+
+# A restart mid-note ----------------------------------------------------------
+
+
+async def test_a_note_a_restart_cut_off_is_saved_at_the_next_start(tmp_path: Path) -> None:
+    """2026-10-12: three QuickNotes were open when JOAT restarted. Each was
+    left "interrupted" (listed as "Note 15:22 · gaps"), never titled, never
+    copied to Apple Notes. The next start finishes them as Save would."""
+    path = tmp_path / "joat.sqlite3"
+    stt = ScriptedStt(["We ship on Friday.", "And the review after."])
+    durable, notes, source, capture = build(path, stt)
+    with durable:
+        capture.control_start()
+        seq = speak_and_pause(source, 0)
+        await settle()
+        for _ in range(4):  # words still unspoken-for when the restart came
+            source.emit(seq, pcm=SPEECH_200MS)
+            seq += 1
+        assert capture.interrupt_for_shutdown() is True
+        assert notes.get("capture-1").state == "interrupted"
+
+        saved: list[str] = []
+        restarted = VoiceNoteCaptureController(
+            notes, AudioRouter(FakeFrameSource()), stt,
+            id_factory=lambda: "capture-2", on_saved=saved.append,
+        )
+
+        assert await restarted.finish_interrupted() == ("capture-1",)
+
+        note = notes.get("capture-1")
+        assert note.state == "saved" and note.raw_retained is False
+        assert note.title is not None and note.title.startswith("Note ")
+        assert transcript_texts(notes) == ["We ship on Friday.", "And the review after."]
+        assert saved == ["capture-1"]
+        # Finished once: a second start has nothing left to do.
+        assert await restarted.finish_interrupted() == ()
+
+
+async def test_only_notes_a_restart_cut_off_are_finished(tmp_path: Path) -> None:
+    stt = ScriptedStt(["Kept."])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start("hold")
+        capture.control_request_discard()
+        capture.control_confirm_discard()  # discarded: never revived
+
+        restarted = VoiceNoteCaptureController(
+            notes, AudioRouter(FakeFrameSource()), stt, id_factory=lambda: "capture-2",
+        )
+        assert await restarted.finish_interrupted() == ()
+        assert notes.get("capture-1").state == "discarded"
+        assert stt.calls == 0

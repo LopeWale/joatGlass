@@ -25,6 +25,9 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
         {"recording", "finalizing", "interrupted", "failed", "discarded"}
     ),
     "finalizing": frozenset({"saved", "saved_degraded", "interrupted", "failed"}),
+    # A note a restart cut off is finished at the next start, as Save would
+    # have (VoiceNoteCaptureController.finish_interrupted).
+    "interrupted": frozenset({"finalizing"}),
 }
 
 

@@ -90,6 +90,11 @@ DEFAULT_TITLE = re.compile(r"^Note \d{2}:\d{2}$")
 _BYTES_PER_SECOND = 16_000 * 2
 #: A paragraph stops growing near the store's section limit (20,000).
 _MAX_PARAGRAPH_CHARS = 18_000
+#: How a JOAT restart leaves an open note: by a clean shutdown, or found
+#: still open by the next start (a crash). Both keep the raw audio.
+_RESTART_CODES = frozenset({
+    "graceful_shutdown_raw_retained", "process_restart_raw_retained",
+})
 #: The settle pass: after a pause, the newest stretch of a paragraph is read
 #: again as ONE piece of audio, up to this long (Whisper hears 30 s at a
 #: time). Chunk by chunk, Whisper starts every chunk as a new sentence: a
@@ -815,23 +820,27 @@ class VoiceNoteCaptureController:
             self._clear_active()
             self._notify()
             return "Nothing was recorded, so the note was discarded."
-        finalizing = self._notes.transition(
+        self._notes.transition(
             note.capture_id,
             "finalizing",
             now_us=self._now(note),
         )
         self._notify()
-        transcript_complete = await self._finish_transcription(note.capture_id)
-        complete = self._notes.frame_count(note.capture_id) > 0 and transcript_complete
+        return self._saved_receipt(await self._save(note.capture_id))
+
+    async def _save(self, capture_id: str) -> VoiceNote:
+        """Finish a finalizing note's words, save it, and hand it on."""
+        transcript_complete = await self._finish_transcription(capture_id)
+        complete = self._notes.frame_count(capture_id) > 0 and transcript_complete
         saved = self._notes.finalize(
-            note.capture_id,
+            capture_id,
             complete=complete,
             completion_code=(
                 "transcript_checkpointed_raw_purged"
                 if complete
                 else "incomplete_raw_retained"
             ),
-            now_us=self._now(self._notes.get(finalizing.capture_id)),
+            now_us=self._now(self._notes.get(capture_id)),
         )
         self._clear_active()
         self._notify()
@@ -841,7 +850,40 @@ class VoiceNoteCaptureController:
             except Exception:
                 # A post-save hook must never cost the wearer their receipt.
                 pass
-        return self._saved_receipt(saved)
+        return saved
+
+    async def finish_interrupted(self) -> tuple[str, ...]:
+        """Save the notes a JOAT restart cut off, as Save would have.
+
+        A restart (an update, a session applying a change, a crash) leaves an
+        open note "interrupted": never saved, never titled, never copied to
+        Apple Notes, and listed on the glasses as "Note 15:22 · gaps". Its
+        words and raw audio are kept, so the next start finishes it. Runs
+        before the glasses connect: it uses the recorder's own transcription
+        state, which belongs to no open note then.
+        """
+        if self._capture_id is not None:
+            return ()
+        finished: list[str] = []
+        for note in self._notes.retained():
+            if (
+                note.state != "interrupted"
+                or note.completion_code not in _RESTART_CODES
+                or not note.raw_retained
+                or self._notes.frame_count(note.capture_id) == 0
+            ):
+                continue
+            try:
+                self._notes.transition(
+                    note.capture_id, "finalizing", now_us=self._now(note),
+                )
+                await self._save(note.capture_id)
+            except Exception:
+                log.exception("an interrupted note could not be finished")
+                self._clear_active()
+                continue
+            finished.append(note.capture_id)
+        return tuple(finished)
 
     def _record_frame(self, frame: AudioFrame) -> None:
         capture_id = self._capture_id

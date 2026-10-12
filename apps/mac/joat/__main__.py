@@ -2218,6 +2218,11 @@ async def main() -> None:
         notif_task = asyncio.get_running_loop().create_task(notification_mux.run())
 
     pomodoro.activate_restored()
+    # Notes a restart cut off are saved now — titled, summarized and copied
+    # to Apple Notes — before the glasses can open a new one.
+    finished_notes = await voice_capture.finish_interrupted()
+    if finished_notes:
+        log.info("saved %d QuickNotes a restart had interrupted", len(finished_notes))
     await transport.start()
     log.info("brain up — plugin dial target is ws://<this-mac>:%d/glasses", args.port)
 

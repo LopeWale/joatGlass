@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-12 — A QuickNote cut off by a JOAT restart is saved at the next start
+
+The wearer: notes "come back with the title 'Note [timestamp] gaps'" and "none of the new notes come back on to the Mac … What did you break?"
+
+**What happened (the database and brain.log, not a guess).** The three notes since 11:44 (13:48, 14:24, 15:22) were open when JOAT restarted: at 14:22:58, 15:15:53 and 15:35:00, each a restart to apply a change. `interrupt_for_shutdown` marked each `interrupted` (`graceful_shutdown_raw_retained`), and nothing ever finished it: no save, so no summary title, no Apple Notes copy, and the list shows any note that is not `saved` as "· gaps". The words and raw audio were all kept (2, 1 and 3 transcript sections). The latency and capitalization change (`a0ec422`) was not involved: no note reached Save after it.
+
+**Change** (`VoiceNoteCaptureController`, `VoiceNoteStore`, `__main__`):
+- `finish_interrupted()`: at start, before the gateway accepts the glasses, every note a restart cut off (`graceful_shutdown_raw_retained` or `process_restart_raw_retained`, raw kept, at least one frame) goes `interrupted → finalizing` and through the same save as the glasses' Save: leftover audio transcribed, finalized, then the existing `on_saved` hook (summary title, Apple Notes). Save and this share one `_save`; nothing is duplicated. Discarded, failed and empty notes are untouched.
+- The store allows `interrupted → finalizing`, and only that.
+- Dry run on a copy of the live database (the copy since deleted), with the same model on a private port: all three notes saved complete (no gaps, raw purged), the save hook fired for each. Tests: a note interrupted mid-sentence is saved by the next start with its words and its leftover audio, once; a discarded note is never revived. Mac suite 3607 passed; the one failure is the intermittent `test_whisper_cold_start` timing test. **Mac only: takes effect, and saves the three notes, when JOAT restarts.**
+
 ## 2026-10-12 — Room noise no longer wakes JOAT: the bias prompt was putting the name into it
 
 The wearer, after the "hearing you…" fix: "it is still fucking doing it because it just did it again … please research and stop guessing."
