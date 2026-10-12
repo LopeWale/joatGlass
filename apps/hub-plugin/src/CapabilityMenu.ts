@@ -410,7 +410,7 @@ export class CapabilityMenu {
     return true;
   }
 
-  /** Long-press on a draft: say it again. The draft stays this action's
+  /** 2x tap on a draft: retry. The draft stays this action's
    * until the Mac ends it; its question then returns as a new action. */
   retryMessageAction(actionId: string): boolean {
     const selection = this.messageSelection;

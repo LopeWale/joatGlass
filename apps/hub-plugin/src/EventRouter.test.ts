@@ -358,49 +358,63 @@ describe('EventRouter — confirm gestures', () => {
     false, undefined, false, false, false, false, false, false, false, undefined, retry,
   );
 
-  it.each(['textEvent', 'sysEvent'] as const)('a long tap (%s) on a reply consent asks to say it again, never the mic', (via) => {
+  it.each(['textEvent', 'sysEvent'] as const)('a 2x tap (%s) on a reply draft is retry, never the mic and never a refusal', (via) => {
     const retry = vi.fn(() => true);
     const { fire, imu, audio, sent } = withRetry(retry);
     imu.isPending.mockReturnValue(true);
 
-    fire({ [via]: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
-    expect(retry).toHaveBeenCalledTimes(1);
-    fire({ [via]: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+    fire({ [via]: { eventType: OsEventTypeList.DOUBLE_CLICK_EVENT } });
 
     expect(retry).toHaveBeenCalledTimes(1);
+    expect(imu.declineByTap).not.toHaveBeenCalled();
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
     expect(audio.stop).not.toHaveBeenCalled();
     expect(audio.start).not.toHaveBeenCalled();
-    expect(imu.confirmByTap).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
   });
 
-  it('consumes a long tap the gate declines, without toggling the mic', () => {
+  it('a 2x tap the draft declines is consumed: no refusal is invented', () => {
     const retry = vi.fn(() => false);
     const { fire, imu, audio, sent } = withRetry(retry);
     imu.isPending.mockReturnValue(true);
 
-    fire({ textEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
-    fire({ textEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+    fire({ textEvent: { eventType: OsEventTypeList.DOUBLE_CLICK_EVENT } });
 
     expect(retry).toHaveBeenCalledTimes(1);
-    expect(audio.stop).not.toHaveBeenCalled();
-    expect(audio.start).not.toHaveBeenCalled();
-    expect(imu.confirmByTap).not.toHaveBeenCalled();
     expect(imu.declineByTap).not.toHaveBeenCalled();
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
+    expect(audio.stop).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
   });
 
-  it('does not toggle the mic when the gate closes between a retry press and its release', () => {
+  it.each([
+    ['long tap', OsEventTypeList.LONG_PRESS_EVENT],
+    ['swipe up', OsEventTypeList.SCROLL_TOP_EVENT],
+    ['swipe down', OsEventTypeList.SCROLL_BOTTOM_EVENT],
+  ] as const)('a %s on a reply draft does nothing: tap and 2x tap are the whole contract', (_name, eventType) => {
     const retry = vi.fn(() => true);
-    const { fire, imu, audio } = withRetry(retry);
+    const { fire, imu, audio, sent } = withRetry(retry);
     imu.isPending.mockReturnValue(true);
-    fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
-    imu.isPending.mockReturnValue(false);
-    fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
 
-    expect(retry).toHaveBeenCalledTimes(1);
+    fire({ textEvent: { eventType } });
+    fire({ sysEvent: { eventType } });
+    if (eventType === OsEventTypeList.LONG_PRESS_EVENT) {
+      fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
+    }
+
+    expect(retry).not.toHaveBeenCalled();
+    expect(imu.declineByTap).not.toHaveBeenCalled();
+    expect(imu.confirmByTap).not.toHaveBeenCalled();
     expect(audio.stop).not.toHaveBeenCalled();
     expect(audio.start).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('leaves 2x tap as the refusal on a gate that offers no retry', () => {
+    const { fire, imu } = make();
+    imu.isPending.mockReturnValue(true);
+    fire({ textEvent: { eventType: OsEventTypeList.DOUBLE_CLICK_EVENT } });
+    expect(imu.declineByTap).toHaveBeenCalledTimes(1);
   });
 
   it('leaves long tap as the mic when no decision is pending', () => {

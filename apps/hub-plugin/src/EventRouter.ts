@@ -193,13 +193,16 @@ export class EventRouter {
     return true;
   }
 
-  /** A decision gate that offers "say it again" takes the long-press; any
-   * other gate consumes it, as before, so the mic never toggles behind it.
-   * Its release then finds no pending press and is consumed silently. */
-  private retryConfirmation(): void {
+  /** A decision gate that offers retry (a Messages draft) takes the 2x tap
+   * as retry: back to the listening box, say it again (the wearer's ruling,
+   * 2026-10-11: "'confirm' tap | 'retry' 2x"). A gate with no retry keeps
+   * 2x tap as its refusal. Long tap and swipe are consumed on a draft, as
+   * before, so the mic never toggles behind the decision. */
+  private retryOrDeclineConfirmation(): void {
     this.pendingMicLongPress = false;
-    if (this.confirmationRetry?.()) {
-      console.info('[EventRouter] long-press on a reply draft — saying it again');
+    if (this.confirmationRetry === undefined) { this.imu.declineByTap(); return; }
+    if (this.confirmationRetry()) {
+      console.info('[EventRouter] 2x tap on a reply draft — retry');
     }
   }
 
@@ -250,12 +253,16 @@ export class EventRouter {
         const eventType = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
         if (eventType === OsEventTypeList.CLICK_EVENT) {
           this.imu.confirmByTap();
-        } else if (eventType === OsEventTypeList.LONG_PRESS_EVENT) {
-          this.retryConfirmation();
+        } else if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+          this.retryOrDeclineConfirmation();
         } else if (
-          eventType === OsEventTypeList.SCROLL_TOP_EVENT ||
-          eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
+          this.confirmationRetry === undefined && (
+            eventType === OsEventTypeList.SCROLL_TOP_EVENT ||
+            eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
+          )
         ) {
+          // A swipe still refuses a gate that has no retry (a calendar or
+          // reminder write). On a draft it is consumed: tap and 2x tap only.
           this.imu.declineByTap();
         }
       }
@@ -298,7 +305,7 @@ export class EventRouter {
         return;
       }
       if (this.imu.isPending() && event.sysEvent.eventType === OsEventTypeList.LONG_PRESS_EVENT) {
-        this.retryConfirmation();
+        this.pendingMicLongPress = false; // consumed: the decision owns it
         return;
       }
       this.handleSys(event.sysEvent);
@@ -409,7 +416,7 @@ export class EventRouter {
    * The active owner determines what is left, never whether Back exits JOAT. */
   private handleBack(): void {
     this.pendingMicLongPress = false;
-    if (this.imu.isPending()) { this.imu.declineByTap(); return; }
+    if (this.imu.isPending()) { this.retryOrDeclineConfirmation(); return; }
     if (this.backPending) return;
     if (this.handlePromptInput(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
     if (this.handleNotificationCard(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
