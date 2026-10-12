@@ -191,6 +191,10 @@ class NotesSync:
     def enabled(self) -> bool:
         return self._settings.enabled
 
+    def set_enabled(self, enabled: bool) -> None:
+        """The QuickNotes page's switch."""
+        self._settings.set_enabled(enabled)
+
     async def sync_voice(self, capture_id: str, *, force: bool = False) -> str | None:
         """Write one recording. None when the switch is off (and not forced)."""
         if self._voice_notes is None or (not force and not self._settings.enabled):

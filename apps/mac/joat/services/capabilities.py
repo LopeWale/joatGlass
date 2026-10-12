@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from ..channels.cards import Card, CardLog
 from ..channels.imessage import IMessageStore, MessageEntry, MessageHistoryPage, MessageThread
 from ..core.protocol import (
+    AudioControl,
     SavedPlace,
     VOICE_REQUEST_PREFIX,
     AgentTerminalHudView,
@@ -52,7 +53,12 @@ from ..persistence.notes import NoteSource, NoteStore, QuickNote
 from ..persistence.voice_notes import VoiceNote, VoiceNoteStore
 from .hud import HudWriter
 from .sinks import DebateSnapshot
-from .voice_note_capture import VoiceNoteCaptureSnapshot
+from .voice_note_capture import (
+    LiveLine,
+    NoteMode,
+    VoiceNoteCaptureSnapshot,
+    labelled,
+)
 from ..core.wearer_zone import WearerZone
 from .hermes_productivity import system_local_time_zone
 from .planning import (
@@ -156,11 +162,11 @@ class _PlanningParent:
 
 
 class VoiceCaptureControls(Protocol):
-    """The narrow live-recording surface the QuickNotes page drives.
+    """The narrow live-note surface the QuickNotes pages drive (FEAT-002).
 
-    During an exclusive capture the microphone belongs to the recording, so
-    these HUD taps are the wearer's only controls; each returns the same
-    receipt string the (paused-state) voice grammar produces.
+    During a continuous recording the microphone belongs to the note, so
+    the lens is the wearer's only control: a tap pauses or resumes, a held
+    touchpad talks into a paused note, and 2x tap opens the finish rows.
     """
 
     @property
@@ -172,9 +178,21 @@ class VoiceCaptureControls(Protocol):
     @property
     def snapshot(self) -> VoiceNoteCaptureSnapshot: ...
 
+    def live_lines(self, limit: int = 12) -> tuple[LiveLine, ...]: ...
+
+    def silent_for_s(self) -> float: ...
+
+    def add_listener(self, listener: Callable[[], None]) -> None: ...
+
     def control_pause(self) -> str: ...
 
     def control_resume(self) -> str: ...
+
+    def control_toggle(self) -> str: ...
+
+    def control_hold_start(self) -> str | None: ...
+
+    def control_hold_end(self) -> str | None: ...
 
     def control_request_discard(self) -> str: ...
 
@@ -184,30 +202,45 @@ class VoiceCaptureControls(Protocol):
 
     async def control_stop(self) -> str: ...
 
-    def control_start(self) -> str: ...
+    def control_start(self, mode: NoteMode = "continuous") -> str: ...
 
 
-_RECORDING_CONTROLS: dict[str, tuple[tuple[str, str], ...]] = {
-    "recording": (
-        ("Save and finish", "stop"),
-        ("Pause recording", "pause"),
-        ("Discard recording", "discard"),
-    ),
-    "paused": (
-        ("Resume recording", "resume"),
-        ("Save and finish", "stop"),
-        ("Discard recording", "discard"),
-    ),
-    "discard_pending": (
-        ("Confirm discard", "confirm_discard"),
-        ("Keep recording", "keep"),
-    ),
-}
+class NoteSyncSwitch(Protocol):
+    """The Apple Notes switch the QuickNotes page shows and flips."""
+
+    @property
+    def enabled(self) -> bool: ...
+
+    def set_enabled(self, enabled: bool) -> None: ...
+
+
+#: 2x tap on a live note: what to do with it. Keep returns to the note.
+_FINISH_CONTROLS: tuple[tuple[str, str], ...] = (
+    ("Save note", "stop"),
+    ("Keep recording", "back_to_live"),
+    ("Discard note", "discard"),
+)
+_DISCARD_CONTROLS: tuple[tuple[str, str], ...] = (
+    ("Confirm discard", "confirm_discard"),
+    ("Keep recording", "keep"),
+)
+#: The live note: a firmware text page the plugin updates in place.
+_LIVE_TITLE = "QUICKNOTES · LIVE"
+#: Newest transcript rows sent per paint (the wire carries 20 rows).
+_LIVE_ROWS = 18
+#: The live page's clock repaints at most this often; words and state
+#: changes repaint at once.
+_LIVE_CLOCK_S = 5.0
+_LIVE_TICK_S = 1.0
+#: No audio this long while capturing: ask the plugin to reopen the mic.
+_NO_AUDIO_REOPEN_S = 1.5
+#: ...and this long: say so on the lens.
+_NO_AUDIO_WARN_S = 3.0
 
 
 @dataclass(frozen=True, slots=True)
 class _NoteRow:
-    """One row on the unified QuickNotes page: recording control or note."""
+    """One row on the unified QuickNotes page: a control or a note."""
 
     label: str
     kind: Literal["control", "voice", "text"]
@@ -227,14 +260,15 @@ class _NoteListState:
 
 # The firmware list draws at most 20 rows (HudPageBuilder.listLayout caps
 # there), and an archive page carries up to two paging rows after its notes.
-#: Sixteen notes, two control rows and two paging rows fit the firmware
-#: list's twenty-row cap on every page.
-_NOTE_LIST_PAGE_SIZE = 16
-#: The QuickNotes page is a control surface: its first rows start a
-#: recording or take dictation by tap. Voice works from anywhere.
+#: Fifteen notes, up to three control rows and two paging rows fit the
+#: firmware list's twenty-row cap on every page.
+_NOTE_LIST_PAGE_SIZE = 15
+#: The QuickNotes page is a control surface: one note, two ways to talk —
+#: a continuous recording (Even's Conversate) or held-touchpad paragraphs
+#: (Even's QuickNote). Voice works from anywhere.
 _NOTE_CONTROLS: tuple[tuple[str, str], ...] = (
-    ("● Record a voice note", "start"),
-    ("✎ Dictate a note", "dictate"),
+    ("● Record", "start"),
+    ("✎ Quick note · hold to talk", "start_hold"),
 )
 #: The Navigation page's open control; the row asks for the place itself.
 _NAVIGATION_CONTROL_ROW = "➤ Navigate to a place"
@@ -375,6 +409,8 @@ class CapabilityRouter:
         ask: AskWearer | None = None,
         navigate: Callable[[str], Awaitable[str | None]] | None = None,
         places: Callable[[], Sequence[SavedPlace]] | None = None,
+        notes_sync: NoteSyncSwitch | None = None,
+        note_reminders: Callable[[str], Awaitable[str]] | None = None,
     ) -> None:
         self._hud = hud
         # A tapped control row asks its own question on the lens and routes
@@ -459,6 +495,20 @@ class CapabilityRouter:
         self._note_rows: list[_NoteRow] = []
         self._note_list: _NoteListState | None = None
         self._note_reader: _NoteReaderState | None = None
+        # FEAT-002: the open note's pages. `_note_page` names what the lens
+        # shows ("list", "live", "finish", "discard"); the live page repaints
+        # itself from the recorder's changes and a slow clock tick.
+        self._notes_sync = notes_sync
+        self._note_reminders = note_reminders
+        self._note_page: str | None = None
+        self._note_finish = False
+        self._live_painted: tuple[object, ...] | None = None
+        self._live_painted_at = 0.0
+        self._live_check_pending = False
+        self._live_ticker: asyncio.Task[None] | None = None
+        self._mic_reopened = False
+        if voice_capture is not None:
+            voice_capture.add_listener(self._on_capture_change)
         self._activity_rows: list[ActionActivity] = []
         self._active_request_id: str | None = None
         self._active_capability: str | None = None
@@ -498,6 +548,8 @@ class CapabilityRouter:
                 self._note_reader = None
                 self._note_list = None
                 self._note_rows = []
+                self._note_page = None
+                self._note_finish = False
                 self.clear_message_selection("surface-departure")
                 return
         if event.container_name == "capmenu" and event.selected_name:
@@ -679,7 +731,16 @@ class CapabilityRouter:
             and event.selected_name == "quicknotes-back"
         ):
             asyncio.get_running_loop().create_task(
-                self._cancel_note_discard(event.request_id)
+                self._note_back(event.request_id)
+            )
+        elif (
+            event.container_name == "capability-lifecycle"
+            and event.selected_name in (
+                "quicknotes-finish", "quicknotes-hold-start", "quicknotes-hold-end",
+            )
+        ):
+            asyncio.get_running_loop().create_task(
+                self._note_gesture(event.selected_name or "", event.request_id)
             )
         elif (
             event.container_name == "capability-lifecycle"
@@ -2270,22 +2331,25 @@ class CapabilityRouter:
         return self._wearer_zone.home()
 
     async def _show_notes(self) -> None:
-        """One QuickNotes surface: live recording controls, else all notes.
+        """One QuickNotes surface: the open note's live page, else all notes.
 
-        Recordings (transcribed + summarized meetings/speeches) and exact
-        dictated text notes are one wearer concept; the storage split stays
-        invisible. While a capture is live the page IS the recorder's control
-        panel — the exclusive microphone means taps are the only controls.
+        Recordings (transcribed + summarized conversations) and exact text
+        notes are one wearer concept; the storage split stays invisible.
+        While a note is open the page IS that note (FEAT-002): its words as
+        they are heard, a tap to pause, a held touchpad to talk, 2x tap to
+        finish.
         """
         self._note_reader = None
         self._note_list = None
         capture = self._voice_capture
         if capture is not None and capture.active:
-            await self._show_recording_controls()
+            await self._show_live_note()
             return
+        self._note_finish = False
         if self._notes is None and self._voice_notes is None:
             if self._request_is_current():
                 self._note_rows = []
+                self._note_page = None
             await self._show_focus(
                 "QUICKNOTES · SETUP",
                 ["Notes storage is unavailable on this Mac."],
@@ -2323,6 +2387,19 @@ class CapabilityRouter:
         self._note_list = _NoteListState(tuple(sorted(rows, key=chronology)))
         await self._show_note_list_page()
 
+    def _note_controls(self) -> list[_NoteRow]:
+        """The rows that lead every QuickNotes page."""
+        controls = [
+            _NoteRow(label=label, kind="control", control=action)
+            for label, action in _NOTE_CONTROLS
+        ]
+        if self._notes_sync is not None:
+            state = "On" if self._notes_sync.enabled else "Off"
+            controls.append(_NoteRow(
+                label=f"⇪ Save to Apple Notes: {state}", kind="control", control="toggle_sync",
+            ))
+        return controls
+
     async def _show_note_list_page(self) -> None:
         state = self._note_list
         if state is None or not self._request_is_current():
@@ -2332,12 +2409,9 @@ class CapabilityRouter:
         # The page is a control surface: recording and dictation are rows
         # to tap, ahead of the notes on every page, so the tap mapping
         # (`_note_rows`) and the drawn list agree row for row.
-        controls = [
-            _NoteRow(label=label, kind="control", control=action)
-            for label, action in _NOTE_CONTROLS
-        ]
-        rows = [*controls, *notes]
+        rows = [*self._note_controls(), *notes]
         self._note_rows = rows
+        self._note_page = "list"
         count = max(1, (len(state.rows) + _NOTE_LIST_PAGE_SIZE - 1) // _NOTE_LIST_PAGE_SIZE)
         hints = [DETAIL_HINT if notes else "tap: choose · " + BACK_HINT]
         if state.index:
@@ -2386,43 +2460,94 @@ class CapabilityRouter:
         finally:
             state.page_pending = False
 
-    async def _cancel_note_discard(self, request_id: str | None) -> None:
+    async def _note_back(self, request_id: str | None) -> None:
+        """2x tap on a DISCARD? or FINISH page: back to the open note."""
+        capture = self._voice_capture
         if (
             request_id != self._active_request_id
             or self._active_capability != "QUICKNOTES"
-            or self._voice_capture is None
-            or not self._voice_capture.discard_pending
+            or capture is None
+            or not capture.active
         ):
             return
         token = self._request_context.set(request_id)
         try:
-            await self._apply_recording_control("keep")
+            if capture.discard_pending:
+                await self._apply_recording_control("keep")
+            elif self._note_finish:
+                await self._apply_recording_control("back_to_live")
         finally:
             self._request_context.reset(token)
 
-    async def _show_recording_controls(self) -> None:
+    async def _note_gesture(self, gesture: str, request_id: str | None) -> None:
+        """The live page's own gestures, reported by the plugin.
+
+        2x tap asks what to do with the note; a long press held on the page
+        talks into a paused note until it is released. Each must come from
+        the live page the wearer is looking at.
+        """
+        capture = self._voice_capture
+        if (
+            capture is None
+            or not capture.active
+            or request_id != self._active_request_id
+            or self._active_capability != "QUICKNOTES"
+        ):
+            return
+        token = self._request_context.set(request_id)
+        try:
+            if gesture == "quicknotes-finish":
+                if self._note_page == "live":
+                    self._note_finish = True
+                    await self._show_live_note()
+            elif gesture == "quicknotes-hold-start":
+                if self._note_page == "live" and capture.control_hold_start() is not None:
+                    self._mic_reopened = False
+                    await self._paint_live(force=True)
+            elif gesture == "quicknotes-hold-end":
+                # A release always ends a hold, even if the page moved on.
+                if capture.control_hold_end() is not None and self._note_page == "live":
+                    await self._paint_live(force=True)
+        finally:
+            self._request_context.reset(token)
+
+    async def _show_live_note(self) -> None:
+        """The open note: discard question, finish rows, or its live page."""
         capture = self._voice_capture
         assert capture is not None
         snapshot = capture.snapshot
         if capture.discard_pending:
-            page, controls = "DISCARD?", _RECORDING_CONTROLS["discard_pending"]
-        elif snapshot.state == "paused":
-            page, controls = "PAUSED", _RECORDING_CONTROLS["paused"]
-        elif snapshot.state == "recording":
-            page, controls = "RECORDING", _RECORDING_CONTROLS["recording"]
-        else:
-            # Finalizing: no tappable rows would do anything, so say so in
-            # the transient band rather than building a page for it.
+            await self._show_note_controls("DISCARD?", _DISCARD_CONTROLS, snapshot, "discard")
+            return
+        if snapshot.state == "finalizing":
+            # No tappable rows would do anything, so say so in the transient
+            # band rather than building a page for it.
             if self._request_is_current():
                 self._note_rows = []
+                self._note_page = None
             await self._hud.receipt("Saving quicknote…")
             return
+        if self._note_finish:
+            await self._show_note_controls("FINISH", _FINISH_CONTROLS, snapshot, "finish")
+            return
+        await self._paint_live(force=True)
+        self._ensure_live_ticker()
+
+    async def _show_note_controls(
+        self,
+        page: str,
+        controls: tuple[tuple[str, str], ...],
+        snapshot: VoiceNoteCaptureSnapshot,
+        name: str,
+    ) -> None:
         if not self._request_is_current():
             return
         self._note_rows = [
             _NoteRow(label=label, kind="control", control=action)
             for label, action in controls
         ]
+        self._note_page = name
+        self._live_painted = None
         title = snapshot.title or "Untitled"
         await self._show_focus(
             f"QUICKNOTES · {page}",
@@ -2430,6 +2555,135 @@ class CapabilityRouter:
             hint=f"{title[:24]} · tap: choose",
             selectable=True,
         )
+
+    def _live_view(self) -> tuple[list[str], str, tuple[object, ...]]:
+        """The live page's rows, its footer, and what a repaint must change.
+
+        The footer carries the state and clock so the newest words keep the
+        whole body; the plugin shows the body's last page. The clock is left
+        out of the change key: it repaints on its own, slower beat.
+        """
+        capture = self._voice_capture
+        assert capture is not None
+        snapshot = capture.snapshot
+        lines = [labelled(line.text, line.speaker) for line in capture.live_lines()]
+        capturing = snapshot.state == "recording"
+        notice: str | None = None
+        if capturing and capture.silent_for_s() >= _NO_AUDIO_WARN_S:
+            notice = "No audio from the mic — check the glasses."
+        elif snapshot.transcribing:
+            notice = "…"
+        if not lines and notice is None:
+            if snapshot.holding or (capturing and snapshot.mode == "continuous"):
+                notice = "Listening — your words appear here."
+            elif snapshot.mode == "hold":
+                notice = "Hold the touchpad and speak. Let go when you are done."
+            else:
+                notice = "Paused. Tap to keep recording."
+        body = "\n".join([*lines, *([notice] if notice else [])])
+        rows = [row for page in paginate_reader_text(body) for row in page][-_LIVE_ROWS:]
+        seconds = snapshot.recorded_s
+        clock = f"{seconds // 60:02d}:{seconds % 60:02d}"
+        if snapshot.holding:
+            hint = f"● Listening {clock} · let go: done"
+        elif capturing:
+            hint = f"● REC {clock} · tap: pause · left x2: finish"
+        else:
+            hint = f"{clock} · hold: talk · tap: record · left x2: finish"
+        key = (tuple(rows), snapshot.state, snapshot.holding, snapshot.mode)
+        return rows, hint, key
+
+    async def _paint_live(self, *, force: bool = False) -> None:
+        """Repaint the live page when its words or state changed.
+
+        ``force`` also repaints for the clock alone (at most every few
+        seconds from the ticker). The plugin updates the same live page in
+        place, so a repaint costs one text upgrade, not a page rebuild.
+        """
+        capture = self._voice_capture
+        if capture is None or not capture.active or not self._request_is_current():
+            return
+        if self._note_finish or capture.discard_pending:
+            return
+        rows, hint, key = self._live_view()
+        now = time.monotonic()
+        if not force and key == self._live_painted:
+            return
+        self._note_rows = [_NoteRow(label="live", kind="control", control="toggle")]
+        self._note_page = "live"
+        self._live_painted = key
+        self._live_painted_at = now
+        await self._show_focus(_LIVE_TITLE, rows, hint=hint, selectable=True)
+
+    def _on_capture_change(self) -> None:
+        """The recorder changed (a frame, a sentence, a state): maybe repaint.
+
+        Called synchronously and often; bursts coalesce into one check.
+        """
+        if self._note_page != "live" or self._live_check_pending:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._live_check_pending = True
+
+        def check() -> None:
+            self._live_check_pending = False
+            loop.create_task(self._live_check())
+
+        loop.call_later(0.25, check)
+
+    async def _live_check(self, *, tick: bool = False) -> None:
+        capture = self._voice_capture
+        if (
+            capture is None
+            or self._note_page != "live"
+            or self._active_capability != "QUICKNOTES"
+        ):
+            return
+        token = self._request_context.set(self._active_request_id)
+        try:
+            if not capture.active:
+                # The note was saved or discarded by voice: show the list.
+                await self._show_notes()
+                return
+            snapshot = capture.snapshot
+            silent = capture.silent_for_s()
+            if snapshot.state == "recording" and silent >= _NO_AUDIO_REOPEN_S:
+                if not self._mic_reopened:
+                    # A muted mic makes a silent recording: ask the plugin to
+                    # open it (an open mic ignores the request).
+                    self._mic_reopened = True
+                    with contextlib.suppress(Exception):
+                        await self._transport.send(AudioControl(open=True))
+            elif silent == 0.0 or silent < 1.0:
+                self._mic_reopened = False
+            clock_due = tick and time.monotonic() - self._live_painted_at >= _LIVE_CLOCK_S
+            await self._paint_live(force=clock_due)
+        finally:
+            self._request_context.reset(token)
+
+    def _ensure_live_ticker(self) -> None:
+        if self._live_ticker is not None and not self._live_ticker.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._live_ticker = loop.create_task(self._run_live_ticker())
+
+    async def _run_live_ticker(self) -> None:
+        capture = self._voice_capture
+        while (
+            capture is not None and capture.active
+            and self._note_page == "live" and self._active_capability == "QUICKNOTES"
+        ):
+            await asyncio.sleep(_LIVE_TICK_S)
+            try:
+                await self._live_check(tick=True)
+            except Exception:
+                log.exception("live note repaint failed")
 
     async def _select_note(self, index: int, trace_id: str, page_index: int | None = None) -> None:
         state = self._note_list
@@ -2513,60 +2767,48 @@ class CapabilityRouter:
         finally:
             reader.page_pending = False
 
-    async def _dictate_note(self) -> None:
-        """The tapped "✎ Dictate a note" row: ask, then save the exact text."""
-        notes = self._notes
-        if self._ask is None or notes is None:
-            await self._hud.receipt("Dictation is unavailable on this Mac.")
-            return
-
-        async def consume(text: str) -> None:
-            visible = " ".join(text.split())
-            if not visible:
-                return
-            identifier = secrets.token_urlsafe(18)
-            notes.create(
-                note_id=identifier,
-                idempotency_key=f"quick-note:{identifier}",
-                text=visible,
-                source=NoteSource(kind="hud.quick-note", identifier=identifier),
-                now_us=time.time_ns() // 1_000,
-            )
-            preview = visible if len(visible) <= 72 else visible[:69] + "…"
-            await self._hud.receipt(f"Saved QuickNote: {preview}")
-            await self._hud.settle_assistant()
-            await self._show_notes()
-
-        if not await self._ask("What should I note?", "note", consume):
-            await self._hud.receipt("The question did not reach the glasses — try again.")
-
     async def _apply_recording_control(self, action: str) -> None:
         capture = self._voice_capture
+        if action == "toggle_sync":
+            sync = self._notes_sync
+            if sync is not None:
+                sync.set_enabled(not sync.enabled)
+                await self._hud.receipt(
+                    "Saved notes now go to Apple Notes too."
+                    if sync.enabled else "Saved notes now stay on this Mac."
+                )
+                await self._hud.settle_assistant()
+            await self._show_notes()
+            return
         if capture is None:
-            if action == "dictate":
-                await self._dictate_note()
-            else:
-                await self._hud.receipt("Recording is unavailable on this Mac.")
+            await self._hud.receipt("Recording is unavailable on this Mac.")
             return
         receipt: str | None = None
-        if action == "start":
-            receipt = capture.control_start()
-        elif action == "dictate":
-            await self._dictate_note()
-            return
+        if action in ("start", "start_hold"):
+            self._note_finish = False
+            self._mic_reopened = False
+            started = capture.control_start("hold" if action == "start_hold" else "continuous")
+            log.info("quicknote control %s: %s", action, started)
+            if not capture.active:
+                # Only a refusal earns a band: an opened note shows itself.
+                receipt = started
+        elif action == "toggle":
+            before = capture.snapshot.state
+            toggled = capture.control_toggle()
+            log.info("quicknote control toggle: %s", toggled)
+            if capture.snapshot.state == before:
+                receipt = toggled
+        elif action == "back_to_live":
+            self._note_finish = False
         elif action == "stop":
-            # Transcription of a long recording takes real time, so the
-            # wearer needs to know it is happening — but a whole page for
-            # one transient line is waste (the wearer's ruling). It goes out
-            # as the same slim band Even AI uses for "listening": the page
-            # underneath stays, and the band replaces itself on completion.
+            self._note_finish = False
+            # Transcription happened while the note was open, so saving is
+            # quick — but the wearer still sees that it is happening, in the
+            # same slim band Even AI uses for "listening".
             await self._hud.receipt("Saving quicknote…")
             receipt = await capture.control_stop()
-        elif action == "pause":
-            receipt = capture.control_pause()
-        elif action == "resume":
-            receipt = capture.control_resume()
         elif action == "discard":
+            self._note_finish = False
             receipt = capture.control_request_discard()
         elif action == "confirm_discard":
             receipt = capture.control_confirm_discard()
@@ -2578,8 +2820,8 @@ class CapabilityRouter:
             # own rather than occupying the lens until the wearer dismisses.
             await self._hud.receipt(receipt)
             await self._hud.settle_assistant()
-        # Re-render whatever is now true: updated controls, or — after a save
-        # or discard — the unified notes list itself.
+        # Re-render whatever is now true: the live page, the finish or
+        # discard rows, or — after a save or discard — the notes list.
         await self._show_notes()
 
     async def _show_voice_note_detail(self, note: VoiceNote, trace_id: str) -> None:
@@ -2602,24 +2844,43 @@ class CapabilityRouter:
             if is_latest:
                 rows.append("Say: summarize the last note.")
         else:
-            rows.append("SUMMARY")
+            rows.append("OVERVIEW")
             rows.append(insights.summary)
             if insights.key_points:
                 rows.append("KEY POINTS")
                 rows.extend(f"– {point}" for point in insights.key_points)
             if insights.todos:
-                rows.append("TODOS")
+                rows.append("NEXT STEPS")
                 # □ reads as an unchecked box: these are the actionable rows,
-                # and "create reminders from the last note" consumes them.
+                # and a tap on this page makes them reminders.
                 rows.extend(f"□ {todo}" for todo in insights.todos)
         if is_latest:
             rows.append("Say: ask the last note …")
         rows.append("TRANSCRIPT")
         segments = store.segments(note.capture_id)
-        rows.extend(segment.text for segment in segments if segment.kind in ("transcript", "gap"))
+        rows.extend(
+            labelled(segment.text, segment.speaker) if segment.kind == "transcript"
+            else segment.text
+            for segment in segments if segment.kind in ("transcript", "gap")
+        )
         if not any(segment.kind == "transcript" for segment in segments):
             rows.append("No transcript is available; retained audio may need recovery.")
-        await self._open_note_reader("QUICKNOTES · NOTE", "Recording", "\n".join(rows), trace_id)
+        on_tap: Callable[[], Awaitable[None]] | None = None
+        tap_hint: str | None = None
+        reminders = self._note_reminders
+        if reminders is not None and insights is not None and insights.todos:
+            capture_id = note.capture_id
+
+            async def add_reminders() -> None:
+                receipt = await reminders(capture_id)
+                await self._hud.receipt(receipt)
+                await self._hud.settle_assistant()
+
+            on_tap, tap_hint = add_reminders, "tap: next steps to Reminders"
+        await self._open_note_reader(
+            "QUICKNOTES · NOTE", "Recording", "\n".join(rows), trace_id,
+            on_tap=on_tap, tap_hint=tap_hint,
+        )
 
     async def _show_navigation(self) -> None:
         """Give the wearer the next natural action, not a hidden CLI contract.

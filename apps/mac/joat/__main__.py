@@ -109,6 +109,7 @@ from .native.bridge import (
 )
 from .persistence.actions import ActionJournal
 from .persistence.places import PlaceStore
+from .persistence.note_exports import NoteExportStore
 from .persistence.notes import NoteStore
 from .persistence.notifications import NotificationObservationStore
 from .persistence.pomodoro import PomodoroStore
@@ -166,6 +167,7 @@ from .services.note_insights import (
     NoteInsightsService,
 )
 from .services.notes_export import AppleNotesExporter
+from .services.notes_sync import NotesSync
 from .services.voice_note_capture import VoiceNoteCaptureController
 from .services.navigation import (
     NavigationSession,
@@ -1519,12 +1521,18 @@ async def main() -> None:
         local_time_zone=system_local_time_zone,
     )
     note_store = NoteStore(durable_store)
-    note_commands = NoteCommandController(note_store)
+    # FEAT-002: every saved note is also written to Apple Notes › JOAT (the
+    # wearer's "saves it to my notes app"), once, then updated in place.
+    voice_note_store = VoiceNoteStore(durable_store)
+    notes_sync = NotesSync(
+        AppleNotesExporter(), NoteExportStore(durable_store),
+        voice_notes=voice_note_store, text_notes=note_store,
+    )
+    note_commands = NoteCommandController(note_store, on_saved=notes_sync.schedule_text)
     # QuickNote recorder: journal-first meeting/speech capture. The router
     # interposes on the transport's frame stream so an exclusive recording
     # owns the microphone (nothing said mid-meeting reaches the assistant);
     # the orchestrator subscribes through it below.
-    voice_note_store = VoiceNoteStore(durable_store)
     recovered_notes = voice_note_store.recover_after_restart(
         now_us=time.time_ns() // 1_000,
     )
@@ -1542,6 +1550,7 @@ async def main() -> None:
         voice_note_store,
         local_completer,
         claude=ClaudeCompleter(claude_binary) if claude_binary else None,
+        after_summary=notes_sync.sync_voice,
     )
     voice_capture = VoiceNoteCaptureController(
         voice_note_store,
@@ -1554,6 +1563,7 @@ async def main() -> None:
         note_insights,
         productivity=productivity_actions,
         exporter=AppleNotesExporter(),
+        sync=notes_sync,
         local_time_zone=system_local_time_zone,
     )
     # Agent Terminal roster: the wearer's existing OpenClaw work sessions,
@@ -1899,6 +1909,8 @@ async def main() -> None:
         notes=note_store,
         voice_notes=voice_note_store,
         voice_capture=voice_capture,
+        notes_sync=notes_sync,
+        note_reminders=note_insight_commands.create_reminders_for,
         actions=action_journal,
         # Opening the sidebar row shows the wearer's actual work sessions,
         # not a readiness card. Only configured lanes reach this: with no

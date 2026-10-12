@@ -15,9 +15,9 @@ Checkbox state is the position. Design: `technical-design.md` in this folder.
   setting + voice toggle, reminders for any note. Done-when:
   `test_note_insights.py`, `test_notes_export.py`, `test_note_commands.py`
   green. ✔ 2026-10-11 (T1–T3: Mac 3544 passed; mypy unchanged).
-- [ ] **T4** Capability router pages: list rows, LIVE (throttled repaint),
+- [x] **T4** Capability router pages: list rows, LIVE (throttled repaint),
   FINISH, hold events, Apple Notes row, detail tap → reminders, `__main__`
-  wiring. Done-when: `test_capabilities.py` QuickNotes cases green.
+  wiring. Done-when: `test_capabilities.py` QuickNotes cases green. ✔ 2026-10-11.
 - [ ] **T5** Plugin: LIVE in-place text upgrade, double-tap → finish,
   long press → hold events. Done-when: vitest + `tsc` green.
 - [ ] **T6** Simulator: AC1 + AC2 with synthetic audio; full Mac + plugin
