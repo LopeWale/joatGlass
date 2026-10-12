@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-12 — Build JOAT 0.1.127
+
+- Packed from `b3a8834` (clean tree) with `scripts/pack.sh`, the `com.example.joat` manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.127 above the last recorded build (0.1.126); app.json, package.json and package-lock.json all 0.1.127. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1224 tests passed, typecheck clean.
+- Canonical `apps/hub-plugin/joat.ehpk`: 178070 bytes, SHA-256 `ed0132ced81ccdf3f0113b82eb9d25e47feccb0aa0b2394d0592338eb8e7805a`. Adds to 0.1.126: long tap no longer turns the mic on or off, and "long tap: mic" is gone from the footers (`4e6dade`). Simulator: the status card's footer reads "2x tap: menu". Plugin only: no Mac restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-12 — Long tap no longer turns the mic on or off
 
 The wearer: the footer's "long tap: mic" "is fucking up my quickNote experience because i use the long tap on quickNote to record and it also turns the mic on; the mic can stay on right?"
