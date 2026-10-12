@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-12 — "hearing you…" only when JOAT is going to act
+
+The wearer, after the name-only gate and 0.1.127: "it is still doing the same thing. Look at the logs … It's still showing this. I am 'hearing you'".
+
+**What the log showed (15:19:16 reconnect → 15:22).** The gate held: the speech detector (`RmsVad`) opened 16 utterances in 3 minutes, 15 were ignored (`unaddressed speech ignored`, `STT produced no text`), and one woke JOAT (15:20:52, `'joats' ~ 'joat'`). But `_transcribe` painted "JOAT · hearing you…" on the status line *before* Whisper ran, so before the name check, for every one of them, for 1.3–2.4 s each. The status line said JOAT was listening to the wearer about every 10 s, while it was about to ignore them. The gate fixed the answers, not the acknowledgement.
+
+**Change** (`VoiceOrchestrator`):
+- `_speech_expected(turn)`: the acknowledgement goes up during transcription only when the speech will be taken without the name. That means: a question on the glass awaiting its answer (a prompt ticket), a Brainstorm topic tapped for dictation, the sentence after "JOAT" alone (`NAME_ONLY_WINDOW_S`), follow-ups in an open conversation (off in production), or no wake words configured.
+- Otherwise it goes up in `_act` the moment the transcript carries the name, before feature navigation, commands or the model (`_acknowledge`, once per turn), so a real request still shows "hearing you…" before its answer card.
+- Room talk and coughs never touch the status line: nothing goes up, and `_act` no longer repaints "listening" after an ignored utterance. A cough during a running answer no longer covers it. `_restore_status` defers only to an *acknowledged* transcription in flight (`_stt_acked`).
+- Latency receipt: on a named request `ack_sent` now follows `stt_complete` (Whisper is ~1.3–2.4 s here); it still precedes the first model chunk.
+- Tests: `TestHearingYouOnlyForJoat` (room talk and coughs leave the status line untouched; the name shows it once, before the conversation card; after the name alone the next sentence is acknowledged while Whisper runs; a cough during an answer does not cover it). Two older tests updated to the new order. Orchestrator, message-reply and latency suites 129 passed; full Mac suite 3594 passed, 1 failure in `test_whisper_cold_start` (spawns a Whisper child, does not touch the orchestrator; fails alone too, as recorded above). mypy clean. **Mac only: takes effect when JOAT restarts.**
+
 ## 2026-10-12 — Build JOAT 0.1.127
 
 - Packed from `b3a8834` (clean tree) with `scripts/pack.sh`, the `com.example.joat` manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.127 above the last recorded build (0.1.126); app.json, package.json and package-lock.json all 0.1.127. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1224 tests passed, typecheck clean.

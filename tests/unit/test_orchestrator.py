@@ -746,7 +746,10 @@ class TestReplyFlow:
 
         assert replier.asked == []
         assert region(transport, ContainerId.MAIN) == []
-        assert region(transport, ContainerId.STATUS_BAR)[-1] == "JOAT · listening"
+        # Room talk never puts "hearing you…" up (2026-10-12: the status line
+        # flashed it for every cough the speech detector caught), so there
+        # is nothing to take down either: the status line is not touched.
+        assert region(transport, ContainerId.STATUS_BAR) == []
 
     async def test_active_session_keeps_its_status_after_consuming_speech(self) -> None:
         class ActiveSessions:
@@ -1063,10 +1066,12 @@ class TestStreamedReply:
 
         await orch._handle_utterance(LOUD)
 
+        # The ack follows the transcript: "hearing you…" goes up only once
+        # the name is heard (2026-10-12), not for every sound before it.
         assert [stage for _turn, stage, _bucket in latency_events] == [
             "utterance_ready",
-            "ack_sent",
             "stt_complete",
+            "ack_sent",
             "first_model_chunk",
             "first_reply_sent",
             "reply_complete",
@@ -1660,6 +1665,82 @@ class TestOrdinaryEnglishWakeWordsMustOpenTheUtterance:
                       "I was wondering JOAT what is next",
                       "okay so anyway JOAT what is on my calendar"):
             assert await self._addressed(heard) is not None, heard
+
+
+class TestHearingYouOnlyForJoat:
+    """The wearer, 2026-10-12, after the name-only gate shipped: "It's still
+    showing this. I am 'hearing you'". The log (15:19–15:22): 16 utterances
+    from the speech detector in 3 minutes, 15 ignored as room talk — and
+    every one painted "JOAT · hearing you…" for the 1.3–2.4 s Whisper took,
+    because the acknowledgement went up before the name check. Now it goes
+    up when the name is heard, or during transcription only when the speech
+    will be taken without it."""
+
+    @staticmethod
+    async def wearer() -> tuple[FakeTransport, FakeEngine, FakeReplier, object]:
+        from joat.services.orchestrator import WAKE_WORDS
+
+        transport, engine, replier = FakeTransport(), FakeEngine(), FakeReplier("answer")
+        orch = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), replier=replier, wake_words=WAKE_WORDS,
+            anchored_wake=(), follow_ups_without_name=False,
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        seq = 0
+
+        async def say(text: str) -> None:
+            nonlocal seq
+            engine.text = text
+            for pcm in (LOUD, LOUD, QUIET, QUIET, QUIET, QUIET):
+                transport.audio_cb(pcm, seq)
+                seq += 1
+            await drain()
+
+        return transport, engine, replier, say
+
+    async def test_room_talk_and_coughs_never_show_hearing_you(self) -> None:
+        transport, _engine, replier, say = await self.wearer()
+        for heard in ("The", "and what about tomorrow", "you", "that's a joke"):
+            await say(heard)  # type: ignore[operator]
+        assert replier.asked == []
+        assert region(transport, ContainerId.STATUS_BAR) == []
+
+    async def test_the_name_shows_it_before_the_answer(self) -> None:
+        transport, _engine, replier, say = await self.wearer()
+        await say("JOAT, what time is sunset?")  # type: ignore[operator]
+        assert replier.asked == ["what time is sunset?"]
+        hud = transport.sent
+        acks = [i for i, m in enumerate(hud)
+                if isinstance(m, HudText) and m.container_id is ContainerId.STATUS_BAR
+                and m.text == "JOAT · hearing you…"]
+        assert len(acks) == 1
+        assert acks[0] < next(i for i, m in enumerate(hud)
+                              if isinstance(m, AssistantConversationView))
+        assert region(transport, ContainerId.STATUS_BAR)[-1] == "JOAT · listening"
+
+    async def test_after_the_name_alone_the_next_sentence_is_acknowledged_at_once(self) -> None:
+        transport, engine, replier, say = await self.wearer()
+        await say("JOAT.")  # type: ignore[operator]
+        before = len(region(transport, ContainerId.STATUS_BAR))
+        seen_during_stt: list[list[str]] = []
+        flush = engine.flush
+
+        async def watching_flush():  # type: ignore[no-untyped-def]
+            seen_during_stt.append(region(transport, ContainerId.STATUS_BAR)[before:])
+            return await flush()
+
+        engine.flush = watching_flush  # type: ignore[method-assign]
+        await say("what's on my calendar")  # type: ignore[operator]
+        assert replier.asked == ["what's on my calendar"]
+        assert seen_during_stt == [["JOAT · hearing you…"]]
+
+    async def test_a_cough_inside_a_running_answer_does_not_cover_it(self) -> None:
+        transport, _engine, _replier, say = await self.wearer()
+        await say("JOAT, what time is sunset?")  # type: ignore[operator]
+        settled = region(transport, ContainerId.STATUS_BAR)
+        await say("The")  # type: ignore[operator]
+        assert region(transport, ContainerId.STATUS_BAR) == settled
 
 
 class TestOnlyTheNameWakesIt:

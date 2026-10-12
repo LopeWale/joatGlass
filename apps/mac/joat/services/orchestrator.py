@@ -440,6 +440,11 @@ class VoiceOrchestrator:
         )
         self._pending_arrived = asyncio.Event()
         self._stt_busy = 0
+        # Transcriptions in flight that put "hearing you…" up, and the last
+        # turn that did. Only speech JOAT will take gets the acknowledgement
+        # (`_speech_expected`, or the name heard): see `_transcribe`.
+        self._stt_acked = 0
+        self._acked_turn = 0
         self._utterance_worker: asyncio.Task[None] | None = None
         # A raster receipt whose first words were sent but not yet seen
         # painted: (turn ordinal, end of speech). Native conversations use
@@ -896,27 +901,62 @@ class VoiceOrchestrator:
         if not self._stt_available:
             log.info("no STT engine — utterance dropped")
             return None
+        # Acknowledge FIRST — but only speech JOAT will take without its
+        # name. The speech detector opens on coughs, breath and room talk
+        # (2026-10-12: 16 utterances in 3 minutes, one addressed), and every
+        # one of them painted "hearing you…" for the 1.3–2.4 s Whisper took,
+        # so the status line said JOAT was listening to the wearer when it
+        # was about to ignore them. Anything else is acknowledged in `_act`
+        # the moment the name is heard.
+        expected = self._speech_expected(turn)
         self._stt_busy += 1
+        if expected:
+            self._stt_acked += 1
         try:
-            # Acknowledge FIRST. Transcription takes seconds, and an
-            # unchanged HUD for that long reads as "the assistant is dead" —
-            # the wearer has no other signal that they were heard.
-            await self._hud.status("JOAT · hearing you…")
-            self._observe_latency(turn.ordinal, "ack_sent", turn.started_at)
+            if expected:
+                await self._acknowledge(turn)
             await self._stt.feed(utterance)
             transcript = await self._stt.flush()
             self._observe_latency(turn.ordinal, "stt_complete", turn.started_at)
         finally:
             self._stt_busy -= 1
+            if expected:
+                self._stt_acked -= 1
         if transcript is None or not transcript.is_final or not transcript.text:
             log.info("STT produced no text")
-            await self._restore_status()
+            if expected:
+                await self._restore_status()
             return None
         log.info("transcript received chars=%d", len(transcript.text))
         if self._status is not None:
             self._status.set(last_transcript=transcript.text)  # type: ignore[attr-defined]
             self._status.bump("utterances")  # type: ignore[attr-defined]
         return transcript
+
+    def _speech_expected(self, turn: _Turn) -> bool:
+        """Whether this utterance will be taken WITHOUT the name.
+
+        A question on the glass waiting for its answer (a Messages reply,
+        a typed prompt), a Brainstorm topic the wearer tapped to dictate,
+        the one request after "JOAT" alone, or follow-ups inside an open
+        conversation (off in production). Everywhere else speech is room
+        talk until the transcript says "JOAT".
+        """
+        if self._wake_words is None or turn.prompt_ticket is not None:
+            return True
+        if self._sessions is not None and self._sessions.topic_capture_armed:
+            return True
+        if self._monotonic() < self._name_only_until:
+            return True
+        return self._follow_ups and self._conversation.is_open
+
+    async def _acknowledge(self, turn: _Turn) -> None:
+        """Put "hearing you…" up once per turn and time it."""
+        if self._acked_turn == turn.ordinal:
+            return
+        self._acked_turn = turn.ordinal
+        await self._hud.status("JOAT · hearing you…")
+        self._observe_latency(turn.ordinal, "ack_sent", turn.started_at)
 
     def _interrupts(self, text: str) -> str | None:
         """Why speech heard over a streaming reply should cut it short, if at all.
@@ -935,9 +975,9 @@ class VoiceOrchestrator:
         # "hearing you" is transient. Empty STT, unaddressed room speech,
         # a deterministic command, and a normal model reply must all
         # return the chrome to its truthful idle state.
-        if self._stt_busy:
-            # A queued utterance is being transcribed over this turn's end;
-            # its own "hearing you…" is the truthful line right now.
+        if self._stt_acked:
+            # A queued utterance JOAT will take is being transcribed over
+            # this turn's end; its own "hearing you…" is the truthful line.
             return
         active_status = (
             self._sessions.active_status
@@ -1046,6 +1086,7 @@ class VoiceOrchestrator:
         latency_turn = turn.ordinal
         prompt_revision = turn.prompt_revision
         prompt_ticket = turn.prompt_ticket
+        ignored = False
         try:
             if self._prompted_input is not None and await self._prompted_input.dispatch(
                 transcript, provenance,
@@ -1086,6 +1127,9 @@ class VoiceOrchestrator:
                         "rejoined a split request (%d + %d chars)",
                         len(tail[0]), len(heard),
                     )
+            if addressed:
+                # The name was heard: now, and only now, say so.
+                await self._acknowledge(turn)
             if addressed and self._feature_navigation is not None:
                 navigation = await self._feature_navigation(addressed)
                 if navigation is not None:
@@ -1139,6 +1183,9 @@ class VoiceOrchestrator:
                 # piece is recovered.
                 self._unaddressed_tail = (transcript.text, time.monotonic())
                 log.info("unaddressed speech ignored chars=%d", len(transcript.text))
+                # Nothing was put up for room talk, so nothing comes down:
+                # repainting "listening" for every cough is still traffic.
+                ignored = self._acked_turn != turn.ordinal
                 return
             if not addressed:
                 if not self._reply_surface_current(prompt_revision, prompt_ticket):
@@ -1328,7 +1375,8 @@ class VoiceOrchestrator:
                 if self._status is not None:
                     self._status.set(last_reply=reply_text)  # type: ignore[attr-defined]
         finally:
-            await self._restore_status()
+            if not ignored:
+                await self._restore_status()
 
     @staticmethod
     def _conversation_text(text: str) -> str:
