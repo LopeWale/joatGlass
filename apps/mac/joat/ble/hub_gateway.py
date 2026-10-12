@@ -52,6 +52,7 @@ from ..core.protocol import (
     AudioSource,
     Auth,
     AuthAccepted,
+    AudioControl,
     BrainstormAction,
     Confirm,
     ConfirmRequest,
@@ -95,6 +96,7 @@ from ..core.protocol import (
     utf16_units,
 )
 from ..services.g2_diagnostics import G2DiagnosticStore
+from .mic_meter import MicMeter
 
 log = logging.getLogger(__name__)
 REMINDER_DUE_ACK_REPROBE_SECONDS = 30.0
@@ -256,6 +258,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._connection_generation = 0
         self._session_pairing_identity_digest: bytes | None = None
         self._standby_refused_generation: int | None = None
+        # Content-free mic timing on the real glasses (mic_meter.py).
+        self._mic_meter = MicMeter(link_rtt_s=self._link_rtt_s)
         # Unlike ordinary JOAT, a field-acceptance receipt must not allow a
         # loopback simulator to stand in for an actual paired wearer session.
         self._current_peer_is_loopback = False
@@ -517,8 +521,15 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
 
     # ── sending ──────────────────────────────────────────────────────────────
 
+    def _link_rtt_s(self) -> float | None:
+        conn = self._conn
+        latency = getattr(conn, "latency", None) if conn is not None else None
+        return latency if isinstance(latency, (int, float)) else None
+
     async def send(self, message: DownlinkMessage) -> None:
         conn = self._conn
+        if isinstance(message, AudioControl) and conn is not None:
+            self._mic_meter.on_control(message.open)
         if conn is None:
             # One line per disconnected spell, then a count when the glasses
             # return: logging every frame wrote ~1,500 identical warnings in
@@ -1315,6 +1326,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 self.hello = None
                 self._clear_location(session_id)
                 self._clear_reminder_due_acks(session_id)
+                self._mic_meter.on_disconnect()
                 for cb in self._disconnect_cbs:
                     cb()
             # Say HOW it ended. Every disconnect in the wearer's log read
@@ -1421,6 +1433,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                     input_cb(message.event)
             case Device():
                 self.device = message
+                self._mic_meter.on_device(message.mic)
                 if message.mic_source is not None:
                     self._prompt_audio_source = message.mic_source
                 if message.wearing is False or (message.mic is False and message.mic_prompt_id is None):
@@ -1603,6 +1616,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             # relay, or queue; forward the boundary so VAD cannot splice it.
             log.warning("audio gap: seq %d → %d", self._last_seq, message.seq)
         self._last_seq = message.seq
+        self._mic_meter.on_audio(len(message.pcm))
 
         pcm = pack_pcm(message.pcm)
         frame = AudioFrame(
