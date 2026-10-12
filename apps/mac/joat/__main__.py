@@ -125,7 +125,7 @@ from .services.brainstorm_history import (
     BrainstormHistoryCommands,
 )
 from .services.status import StatusPublisher
-from .services.orchestrator import VoiceOrchestrator
+from .services.orchestrator import WAKE_WORDS, VoiceOrchestrator
 from .services.prompted_speech import PromptedSpeechRuntime
 from .services.voice_latency import VoiceLatencyStore
 from .services.ambient import AmbientPublisher
@@ -1775,21 +1775,12 @@ async def main() -> None:
         pomodoro=PomodoroCommands(pomodoro, panels),
         search=SearchCommands(search, panels),
     )
-    # The assistant's name is JOAT — plus mishearings observed LIVE from
-    # whisper on short utterances: a one-word utterance gives the model no
-    # context, so "JOAT" comes back as "Jokes"/"Jote"/"Jolt". Rejecting
-    # those made the assistant look deaf to its own name.
-    #
-    # "joke" and "choke" join them from captures on 2026-09-22: a real voice
-    # turn through the running brain transcribed "JOAT, in three sentences"
-    # as "Joke, in three sentences" and then "Choke, in three sentences".
-    # The SINGULAR was missing while the plural was listed, and "choke" was
-    # absent entirely. Both are anchored in the orchestrator, so they only
-    # count when they open the utterance.
-    wake_words = None if args.always_answer else (
-        "hey joat",
-        "joat", "jote", "jolt", "jokes", "joke", "choke", "jot",
-    )
+    # The assistant's name is JOAT. Whisper renders it as "Jote", and with
+    # the wearer's accent as "Joke"/"Jokes"/"Choke"/"Jot"/"Jolt" (captures
+    # from 2026-09-22). Since 2026-10-12 the ones that are ordinary English
+    # count only after "hey" (orchestrator.WAKE_WORDS), and no speech is
+    # answered without the name: "The" from a cough was being answered.
+    wake_words = None if args.always_answer else WAKE_WORDS
     voice_latency = VoiceLatencyStore() if args.voice_latency_diagnostics else None
     async def check_terminal_input(lane: str, text: str) -> bool | None:
         """Show what was heard before a work session gets it (2026-10-06).
@@ -1860,6 +1851,12 @@ async def main() -> None:
         prompted_input=prompted_speech.dispatcher,
         selected_message_reply=message_ui.handle_unaddressed_reply,
         surface_revision=lambda: capabilities.view_revision,
+        # Ordinary-English renderings only count after "hey" (wake_words).
+        anchored_wake=(),
+        # Every request names JOAT. The 30 s window used to admit any speech
+        # after an answer; "The" (a cough, as Whisper hears it) was answered,
+        # which reopened the window for the next one (2026-10-12).
+        follow_ups_without_name=False,
     )
     orchestrator.attach()
     # A notification card must not take the lens while the wearer is still

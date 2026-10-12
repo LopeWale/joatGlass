@@ -1662,6 +1662,122 @@ class TestOrdinaryEnglishWakeWordsMustOpenTheUtterance:
             assert await self._addressed(heard) is not None, heard
 
 
+class TestOnlyTheNameWakesIt:
+    """The wearer, 2026-10-12: "it just randomly pops up thinking that I said
+    the word 'The'". The log showed it: a 3-character transcript inside the
+    30 s conversation window was answered as a follow-up (11:55:43,
+    11:56:19), and every answer re-opened the window for the next one. Now
+    nothing without the name is a request — except the one sentence right
+    after the name alone — and filler is never a request at all."""
+
+    @staticmethod
+    def production(clock: object | None = None) -> VoiceOrchestrator:
+        from joat.services.orchestrator import WAKE_WORDS
+
+        class Transport:
+            async def send(self, *a: object, **k: object) -> None: ...
+
+        o = VoiceOrchestrator(
+            Transport(),  # type: ignore[arg-type]
+            stt=None, stt_available=False, wake_words=WAKE_WORDS,
+            anchored_wake=(), follow_ups_without_name=False,
+            **({"monotonic": clock} if clock is not None else {}),  # type: ignore[arg-type]
+        )
+        return o
+
+    def test_after_an_answer_unnamed_speech_is_room_talk(self) -> None:
+        o = self.production()
+        assert o._addressed("JOAT what's on my calendar") == "what's on my calendar"
+        o._conversation.open()  # JOAT answered
+        for room in ("and what about tomorrow", "The", "so anyway I told him"):
+            assert o._addressed(room) is None, room
+
+    def test_filler_is_never_a_request_even_with_follow_ups_on(self) -> None:
+        o, _ = TestTheConversationWindow().gate()
+        o._conversation.open()
+        for heard in ("The", "The.", "you", "Thank you.", "Thanks for watching!", "Um", "so"):
+            assert o._addressed(heard) is None, heard
+
+    def test_the_name_alone_then_the_request(self) -> None:
+        class Clock:
+            t = 1_000.0
+            def __call__(self) -> float:
+                return self.t
+        clock = Clock()
+        o = self.production(clock)
+        assert o._addressed("JOAT") == ""
+        o._name_only_until = clock.t + 8.0  # set where "Yes?" is shown
+        clock.t += 2
+        assert o._addressed("The") is None  # a cough does not spend it
+        clock.t += 2
+        assert o._addressed("what's on my calendar") == "what's on my calendar"
+        clock.t += 1
+        assert o._addressed("and tomorrow") is None  # one sentence, not a window
+
+    async def test_through_real_turns_only_named_speech_is_answered(self) -> None:
+        """The 2026-10-12 sequence, end to end: the wearer asks JOAT
+        something, it answers, then a cough comes back from STT as "The" and
+        room talk follows. Before: both answered (the 30 s window). Now:
+        neither. Then the name alone, and the request after it, is answered."""
+        from joat.services.orchestrator import WAKE_WORDS
+
+        transport, engine, replier = FakeTransport(), FakeEngine(), FakeReplier("answer")
+        orch = VoiceOrchestrator(
+            transport, engine, vad=TEST_VAD(), replier=replier, wake_words=WAKE_WORDS,
+            anchored_wake=(), follow_ups_without_name=False,
+        )
+        orch.attach()
+        assert transport.audio_cb is not None
+        seq = 0
+
+        async def say(text: str) -> None:
+            nonlocal seq
+            engine.text = text
+            for pcm in (LOUD, LOUD, QUIET, QUIET, QUIET, QUIET):
+                transport.audio_cb(pcm, seq)
+                seq += 1
+            await drain()
+
+        await say("JOAT, what time is sunset?")
+        await say("The")
+        await say("and what about tomorrow")
+        await say("that's a joke")
+        assert replier.asked == ["what time is sunset?"]
+        await say("JOAT.")
+        await say("what's on my calendar")
+        await say("and tomorrow")
+        assert replier.asked == ["what time is sunset?", "what's on my calendar"]
+        await say("Hey Joke, what's the weather")
+        assert replier.asked[-1] == "what's the weather"
+
+    def test_the_name_alone_expires(self) -> None:
+        class Clock:
+            t = 1_000.0
+            def __call__(self) -> float:
+                return self.t
+        clock = Clock()
+        o = self.production(clock)
+        o._name_only_until = clock.t + 8.0
+        clock.t += 9
+        assert o._addressed("what's on my calendar") is None
+
+    def test_the_name_and_hey_joke_wake_it_anywhere(self) -> None:
+        o = self.production()
+        for heard in ("JOAT what is the weather", "Hey JOAT, open the terminal",
+                      "Hey, Joke. What time is it?", "hey jokes tell me the time",
+                      "hey choke what is next", "hey jot remind me at six",
+                      "I was wondering JOAT what is next", "jote what's the time"):
+            assert o._addressed(heard) is not None, heard
+
+    def test_ordinary_words_without_hey_are_room_talk(self) -> None:
+        """Bare "joke" no longer wakes it: the wearer says "Hey Joke"."""
+        o = self.production()
+        for room in ("joke what is the weather", "that's a joke", "Joke's on you",
+                     "I nearly had to choke it down", "jot that down", "give the door a jolt",
+                     "The", "the", "you"):
+            assert o._addressed(room) is None, room
+
+
 class TestTheRestartGreetingGivesFOLLOWABLEAdvice:
     """After an engine restart mid-Brainstorm the greeting names the
     interrupted session and tells the wearer what to SAY to get back to
@@ -1892,6 +2008,9 @@ class TestTheConversationWindow:
         o._fuzzy_wake = ("joat", "jode", "jodh")
         o._fuzzy_threshold = 0.86
         o._conversation = ConversationWindow(seconds, clock)
+        o._monotonic = clock
+        o._follow_ups = True
+        o._name_only_until = 0.0
         return o, clock
 
     def test_a_follow_up_after_a_reply_is_heard_without_the_name(self) -> None:

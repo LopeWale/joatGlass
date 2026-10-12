@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-10-12 — JOAT answers only when named: "JOAT", "Hey JOAT", "Hey Joke"
+
+The wearer: "it just randomly pops up thinking that I said the word 'The' … only trigger when I say 'Hey Joat/Joke' … investigate why it just triggers randomly."
+
+**Why it triggered.** Not the wake word: since 2026-10-08 only 4 utterances woke JOAT by similarity (`joats ~ joat`), none on "the". It was the 30 s conversation window: after JOAT answered, *any* speech in the next 30 s was taken as a follow-up, no name needed, and every answer re-opened the window. 14 such follow-ups were answered since 10-08; several were 3-character transcripts ("The") — e.g. 11:55:43 and 11:56:19 today, each followed by `reply_complete`. "The", "you", "Thank you" are what Whisper makes of a cough, a breath or room noise.
+
+**What the microphone is doing (measured from brain.log, 10-08 → today).** The Mac's speech detector (`RmsVad`, an energy threshold) opened 104 utterances; 43 came back from Whisper as no text, a prompt echo or a sound annotation, and 31 of the 85 transcripts were 4 characters or fewer. The host's speaker label dropped only 4 as another person. Even's documentation for the G2 microphone (Device APIs) covers `audioControl(true, Glasses)` after the startup page and 16 kHz s16le mono PCM in `audioEvent` — nothing about voice detection, noise suppression or wake words; the SDK's `speakerRole` is "an app algorithm result, not a firmware identity assertion" and `direction` is an undocumented raw tag. The plugin follows that contract. Speech detection is ours, and it opens on non-speech; that alone was harmless while the name gated every request, and the window removed the gate.
+
+**Change** (`VoiceOrchestrator`, `__main__`):
+- `follow_ups_without_name=False` in production: no speech is a request without the name. The conversation card and its tap Continue are unchanged.
+- The name alone ("JOAT" → "Yes?") makes the *one* utterance within 8 s the request (`NAME_ONLY_WINDOW_S`), then the name is needed again.
+- Filler — "The", "you", "Thank you", "Thanks for watching", "um", "so" — is never a request, in any mode (`_is_filler`).
+- `WAKE_WORDS` (one list, used by `__main__` and the tests): "JOAT"/"Jote" anywhere; the renderings that are ordinary English — joke, jokes, choke, jot, jolt — only after "hey" ("Hey Joke"). Bare "joke …" no longer wakes it; "that's a joke" never did and still doesn't.
+- Tests: `TestOnlyTheNameWakesIt` — the 2026-10-12 sequence through real voice turns (an answer, then "The", room talk and "that's a joke" unanswered; name alone then the request answered, the next sentence not; "Hey Joke, …" answered), the gate rules, filler in both modes, the 8 s expiry. Orchestrator 104 passed; full Mac suite 3584 passed. **Mac only: JOAT restarted.**
+
 ## 2026-10-12 — The Mac measures the glasses' microphone (content-free)
 
 The wearer: "use the skills to understand how the mics [work] and measure."

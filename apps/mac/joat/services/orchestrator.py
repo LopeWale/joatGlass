@@ -114,6 +114,31 @@ would not have admitted anyway.
 """
 
 CONVERSATION_WINDOW_S = 30.0
+#: What the wearer says to JOAT (2026-10-12): "JOAT" or "Hey JOAT"; with
+#: his accent the name can come back as "joke", so "Hey Joke" counts too.
+#: The renderings that are ordinary English (joke, jokes, choke, jot, jolt)
+#: count ONLY after "hey" — "that's a joke" is room talk. The name itself,
+#: and "jote", are not English words and may appear anywhere.
+WAKE_WORDS: tuple[str, ...] = (
+    "hey joat", "hey jote",
+    "hey joke", "hey jokes", "hey choke", "hey jot", "hey jolt",
+    "joat", "jote",
+)
+#: After the name ALONE ("JOAT" -> "Yes?"), the one utterance that follows
+#: within this long is the request, without saying the name twice.
+NAME_ONLY_WINDOW_S = 8.0
+#: What Whisper makes of a cough, a breath or room noise, and fillers that are
+#: never a request on their own. "The" was answered as a follow-up again and
+#: again on 2026-10-12 (chars=3, then reply_complete).
+_FILLER_WORDS = frozenset({
+    "the", "a", "an", "uh", "um", "umm", "hmm", "mm", "mhm", "ah", "oh",
+    "you", "thank", "thanks", "for", "watching", "bye", "so",
+})
+
+
+def _is_filler(text: str) -> bool:
+    words = re.findall(r"[a-z']+", text.lower())
+    return not words or all(word in _FILLER_WORDS for word in words)
 #: Least time between two streamed "answering" frames. Every frame carries
 #: the whole transcript, so a CLI that yields a token at a time had the Mac
 #: re-send the entire answer per token; the plugin coalesces paints anyway.
@@ -273,8 +298,15 @@ class VoiceOrchestrator:
         feature_navigation: Callable[[str], Awaitable[str | None]] | None = None,
         stream_publish_interval_s: float = STREAM_PUBLISH_INTERVAL_S,
         monotonic: Callable[[], float] = time.monotonic,
+        follow_ups_without_name: bool = True,
     ) -> None:
         self._transport = transport
+        # The wearer, 2026-10-12: JOAT answers only when it is named. With
+        # this off, the conversation window no longer admits unnamed speech:
+        # every request carries "JOAT" — except the one sentence right after
+        # the name alone (NAME_ONLY_WINDOW_S).
+        self._follow_ups = follow_ups_without_name
+        self._name_only_until = 0.0
         self._stream_publish_interval_s = stream_publish_interval_s
         self._monotonic = monotonic
         # An interposed source (the AudioRouter) lets an exclusive Voice Note
@@ -916,8 +948,11 @@ class VoiceOrchestrator:
         # was shown whether the next sentence would be heard or silently
         # dropped, so the only safe habit it taught was to say the name
         # every time — the habit that made this feel like a command line.
-        idle = ("JOAT · go on" if self._conversation.is_open
-                else "JOAT · listening")
+        go_on = (
+            (self._follow_ups and self._conversation.is_open)
+            or self._monotonic() < self._name_only_until
+        )
+        idle = "JOAT · go on" if go_on else "JOAT · listening"
         await self._hud.status(active_status or idle)
 
     async def _run_turn(self, queued: _QueuedUtterance) -> None:
@@ -1117,6 +1152,7 @@ class VoiceOrchestrator:
                 self._greet_assistant_conversation("Yes?")
                 await self._publish_assistant_conversation("ready")
                 self._conversation.open()
+                self._name_only_until = self._monotonic() + NAME_ONLY_WINDOW_S
                 return
             query = addressed
             # Trigger phrases ("debate <topic>") now see only ADDRESSED text.
@@ -1540,7 +1576,19 @@ class VoiceOrchestrator:
         """
         spoken = self._strip_wake_word(text)
         if spoken is not None:
+            self._name_only_until = 0.0
             return spoken
+        # A cough, a breath or room noise comes back from Whisper as "The",
+        # "you", "Thank you". On its own it is never a request.
+        if _is_filler(text):
+            return None
+        if self._monotonic() < self._name_only_until:
+            # "JOAT" ... "what's on my calendar": the name, then the request.
+            self._name_only_until = 0.0
+            log.info("request heard right after the name alone")
+            return text
+        if not self._follow_ups:
+            return None
         if not self._conversation.is_open:
             return None
         # Reading time protects the retained answer from notification cards;
