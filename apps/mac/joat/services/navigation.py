@@ -251,6 +251,7 @@ class NavigationSession(Session):
         self._route_installed = False
         self._last_state_sequence = 0
         self._install_attempt: tuple[str, int] | None = None
+        self._route_sent_at = 0.0
         self._pending_reroute_request_id: str | None = None
         self._reroute_after_view_ack: _RerouteAfterViewAck | None = None
         self._arrived = False
@@ -800,6 +801,7 @@ class NavigationSession(Session):
             return
         self._origin_request = None
         self._locating_visible_since = None
+        log.info("navigation origin received")
         self._origin = NavigationPoint(origin.latitude, origin.longitude)
         # The first tile, before the route is known: the streets the wearer
         # is standing in are worth having the moment guidance starts.
@@ -837,6 +839,7 @@ class NavigationSession(Session):
                 await asyncio.sleep(remaining)
         if self._cancelled:
             return
+        log.info("navigation origin unavailable")
         self._origin_request = None
         self._error_recovery = "origin"
         await self._send_view(NavigationHudView(
@@ -1033,6 +1036,8 @@ class NavigationSession(Session):
                 return
         self._route_installed = False
         self._install_attempt = (route.route_id, self._route_revision)
+        self._route_sent_at = time.monotonic()
+        log.info("navigation route sent revision=%d", self._route_revision)
         await self._transport.send(NavigationRoute(
             session_id=self._session_id,
             request_id=view.request_id,
@@ -1055,6 +1060,14 @@ class NavigationSession(Session):
         ):
             return
         self._install_attempt = None
+        # Content-free, but it says which step a failed walk stopped at and
+        # how long the phone took to answer (a stream that never starts is
+        # a ~5 s timeout; a refusal is immediate).
+        log.info(
+            "navigation route %s after %.1fs",
+            ack.outcome,
+            time.monotonic() - self._route_sent_at,
+        )
         if ack.outcome == "installed":
             self._route_installed = True
             self._last_state_sequence = 0
@@ -1129,6 +1142,7 @@ class NavigationSession(Session):
         if view.view != "error":
             self._error_recovery = None
         self._generation += 1
+        log.info("navigation view %s generation=%d", view.view, self._generation)
         message = NavigationView(
             session_id=self._session_id,
             request_id=self._request_id(phase, self._generation),

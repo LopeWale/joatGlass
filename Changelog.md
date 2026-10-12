@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-12 — A route starts when the phone's location stream will not
+
+The wearer: navigation "does not work anymore"; tapping a saved place ends on "Navigation could not start · The route was not installed on the phone". The phone's Places page is fine (the Mac holds the place, with its address and pin).
+
+**Cause.** The place, the mode, the origin and the Mapbox route all worked; the plugin refused the route at the last step. Installing a route switches the Even host's one location stream to high accuracy (`startAppLocationUpdates`, 1 s / 1 m), and since 2026-10-05 a route the stream cannot serve is rejected rather than left on "Starting navigation". On the wearer's iPhone the stream would not start, while one-shot fixes (`getAppLocation`) kept arriving: the route's own origin was one. Even's docs document both calls but not when the stream may refuse. The brain log shows the same pattern outside navigation: after the 15:35 connect no stream fix arrived for 4.5 minutes.
+
+**Change** (`LocationSessionManager`, plugin):
+- When the stream will not start for a route, the route runs on one-shot high-accuracy fixes, one after another with a 1 s rest, through the same path as stream fixes (the navigation consumer, the `navigation_location` diagnostic, the coarse Mac uplink). The first fix decides the route; only a phone that gives neither a stream nor a one-shot fix refuses it.
+- While on one-shot fixes it tries the stream again every 30 s and hands over once it starts. Ending the route ends the reads.
+- Mac (`NavigationSession`): content-free INFO lines for each step (view kind, origin received/unavailable, route sent, route installed/rejected and how long the phone took), so a failed walk shows where it stopped. Nothing else changed on the Mac.
+- Tests: a route on one-shot fixes when the stream will not start (and the reads stop with the route), a refusal only when no fix comes either, the hand-back to the stream. Plugin 1227 passed, typecheck clean; Mac navigation tests 96 passed, mypy clean. The simulator cannot supply a phone fix, so this is unit-verified; the walk itself is the wearer's.
+
 ## 2026-10-12 — "hearing you…" only when JOAT is going to act
 
 The wearer, after the name-only gate and 0.1.127: "it is still doing the same thing. Look at the logs … It's still showing this. I am 'hearing you'".

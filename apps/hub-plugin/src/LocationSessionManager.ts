@@ -42,6 +42,14 @@ const NAVIGATION_ORIGIN_CACHE_MAX_AGE_MS = 10_000;
 // the owner-only receipt, rather than holding the location state machine.
 const STREAM_START_TIMEOUT_MS = 5_000;
 
+// When the host will not start the high-accuracy stream for a route, the
+// route runs on one-shot fixes instead, one after another with this rest
+// between them, and tries the stream again this often. On the wearer's
+// iPhone (2026-10-12) every route was refused as "not installed on the
+// phone" while one-shot fixes (the route's own origin) kept arriving.
+const NAVIGATION_POLL_REST_MS = 1_000;
+const NAVIGATION_STREAM_RETRY_MS = 30_000;
+
 const FIELD_TIMESTAMP = 1;
 const FIELD_SPEED = 2;
 const FIELD_HEADING = 4;
@@ -148,11 +156,61 @@ export class LocationSessionManager {
       // failed and nothing retried), and the glasses then said "Starting
       // navigation" forever. Retry the start now, and report its truth.
       if (!this.shouldRun) return consumer === undefined;
-      if (this.unsubscribe === undefined) {
-        return consumer === undefined ? true : this.startNow();
+      if (consumer === undefined) {
+        return this.unsubscribe === undefined ? true : this.applyDesiredProfile(profileEpoch);
       }
-      return this.applyDesiredProfile(profileEpoch);
+      const streaming = this.unsubscribe === undefined
+        ? await this.startNow()
+        : await this.applyDesiredProfile(profileEpoch);
+      if (streaming) return true;
+      // The stream would not start, but one-shot fixes may still come: the
+      // route runs on those rather than not at all. Only a phone that gives
+      // no fix either refuses the route.
+      return this.pollNavigation(consumer);
     });
+  }
+
+  /** The route's first one-shot fix decides it; later ones keep coming. */
+  private async pollNavigation(consumer: NavigationLocationConsumer): Promise<boolean> {
+    const first = await this.navigationFix();
+    if (first === null || !this.pollingFor(consumer)) return false;
+    this.onLocation(first, true);
+    void this.keepPollingNavigation(consumer);
+    return true;
+  }
+
+  /** Still a route on one-shot fixes: the same consumer, and no stream yet. */
+  private pollingFor(consumer: NavigationLocationConsumer): boolean {
+    return this.shouldRun
+      && this.navigationConsumer === consumer
+      && this.appliedProfile !== 'navigation';
+  }
+
+  private async navigationFix(): Promise<AppLocation | null> {
+    try {
+      return await this.readOneShotLocation(this.bridge(), AppLocationAccuracy.High);
+    } catch {
+      return null;
+    }
+  }
+
+  private async keepPollingNavigation(consumer: NavigationLocationConsumer): Promise<void> {
+    let streamTriedAt = Date.now();
+    while (this.pollingFor(consumer)) {
+      await new Promise<void>((resolve) => { setTimeout(resolve, NAVIGATION_POLL_REST_MS); });
+      if (!this.pollingFor(consumer)) return;
+      if (Date.now() - streamTriedAt >= NAVIGATION_STREAM_RETRY_MS) {
+        streamTriedAt = Date.now();
+        // A stream that starts now ends this loop: its own fixes take over.
+        await this.enqueue(async () => {
+          if (!this.pollingFor(consumer)) return true;
+          return this.unsubscribe === undefined ? this.startNow() : this.applyDesiredProfile();
+        });
+        continue;
+      }
+      const fix = await this.navigationFix();
+      if (fix !== null && this.pollingFor(consumer)) this.onLocation(fix, true);
+    }
   }
 
   /** Link loss revokes every Mac-authorized high-rate profile immediately. */
@@ -445,7 +503,8 @@ export class LocationSessionManager {
     if (profile === 'ambient' && success) this.probeSession = false;
   }
 
-  private onLocation(location: AppLocation): void {
+  /** A fix from the stream, or `polled` from a route's one-shot reads. */
+  private onLocation(location: AppLocation, polled = false): void {
     const latitude = location.latitude;
     const longitude = location.longitude;
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
@@ -453,10 +512,10 @@ export class LocationSessionManager {
     const receivedAt = Date.now();
     this.rememberLocation(location, receivedAt);
     this.forwardAmbient(location, receivedAt);
-    if (this.appliedProfile === 'probe') {
+    if (!polled && this.appliedProfile === 'probe') {
       this.recordLocationQuality(location, receivedAt, 'location_probe');
     }
-    if (this.appliedProfile === 'navigation') {
+    if (polled || this.appliedProfile === 'navigation') {
       this.recordLocationQuality(location, receivedAt, 'navigation_location');
       this.navigationConsumer?.(location, receivedAt);
     }

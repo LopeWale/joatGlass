@@ -247,6 +247,77 @@ describe('LocationSessionManager', () => {
     expect(await idle.manager.setNavigationConsumer(() => undefined)).toBe(false);
   });
 
+  it('runs a route on one-shot fixes when the high-accuracy stream will not start', async () => {
+    // The wearer's iPhone, 2026-10-12: every route came back "not installed
+    // on the phone" because the stream would not start, while one-shot fixes
+    // (the route's own origin) kept arriving. The route runs on those.
+    vi.useFakeTimers();
+    pinHostZone();
+    const h = harness();
+    await h.manager.start();
+    h.bridge.startAppLocationUpdates.mockImplementation(async () => false);
+    h.bridge.getAppLocation.mockImplementation(async () => (
+      { latitude: 41.9, longitude: -87.65, accuracy: 6 }
+    ));
+    const fixes: AppLocation[] = [];
+
+    expect(await h.manager.setNavigationConsumer((location) => { fixes.push(location); })).toBe(true);
+    expect(fixes).toHaveLength(1);
+    expect(h.bridge.getAppLocation).toHaveBeenLastCalledWith({
+      accuracy: AppLocationAccuracy.High,
+      timeoutMs: 5000,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fixes).toHaveLength(2);
+    expect(h.diagnostics.record).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'navigation_location' }),
+    );
+
+    // The route ends: no more reads.
+    await h.manager.setNavigationConsumer(undefined);
+    const reads = h.bridge.getAppLocation.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.bridge.getAppLocation.mock.calls.length).toBe(reads);
+    expect(fixes).toHaveLength(2);
+  });
+
+  it('refuses a route only when neither the stream nor a one-shot fix comes', async () => {
+    const h = harness(null);
+    await h.manager.start();
+    h.bridge.startAppLocationUpdates.mockImplementation(async () => false);
+
+    expect(await h.manager.setNavigationConsumer(() => undefined)).toBe(false);
+  });
+
+  it('hands a route on one-shot fixes back to the stream once it starts', async () => {
+    vi.useFakeTimers();
+    pinHostZone();
+    const h = harness();
+    await h.manager.start();
+    h.bridge.startAppLocationUpdates.mockImplementation(async () => false);
+    h.bridge.getAppLocation.mockImplementation(async () => (
+      { latitude: 41.9, longitude: -87.65, accuracy: 6 }
+    ));
+    const fixes: AppLocation[] = [];
+    await h.manager.setNavigationConsumer((location) => { fixes.push(location); });
+
+    h.bridge.startAppLocationUpdates.mockImplementation(async () => true);
+    await vi.advanceTimersByTimeAsync(31_000);
+    const reads = h.bridge.getAppLocation.mock.calls.length;
+    expect(h.bridge.startAppLocationUpdates).toHaveBeenLastCalledWith({
+      accuracy: AppLocationAccuracy.High,
+      distanceFilter: 1,
+      intervalMs: 1000,
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.bridge.getAppLocation.mock.calls.length).toBe(reads);
+    const polled = fixes.length;
+    h.emit({ latitude: 41.90002, longitude: -87.64998, accuracy: 5 });
+    expect(fixes).toHaveLength(polled + 1);
+  });
+
   it('re-arms the active high-accuracy navigation stream after foreground return', async () => {
     const h = harness();
     await h.manager.start();
