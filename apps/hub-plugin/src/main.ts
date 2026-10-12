@@ -601,7 +601,13 @@ async function boot(): Promise<void> {
       // BLACK because only the status line repainted (wearer report,
       // 2026-09-05). Repaint the whole restored surface, then the status.
       void hud.repaintRestoredSurface();
-      void hud.setStatus(audio.isOpen ? 'JOAT · listening' : 'JOAT · mic off');
+      // Even Hub's Background & Lifecycle page: capture stops while the app
+      // is backgrounded; re-enable it on foreground with the same source and
+      // never assume the stream is still live. The status said "listening"
+      // over a dead mic (the wearer, 2026-10-12).
+      void (audio.isOpen ? audio.rearm('foreground') : Promise.resolve(false)).then(() => {
+        if (!exiting) void hud.setStatus(audio.isOpen ? 'JOAT · listening' : 'JOAT · mic off');
+      });
     },
     onForegroundExit: () => {
       promptedInput.cancel('background');

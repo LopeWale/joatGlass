@@ -5,6 +5,9 @@
 
 /** RFC 6455 private-use close code: another authenticated display took over. */
 export const PLUGIN_REPLACED_CLOSE_CODE = 4409;
+/** A standby dial (`?standby=1`) refused: another display holds the glasses.
+ * Twin: apps/mac/joat/core/protocol.py. */
+export const PLUGIN_SLOT_OCCUPIED_CLOSE_CODE = 4410;
 
 /** Container IDs — stable across rebuilds so textContainerUpgrade can target them. */
 export const ContainerId = {

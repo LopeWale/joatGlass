@@ -90,6 +90,7 @@ from ..core.protocol import (
     CONFIRM_PROMPT_MAX_UTF16_UNITS,
     MESSAGE_REVIEW_PROMPT_MAX_UTF16_UNITS,
     PLUGIN_REPLACED_CLOSE_CODE,
+    PLUGIN_SLOT_OCCUPIED_CLOSE_CODE,
     parse_uplink,
     utf16_units,
 )
@@ -254,6 +255,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._prompt: _PendingPrompt | None = None
         self._connection_generation = 0
         self._session_pairing_identity_digest: bytes | None = None
+        self._standby_refused_generation: int | None = None
         # Unlike ordinary JOAT, a field-acceptance receipt must not allow a
         # loopback simulator to stand in for an actual paired wearer session.
         self._current_peer_is_loopback = False
@@ -1053,6 +1055,36 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         log.info("pairing window opened locally for 120 seconds")
         return True
 
+    @staticmethod
+    def _is_standby_path(path: str) -> bool:
+        return "1" in parse_qs(urlsplit(path).query).get("standby", [])
+
+    def _standby_refused(self, path: str, conn: ServerConnection | None = None) -> bool:
+        """A standby dial is a display another one replaced, asking whether
+        the glasses are free. It may take them only when no display holds
+        them: newest-wins would otherwise let it kick the live one, and the
+        two would trade the glasses back and forth."""
+        if not self._is_standby_path(path):
+            return False
+        current = self._conn
+        if current is None or current is conn:
+            return False
+        if self._standby_refused_generation != self._connection_generation:
+            self._standby_refused_generation = self._connection_generation
+            log.info("standby display refused — another display holds the glasses")
+        return True
+
+    async def _accept(self, conn: ServerConnection) -> bool:
+        """Send auth.accepted, unless this is a standby dial and the slot is
+        held (checked again here: the upgrade-time check can race a newer
+        arrival)."""
+        request = conn.request
+        if request is not None and self._standby_refused(request.path, conn):
+            await conn.close(code=PLUGIN_SLOT_OCCUPIED_CLOSE_CODE, reason="glasses held by another display")
+            return False
+        await conn.send(json.dumps(AuthAccepted().to_wire()))
+        return True
+
     def _authorize(self, conn: ServerConnection, request: Request) -> Response | None:
         """Reject closed pairing windows and credentials in request targets.
 
@@ -1067,6 +1099,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 HTTPStatus.BAD_REQUEST,
                 "send credentials in the auth frame, never the URL\n",
             )
+        if self._standby_refused(request.path):
+            return conn.respond(HTTPStatus.CONFLICT, "another display holds the glasses\n")
         if self._pairing is None or self._peer_is_exempt(conn):
             return None
         expected = self._pairing.token
@@ -1136,11 +1170,13 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             except (json.JSONDecodeError, ProtocolError, TypeError):
                 return self._pairing_identity(None), raw
             if isinstance(first, Auth):
-                await conn.send(json.dumps(AuthAccepted().to_wire()))
+                if not await self._accept(conn):
+                    return None, None
                 return self._pairing_identity(None), None
             return self._pairing_identity(None), raw
         if self._peer_is_exempt(conn):
-            await conn.send(json.dumps(AuthAccepted().to_wire()))
+            if not await self._accept(conn):
+                return None, None
             return self._pairing_identity(None), None
 
         async with self._auth_lock:
@@ -1158,7 +1194,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                         self._record_refusal(conn)
                         await conn.close(code=4401, reason="authentication failed")
                         return None, None
-                    await conn.send(json.dumps(AuthAccepted().to_wire()))
+                    if not await self._accept(conn):
+                        return None, None
                     return self._pairing_identity(expected), None
 
                 if not self._pairing.window_open:
@@ -1170,7 +1207,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                     # explicitly opened this bounded window.
                     self._pairing.confirm(first.token)
                     log.info("pairing: adopted a persisted peer token — window closed")
-                    await conn.send(json.dumps(AuthAccepted().to_wire()))
+                    if not await self._accept(conn):
+                        return None, None
                     return self._pairing_identity(first.token), None
 
                 candidate = PairingStore.mint()
@@ -1188,7 +1226,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                     return None, None
                 self._pairing.confirm(candidate)
                 log.info("pairing: confirmed — remote peers now require auth")
-                await conn.send(json.dumps(AuthAccepted().to_wire()))
+                if not await self._accept(conn):
+                    return None, None
                 return self._pairing_identity(candidate), None
             except (asyncio.TimeoutError, ProtocolError, websockets.ConnectionClosed):
                 try:

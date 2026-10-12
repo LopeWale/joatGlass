@@ -30,6 +30,10 @@ CANVAS_GREY_LEVELS = 16
 # Private WebSocket close code agreed with types.ts (RFC 6455 section 7.4.2).
 # A replaced plugin yields instead of reconnecting and evicting its successor.
 PLUGIN_REPLACED_CLOSE_CODE = 4409
+# A standby dial (``?standby=1``: a display another one replaced, asking
+# whether the glasses are free) is refused with this while a display holds
+# them. Twin: apps/hub-plugin/src/types.ts.
+PLUGIN_SLOT_OCCUPIED_CLOSE_CODE = 4410
 
 # Request ids the MAC mints for voice-initiated surfaces. The plugin adopts a
 # list whose request id carries this prefix instead of dropping it as stale,

@@ -32,6 +32,7 @@ from joat.audio.vad import RmsVad
 from joat.core.interfaces import AudioFrame, MessageSender, SttEngine, Transcript
 from joat.core.pairing import PairingStore
 from joat.core.protocol import (
+    PLUGIN_SLOT_OCCUPIED_CLOSE_CODE,
     BrainstormAction,
     Device,
     EventSource,
@@ -1172,6 +1173,65 @@ class TestPluginReplacement:
                 }
             await _wait_for(lambda: not t.connected)
             assert disconnects == [True]
+
+    async def test_standby_dial_never_evicts_the_display_holding_the_glasses(
+        self, paired_transport,
+    ) -> None:
+        """A display another one replaced asks with ``?standby=1``. While a
+        display holds the glasses it is refused at the upgrade (409), so the
+        two can never trade the glasses back and forth (2026-10-12)."""
+        t, url, store = paired_transport
+        token = await _pair(url)
+        await _wait_for(lambda: not t.connected)
+        async with websockets.connect(url) as live:
+            await _authenticate(live, token)
+            await _wait_for(lambda: t.connected)
+            active = t._conn
+            generation = t.connection_generation
+
+            with pytest.raises(websockets.InvalidStatus) as refused:
+                await websockets.connect(f"{url}?standby=1")
+            assert refused.value.response.status_code == 409
+
+            assert t._conn is active
+            assert t.connection_generation == generation
+            assert live.close_code is None
+            await t.send(HudText(text="Still the live display"))
+            assert json.loads(await asyncio.wait_for(live.recv(), 2))["text"] == "Still the live display"
+
+    async def test_standby_dial_takes_a_free_slot(self, paired_transport) -> None:
+        """The display that replaced it is gone: the standby display is
+        admitted and owns the glasses (it sat halted for 3 h 45 min before)."""
+        t, url, store = paired_transport
+        token = await _pair(url)
+        await _wait_for(lambda: not t.connected)
+        async with websockets.connect(f"{url}?standby=1") as standby:
+            await _authenticate(standby, token)
+            await _wait_for(lambda: t.connected)
+            await t.send(HudText(text="Back on the glasses"))
+            assert json.loads(await asyncio.wait_for(standby.recv(), 2))["text"] == "Back on the glasses"
+
+    async def test_standby_refused_before_accept_when_a_display_arrives_first(
+        self, paired_transport,
+    ) -> None:
+        """The upgrade-time check can race a newer arrival: the slot is
+        checked again before auth.accepted, and the standby is closed 4410."""
+        t, url, store = paired_transport
+        token = await _pair(url)
+        await _wait_for(lambda: not t.connected)
+        standby = await websockets.connect(f"{url}?standby=1")  # slot free at upgrade
+        try:
+            # A display took the glasses between the upgrade and the auth frame.
+            occupant = object()
+            t._conn = occupant  # type: ignore[assignment]
+            await standby.send(json.dumps({"kind": "auth", "token": token}))
+            with pytest.raises(websockets.ConnectionClosed):
+                await asyncio.wait_for(standby.recv(), 2)
+            assert standby.close_code == PLUGIN_SLOT_OCCUPIED_CLOSE_CODE
+            assert t._conn is occupant
+        finally:
+            t._conn = None
+            await standby.close()
 
     async def test_unauthenticated_replacement_cannot_evict_or_change_generation(
         self, paired_transport,

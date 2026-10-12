@@ -883,7 +883,12 @@ describe('MacLink replaced display', () => {
     first.receive({ kind: 'hud.text', text: 'old display' });
     first.close(4409);
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(dialed).toEqual(['ws://a:1/g']);
+    // Yielded: no ordinary dial, no rotation to another Mac, no state change.
+    // Only standby dials, which the Mac admits only to a free slot (they
+    // never open here: the live display still holds the glasses).
+    expect(dialed[0]).toBe('ws://a:1/g');
+    expect(dialed.length).toBeGreaterThan(1);
+    expect(dialed.slice(1).every((url) => url === 'ws://a:1/g?standby=1')).toBe(true);
     expect(link.linkState).toBe('closed');
     expect(link.wasReplaced).toBe(true);
     expect(context?.signal.aborted).toBe(true);
@@ -891,14 +896,83 @@ describe('MacLink replaced display', () => {
 
     // Input produced during retirement cannot appear on a later owner.
     link.send({ kind: 'hello', model: 'retired', sn: 'fixture', launchSource: 'unknown' });
+    const before = dialed.length;
     link.connect();
     expect(link.wasReplaced).toBe(false);
-    expect(dialed).toEqual(['ws://a:1/g', 'ws://a:1/g']);
-    sockets[1]!.open();
-    sockets[1]!.receive({ kind: 'auth.accepted' });
-    expect(sockets[1]!.sent.map((value) => JSON.parse(value))).toEqual([{ kind: 'auth', token: 'paired' }]);
+    expect(dialed.slice(before)).toEqual(['ws://a:1/g']);
+    const takeover = sockets[sockets.length - 1]!;
+    takeover.open();
+    takeover.receive({ kind: 'auth.accepted' });
+    expect(takeover.sent.map((value) => JSON.parse(value))).toEqual([{ kind: 'auth', token: 'paired' }]);
     expect(link.linkState).toBe('connected');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(dialed.slice(before)).toEqual(['ws://a:1/g']);
     link.close();
+  });
+
+  it('takes the glasses back when the display that replaced it is gone', () => {
+    // 2026-10-12: a second copy of the plugin replaced this one (4409), then
+    // died (1005). This copy sat halted for 3 h 45 min — no dial at all —
+    // because only a host foreground event could revive it.
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://a:1/g'], token: 'paired', standbyRetryMs: 10_000 });
+    const states: string[] = [];
+    link.onState((state) => states.push(state));
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+    sockets[0]!.close(4409);
+    states.length = 0;
+
+    // The other display still holds the glasses: the Mac refuses (4410).
+    vi.advanceTimersByTime(10_000);
+    expect(dialed).toEqual(['ws://a:1/g', 'ws://a:1/g?standby=1']);
+    sockets[1]!.open();
+    expect(JSON.parse(sockets[1]!.sent[0]!)).toEqual({ kind: 'auth', token: 'paired' });
+    sockets[1]!.close(4410);
+    expect(link.wasReplaced).toBe(true);
+    expect(states).toEqual([]);
+
+    // It is gone: the next standby dial is admitted and this display is back.
+    vi.advanceTimersByTime(10_000);
+    expect(dialed).toEqual(['ws://a:1/g', 'ws://a:1/g?standby=1', 'ws://a:1/g?standby=1']);
+    sockets[2]!.open();
+    sockets[2]!.receive({ kind: 'auth.accepted' });
+    expect(link.wasReplaced).toBe(false);
+    expect(link.linkState).toBe('connected');
+    expect(states).toEqual(['connected']);
+
+    // Connected again, it behaves like any connection: an ordinary drop
+    // redials normally, not as standby.
+    sockets[2]!.close(1006);
+    vi.advanceTimersByTime(1_000);
+    expect(dialed[3]).toBe('ws://a:1/g');
+    link.close();
+  });
+
+  it('a standby dial that hangs or fails is only a "not now"', () => {
+    vi.useFakeTimers();
+    const link = new MacLink({
+      urls: ['ws://a:1/g'], token: 'paired', standbyRetryMs: 10_000, dialTimeoutMs: 4_000,
+    });
+    link.connect();
+    sockets[0]!.open();
+    sockets[0]!.receive({ kind: 'auth.accepted' });
+    sockets[0]!.close(4409);
+    vi.advanceTimersByTime(10_000); // standby dial 1: never opens
+    vi.advanceTimersByTime(4_000); // its dial deadline
+    expect(link.wasReplaced).toBe(true);
+    expect(link.linkState).toBe('closed');
+    vi.advanceTimersByTime(10_000); // standby dial 2: network error
+    sockets[2]!.close(1006);
+    expect(link.wasReplaced).toBe(true);
+    expect(dialed).toEqual(['ws://a:1/g', 'ws://a:1/g?standby=1', 'ws://a:1/g?standby=1']);
+    // A host foreground event still takes over at once, without waiting.
+    link.resumeIfReplaced();
+    expect(dialed[3]).toBe('ws://a:1/g');
+    link.close();
+    vi.advanceTimersByTime(60_000);
+    expect(dialed).toHaveLength(4); // explicit teardown ends standby too
   });
 
   it.each([1000, 1006])('still retries ordinary authenticated closure %s', (code) => {

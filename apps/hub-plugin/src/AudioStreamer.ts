@@ -5,6 +5,12 @@ import type { UplinkMessage } from './types';
 
 const SAMPLE_RATE = 16_000;
 
+/** The glasses deliver PCM every few tens of milliseconds while capture is
+ * on. This long without a frame means the host stopped capture. */
+export const STREAM_STALE_MS = 1_500;
+/** A silent stream re-arms itself at most this often. */
+export const REARM_MIN_INTERVAL_MS = 10_000;
+
 export interface PromptAudioEpoch {
   readonly promptId: string;
   readonly source: AudioInputSource;
@@ -66,6 +72,19 @@ export class AudioStreamer {
   private promptEpoch?: EpochState;
   private promptRevision = 0;
   private readonly samplesPerMessage: number;
+  /**
+   * When the host last delivered PCM while the mic was open. The host stops
+   * capture when the app is backgrounded and says nothing: Even Hub's
+   * Background & Lifecycle page — `audioControl(true, ...)` capture "stops if
+   * the WebView is suspended", re-enable it on foreground with the same
+   * `AudioInputSource`, and do not assume the stream is still live. `open`
+   * is only this page's belief. A reply box opened on that belief listened
+   * to nothing, forever (the wearer, 2026-10-12).
+   */
+  private lastFrameAtMs = 0;
+  private lastRearmAtMs = Number.NEGATIVE_INFINITY;
+  /** Test seam. */
+  now: () => number = () => Date.now();
 
   constructor(
     private readonly client: BridgeClient,
@@ -170,8 +189,13 @@ export class AudioStreamer {
       }
       this.open = true;
       this.lastSource = source;
+      // A stream just opened has had no chance to deliver yet.
+      this.lastFrameAtMs = this.now();
       this.onState?.(true);
-      this.flushTimer = setInterval(() => this.flush(), this.flushMs);
+      this.flushTimer = setInterval(() => {
+        this.flush();
+        this.checkLiveness();
+      }, this.flushMs);
       return true;
     });
   }
@@ -179,9 +203,15 @@ export class AudioStreamer {
   /** The question owns only the microphone it opened. External starts/stops
    * supersede that ownership, and release revokes local capture synchronously. */
   openPromptMicrophone(source: AudioInputSource, promptId: string): PromptMicrophone {
-    if (this.open) return {
-      ready: Promise.resolve(this.lastSource === source), release: () => undefined,
-    };
+    if (this.open) {
+      // "Open" is a belief. A question asked on a silent stream re-arms the
+      // host's capture before it says ready, or the box listens to nothing.
+      const sameSource = this.lastSource === source;
+      return {
+        ready: sameSource && this.isStale() ? this.rearm('prompt') : Promise.resolve(sameSource),
+        release: () => undefined,
+      };
+    }
     const ready = this.start(source);
     const epoch = this.controlEpoch;
     let released = false;
@@ -190,6 +220,50 @@ export class AudioStreamer {
       released = true;
       if (epoch === this.controlEpoch) void this.stop(promptId);
     } };
+  }
+
+  /** Open, yet nothing from the host for STREAM_STALE_MS. */
+  isStale(): boolean {
+    return this.open && this.now() - this.lastFrameAtMs > STREAM_STALE_MS;
+  }
+
+  /**
+   * Ask the host to capture again, on the same source, without changing
+   * what this page believes. Even's lifecycle guidance for a return from the
+   * background; also the cure for a stream that went silent under us. A host
+   * that refuses means the mic is not live: say so, rather than keep a
+   * "listening" flag over a dead stream.
+   */
+  async rearm(reason: string): Promise<boolean> {
+    if (!this.open || !this.desiredOpen) return false;
+    const source = this.lastSource;
+    const epoch = this.controlEpoch;
+    this.lastRearmAtMs = this.now();
+    const ok = await this.control(async () => {
+      if (!this.open || epoch !== this.controlEpoch) return this.open;
+      try {
+        const bridge =
+          source === AudioInputSource.Glasses ? this.client.assertStarted() : this.client.require();
+        if (await bridge.audioControl(true, source)) {
+          this.lastFrameAtMs = this.now();
+          console.info(`[AudioStreamer] mic re-armed (${reason})`);
+          return true;
+        }
+      } catch (err) {
+        console.warn(`[AudioStreamer] mic re-arm failed (${reason}):`, err);
+      }
+      return false;
+    });
+    if (!ok && epoch === this.controlEpoch && this.open) await this.stop();
+    return ok && this.open;
+  }
+
+  /** A stream that went silent re-arms itself, at most every
+   * REARM_MIN_INTERVAL_MS (a sibling page's audioControl(false), a host
+   * hiccup, a background trip with no foreground event). */
+  private checkLiveness(): void {
+    if (!this.isStale() || this.now() - this.lastRearmAtMs < REARM_MIN_INTERVAL_MS) return;
+    void this.rearm('silent stream');
   }
 
   // Serialize only native mic control, including late-start compensation.
@@ -239,6 +313,7 @@ export class AudioStreamer {
     pcm: Uint8Array | number[], speakerRole?: string | null, source?: AudioInputSource,
   ): void {
     if (!this.open) return;
+    this.lastFrameAtMs = this.now();
     const sourceKnown = source === AudioInputSource.Glasses || source === AudioInputSource.Phone;
     const actualSource = sourceKnown ? source : this.lastSource;
     const current = this.promptEpoch;

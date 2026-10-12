@@ -92,6 +92,16 @@ export interface MacLinkOptions {
   dialTimeoutMs?: number;
   /** Abort and replace a connection whose downlink handler stops settling. */
   downlinkHandlerTimeoutMs?: number;
+  /** How often a replaced display asks whether the glasses' slot is free. */
+  standbyRetryMs?: number;
+}
+
+/** A standby dial: the Mac refuses it (HTTP 409, or close 4410) while
+ * another display holds the glasses, so it can never kick the live one. */
+export const STANDBY_QUERY = 'standby=1';
+
+function standbyUrl(url: string): string {
+  return url.includes('?') ? `${url}&${STANDBY_QUERY}` : `${url}?${STANDBY_QUERY}`;
 }
 
 /**
@@ -111,6 +121,9 @@ export class MacLink {
   private selectionPinned = false;
   private closed = false;
   private replaced = false;
+  /** The dial in flight only asks for a FREE slot (see STANDBY_QUERY). */
+  private standbyDial = false;
+  private standbyTimer?: ReturnType<typeof setTimeout>;
   private handler?: DownlinkHandler;
   private ingressHandler?: (msg: DownlinkMessage, context: DownlinkContext) => void;
   private downlinkDispatcher?: DownlinkDispatcher;
@@ -126,6 +139,7 @@ export class MacLink {
   private readonly capMs: number;
   private readonly dialMs: number;
   private readonly downlinkMs: number;
+  private readonly standbyMs: number;
   private dialTimer?: ReturnType<typeof setTimeout>;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private staleTokenHandler?: (origin: string, tokens: PairingTokensByOrigin) => void;
@@ -156,6 +170,7 @@ export class MacLink {
     this.capMs = opts.reconnectMaxMs ?? 15_000;
     this.dialMs = opts.dialTimeoutMs ?? 4_000;
     this.downlinkMs = opts.downlinkHandlerTimeoutMs ?? 15_000;
+    this.standbyMs = opts.standbyRetryMs ?? 10_000;
   }
 
   /** The URL currently being dialed (for status surfaces). */
@@ -249,9 +264,19 @@ export class MacLink {
     this.stateHandler?.(state);
   }
 
-  connect(): void {
-    this.closed = false;
-    this.replaced = false;
+  /**
+   * Dial the Mac. A `standby` dial is made only by a display another one
+   * replaced: it stays yielded (closed, replaced, no state reports) and the
+   * Mac admits it only when no display holds the glasses. Accepted, it takes
+   * the glasses back like any connection.
+   */
+  connect(standby = false): void {
+    this.clearStandbyTimer();
+    this.standbyDial = standby;
+    if (!standby) {
+      this.closed = false;
+      this.replaced = false;
+    }
     this.clearReconnectTimer();
     this.clearDialTimer();
     // Abandon any previous socket BEFORE dialing again. A socket we are
@@ -261,10 +286,11 @@ export class MacLink {
     // Observed on real hardware as ~2 reconnects/second, indefinitely.
     this.abandon();
     this.authenticated = false;
-    this.reportState(this.attempt === 0 ? 'connecting' : 'reconnecting');
+    if (!standby) this.reportState(this.attempt === 0 ? 'connecting' : 'reconnecting');
     // Credentials never ride a request target: URL strings are copied into
     // browser history, proxy/access logs, diagnostics, and exception text.
-    const socket = new WebSocket(this.activeUrl);
+    // The standby flag is not a credential.
+    const socket = new WebSocket(standby ? standbyUrl(this.activeUrl) : this.activeUrl);
     const dispatcher: DownlinkDispatcher = {
       socket,
       generation: ++this.nextDownlinkGeneration,
@@ -299,6 +325,15 @@ export class MacLink {
         const message = JSON.parse(String(event.data)) as DownlinkMessage;
         if (message.kind === 'auth.accepted') {
           if (!this.authenticated) {
+            if (this.standbyDial) {
+              // The slot was free: the display that held the glasses is
+              // gone (its WebView destroyed, its socket dead). Take them
+              // back instead of sitting halted until a host lifecycle
+              // event that may never come (2026-10-12: 3 h 45 min).
+              this.standbyDial = false;
+              this.replaced = false;
+              this.closed = false;
+            }
             this.authenticated = true;
             this.clearDialTimer();
             this.attempt = 0;
@@ -388,12 +423,23 @@ export class MacLink {
       this.revokeDownlinkDispatcher(socket);
       const wasAuthenticated = this.authenticated;
       this.authenticated = false;
+      if (this.standbyDial) {
+        // Refused (another display still holds the glasses: HTTP 409 or
+        // close 4410) or simply failed. Still yielded; ask again later.
+        this.standbyDial = false;
+        this.socket = undefined;
+        this.scheduleStandby();
+        return;
+      }
       if (wasAuthenticated && event.code === PLUGIN_REPLACED_CLOSE_CODE) {
         this.replaced = true;
         this.pendingLocation = undefined;
         // halt() cancels all timers, revokes queued downlinks and notifies
         // the host to stop audio/input. Keep credentials for manual takeover.
         this.halt();
+        // Yielding used to be permanent until a host foreground event. When
+        // the display that replaced us dies first, nothing ever came back.
+        this.scheduleStandby();
         return;
       }
       // Post-handshake auth gives an explicit close code. Never discard a
@@ -553,6 +599,8 @@ export class MacLink {
   private halt(): void {
     this.closed = true;
     this.authenticated = false;
+    this.standbyDial = false;
+    this.clearStandbyTimer();
     this.clearReconnectTimer();
     this.clearDialTimer();
     this.abandon();
@@ -603,9 +651,35 @@ export class MacLink {
     }
   }
 
+  private clearStandbyTimer(): void {
+    if (this.standbyTimer !== undefined) {
+      clearTimeout(this.standbyTimer);
+      this.standbyTimer = undefined;
+    }
+  }
+
+  /** A replaced display asks again, on its own clock, for a free slot. */
+  private scheduleStandby(): void {
+    this.clearStandbyTimer();
+    if (!this.replaced) return;
+    this.standbyTimer = setTimeout(() => {
+      this.standbyTimer = undefined;
+      if (this.replaced) this.connect(true);
+    }, this.standbyMs);
+  }
+
   /** A local deadline must not wait for the browser's asynchronous close. */
   private expireSocket(socket: WebSocket): void {
-    if (this.socket !== socket || this.closed) return;
+    if (this.socket !== socket) return;
+    if (this.standbyDial) {
+      // A standby dial that hangs is just a "not now".
+      this.clearDialTimer();
+      this.abandon();
+      this.standbyDial = false;
+      this.scheduleStandby();
+      return;
+    }
+    if (this.closed) return;
     this.clearDialTimer();
     this.authenticated = false;
     this.abandon();

@@ -496,3 +496,97 @@ describe('AudioStreamer prompt epochs', () => {
       .map((message) => [message.pcm, message.audioEpoch])).toEqual([[[2], undefined]]);
   });
 });
+
+describe('AudioStreamer stream liveness (Even Hub Background & Lifecycle)', () => {
+  // Even's lifecycle page: `audioControl(true, ...)` capture "stops if the
+  // WebView is suspended"; re-enable it on foreground with the same
+  // AudioInputSource, and do not assume the stream is still live.
+  function rig(results: boolean[] = []) {
+    const calls: Array<[boolean, AudioInputSource | undefined]> = [];
+    const audioControl = async (open: boolean, source?: AudioInputSource) => {
+      calls.push([open, source]);
+      return open ? (results.length ? results.shift()! : true) : true;
+    };
+    const client = {
+      assertStarted: () => ({ audioControl }),
+      require: () => ({ audioControl }),
+    } as unknown as BridgeClient;
+    const audio = new AudioStreamer(client, { send: () => undefined } as unknown as MacLink);
+    return { audio, calls };
+  }
+
+  it('a question on a silent stream re-arms the host capture before it is ready', async () => {
+    const { audio, calls } = rig();
+    await audio.start(AudioInputSource.Glasses);
+    audio.ingest(new Uint8Array([1, 0]));
+    // The phone went to the background and came back: the host stopped
+    // delivering PCM, and this page still believes the mic is open.
+    vi.setSystemTime(Date.now() + 5_000);
+    expect(audio.isOpen).toBe(true);
+    expect(audio.isStale()).toBe(true);
+    calls.length = 0;
+    const mic = audio.openPromptMicrophone(AudioInputSource.Glasses, 'reply');
+    await expect(mic.ready).resolves.toBe(true);
+    expect(calls).toEqual([[true, AudioInputSource.Glasses]]);
+    expect(audio.isStale()).toBe(false);
+  });
+
+  it('a question on a live stream does not touch the host', async () => {
+    const { audio, calls } = rig();
+    await audio.start(AudioInputSource.Glasses);
+    audio.ingest(new Uint8Array([1, 0]));
+    calls.length = 0;
+    const mic = audio.openPromptMicrophone(AudioInputSource.Glasses, 'reply');
+    await expect(mic.ready).resolves.toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it('a host that refuses the re-arm leaves the mic honestly off', async () => {
+    const { audio, calls } = rig([true, false]);
+    const states: boolean[] = [];
+    audio.onState = (open) => states.push(open);
+    await audio.start(AudioInputSource.Glasses);
+    vi.setSystemTime(Date.now() + 5_000);
+    const mic = audio.openPromptMicrophone(AudioInputSource.Glasses, 'reply');
+    await expect(mic.ready).resolves.toBe(false);
+    await vi.runOnlyPendingTimersAsync();
+    expect(audio.isOpen).toBe(false);
+    expect(states).toEqual([true, false]);
+    expect(calls[calls.length - 1]).toEqual([false, undefined]);
+  });
+
+  it('a stream that goes silent re-arms itself, at most every ten seconds', async () => {
+    const { audio, calls } = rig();
+    await audio.start(AudioInputSource.Glasses);
+    calls.length = 0;
+    await vi.advanceTimersByTimeAsync(1_400);
+    expect(calls).toEqual([]); // not stale yet
+    await vi.advanceTimersByTimeAsync(400);
+    expect(calls).toEqual([[true, AudioInputSource.Glasses]]);
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(calls).toHaveLength(1); // still silent, but rate-limited
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(calls).toHaveLength(2);
+    // Frames flowing again: no more re-arms.
+    for (let i = 0; i < 100; i += 1) {
+      audio.ingest(new Uint8Array([1, 0]));
+      await vi.advanceTimersByTimeAsync(200);
+    }
+    expect(calls).toHaveLength(2);
+    await audio.stop();
+  });
+
+  it('re-arm keeps the same microphone (phone stays phone)', async () => {
+    const { audio, calls } = rig();
+    await audio.start(AudioInputSource.Phone);
+    calls.length = 0;
+    await expect(audio.rearm('foreground')).resolves.toBe(true);
+    expect(calls).toEqual([[true, AudioInputSource.Phone]]);
+  });
+
+  it('re-arm is a no-op while the mic is off', async () => {
+    const { audio, calls } = rig();
+    await expect(audio.rearm('foreground')).resolves.toBe(false);
+    expect(calls).toEqual([]);
+  });
+});

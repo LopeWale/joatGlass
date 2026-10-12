@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-10-12 — The plugin no longer freezes after a second copy of it takes the glasses; a mic the host stopped is re-armed
+
+The wearer: "the background state is causing the project, the plugin to freeze. I'm the one that I've seen that. So do an investigation."
+
+**What the logs showed.** At 07:49:35 the plugin connected; 0.7 s later a second copy of the plugin connected and replaced it (`4409 plugin connection replaced`) — two copies alive at once, the host's foreground/background handoff. At 07:57:43 the second copy died with no close frame (`1005`). From then until 11:42:16 — **3 h 45 min — not one dial reached the Mac.** A running plugin redials every few seconds; this one could not.
+
+**Why (plugin).**
+- A copy that receives `4409` called `halt()`: `closed = true`, no redial, display suspended, mic and IMU stopped, every gesture and audio frame dropped (`EventRouter.dispatch`). The only way back was `resumeIfReplaced()`, called from a host foreground event or `__restoreState`. When the copy that replaced it died first, nothing ever revived it: the glasses kept the last frame and ignored every tap.
+- The mic flag outlives the host's capture. Even Hub's Background & Lifecycle page (hub.evenrealities.com/docs/build/background-lifecycle): `audioControl(true, …)` capture "stops if the WebView is suspended"; re-enable it on foreground with the same `AudioInputSource` and do not assume the stream is still live. `onForegroundEnter` repainted and set the status to "JOAT · listening" from `audio.isOpen` — this page's own belief — and never called `audioControl` again. `openPromptMicrophone` returned "ready" for any open flag without touching the host, so a tap-to-reply after a background trip opened the box on a dead stream: the listening animation, no words, stuck.
+
+**Fix.**
+- **Standby takeover** (both sides; wire constant twin `PLUGIN_SLOT_OCCUPIED_CLOSE_CODE = 4410`). A replaced copy still yields exactly as before, but every 10 s it dials with `?standby=1`. The Mac refuses a standby dial while a display holds the glasses — HTTP 409 at the upgrade (`HubGatewayTransport._authorize`), and again right before `auth.accepted` (close 4410, `_accept`) so a racing arrival cannot be evicted — so two copies never trade the glasses. When the slot is free the standby copy is admitted and is the display again (display resumed, hello, the Mac reopens its mic). A host foreground event still takes over at once.
+- **Mic liveness** (`AudioStreamer`): it records when the host last delivered PCM. `rearm(reason)` re-issues `audioControl(true, sameSource)`; a refusal stops the mic honestly instead of keeping "listening" over nothing. Foreground enter re-arms (Even's guidance) and only then sets the status line; a reply question on a stream silent for 1.5 s re-arms before it says ready; an open stream silent for 1.5 s re-arms itself, at most every 10 s.
+
+**Verified.** Official simulator (`scripts/simulator_display_takeover_probe.py`, new): the simulator's copy connected; a second display took the glasses and held them 25 s (the simulator's copy made no takeover; its standby dials were refused); the second display died without a close frame; the simulator's copy was back **3.2 s** later on its own, mic streaming, and a swipe + tap opened News. Frames: `docs/features/FEAT-001-messages-voice-reply/sim-frames/display-takeover.png`. The simulator does not stop its mic on a lifecycle event the way the phone host does, so the re-arm is verified by tests modelled on Even's documented behaviour, not on the simulator. Not yet verified on physical glasses.
+
+**Tests.** `MacLink.test.ts`: the replaced display only standby-dials while held, takes the glasses back when the slot is free, treats a hung or failed standby dial as "not now", and a foreground event still takes over at once (the old "no dial for 60 s after 4409" assertion encoded the freeze and now asserts standby-only dials). `AudioStreamer.test.ts`: a question on a silent stream re-arms before ready; a live stream is left alone; a refused re-arm leaves the mic off; a silent stream re-arms at most every 10 s; re-arm keeps phone as phone. `test_hub_gateway.py`: a standby dial never evicts the live display (409); it takes a free slot; the pre-accept re-check closes 4410. Plugin 1203 passed, typecheck clean; gateway 92, protocol 184, mypy clean. **Both sides change: a new package and a JOAT restart.**
+
 ## 2026-10-12 — A tapped reply is no longer thrown away for one stray `other` speaker frame
 
 The wearer: "the messaging function for tap to speak still does not work? It shows the little animation like it's listening, but doesn't show me what I'm saying and gets stuck a lot."
@@ -8,7 +26,7 @@ The wearer: "the messaging function for tap to speak still does not work? It sho
 - **Cause.** `PromptedInputDispatcher.dispatch` refused a prompted answer if ANY frame of the utterance carried the host's `other` speaker tag, and `_maybe_publish_partial` suppressed the live words on the box by the same test. The Even app's speaker role is "an app algorithm result, not a firmware identity assertion" (SDK 0.0.16 `AudioEvent.speakerRole`); on the glasses it tags a frame or two of the wearer's own reply `other`. The utterances had reached Whisper at all only because the ambient gate already used the sane rule (`other` present and `self` absent).
 - **Fix.** The prompt path uses the ambient rule: another speaker's words are the ones the host named `other` and never `self`. A reply the wearer tapped for, with `self` frames in it, is shown as it is heard and taken at the end; the review box is still the gate before anything is sent.
 - Tests: `test_prompted_input.py` (`{self, other, unknown}` is now taken; `{other}` and `{unknown, other}` still refused), `test_orchestrator.py` (a stray `other` frame in a `self` reply keeps the words on the box); prompted/messages suites 235 passed, mypy clean. **Mac only: restart JOAT.** Not yet verified on physical glasses.
-- Background state: already in place (`BackgroundState.ts` implements `__getStateSnapshot`/`__restoreState`; the SDK still exports no helpers in 0.0.16), not a factor here.
+- Correction: this entry first called background state "not a factor here" after a grep, without investigating. It was a factor — see the entry above (a replaced copy that never came back, and a mic the host stopped while the plugin still believed it open).
 
 ## 2026-10-12 — Build JOAT 0.1.124
 
