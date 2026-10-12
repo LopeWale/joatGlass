@@ -843,7 +843,7 @@ async function boot(): Promise<void> {
         // a voice-initiated open expands the tab; a push for a tab whose
         // page is already on the glass repaints that page in place.
         await awaitCurrent(hud.acceptPanel(msg));
-        if (msg.activate) {
+        if (msg.activate && msg.tab !== 'quicknotes') {
           brainstorm.clear();
           await awaitCurrent(menu.openPanelTab(msg.tab, 0, false));
         } else {
@@ -1424,7 +1424,8 @@ async function renderVisualState(
     const tab = panelVisualTab(state);
     if (state.endsWith('-expanded') || state === 'panel-article') {
       // Through the REAL drill-in, so simulator gestures drive the page.
-      await menu.openPanelTab(tab);
+      if (tab === 'quicknotes') await menu.openQuickNotes();
+      else await menu.openPanelTab(tab);
       if (state === 'panel-article') {
         const article = panelArticleFixture();
         await menu.presentList(
@@ -1433,7 +1434,7 @@ async function renderVisualState(
       }
       return;
     }
-    await hud.setActiveTab(tab);
+    if (tab !== 'search') await hud.setActiveTab(tab);
     return;
   }
 

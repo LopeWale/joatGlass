@@ -450,7 +450,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, listOptions } = rig();
-      await menu.openFromContextualMenu(4); // via the firmware menu
+      await menu.openQuickNotes(); // via the overview's QuickNotes tab
       await vi.advanceTimersByTimeAsync(0);
       expect(listOptions[0]?.title).toBe('QUICKNOTES');
 
@@ -599,7 +599,7 @@ describe('CapabilityMenu', () => {
 
   it('draws QuickNotes, Notifications and the readers natively, paging the archive by its rows', async () => {
     const { menu, listOptions, sent } = rig();
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('QuickNotes'));
+    await menu.openQuickNotes();
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     const page = [...rows(20), '▼ Older notes'];
@@ -1149,7 +1149,7 @@ describe('CapabilityMenu', () => {
       if (direction === 'down' && localPages > 0) { localPages -= 1; return true; }
       return false;
     });
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('QuickNotes'));
+    await menu.openQuickNotes();
     const requestId = latestRequestId(sent);
     const picker = ['Other note', 'Long exact note'];
     await menu.presentList('QUICKNOTES', picker, requestId, true);
@@ -1925,7 +1925,7 @@ describe('CapabilityMenu', () => {
 
   it('closes instead of entering an invisible scrolled capability after a paint failure', async () => {
     const { menu, defaultsCount } = rig(false);
-    await menu.openFromContextualMenu(4); // via the firmware menu
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Activity')); // via the firmware menu
     await vi.waitFor(() => expect(menu.isOpen()).toBe(false));
 
     expect(defaultsCount()).toBe(1);
@@ -2277,7 +2277,7 @@ describe('queued conversational Terminal prelude ownership', () => {
     const { menu, hud, lists, listOptions } = rig();
     hud.showBrainstorm = vi.fn(async () => true);
     const dispatch = queuedPrelude(menu, 'voice-before-quicknotes');
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('QuickNotes'));
+    await menu.openQuickNotes();
     const before = lists.length;
 
     expect(await dispatch()).toBe(false);

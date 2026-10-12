@@ -797,7 +797,9 @@ export type Unsubscribe = () => void;
  */
 export const CAPABILITIES = [
   'Messages', 'Planning', 'Navigation', 'Brainstorm',
-  'QuickNotes', 'Agent Terminal', 'Activity', 'Settings',
+  // Search took QuickNotes' place (2026-10-11): QuickNotes moved onto the
+  // overview's rail, and Search opens its page from here.
+  'Search', 'Agent Terminal', 'Activity', 'Settings',
 ] as const;
 
 export type CapabilityName = (typeof CAPABILITIES)[number];
@@ -820,10 +822,14 @@ export const QUICKNOTES_UNDO_MENU_LABEL = 'Undo last input';
  * sidebar capabilities: the rail is reached by swiping on the overview.
  * Mac counterpart: PANEL_TABS in apps/mac/joat/core/protocol.py.
  */
-export const PANEL_TABS = ['notifications', 'news', 'pomodoro', 'search'] as const;
+export const PANEL_TABS = ['notifications', 'news', 'pomodoro', 'quicknotes'] as const;
 export type PanelTab = (typeof PANEL_TABS)[number];
-/** The tabs whose content the Mac pushes as `hud.panel`. */
-export type PanelContentTab = Exclude<PanelTab, 'notifications'>;
+/** The tabs whose content the Mac pushes as `hud.panel`: the rail's, and
+ * Search, whose page the menu opens. QuickNotes replaced Search on the rail
+ * (the wearer, 2026-10-11: "so now the overview has a way to quickly get to
+ * the quicknote"). Mac counterpart: PANEL_TABS in core/protocol.py. */
+export const PANEL_CONTENT_TABS = ['news', 'pomodoro', 'quicknotes', 'search'] as const;
+export type PanelContentTab = (typeof PANEL_CONTENT_TABS)[number];
 
 export type PomodoroPhase = 'idle' | 'focus' | 'break' | 'long_break';
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-11 — QuickNotes is on the overview's rail; Search moves into the menu
+
+The wearer: "replace the search on the overview tab with the quicknote instead then move the search to the menu option in place of the quicknote so now the overview has a way to quickly get to the quicknote."
+
+- **The rail is NOTIFICATIONS, NEWS, POMODORO, QUICKNOTES** (`PANEL_TABS`). The QuickNotes tab shows the newest notes, age first, as Even's QuickNote widget on its Dashboard does; a tap opens QuickNotes ("+ Create new note" at the top). The Mac pushes the tab (`QuickNotesPanel`, `hud.panel` tab `quicknotes`) on connect, after every save, and after a summary renames a note.
+- **The menu's fifth row is Search** where QuickNotes was (`CAPABILITIES`). It opens the Search page from the rows the Mac last pushed; "JOAT, look up …" still opens it by voice. Search keeps its content push (`PANEL_CONTENT_TABS`), it is only off the rail.
+- QuickNotes pages from the Mac are still recognised now that QuickNotes is not a menu row (`adoptVoiceGeneration`); a voice "open quick notes" and the tab's tap reach the same page.
+- Verified in the official simulator: the rail with QUICKNOTES, the tab's newest notes, its tap opening the QuickNotes list, Back to the overview, the menu with Search in fifth place, and Search's page. Not verified on physical glasses.
+- Tests: plugin 1194 passed, typecheck clean; Mac tests for the tab (`test_quicknotes_panel.py`, 2 new) and the panel wire. **Both sides change: a new package and a JOAT restart.**
+
 ## 2026-10-11 — QuickNotes matches Even's QuickNote and Conversate: no speaker labels, one "+ Create new note", Save / Discard / Cancel, Undo last input
 
 The wearer: "who is them? where did you see this in the Even Realities QuickNote and Conversate features?" Nowhere: Even's own screenshots (support.evenrealities.com, QuickNote and Conversate) show plain words, and the "You:" / "Them:" labels were JOAT's guess from the SDK's `speakerRole`. The wearer then chose to match Even on every point below.

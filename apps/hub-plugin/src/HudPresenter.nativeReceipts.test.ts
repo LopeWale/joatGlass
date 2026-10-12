@@ -259,7 +259,7 @@ describe('the page of an open QuickNote — Even\'s "New note" (FEAT-002)', () =
     expect(await r.hud.showList(['Listening…'], live)).toBe(true);
     const items = r.rebuilds[r.rebuilds.length - 1]?.menuObject?.menuItems ?? [];
     expect(items[0]).toMatchObject({ itemID: QUICKNOTES_UNDO_MENU_ID, itemName: 'Undo last input' });
-    expect(items.map((item: { itemName?: string }) => item.itemName)).toContain('QuickNotes');
+    expect(items.map((item: { itemName?: string }) => item.itemName)).toContain('Search');
 
     // Any other page keeps the plain capability menu.
     expect(await r.hud.showList(['A short note'], {

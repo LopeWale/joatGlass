@@ -31,9 +31,9 @@ describe('PanelRail', () => {
     expect(rail.step(-1)).toBeUndefined();
     expect(rail.step(1)).toBe('news');
     expect(rail.step(1)).toBe('pomodoro');
-    expect(rail.step(1)).toBe('search');
+    expect(rail.step(1)).toBe('quicknotes');
     expect(rail.step(1)).toBeUndefined();
-    expect(rail.active()).toBe('search');
+    expect(rail.active()).toBe('quicknotes');
     rail.reset();
     expect(rail.active()).toBe('notifications');
   });
@@ -61,8 +61,8 @@ describe('PanelRail', () => {
     expect(rail.visual()).toMatchObject({
       activeTab: 'news', content: { tab: 'news', rows: ['[2m] First · BBC'] },
     });
-    rail.setActive('search');
-    expect(rail.visual()).toEqual({ activeTab: 'search' });
+    rail.setActive('quicknotes');
+    expect(rail.visual()).toEqual({ activeTab: 'quicknotes' });
   });
 
   it('survives the host background migration as plain JSON', () => {

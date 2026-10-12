@@ -138,6 +138,7 @@ from .services.local_commands import (
 )
 from .services.panel_commands import NewsCommands, PomodoroCommands, SearchCommands
 from .services.panels import PanelPublisher
+from .services.quicknotes_panel import QuickNotesPanel
 from .services.pomodoro import PomodoroService
 from .services.search import SearchService
 from .core.wearer_zone import WearerZone
@@ -417,8 +418,11 @@ async def main() -> None:
         on_change=lambda: panels.publish("pomodoro"),
         notify=lambda card: sessions.notify(card),
     )
+    # QuickNotes is a rail tab (the newest notes; a tap opens QuickNotes).
+    quicknotes_panel = QuickNotesPanel(VoiceNoteStore(durable_store), NoteStore(durable_store))
     panels = PanelPublisher(
-        transport, {"news": news, "pomodoro": pomodoro, "search": search},
+        transport,
+        {"news": news, "pomodoro": pomodoro, "search": search, "quicknotes": quicknotes_panel},
     )
     imessage = IMessageStore()
 
@@ -1528,15 +1532,28 @@ async def main() -> None:
         AppleNotesExporter(), NoteExportStore(durable_store),
         voice_notes=voice_note_store, text_notes=note_store,
     )
-    note_commands = NoteCommandController(note_store, on_saved=notes_sync.schedule_text)
+    def publish_quicknotes() -> None:
+        # The overview's QuickNotes tab shows the newest notes.
+        try:
+            asyncio.get_running_loop().create_task(panels.publish("quicknotes"))
+        except RuntimeError:
+            pass
+
+    def text_note_saved(note_id: str) -> None:
+        notes_sync.schedule_text(note_id)
+        publish_quicknotes()
+
+    note_commands = NoteCommandController(note_store, on_saved=text_note_saved)
 
     async def after_note_summary(capture_id: str) -> None:
         # The summary may have renamed the note ("Note 21:10" → its title):
-        # copy it to Apple Notes, then show the new title if the list is up.
+        # copy it to Apple Notes, then show the new title if the list is up,
+        # and on the overview's QuickNotes tab.
         await notes_sync.sync_voice(capture_id)
         router = capabilities_ref.get("router")
         if router is not None:
             await router.refresh_notes_list()
+        await panels.publish("quicknotes")
 
     capabilities_ref: dict[str, CapabilityRouter] = {}
     # QuickNote recorder: journal-first meeting/speech capture. The router
@@ -1562,12 +1579,16 @@ async def main() -> None:
         claude=ClaudeCompleter(claude_binary) if claude_binary else None,
         after_summary=after_note_summary,
     )
+    def voice_note_saved(capture_id: str) -> None:
+        note_insights.schedule_summarize(capture_id)
+        publish_quicknotes()
+
     voice_capture = VoiceNoteCaptureController(
         voice_note_store,
         audio_router,
         stt,
         stt_available=stt_available,
-        on_saved=note_insights.schedule_summarize,
+        on_saved=voice_note_saved,
     )
     note_insight_commands = NoteInsightCommandController(
         note_insights,

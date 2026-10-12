@@ -5,8 +5,9 @@
  * on the outer-left edge of the pane, swipe to move between them, click to
  * drill in. Which tab is active is purely local state: the Mac never learns
  * it, and a swipe never costs a round trip. What the Mac owns is the CONTENT
- * behind news, pomodoro and search, pushed as `hud.panel` and cached here so
- * a swipe onto a tab paints from memory. Notifications, the first tab, has
+ * behind news, pomodoro and quicknotes (and Search, which the menu opens),
+ * pushed as `hud.panel` and cached here so a swipe onto a tab paints from
+ * memory. A tap on QuickNotes opens QuickNotes itself. Notifications, the first tab, has
  * no cache of its own: it is the overview's Main/Context/Tray streams, the
  * resting screen JOAT already drew.
  *
@@ -16,6 +17,7 @@
  */
 
 import {
+  PANEL_CONTENT_TABS,
   PANEL_TABS,
   panelRequestId,
   type DownlinkMessage,
@@ -41,7 +43,8 @@ export interface PanelContent {
 
 /** What the renderer needs to draw the rail and the active tab's pane. */
 export interface PanelRailVisual {
-  activeTab: PanelTab;
+  /** A rail tab, or Search's own page (opened from the menu). */
+  activeTab: PanelTab | PanelContentTab;
   /** The active tab's cached content; absent for Notifications, or before
    * the Mac has pushed anything for that tab. */
   content?: PanelContent;
@@ -50,28 +53,31 @@ export interface PanelRailVisual {
 /** The focus-page title each tab expands into. The Mac answers a row tap
  * with a `hud.list` whose title extends this ("NEWS · ARTICLE"), which is
  * how CapabilityMenu's existing two-deep Back knows the parent. */
-export const PANEL_TAB_TITLES: Readonly<Record<PanelTab, string>> = {
+export const PANEL_TAB_TITLES: Readonly<Record<PanelTab | PanelContentTab, string>> = {
   notifications: 'NOTIFICATIONS',
   news: 'NEWS',
   pomodoro: 'POMODORO',
+  quicknotes: 'QUICKNOTES',
   search: 'SEARCH',
 };
 
+/** The tabs that expand into a panel page of their own. QuickNotes does not:
+ * its tap opens the QuickNotes capability, whose pages it owns. */
+const PAGE_TABS = ['news', 'pomodoro', 'search'] as const;
+export type PanelPageTab = (typeof PAGE_TABS)[number];
+
 /** "NEWS" or "NEWS · ARTICLE" → 'news'; anything else → undefined. */
-export function panelTabForTitle(title: string | undefined): PanelContentTab | undefined {
+export function panelTabForTitle(title: string | undefined): PanelPageTab | undefined {
   const family = (title ?? '').split('·')[0]?.trim().toUpperCase();
-  for (const tab of PANEL_TABS) {
-    if (tab !== 'notifications' && PANEL_TAB_TITLES[tab] === family) return tab;
-  }
-  return undefined;
+  return PAGE_TABS.find((tab) => PANEL_TAB_TITLES[tab] === family);
 }
 
 export function isPanelContentTab(value: unknown): value is PanelContentTab {
-  return value === 'news' || value === 'pomodoro' || value === 'search';
+  return (PANEL_CONTENT_TABS as readonly unknown[]).includes(value);
 }
 
 function isPanelTab(value: unknown): value is PanelTab {
-  return value === 'notifications' || isPanelContentTab(value);
+  return (PANEL_TABS as readonly unknown[]).includes(value);
 }
 
 /** Time left on the timer at `nowMs`, on the plugin's own clock. */
@@ -199,7 +205,7 @@ export class PanelRail {
 
   /** The rail as it looks with `tab` highlighted — an expanded page keeps
    * its own tab lit whatever the overview's active tab is. */
-  visualFor(tab: PanelTab): PanelRailVisual {
+  visualFor(tab: PanelTab | PanelContentTab): PanelRailVisual {
     const content = tab === 'notifications' ? undefined : this.contents.get(tab);
     return content ? { activeTab: tab, content: cloneContent(content) } : { activeTab: tab };
   }

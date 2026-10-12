@@ -45,6 +45,7 @@ import {
   PANEL_TABS,
   SPINE_LABEL_BOX,
   type HudContentKind,
+  type PanelContentTab,
   type PanelTab,
   type PlanningGridCell,
   type ProductivityHudModel,
@@ -1540,7 +1541,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
    */
   private drawTabRail(
     context: CanvasRenderingContext2D,
-    activeTab: PanelTab,
+    // Search's own page (from the menu) lights no rail tab.
+    activeTab: PanelTab | PanelContentTab,
     icons: Record<HudIconName, HTMLImageElement>,
   ): void {
     const rail = PANEL_RAIL;
@@ -1549,7 +1551,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       notifications: icons.notifications,
       news: icons.news,
       pomodoro: icons.pomodoro,
-      search: icons.search,
+      quicknotes: icons.quicknotes,
     };
     PANEL_TABS.forEach((tab, index) => {
       const top = rail.slotY[index] ?? rail.slotY[0];
@@ -1628,10 +1630,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
-    if (rail.activeTab === 'search') {
-      label('SEARCH');
+    if (rail.activeTab === 'search' || rail.activeTab === 'quicknotes') {
+      const notes = rail.activeTab === 'quicknotes';
+      label(notes ? 'QUICKNOTES' : 'SEARCH');
       if (!content || (!content.headline && content.rows.length === 0)) {
-        quiet([content?.empty ?? 'Say “JOAT, look up …”'], layout.mainTopBaselineY);
+        quiet([content?.empty ?? (notes ? 'No notes yet.' : 'Say “JOAT, look up …”')], layout.mainTopBaselineY);
         return;
       }
       let y = layout.mainTopBaselineY;

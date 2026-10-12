@@ -1591,10 +1591,11 @@ class HudNotifications:
 
 
 #: The tabs whose content the Mac pushes. Rail order on the glass is
-#: notifications, news, pomodoro, search; notifications is not a push because
-#: that tab reads the overview's own Main/Context/Tray streams.
-#: Plugin counterpart: PANEL_TABS in apps/hub-plugin/src/types.ts.
-PANEL_TABS: tuple[str, ...] = ("news", "pomodoro", "search")
+#: notifications, news, pomodoro, quicknotes; notifications is not a push
+#: because that tab reads the overview's own Main/Context/Tray streams.
+#: Search left the rail for the menu (2026-10-11) and still pushes its page.
+#: Plugin counterpart: PANEL_CONTENT_TABS in apps/hub-plugin/src/types.ts.
+PANEL_TABS: tuple[str, ...] = ("news", "pomodoro", "search", "quicknotes")
 POMODORO_PHASES = frozenset({"idle", "focus", "break", "long_break"})
 #: SDK caps carried over from HudList: a panel is a list the plugin caches.
 PANEL_ROW_LIMIT = 20

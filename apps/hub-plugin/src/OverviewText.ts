@@ -240,15 +240,12 @@ export function composeOverviewText(
           ...(content.headline ? [['', content.headline] as PaneRow] : []),
           ...content.rows.map(listRow),
         ];
-      case 'search':
-        if (!content || (!content.headline && content.rows.length === 0)) {
-          return [['', content?.empty ?? 'Say “JOAT, look up …”']];
-        }
-        // Results are numbered: "open the second" names a row.
-        return [
-          ...(content.headline ? [['Query', content.headline] as PaneRow] : []),
-          ...content.rows.map((row, index): PaneRow => [String(index + 1), row]),
-        ];
+      case 'quicknotes':
+        // Even's QuickNote widget: the newest notes, age in the label
+        // column; a tap opens QuickNotes ("+ Create new note" leads there).
+        if (!content) return [['', 'Waiting for JOAT on your Mac…']];
+        if (content.rows.length === 0) return [['', content.empty ?? 'No notes yet.'], ['', 'tap: open']];
+        return content.rows.map(listRow);
       default:
         // Notifications: the unread cards, newest first, the app in the
         // label column; a tap opens the newest as its card.

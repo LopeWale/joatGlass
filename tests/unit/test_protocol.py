@@ -1540,12 +1540,13 @@ class TestHudPanelWire:
     reads these keys literally, and `panelRequestId` there must mint the same
     string `panel_request_id` mints here — a row tap echoes it back."""
 
-    def test_panel_tabs_match_the_plugin_rail_order(self) -> None:
+    def test_panel_tabs_match_the_plugin_content_tabs(self) -> None:
         from joat.core.protocol import PANEL_TABS
 
-        # PANEL_TABS in types.ts is ['notifications', 'news', 'pomodoro',
-        # 'search']; notifications is never pushed, so it is absent here.
-        assert PANEL_TABS == ("news", "pomodoro", "search")
+        # PANEL_CONTENT_TABS in types.ts: the rail's news, pomodoro and
+        # quicknotes (QuickNotes replaced Search on the rail, 2026-10-11), and
+        # Search, whose page the menu opens. Notifications is never pushed.
+        assert set(PANEL_TABS) == {"news", "pomodoro", "search", "quicknotes"}
 
     def test_hud_panel_wire_shape_and_caps(self) -> None:
         from joat.core.protocol import HudPanel

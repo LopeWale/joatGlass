@@ -8,7 +8,7 @@ import {
   parsePlanningMonthTitle,
 } from './HudCanvasRenderer';
 import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
-import { PANEL_TAB_TITLES, panelTabForTitle, pomodoroBlockLabel, pomodoroRemainingMs } from './PanelRail';
+import { PANEL_TAB_TITLES, panelTabForTitle, pomodoroBlockLabel, pomodoroRemainingMs, type PanelPageTab } from './PanelRail';
 
 /** Readers and plain text pages drawn as one firmware text page instead of
  * four image tiles: a reader the Mac pages, a result, a setup notice. A tap
@@ -100,7 +100,7 @@ import {
  * A page opened by hand is a control surface, so the empty line names the
  * gesture that fills it, never a phrase to say: voice works from anywhere
  * and the Mac pushes every tab's rows on its own. */
-const PANEL_EMPTY_COPY: Readonly<Record<PanelContentTab, string>> = {
+const PANEL_EMPTY_COPY: Readonly<Record<PanelPageTab, string>> = {
   news: 'No headlines yet — hold to refresh.',
   pomodoro: 'Timer not loaded — hold to retry.',
   search: 'Search not loaded — hold to retry.',
@@ -130,7 +130,7 @@ interface DataSurfaceSnapshot {
   messagesScreen?: MessagesScreen;
   /** An expanded panel tab keeps its rail lit, on the page and on the
    * list Back restores; without this the rail vanished on return. */
-  railTab?: PanelContentTab;
+  railTab?: PanelPageTab;
 }
 
 interface TerminalOpeningBinding {
@@ -1537,6 +1537,12 @@ export class CapabilityMenu {
       await this.openSettings();
       return;
     }
+    if (picked === 'Search') {
+      // Search left the overview's rail for this menu: its own page, from
+      // the rows the Mac last pushed.
+      await this.openPanelTab('search');
+      return;
+    }
     if (picked === 'Planning' && this.view === 'data'
       && this.pendingTitle === 'PLANNING' && this.dataSurface && this.dataRowsSelectable) {
       // Reopening the current agenda refreshes its data without first
@@ -1572,6 +1578,11 @@ export class CapabilityMenu {
    * no "Loading…" frame in between. */
   async openActiveTab(): Promise<void> {
     const tab = this.hud.activeTab();
+    if (tab === 'quicknotes') {
+      // Even's QuickNote widget on its Dashboard: a tap opens QuickNotes.
+      await this.openQuickNotes();
+      return;
+    }
     if (tab === 'notifications') {
       // The unread cards themselves, newest first, as Even's menu opens
       // them: a tap reads one and shows the next. The list page remains for
@@ -1644,7 +1655,7 @@ export class CapabilityMenu {
    * `capdata` carrying the cached revision, and the Mac answers an opened
    * row with a `hud.list` titled "<TAB> · …" that presentList matches.
    */
-  async openPanelTab(tab: PanelContentTab, keepSelection = 0, notifyMac = true): Promise<void> {
+  async openPanelTab(tab: PanelPageTab, keepSelection = 0, notifyMac = true): Promise<void> {
     if (notifyMac) this.departSurface(tab);
     else this.retireBrainstormSurface();
     this.leaveMessages();
@@ -1720,10 +1731,19 @@ export class CapabilityMenu {
    * — Back will find the newer rows.
    */
   async presentPanelContent(tab: PanelContentTab): Promise<boolean> {
-    if (!this.isPanelExpanded() || panelTabForTitle(this.pendingTitle) !== tab) return false;
+    const shown = panelTabForTitle(this.pendingTitle);
+    if (!this.isPanelExpanded() || shown === undefined || shown !== tab) return false;
     const keep = this.selectedIndex;
-    await this.openPanelTab(tab, keep, false);
+    await this.openPanelTab(shown, keep, false);
     return true;
+  }
+
+  /** QuickNotes: the overview's QuickNotes tab and "open quick notes" reach
+   * it; it left the menu for the rail (2026-10-11). */
+  async openQuickNotes(): Promise<void> {
+    // A wearer's choice, as a menu row is: an older queued prelude is stale.
+    this.terminalPreludeRevision += 1;
+    await this.openCapability('QuickNotes', CAPABILITIES.length + 1);
   }
 
   /** The reader for an opened headline or result: the Mac owns the page
@@ -1900,7 +1920,7 @@ export class CapabilityMenu {
   }
 
   private async openCapability(
-    picked: Exclude<(typeof CAPABILITIES)[number], 'Settings'> | 'Notifications',
+    picked: Exclude<(typeof CAPABILITIES)[number], 'Settings' | 'Search'> | 'Notifications' | 'QuickNotes',
     index: number,
     planningAnchorUnixMs?: number,
     receiptRefresh?: {
@@ -1982,10 +2002,11 @@ export class CapabilityMenu {
    * leaves state untouched so the ordinary guards drop the frame. */
   private adoptVoiceGeneration(title: string, requestId: string): void {
     const family = (title.split('·')[0] ?? '').trim().toUpperCase();
-    // Notifications is a page the Mac opens by voice too ("show my
-    // notifications") without being a menu capability.
-    const known = family === 'NOTIFICATIONS'
-      || CAPABILITIES.some((name) => name.toUpperCase() === family);
+    // Notifications and QuickNotes are pages the Mac opens (by voice, or
+    // QuickNotes from the overview's rail) without being menu rows; Search
+    // is a menu row whose page is a panel tab, not a Mac capability page.
+    const known = family === 'NOTIFICATIONS' || family === 'QUICKNOTES'
+      || CAPABILITIES.some((name) => name !== 'Search' && name.toUpperCase() === family);
     if (!known) return;
     this.leaveMessages();
     this.retireTerminalOpening();
@@ -2036,7 +2057,7 @@ export class CapabilityMenu {
     // The guidance must name the row exactly as the sidebar prints it
     // ('QuickNotes', 'Agent Terminal'), so map the timeout title back through
     // CAPABILITIES instead of case-folding it.
-    const readable = CAPABILITIES.find((cap) => cap.toUpperCase() === title)
+    const readable = [...CAPABILITIES, 'QuickNotes'].find((cap) => cap.toUpperCase() === title)
       ?? title.charAt(0) + title.slice(1).toLowerCase();
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;

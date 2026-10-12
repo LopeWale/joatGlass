@@ -1,8 +1,8 @@
 """The overview's tabbed right panel, Mac side.
 
-The glasses show a rail of tabs — notifications, news, pomodoro, search.
-Which tab is up is the plugin's business; what stands behind news, pomodoro
-and search is the Mac's. Each of those is a `PanelProvider` that can say
+The glasses show a rail of tabs — notifications, news, pomodoro, quicknotes
+— and Search opens from the menu. Which tab is up is the plugin's business;
+what stands behind news, pomodoro, search and quicknotes is the Mac's. Each of those is a `PanelProvider` that can say
 what its tab shows right now (no I/O), refresh itself (I/O), and open one of
 its rows. This module publishes their snapshots as `hud.panel` pushes and
 answers the taps that come back.
@@ -39,6 +39,8 @@ log = logging.getLogger(__name__)
 #: The focus-page title each tab expands into on the glass. A reader page
 #: extends it ("NEWS · ARTICLE"), which is how the plugin's two-deep Back
 #: knows the parent. Plugin counterpart: PANEL_TAB_TITLES in PanelRail.ts.
+#: QuickNotes has none: a tap on its tab opens the QuickNotes capability,
+#: whose pages the capability router owns.
 PANEL_TITLES: dict[str, str] = {
     "news": "NEWS",
     "pomodoro": "POMODORO",

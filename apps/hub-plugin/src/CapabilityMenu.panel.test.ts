@@ -5,7 +5,7 @@ import { PanelRail } from './PanelRail';
 import { Settings } from './Settings';
 import type { HudPresenter } from './HudPresenter';
 import type { MacLink } from './MacLink';
-import type { PanelTab } from './types';
+import { CAPABILITIES, type PanelTab } from './types';
 
 /**
  * The overview's tab rail, through the menu: a resting swipe moves the
@@ -135,8 +135,24 @@ describe('CapabilityMenu — the overview tab rail', () => {
     expect(menu.handleOverviewSwipe(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(false);
   });
 
+  it("a tap on the overview's QuickNotes tab opens QuickNotes (it replaced Search on the rail)", async () => {
+    const { menu, sent } = rig('quicknotes');
+    await menu.openActiveTab();
+    await vi.waitFor(() => expect(sent.some((m) => {
+      const event = (m as { event?: { containerName?: string; selectedName?: string } }).event;
+      return event?.containerName === 'capmenu' && event.selectedName === 'QuickNotes';
+    })).toBe(true));
+  });
+
+  it('Search opens from the menu, in the place QuickNotes had', async () => {
+    const { menu, lists } = rig();
+    expect(CAPABILITIES.indexOf('Search')).toBe(4);
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Search'));
+    expect(lists[0]?.options).toMatchObject({ title: 'SEARCH' });
+  });
+
   it('an empty tab expands to an honest, unselectable line', async () => {
-    const { menu, lists } = rig('search');
+    const { menu, lists } = rig();
     await menu.openPanelTab('search');
     const page = lists[0]!;
     expect(page.items).toEqual(['Search not loaded — hold to retry.']);
