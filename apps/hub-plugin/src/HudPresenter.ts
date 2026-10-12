@@ -18,7 +18,7 @@ import {
   validAssistantConversationSnapshot,
   type ConversationExitResult,
 } from './AssistantConversationSurface';
-import { paginateHanging, paginateMeasured } from './FirmwareText';
+import { paginateFromEnd, paginateHanging, paginateMeasured } from './FirmwareText';
 import { OVERLAY_GAP, cardTop, overlayConversation } from './ConversationOverlay';
 import { paginateEven, readerParagraphs, type EvenReaderLine } from './EvenFont';
 import { hasImageHeader, withImageHeader } from './HeaderImage';
@@ -55,6 +55,9 @@ import {
   type PlanningGridCell,
   type PromptOwnerKind,
   type ProductivityHudModel,
+  QUICKNOTES_NOTE_TITLE,
+  QUICKNOTES_UNDO_MENU_ID,
+  QUICKNOTES_UNDO_MENU_LABEL,
 } from './types';
 
 // A text container holds at most 999 UTF-8 bytes (FirmwareLimits); an
@@ -248,12 +251,18 @@ let evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '0') =
  * the firmware text pages in place (one upgrade per swipe) and draws every
  * stroke at full brightness, where the 55% image's thin strokes look faded
  * (the wearer, 2026-10-07). */
-const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', 'QUICKNOTES · LIVE']);
+const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', QUICKNOTES_NOTE_TITLE]);
 /** Text pages laid out as speakers' turns ("Them: …" with its wrapped rows
- * under the words): a Messages thread, and an open QuickNote's live words. */
+ * under the words): a Messages thread. */
 function speakerPaged(title: string): boolean {
-  return title.startsWith('MESSAGES') || title.trim().toUpperCase() === 'QUICKNOTES · LIVE';
+  return title.startsWith('MESSAGES');
 }
+/** An open QuickNote (Even's "New note"): plain words paged from the
+ * newest end, and "Undo last input" in the glasses' menu. */
+function isQuickNotesNote(title: string): boolean {
+  return title.trim().toUpperCase() === QUICKNOTES_NOTE_TITLE;
+}
+const QUICKNOTES_NOTE_MENU = [{ id: QUICKNOTES_UNDO_MENU_ID, name: QUICKNOTES_UNDO_MENU_LABEL }] as const;
 /**
  * A Messages page scrolls on the glass instead of turning seven-line pages
  * (the wearer's ruling, 2026-10-11). The firmware scrolls an overflowing
@@ -365,6 +374,14 @@ function sameGeometry(left: RebuildPageContainer, right: RebuildPageContainer): 
     ...(page.imageObject ?? []).map((item) => [item.containerID, item.xPosition, item.yPosition, item.width, item.height]),
   ]);
   return shape(left) === shape(right);
+}
+
+/** An open QuickNote's footer: the Mac's state, clock and gestures, plus a
+ * swipe when there are earlier words. No page counter — the newest words
+ * are the point, and the footer must fit one line. */
+function liveNoteHint(_page: number, count: number, macHint: string): string {
+  if (count <= 1) return GesturePolicy.formatHint(macHint);
+  return GesturePolicy.formatHint(`${macHint} · swipe: page`);
 }
 
 function textPageHint(page: number, count: number, macHint: string, review = false): string {
@@ -2159,13 +2176,25 @@ export class HudPresenter {
       scrolls ? SCROLLING_PAGE_MAX_LINES : READER_TEXT_PAGE.lineCapacity,
       scrolls ? SCROLLING_PAGE_MAX_UNITS : undefined,
     );
+    // An open QuickNote pages from its newest words, and its glasses menu
+    // leads with Undo last input (Even's QuickNote menu).
+    const note = isQuickNotesNote(surface.options.title);
+    const shown = note
+      ? paginateFromEnd(
+        readerParagraphs(surface.items).join('\n'), READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity,
+      )
+      : pages;
     const page = this.nativeTextPage?.source === source
-      ? Math.min(this.nativeTextPage.page, pages.length - 1)
-      : surface.options.nativeTextPageFromEnd ? pages.length - 1 : 0;
-    const body = pages[page] ?? ' ';
-    const hint = textPageHint(page, pages.length, surface.options.hint, surface.options.reviewTapOnLastPage);
+      ? Math.min(this.nativeTextPage.page, shown.length - 1)
+      : surface.options.nativeTextPageFromEnd ? shown.length - 1 : 0;
+    const body = shown[page] ?? ' ';
+    const hint = note
+      ? liveNoteHint(page, shown.length, surface.options.hint)
+      : textPageHint(page, shown.length, surface.options.hint, surface.options.reviewTapOnLastPage);
     const ok = await this.replaceNativePage(
-      this.layouts.textPageLayout(body, { status: this.nativeHeader(surface.options.title), hint }, { inset: true }),
+      this.layouts.textPageLayout(body, { status: this.nativeHeader(surface.options.title), hint }, {
+        inset: true, ...(note ? { menuLead: QUICKNOTES_NOTE_MENU } : {}),
+      }),
       'text-page-native',
     );
     if (!ok || !current()) {
@@ -2189,7 +2218,7 @@ export class HudPresenter {
       this.streams.set(ContainerId.StatusBar, liveStatus.text);
       if (liveStatus.brightness !== undefined) this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
     }
-    this.nativeTextPage = { source, pages, page, body, hint };
+    this.nativeTextPage = { source, pages: shown, page, body, hint };
     this.recordPageTransition(from, 'list', 'show_list', 'success');
     return true;
   }
@@ -2208,13 +2237,13 @@ export class HudPresenter {
       || surface.kind !== 'list' || surface.options.title !== options.title
       || !this.usesNativeTextPage(surface.options)) return false;
     const displayCurrent = this.captureDisplayGuard();
-    const pages = paginateHanging(
+    const pages = paginateFromEnd(
       readerParagraphs(items).join('\n'), READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity,
     );
     const page = Math.max(0, pages.length - 1);
     const body = pages[page] ?? ' ';
     const macHint = options.hint ?? '';
-    const hint = textPageHint(page, pages.length, macHint);
+    const hint = liveNoteHint(page, pages.length, macHint);
     const previous = { body: state.body, hint: state.hint };
     this.surface = { ...surface, items: [...items], options: { ...surface.options, hint: macHint } };
     this.nativeTextPage = { source: items.join('\n'), pages, page, body, hint };
@@ -2263,7 +2292,9 @@ export class HudPresenter {
     const review = this.surface.kind === 'list' && this.surface.options.reviewTapOnLastPage === true;
     state.page = page;
     state.body = state.pages[page] ?? ' ';
-    state.hint = textPageHint(page, state.pages.length, macHint, review);
+    state.hint = this.surface.kind === 'list' && isQuickNotesNote(this.surface.options.title)
+      ? liveNoteHint(page, state.pages.length, macHint)
+      : textPageHint(page, state.pages.length, macHint, review);
     void (async () => {
       await this.upgradeNativeText(ContainerId.Main, 'main', state.body, previous.body);
       if (this.nativeTextPage !== state) return;

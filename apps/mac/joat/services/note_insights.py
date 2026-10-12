@@ -36,7 +36,7 @@ from .productivity_actions import (
     ReminderIntent,
 )
 from .notes_sync import voice_document
-from .voice_note_capture import DEFAULT_TITLE, labelled
+from .voice_note_capture import DEFAULT_TITLE
 
 log = logging.getLogger(__name__)
 
@@ -65,8 +65,7 @@ _MAX_REMINDER_HANDOFF = 8
 
 _INSIGHTS_SYSTEM = (
     "You distill the transcript of a recorded conversation, meeting, speech or "
-    "dictated note. Lines may start with 'You:' (the person who recorded it) "
-    "or 'Them:' (someone else). Reply in EXACTLY this plain-text shape, with "
+    "dictated note. Reply in EXACTLY this plain-text shape, with "
     "these four headers:\n"
     "TITLE:\n"
     "2 to 6 words naming what it is about\n"
@@ -246,7 +245,7 @@ class NoteInsightsService:
         parts: list[str] = []
         for segment in self._notes.segments(capture_id):
             if segment.kind == "transcript":
-                parts.append(labelled(segment.text, segment.speaker))
+                parts.append(segment.text)
             elif segment.kind == "gap":
                 parts.append("[recording gap]")
         return "\n".join(parts)

@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
-import { HudPageBuilder } from './HudPageBuilder';
+import { HudPageBuilder, READER_TEXT_PAGE } from './HudPageBuilder';
 import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
 import type { HudVisualFrame } from './HudVisualSurface';
-import type { ProductivityHudModel } from './types';
+import { QUICKNOTES_UNDO_MENU_ID, type ProductivityHudModel } from './types';
 
 // These tests pin the IMAGE overview (VITE_NATIVE_OVERVIEW=0). The text
 // overview, which is Home by default, has its own: HudPresenter.textOverview.test.ts.
@@ -194,17 +194,17 @@ describe('navigation frames before the live map', () => {
   });
 });
 
-describe('the live page of an open QuickNote (FEAT-002)', () => {
-  const live = { title: 'QUICKNOTES · LIVE', hint: '● REC 00:00 · tap: pause · left x2: finish', nativeTextPage: true };
+describe('the page of an open QuickNote — Even\'s "New note" (FEAT-002)', () => {
+  const live = { title: 'QUICKNOTES · NEW NOTE', hint: '● REC 00:00 · tap: pause · left x2: finish', nativeTextPage: true };
 
   it('takes newer words as in-place upgrades, never a rebuilt page', async () => {
     const r = rig();
-    expect(await r.hud.showList(['Listening — your words appear here.'], live)).toBe(true);
+    expect(await r.hud.showList(['Listening…'], live)).toBe(true);
     expect(r.writes()).toEqual(['rebuild:0:3:0']);
     r.reset();
 
     expect(await r.hud.updateLiveTextPage(
-      ['Them: We can deliver on the 14th.\n', 'You: Great, book it.'],
+      ['We can deliver on the 14th.\n', 'Great, book it.'],
       { ...live, hint: '● REC 00:05 · tap: pause · left x2: finish' },
     )).toBe(true);
     expect(r.writes()).toEqual(['upgrade:main', 'upgrade:hint']);
@@ -212,7 +212,7 @@ describe('the live page of an open QuickNote (FEAT-002)', () => {
     r.reset();
     // Only the clock moved: one upgrade, of the footer.
     expect(await r.hud.updateLiveTextPage(
-      ['Them: We can deliver on the 14th.\n', 'You: Great, book it.'],
+      ['We can deliver on the 14th.\n', 'Great, book it.'],
       { ...live, hint: '● REC 00:10 · tap: pause · left x2: finish' },
     )).toBe(true);
     expect(r.writes()).toEqual(['upgrade:hint']);
@@ -229,14 +229,43 @@ describe('the live page of an open QuickNote (FEAT-002)', () => {
     expect(r.writes()).toEqual([]);
   });
 
-  it('always shows the newest words: the last page', async () => {
+  it('fills the page with the newest words', async () => {
     const r = rig();
-    expect(await r.hud.showList(['Listening.'], live)).toBe(true);
-    const many = Array.from({ length: 18 }, (_, i) => `Them: sentence number ${i + 1} of a long meeting.\n`);
+    expect(await r.hud.showList(['Listening…'], live)).toBe(true);
+    const many = Array.from({ length: 18 }, (_, i) => `Sentence number ${i + 1} of a long meeting.\n`);
     expect(await r.hud.updateLiveTextPage(many, live)).toBe(true);
-    const upgrades = (r.hud as unknown as { nativeTextPage?: { page: number; pages: string[]; body: string } })
+    const state = (r.hud as unknown as { nativeTextPage?: { page: number; pages: string[]; body: string; hint: string } })
       .nativeTextPage;
-    expect(upgrades?.page).toBe((upgrades?.pages.length ?? 1) - 1);
-    expect(upgrades?.body).toContain('sentence number 18');
+    expect(state?.page).toBe((state?.pages.length ?? 1) - 1);
+    const lines = state?.body.split('\n') ?? [];
+    expect(lines[lines.length - 1]).toBe('Sentence number 18 of a long meeting.');
+    // A full page, not the remainder of a page cut from the start.
+    expect(lines.length).toBe(READER_TEXT_PAGE.lineCapacity);
+    expect(lines.every((line) => line.startsWith('Sentence number '))).toBe(true);
+    // One footer line: no page counter, a swipe for the earlier words.
+    expect(state?.hint).toBe('● REC 00:00 · tap: pause · swipe: page · 2x tap: finish');
+
+    // One long paragraph (a continuous stretch flows on): still a full page.
+    const flowing = Array.from({ length: 40 }, (_, i) => `word${i + 1} and more words`).join(' ');
+    expect(await r.hud.updateLiveTextPage([flowing], live)).toBe(true);
+    const after = (r.hud as unknown as { nativeTextPage?: { body: string } }).nativeTextPage;
+    const rows = after?.body.split('\n') ?? [];
+    expect(rows.length).toBe(READER_TEXT_PAGE.lineCapacity);
+    expect(rows[rows.length - 1]).toContain('word40 and more words');
+  });
+
+  it("carries Undo last input first in the glasses' menu (Even's QuickNote menu)", async () => {
+    const r = rig();
+    expect(await r.hud.showList(['Listening…'], live)).toBe(true);
+    const items = r.rebuilds[r.rebuilds.length - 1]?.menuObject?.menuItems ?? [];
+    expect(items[0]).toMatchObject({ itemID: QUICKNOTES_UNDO_MENU_ID, itemName: 'Undo last input' });
+    expect(items.map((item: { itemName?: string }) => item.itemName)).toContain('QuickNotes');
+
+    // Any other page keeps the plain capability menu.
+    expect(await r.hud.showList(['A short note'], {
+      title: 'QUICKNOTES · DETAIL', hint: '2x tap: back', nativeTextPage: true,
+    })).toBe(true);
+    const other = r.rebuilds[r.rebuilds.length - 1]?.menuObject?.menuItems ?? [];
+    expect(other.some((item: { itemID?: number }) => item.itemID === QUICKNOTES_UNDO_MENU_ID)).toBe(false);
   });
 });

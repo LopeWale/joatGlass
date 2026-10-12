@@ -567,6 +567,9 @@ class FakeVoiceCapture:
     def silent_for_s(self) -> float:
         return self.silent_s
 
+    def elapsed_s(self) -> float:
+        return float(self.recorded_s)
+
     def add_listener(self, listener) -> None:  # type: ignore[no-untyped-def]
         self.listener = listener
 
@@ -614,6 +617,25 @@ class FakeVoiceCapture:
         self.calls.append("keep")
         self._discard = False
         return "Kept Voice Note."
+
+    def control_discard(self) -> str:
+        self.calls.append("discard_now")
+        self._active = False
+        return "Discarded Voice Note."
+
+    def control_undo(self) -> str:
+        self.calls.append("undo")
+        if not self.lines:
+            return "Nothing to undo."
+        self.lines = self.lines[:-1]
+        return "Removed the last paragraph."
+
+    def control_hold_cancel(self) -> str | None:
+        self.calls.append("hold_cancel")
+        if not self._holding:
+            return None
+        self._state, self._holding = "paused", False
+        return "Menu opened; the held audio was not kept."
 
     async def control_stop(self) -> str:
         self.calls.append("stop")
@@ -676,7 +698,8 @@ def receipts(transport: FakeTransport) -> list[str]:
     ]
 
 
-NOTE_CONTROL_ROWS = ["● Record", "✎ Quick note · hold to talk"]
+#: Even's QuickNote list leads with one row.
+NOTE_CONTROL_ROWS = ["+ Create new note"]
 
 
 def _urgent_card() -> Card:
@@ -763,15 +786,15 @@ class TestCapabilityViews:
             await router.open("QuickNotes")
             first = [m for m in transport.sent if isinstance(m, HudList)][-1]
             assert first.title == "QUICKNOTES"
-            # Every page is a control surface: record and quick note lead,
-            # then fifteen notes, then the paging row — twenty rows at most.
-            assert first.items[:2] == NOTE_CONTROL_ROWS
-            assert first.items[2].endswith("Fixture note 23")
-            assert first.items[16].endswith("Fixture note 9")
+            # Every page leads with Even's "+ Create new note", then fifteen
+            # notes, then the paging row — twenty rows at most.
+            assert first.items[:1] == NOTE_CONTROL_ROWS
+            assert first.items[1].endswith("Fixture note 23")
+            assert first.items[15].endswith("Fixture note 9")
             assert first.items[-1] == "▼ Older notes"
-            assert len(first.items) == 18
+            assert len(first.items) == 17
             assert first.selectable is True
-            assert first.page_controls == (None, 17)
+            assert first.page_controls == (None, 16)
             assert first.quick_notes_page == (0, 2)
 
             router.on_input(InputEvent(
@@ -784,16 +807,16 @@ class TestCapabilityViews:
                 for m in transport.sent
             ))
             older = [m for m in transport.sent if isinstance(m, HudList)][-1]
-            assert older.items[:2] == NOTE_CONTROL_ROWS
-            assert older.items[2].endswith("Fixture note 8")
-            assert older.items[9].endswith("Fixture note 1")
-            assert len(older.items) == 11
-            assert older.page_controls == (10, None)
+            assert older.items[:1] == NOTE_CONTROL_ROWS
+            assert older.items[1].endswith("Fixture note 8")
+            assert older.items[8].endswith("Fixture note 1")
+            assert len(older.items) == 10
+            assert older.page_controls == (9, None)
             assert older.quick_notes_page == (1, 2)
 
             # A tap on the paging row never opens a note: it is past the rows.
             router.on_input(InputEvent(
-                container_name="capdata", selected_name="QUICKNOTES", selected_index=10,
+                container_name="capdata", selected_name="QUICKNOTES", selected_index=9,
                 quick_notes_page_index=1,
             ))
             await asyncio.sleep(0)
@@ -2301,13 +2324,13 @@ class TestCapabilityViews:
         await router.open("QuickNotes")
         note_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert note_list.title == "QUICKNOTES"
-        assert note_list.items[:2] == NOTE_CONTROL_ROWS
-        assert "Ask Adaeze" in note_list.items[2]
-        assert len(note_list.items) == 3
+        assert note_list.items[:1] == NOTE_CONTROL_ROWS
+        assert "Ask Adaeze" in note_list.items[1]
+        assert len(note_list.items) == 2
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="QUICKNOTES",
-            selected_index=2,
+            selected_index=1,
         ))
         await asyncio.sleep(0)
         note_detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
@@ -2357,7 +2380,7 @@ class TestCapabilityViews:
             router, transport, _ = make_router(tmp_path, notes=notes)
             await router.open("QuickNotes", request_id="wide-note-reader")
             await router._select_capability_row(
-                "QUICKNOTES", 2, "reader-wide", "wide-note-reader",
+                "QUICKNOTES", 1, "reader-wide", "wide-note-reader",
             )
             pages = await collect_note_reader(
                 router, transport, request_id="wide-note-reader", trace_id="reader-wide",
@@ -2385,7 +2408,7 @@ class TestCapabilityViews:
                              source=NoteSource(kind="synthetic"), now_us=at)
             router, transport, _ = make_router(tmp_path, notes=notes)
             await router.open("QuickNotes", request_id="note-reader")
-            await router._select_capability_row("QUICKNOTES", 3, "reader-long", "note-reader")
+            await router._select_capability_row("QUICKNOTES", 2, "reader-long", "note-reader")
             pages = await collect_note_reader(router, transport, request_id="note-reader", trace_id="reader-long")
             assert len(pages) > 2
             assert "".join(row for page in pages for row in page["items"][1:]) == body
@@ -2411,7 +2434,7 @@ class TestCapabilityViews:
                 selected_name="quicknotes-list", request_id="note-reader"))
             await asyncio.sleep(0)
             assert len(transport.sent) == before, "Back must retire an already queued page"
-            await router._select_capability_row("QUICKNOTES", 2, "reader-second", "note-reader")
+            await router._select_capability_row("QUICKNOTES", 1, "reader-second", "note-reader")
             second = [m for m in transport.sent if isinstance(m, HudList)][-1].to_wire()
             assert "".join(second["items"][1:]).startswith("Second note")
             assert "down more" in second["hint"]
@@ -2448,12 +2471,12 @@ class TestCapabilityViews:
                     key_points=("One point",), todos=("One action",), now_us=21)
             router, transport, _ = make_router(tmp_path, voice_notes=notes)
             await router.open("QuickNotes", request_id="recording-reader")
-            await router._select_capability_row("QUICKNOTES", 2, "reader-recording", "recording-reader")
+            await router._select_capability_row("QUICKNOTES", 1, "reader-recording", "recording-reader")
             pages = await collect_note_reader(router, transport, request_id="recording-reader", trace_id="reader-recording")
             body = "".join(row for page in pages for row in page["items"][1:])
             assert first in body and last in body
             assert body.index(first) < body.index(last)
-            assert "[synthetic_gap] Missing interval" in body
+            assert "[recording gap]" in body
             assert ("Summary only." in body) == with_summary
             assert "FINAL-RECORDING-MARKER" in "".join(pages[-1]["items"][1:])
 
@@ -2484,18 +2507,18 @@ class TestCapabilityViews:
         await router.open("QuickNotes")
         note_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert note_list.title == "QUICKNOTES"
-        # The two control rows lead; then recordings (marked with the ●
-        # record glyph), then exact dictated text notes.
-        assert note_list.items[:2] == NOTE_CONTROL_ROWS
-        assert "● Standup notes" in note_list.items[2]
-        assert "Ask Adaeze" in note_list.items[3]
-        assert len(note_list.items) == 4
+        # The create row leads; then recordings (marked with the ● record
+        # glyph), then exact dictated text notes.
+        assert note_list.items[:1] == NOTE_CONTROL_ROWS
+        assert "● Standup notes" in note_list.items[1]
+        assert "Ask Adaeze" in note_list.items[2]
+        assert len(note_list.items) == 3
         assert note_list.selectable is True
 
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="QUICKNOTES",
-            selected_index=2,
+            selected_index=1,
         ))
         await asyncio.sleep(0)
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
@@ -2514,7 +2537,7 @@ class TestCapabilityViews:
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="QUICKNOTES",
-            selected_index=3,
+            selected_index=2,
         ))
         await asyncio.sleep(0)
         text_detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
@@ -2523,13 +2546,13 @@ class TestCapabilityViews:
         assert "".join(text_detail.to_wire()["items"][1:]) == "Ask Adaeze about the design review"
 
     async def test_an_open_note_owns_the_quicknotes_page_as_its_live_words(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        """FEAT-002: the open note is a live text page — its words, a tap to
-        pause, 2x tap for the finish rows."""
+        """FEAT-002: the open note is Even's "New note" page — plain words (no
+        speaker labels), a tap to pause, 2x tap for Save / Discard / Cancel."""
         store = DurableStore(tmp_path / "durable.sqlite3")
         voice_notes = VoiceNoteStore(store)
         _retained_voice_note(voice_notes, "capture-0", base_us=5)
         capture = FakeVoiceCapture(state="recording", title="Client call")
-        capture.lines = (LiveLine("We ship on Friday.", "other"), LiveLine("Agreed.", "self"))
+        capture.lines = (LiveLine("We ship on Friday."), LiveLine("Agreed."))
         capture.recorded_s = 75
         router, transport, _ = make_router(
             tmp_path, voice_notes=voice_notes, voice_capture=capture,
@@ -2537,8 +2560,8 @@ class TestCapabilityViews:
 
         await router.open("QuickNotes", request_id="notes-live")
         live = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert live.title == "QUICKNOTES · LIVE"
-        assert "".join(live.items) == "Them: We ship on Friday.\nYou: Agreed."
+        assert live.title == "QUICKNOTES · NEW NOTE"
+        assert "".join(live.items) == "We ship on Friday.\nAgreed."
         assert live.selectable is True
         assert live.hint == "● REC 01:15 · tap: pause · left x2: finish"
 
@@ -2560,7 +2583,9 @@ class TestCapabilityViews:
         await wait_until(lambda: [m for m in transport.sent if isinstance(m, HudList)][-1].title
                          == "QUICKNOTES · FINISH")
         finish = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert finish.items == ["Save note", "Keep recording", "Discard note"]
+        # Even's QuickNote exit prompt, word for word.
+        assert finish.items == ["Save", "Discard", "Cancel"]
+        assert finish.hint == "Client call · tap: choose · left x2: cancel"
         router.on_input(InputEvent(
             container_name="capdata", selected_name="QUICKNOTES",
             selected_index=0, request_id="notes-live",
@@ -2572,12 +2597,14 @@ class TestCapabilityViews:
             isinstance(m, AssistantOverlay) and m.text == "Saving quicknote…"
             for m in transport.sent
         )
+        # A clean save shows itself on the list; no technical band.
+        assert receipts(transport) == ["Saving quicknote…"]
         after = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert after.items[:2] == NOTE_CONTROL_ROWS
-        assert "● Standup notes" in after.items[2]
+        assert after.items[:1] == NOTE_CONTROL_ROWS
+        assert "● Standup notes" in after.items[1]
         store.close()
 
-    async def test_keep_recording_on_the_finish_rows_returns_to_the_note(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    async def test_cancel_on_the_exit_prompt_returns_to_the_note(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         capture = FakeVoiceCapture(state="recording", title="Standup")
         router, transport, _ = make_router(tmp_path, voice_capture=capture)
         await router.open("QuickNotes", request_id="notes-keep")
@@ -2586,11 +2613,11 @@ class TestCapabilityViews:
         await wait_until(lambda: [m for m in transport.sent if isinstance(m, HudList)][-1].title
                          == "QUICKNOTES · FINISH")
 
-        # Both ways back: the Keep row, and 2x tap on the rows.
+        # Both ways back: the Cancel row, and 2x tap on the rows.
         router.on_input(InputEvent(container_name="capdata", selected_name="QUICKNOTES",
-                                   selected_index=1, request_id="notes-keep"))
+                                   selected_index=2, request_id="notes-keep"))
         await wait_until(lambda: [m for m in transport.sent if isinstance(m, HudList)][-1].title
-                         == "QUICKNOTES · LIVE")
+                         == "QUICKNOTES · NEW NOTE")
         router.on_input(InputEvent(container_name="capability-lifecycle",
                                    selected_name="quicknotes-finish", request_id="notes-keep"))
         await wait_until(lambda: [m for m in transport.sent if isinstance(m, HudList)][-1].title
@@ -2598,7 +2625,7 @@ class TestCapabilityViews:
         router.on_input(InputEvent(container_name="capability-lifecycle",
                                    selected_name="quicknotes-back", request_id="notes-keep"))
         await wait_until(lambda: [m for m in transport.sent if isinstance(m, HudList)][-1].title
-                         == "QUICKNOTES · LIVE")
+                         == "QUICKNOTES · NEW NOTE")
         assert "stop" not in capture.calls
 
     async def test_a_held_touchpad_talks_into_a_quick_note(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -2609,12 +2636,12 @@ class TestCapabilityViews:
             )
             await router.open("QuickNotes", request_id="notes-hold")
             router.on_input(InputEvent(container_name="capdata", selected_name="QUICKNOTES",
-                                       selected_index=1, request_id="notes-hold"))
+                                       selected_index=0, request_id="notes-hold"))
             await wait_until(lambda: capture.calls == ["start:hold"])
             await wait_until(lambda: [m for m in transport.sent if isinstance(m, HudList)][-1].title
-                             == "QUICKNOTES · LIVE")
+                             == "QUICKNOTES · NEW NOTE")
             opened = [m for m in transport.sent if isinstance(m, HudList)][-1]
-            assert "Hold the touchpad and speak" in "".join(opened.items)
+            assert "".join(opened.items) == "Hold to talk, or tap to record."
 
             router.on_input(InputEvent(container_name="capability-lifecycle",
                                        selected_name="quicknotes-hold-start", request_id="notes-hold"))
@@ -2632,6 +2659,21 @@ class TestCapabilityViews:
             await asyncio.sleep(0.05)
             assert capture.calls[-1] == "hold_end"
 
+    async def test_the_rec_timer_repaints_each_new_second_once(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        capture = FakeVoiceCapture(state="recording", title="Standup")
+        capture.recorded_s = 10
+        router, transport, _ = make_router(tmp_path, voice_capture=capture)
+        await router.open("QuickNotes", request_id="notes-timer")
+        pages = lambda: [m for m in transport.sent if isinstance(m, HudList)]  # noqa: E731
+        before = len(pages())
+
+        await router._live_check(tick=True)              # same second: nothing
+        assert len(pages()) == before
+        capture.recorded_s = 11
+        await router._live_check(tick=True)              # next second: one repaint
+        assert len(pages()) == before + 1
+        assert pages()[-1].hint == "● REC 00:11 · tap: pause · left x2: finish"
+
     async def test_the_live_page_asks_for_the_mic_when_no_audio_arrives(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         capture = FakeVoiceCapture(state="recording", title="Standup")
         capture.silent_s = 3.5
@@ -2647,27 +2689,47 @@ class TestCapabilityViews:
         await router._live_check(tick=True)
         assert sum(isinstance(m, AudioControl) for m in transport.sent) == before, "asks once"
 
-    async def test_the_apple_notes_row_flips_the_switch(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        class Switch:
-            enabled = True
+    async def test_undo_last_input_from_the_glasses_menu(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """Even's QuickNote menu: Undo last input drops the newest paragraph;
+        the page without it is the answer, and only "nothing" earns a band."""
+        capture = FakeVoiceCapture(state="paused", title="Note 09:30")
+        capture._mode = "hold"
+        capture.lines = (LiveLine("Buy milk."), LiveLine("Call the plumber."))
+        router, transport, _ = make_router(tmp_path, voice_capture=capture)
+        await router.open("QuickNotes", request_id="notes-undo")
 
-            def set_enabled(self, enabled: bool) -> None:
-                self.enabled = enabled
+        router.on_input(InputEvent(container_name="capability-lifecycle",
+                                   selected_name="quicknotes-undo", request_id="notes-undo"))
+        await wait_until(lambda: "".join(
+            [m for m in transport.sent if isinstance(m, HudList)][-1].items) == "Buy milk.")
+        assert receipts(transport) == []
 
-        switch = Switch()
-        with DurableStore(tmp_path / "notes.sqlite3") as durable:
-            router, transport, _ = make_router(tmp_path, notes=NoteStore(durable))
-            router._notes_sync = switch  # type: ignore[assignment]
-            await router.open("QuickNotes", request_id="notes-sync")
-            page = [m for m in transport.sent if isinstance(m, HudList)][-1]
-            assert page.items == [*NOTE_CONTROL_ROWS, "Save to Apple Notes: On"]
+        capture.lines = ()
+        router.on_input(InputEvent(container_name="capability-lifecycle",
+                                   selected_name="quicknotes-undo", request_id="notes-undo"))
+        await wait_until(lambda: receipts(transport) == ["Nothing to undo."])
+        # An Undo from an older visit is not this note's.
+        router.on_input(InputEvent(container_name="capability-lifecycle",
+                                   selected_name="quicknotes-undo", request_id="notes-old"))
+        await asyncio.sleep(0.05)
+        assert capture.calls.count("undo") == 2
 
-            await router._select_capability_row("QUICKNOTES", 2, "hud", "notes-sync")
+    async def test_a_hold_that_opened_the_glasses_menu_is_cancelled(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        capture = FakeVoiceCapture(state="paused", title="Note 09:30")
+        router, transport, _ = make_router(tmp_path, voice_capture=capture)
+        await router.open("QuickNotes", request_id="notes-menu")
+        router.on_input(InputEvent(container_name="capability-lifecycle",
+                                   selected_name="quicknotes-hold-start", request_id="notes-menu"))
+        await wait_until(lambda: capture.calls[-1:] == ["hold_start"])
 
-            assert switch.enabled is False
-            assert receipts(transport) == ["Saved notes now stay on this Mac."]
-            page = [m for m in transport.sent if isinstance(m, HudList)][-1]
-            assert page.items[2] == "Save to Apple Notes: Off"
+        router.on_input(InputEvent(container_name="capability-lifecycle",
+                                   selected_name="quicknotes-hold-cancel", request_id="notes-menu"))
+
+        await wait_until(lambda: capture.calls[-1:] == ["hold_cancel"])
+        assert capture.snapshot.holding is False
+        await wait_until(lambda: not (
+            [m for m in transport.sent if isinstance(m, HudList)][-1].hint or ""
+        ).startswith("● Listening"))
 
     async def test_a_generated_title_reaches_the_open_list(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         store = DurableStore(tmp_path / "durable.sqlite3")
@@ -2680,10 +2742,10 @@ class TestCapabilityViews:
         await router.refresh_notes_list()
 
         listing = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert "● Delivery and van booking" in listing.items[2]
+        assert "● Delivery and van booking" in listing.items[1]
         assert listing.request_id == "notes-rename"
         # Not on the list (a note's page is open): nothing is repainted.
-        await router._select_capability_row("QUICKNOTES", 2, "rec", "notes-rename")
+        await router._select_capability_row("QUICKNOTES", 1, "rec", "notes-rename")
         before = len(transport.sent)
         await router.refresh_notes_list()
         assert len(transport.sent) == before
@@ -2706,10 +2768,10 @@ class TestCapabilityViews:
         router, transport, _ = make_router(tmp_path, voice_notes=voice_notes)
         router._note_reminders = reminders
         await router.open("QuickNotes", request_id="notes-remind")
-        await router._select_capability_row("QUICKNOTES", 2, "rec", "notes-remind")
+        await router._select_capability_row("QUICKNOTES", 1, "rec", "notes-remind")
         page = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert page.title == "QUICKNOTES · NOTE"
-        assert page.hint is not None and "tap: next steps to Reminders" in page.hint
+        assert page.hint is not None and "tap: reminders" in page.hint
         assert page.selectable is True
 
         router.on_input(InputEvent(container_name="capdata", selected_name="QUICKNOTES",
@@ -2719,14 +2781,15 @@ class TestCapabilityViews:
         store.close()
 
     async def test_quicknotes_empty_and_setup_pages_still_offer_the_controls(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        """No notes yet is a page with two things to tap; no store is a fact."""
+        """No notes yet is Even's list with only "+ Create new note"; no store
+        is a fact. There is no settings row on the glasses."""
         with DurableStore(tmp_path / "empty-notes.sqlite3") as durable:
             router, transport, _ = make_router(tmp_path, notes=NoteStore(durable))
             await router.open("QuickNotes", request_id="notes-empty")
             empty = [m for m in transport.sent if isinstance(m, HudList)][-1]
             assert empty.title == "QUICKNOTES · EMPTY"
             assert empty.items == NOTE_CONTROL_ROWS
-            assert empty.hint == "tap: choose · left x2: back"
+            assert empty.hint == "tap: open · left x2: back"
             assert empty.selectable is True
             assert empty.quick_notes_page == (0, 1)
             assert empty.page_controls == (None, None)
@@ -2738,7 +2801,7 @@ class TestCapabilityViews:
         assert setup.items == ["Notes storage is unavailable on this Mac."]
         assert setup.selectable is False
 
-    async def test_the_record_row_opens_a_recording_on_its_live_page(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    async def test_the_create_row_opens_a_new_note(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         store = DurableStore(tmp_path / "durable.sqlite3")
         voice_notes = VoiceNoteStore(store)
         _retained_voice_note(voice_notes, "capture-0", base_us=5)
@@ -2749,22 +2812,24 @@ class TestCapabilityViews:
         await router.open("QuickNotes", request_id="notes-record")
         listing = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert listing.title == "QUICKNOTES"
-        assert listing.items[:2] == NOTE_CONTROL_ROWS
-        assert "● Standup notes" in listing.items[2]
+        assert listing.items[:1] == NOTE_CONTROL_ROWS
+        assert "● Standup notes" in listing.items[1]
+        assert listing.hint == "tap: open · left x2: back"
 
         router.on_input(InputEvent(
             container_name="capdata", selected_name="QUICKNOTES",
             selected_index=0, request_id="notes-record",
         ))
-        await wait_until(lambda: capture.calls == ["start:continuous"])
+        await wait_until(lambda: capture.calls == ["start:hold"])
         await wait_until(lambda: any(
-            isinstance(m, HudList) and m.title == "QUICKNOTES · LIVE"
+            isinstance(m, HudList) and m.title == "QUICKNOTES · NEW NOTE"
             for m in transport.sent
         ))
         # An opened note shows itself; only a refusal would earn a band.
         assert receipts(transport) == []
         live = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert "Listening — your words appear here." in "".join(live.items)
+        assert "".join(live.items) == "Hold to talk, or tap to record."
+        assert live.hint == "00:00 · hold: talk · tap: record · left x2: finish"
         store.close()
 
     async def test_the_record_row_without_a_capture_controller_says_so(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -2774,7 +2839,7 @@ class TestCapabilityViews:
             await router._select_capability_row("QUICKNOTES", 0, "hud", "notes-no-capture")
             assert receipts(transport) == ["Recording is unavailable on this Mac."]
 
-    async def test_discard_needs_its_own_confirm_row(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    async def test_a_spoken_discard_still_asks_again(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         capture = FakeVoiceCapture(
             state="paused", title="Risky", discard_pending=True,
         )
@@ -2783,7 +2848,27 @@ class TestCapabilityViews:
         await router.open("QuickNotes")
         controls = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert controls.title == "QUICKNOTES · DISCARD?"
-        assert controls.items == ["Confirm discard", "Keep recording"]
+        assert controls.items == ["Discard", "Cancel"]
+
+    async def test_discard_on_the_exit_prompt_leaves_at_once(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """Even's exit prompt: Discard exits without saving — no second
+        question, no band."""
+        capture = FakeVoiceCapture(state="recording", title="Risky")
+        router, transport, _ = make_router(tmp_path, voice_capture=capture)
+        await router.open("QuickNotes", request_id="notes-discard")
+        router.on_input(InputEvent(container_name="capability-lifecycle",
+                                   selected_name="quicknotes-finish", request_id="notes-discard"))
+        await wait_until(lambda: [m for m in transport.sent if isinstance(m, HudList)][-1].title
+                         == "QUICKNOTES · FINISH")
+
+        router.on_input(InputEvent(container_name="capdata", selected_name="QUICKNOTES",
+                                   selected_index=1, request_id="notes-discard"))
+
+        await wait_until(lambda: "discard_now" in capture.calls)
+        await asyncio.sleep(0.05)
+        assert not any(isinstance(m, HudList) and m.title == "QUICKNOTES · DISCARD?"
+                       for m in transport.sent)
+        assert receipts(transport) == []
 
     async def test_quicknotes_discard_back_keeps_then_saves_the_recording(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         capture = FakeVoiceCapture(state="recording", discard_pending=True)
@@ -2794,7 +2879,7 @@ class TestCapabilityViews:
         await asyncio.sleep(.05)
         assert capture.calls == ["keep"]
         controls = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert controls.title == "QUICKNOTES · LIVE"
+        assert controls.title == "QUICKNOTES · NEW NOTE"
         router.on_input(InputEvent(container_name="capability-lifecycle",
                                    selected_name="quicknotes-finish", request_id="notes-current"))
         await asyncio.sleep(.05)
@@ -2872,7 +2957,7 @@ class TestCapabilityOpenController:
         opener = CapabilityOpenController(lambda: router)
         await opener.reflect_quicknotes()
         control_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert control_list.title == "QUICKNOTES · LIVE"
+        assert control_list.title == "QUICKNOTES · NEW NOTE"
         assert control_list.request_id is not None
         assert control_list.request_id.startswith(VOICE_REQUEST_PREFIX)
 

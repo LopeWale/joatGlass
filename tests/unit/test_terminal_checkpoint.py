@@ -78,7 +78,7 @@ def test_migration_12_preserves_v11_ledger_and_timer_data(tmp_path, monkeypatch)
     with DurableStore(path) as db:
         # 12 terminal_checkpoints; 13 pomodoro_lengths; 14 saved_places;
         # 15 live QuickNote transcription (FEAT-002)
-        assert db.schema_version == 15
+        assert db.schema_version == 16
         assert db.execute('SELECT * FROM schema_migrations WHERE version<=11 ORDER BY version').fetchall() == ledger
         assert db.execute('SELECT * FROM pomodoro_checkpoint').fetchone() == timer
         assert db.execute('SELECT count(*) FROM terminal_checkpoints').fetchone() == (0,)

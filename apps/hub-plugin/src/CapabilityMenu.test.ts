@@ -1059,16 +1059,16 @@ describe('CapabilityMenu', () => {
       }),
     });
     const requestId = 'voice-notes-live';
-    await menu.presentList('QUICKNOTES · LIVE', ['Listening — your words appear here.'], requestId,
+    await menu.presentList('QUICKNOTES · NEW NOTE', ['Listening — your words appear here.'], requestId,
       true, '● REC 00:00 · tap: pause · left x2: finish');
     // Drawn once as a firmware text page that opens on its newest words.
     expect(listOptions[listOptions.length - 1]).toMatchObject({
-      title: 'QUICKNOTES · LIVE', nativeTextPage: true, nativeTextPageFromEnd: true,
+      title: 'QUICKNOTES · NEW NOTE', nativeTextPage: true, nativeTextPageFromEnd: true,
     });
     expect(menu.isQuickNotesLive()).toBe(true);
     const paints = lists.length;
 
-    await menu.presentList('QUICKNOTES · LIVE', ['We ship Friday.'], requestId,
+    await menu.presentList('QUICKNOTES · NEW NOTE', ['We ship Friday.'], requestId,
       true, '● REC 00:05 · tap: pause · left x2: finish');
     expect(lists).toHaveLength(paints); // newer words never rebuild the page
     expect(updates).toEqual([
@@ -1080,13 +1080,13 @@ describe('CapabilityMenu', () => {
     expect(sent[sent.length - 1]).toMatchObject({ event: {
       containerName: 'capdata', selectedName: 'QUICKNOTES', selectedIndex: 0, requestId,
     } });
-    await menu.presentList('QUICKNOTES · LIVE', ['We ship Friday.'], requestId,
+    await menu.presentList('QUICKNOTES · NEW NOTE', ['We ship Friday.'], requestId,
       true, '00:05 · hold: talk · tap: record · left x2: finish');
     expect(lists).toHaveLength(paints);
     const taps = sent.length;
     menu.handleClick(); // the answer re-enabled the tap
     expect(sent).toHaveLength(taps + 1);
-    await menu.presentList('QUICKNOTES · LIVE', ['We ship Friday.'], requestId,
+    await menu.presentList('QUICKNOTES · NEW NOTE', ['We ship Friday.'], requestId,
       true, '● REC 00:06 · tap: pause · left x2: finish');
 
     await menu.toggle();
@@ -1106,7 +1106,7 @@ describe('CapabilityMenu', () => {
   it('turns a held touchpad on the live note into hold events', async () => {
     const { menu, sent } = rig();
     const requestId = 'voice-notes-hold';
-    await menu.presentList('QUICKNOTES · LIVE', ['Hold the touchpad and speak.'], requestId,
+    await menu.presentList('QUICKNOTES · NEW NOTE', ['Hold the touchpad and speak.'], requestId,
       true, '00:00 · hold: talk · tap: record · left x2: finish');
     menu.sendQuickNotesHold('start');
     menu.sendQuickNotesHold('end');

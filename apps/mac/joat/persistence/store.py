@@ -665,6 +665,26 @@ _MIGRATION_15 = (
     """,
 )
 
+_MIGRATION_16 = (
+    # The wearer ruled out speaker labels (2026-10-11: Even's QuickNote and
+    # Conversate show plain text), so nothing reads or writes these.
+    "DROP TABLE voice_note_segment_speakers",
+    # "Undo last input" (Even's QuickNote): the wearer took these frames'
+    # words back. The audio is still accounted for, so an undo never turns a
+    # complete note into one with gaps; the words just are not part of it.
+    """
+    CREATE TABLE voice_note_undone_spans (
+        capture_id TEXT NOT NULL REFERENCES voice_notes(capture_id) ON DELETE CASCADE,
+        first_frame_ordinal INTEGER NOT NULL CHECK (first_frame_ordinal >= 0),
+        last_frame_ordinal INTEGER NOT NULL CHECK (
+            last_frame_ordinal >= first_frame_ordinal
+        ),
+        created_at_us INTEGER NOT NULL CHECK (created_at_us >= 0),
+        PRIMARY KEY (capture_id, first_frame_ordinal)
+    ) STRICT
+    """,
+)
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
@@ -681,6 +701,7 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (13, "durable_pomodoro_lengths", _MIGRATION_13),
     (14, "durable_saved_places", _MIGRATION_14),
     (15, "live_quicknote_transcription", _MIGRATION_15),
+    (16, "quicknote_undo_without_speakers", _MIGRATION_16),
 )
 
 

@@ -6,6 +6,7 @@ import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
 import type { ImuMonitor } from './ImuMonitor';
 import { CapabilityMenu } from './CapabilityMenu';
+import { QUICKNOTES_UNDO_MENU_ID } from './types';
 import { Settings } from './Settings';
 import type { HudPresenter } from './HudPresenter';
 import { CAPABILITY_MENU_ID_BASE, type UplinkMessage } from './types';
@@ -1359,12 +1360,14 @@ describe('the notification card owns the taps while it is up', () => {
 describe('EventRouter — a long press held on an open QuickNote talks into it (FEAT-002)', () => {
   function liveNote() {
     const r = make(true);
-    const holds: Array<'start' | 'end'> = [];
+    const holds: Array<'start' | 'end' | 'cancel'> = [];
+    const undos: number[] = [];
     Object.assign(r.menu, {
       isQuickNotesLive: vi.fn(() => true),
-      sendQuickNotesHold: vi.fn((phase: 'start' | 'end') => { holds.push(phase); }),
+      sendQuickNotesHold: vi.fn((phase: 'start' | 'end' | 'cancel') => { holds.push(phase); }),
+      sendQuickNotesUndo: vi.fn(() => { undos.push(1); return true; }),
     });
-    return { ...r, holds };
+    return { ...r, holds, undos };
   }
 
   it('starts on the press and ends on the release; the mic is never toggled', () => {
@@ -1385,15 +1388,23 @@ describe('EventRouter — a long press held on an open QuickNote talks into it (
     expect(r.sent).toEqual([]);
   });
 
-  it('ends the hold when the OS contextual menu claims the gesture', () => {
+  it('cancels the hold when the press opened the glasses menu (tap, then long press)', () => {
     const r = liveNote();
     r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
     r.fire({ sysEvent: { eventType: OsEventTypeList.FOREGROUND_ENTER_EVENT } });
-    expect(r.holds).toEqual(['start', 'end']);
+    // Not talking: the Mac keeps none of that hold's audio.
+    expect(r.holds).toEqual(['start', 'cancel']);
     expect(r.lifecycle.onContextualMenu).toHaveBeenCalledWith(true);
     // The overlay's own release is not a second end.
     r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
-    expect(r.holds).toEqual(['start', 'end']);
+    expect(r.holds).toEqual(['start', 'cancel']);
+  });
+
+  it("the glasses menu's Undo last input reaches the open note (Even's QuickNote menu)", () => {
+    const r = liveNote();
+    r.fire({ menuItemClickEvent: { itemID: QUICKNOTES_UNDO_MENU_ID } });
+    expect(r.undos).toEqual([1]);
+    expect(r.audio.stop).not.toHaveBeenCalled();
   });
 
   it('elsewhere a long press is still the mic', () => {

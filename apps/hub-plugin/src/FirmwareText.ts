@@ -154,6 +154,38 @@ export function paginateMeasured(
   return pages.length > 0 ? pages : [' '];
 }
 
+/**
+ * Live words as firmware pages counted from the NEWEST end (an open
+ * QuickNote): every paragraph wrapped into explicit lines that fit
+ * `innerWidth` (so the firmware never breaks one again), then cut into pages
+ * of `maxLines` from the last line back. The page on the glass is always
+ * full of the newest words, however long the paragraph they belong to.
+ */
+export function paginateFromEnd(
+  text: string,
+  innerWidth: number,
+  maxLines: number,
+  maxUnits = NATIVE_PAGE_MAX_UNITS,
+): string[] {
+  const lines = text.replace(/\r\n?/gu, NEWLINE).split(NEWLINE)
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph.length > 0)
+    .flatMap((paragraph) => wrapWords(paragraph.split(/\s+/u).filter(Boolean), innerWidth));
+  const pages: string[] = [];
+  let page: string[] = [];
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!;
+    if (page.length > 0 && (page.length >= Math.max(1, maxLines)
+      || [line, ...page].join(NEWLINE).length > maxUnits)) {
+      pages.unshift(page.join(NEWLINE));
+      page = [];
+    }
+    page.unshift(line);
+  }
+  if (page.length > 0) pages.unshift(page.join(NEWLINE));
+  return pages.length > 0 ? pages : [' '];
+}
+
 /** "Name: words" — a speaker's name in front of their words. */
 const SPEAKER_LINE = /^([^:\s][^:]{0,31}):\s+(\S.*)$/u;
 

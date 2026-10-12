@@ -482,7 +482,7 @@ def test_recent_retained_orders_newest_first_and_skips_discards(tmp_path: Path) 
         assert [note.capture_id for note in recent] == ["capture-2", "capture-1"]
 
 
-# ── FEAT-002: quiet spans, speakers, rename, exports ────────────────────────
+# ── FEAT-002: quiet spans, undo, rename, exports ────────────────────────────
 
 def _recording_with_frames(notes: VoiceNoteStore, count: int) -> None:
     notes.create(
@@ -505,7 +505,7 @@ def test_quiet_spans_count_as_covered_so_a_pause_is_not_a_degraded_note(
         _recording_with_frames(notes, 4)
         notes.append_transcript(
             "capture-1", text="Hello there", first_frame_ordinal=0,
-            last_frame_ordinal=1, now_us=20, speaker="self",
+            last_frame_ordinal=1, now_us=20,
         )
         assert [f.ordinal for f in notes.uncovered_frames("capture-1")] == [2, 3]
         notes.append_quiet_span(
@@ -521,8 +521,7 @@ def test_quiet_spans_count_as_covered_so_a_pause_is_not_a_degraded_note(
         )
 
         assert saved.state == "saved" and saved.raw_retained is False
-        segment = notes.segments("capture-1")[0]
-        assert segment.speaker == "self"
+        assert [segment.text for segment in notes.segments("capture-1")] == ["Hello there"]
 
 
 def test_an_uncovered_frame_still_degrades_the_note(tmp_path: Path) -> None:
@@ -543,7 +542,7 @@ def test_an_uncovered_frame_still_degrades_the_note(tmp_path: Path) -> None:
         assert saved.state == "saved_degraded" and saved.raw_retained is True
 
 
-def test_quiet_spans_and_speakers_must_be_backed_and_valid(tmp_path: Path) -> None:
+def test_quiet_spans_must_be_backed_and_valid(tmp_path: Path) -> None:
     durable, notes = open_store(tmp_path / "joat.sqlite3")
     with durable:
         _recording_with_frames(notes, 2)
@@ -556,11 +555,6 @@ def test_quiet_spans_and_speakers_must_be_backed_and_valid(tmp_path: Path) -> No
             notes.append_quiet_span(
                 "capture-1", first_frame_ordinal=0, last_frame_ordinal=0,
                 reason="music", now_us=20,
-            )
-        with pytest.raises(ValueError, match="speaker"):
-            notes.append_transcript(
-                "capture-1", text="x", first_frame_ordinal=0,
-                last_frame_ordinal=0, now_us=20, speaker="wearer",
             )
 
 
@@ -596,21 +590,61 @@ def test_rename_replaces_a_clock_title_but_never_revives_a_discard(tmp_path: Pat
             notes.rename("capture-1", "Back from the dead", now_us=32)
 
 
-def test_discard_purges_quiet_spans_and_speaker_labels(tmp_path: Path) -> None:
+def test_undo_takes_words_out_but_keeps_the_audio_accounted_for(tmp_path: Path) -> None:
+    durable, notes = open_store(tmp_path / "joat.sqlite3")
+    with durable:
+        _recording_with_frames(notes, 4)
+        notes.append_transcript(
+            "capture-1", text="Keep this", first_frame_ordinal=0,
+            last_frame_ordinal=1, now_us=20,
+        )
+        notes.append_transcript(
+            "capture-1", text="Take this back", first_frame_ordinal=2,
+            last_frame_ordinal=3, now_us=21,
+        )
+
+        assert notes.undo_range(
+            "capture-1", first_frame_ordinal=2, last_frame_ordinal=3, now_us=22,
+        ) == 1
+
+        assert [s.text for s in notes.segments("capture-1")] == ["Keep this"]
+        assert notes.get("capture-1").transcribed_segments == 1
+        assert notes.is_undone("capture-1", 2, 3) and not notes.is_undone("capture-1", 1, 2)
+        assert notes.uncovered_frames("capture-1") == ()
+        notes.transition("capture-1", "finalizing", now_us=23)
+        saved = notes.finalize(
+            "capture-1", complete=True,
+            completion_code="transcript_checkpointed_raw_purged", now_us=24,
+        )
+        assert saved.state == "saved" and saved.raw_retained is False
+        with pytest.raises(VoiceNoteConflictError):
+            notes.undo_range("capture-1", first_frame_ordinal=0, last_frame_ordinal=0, now_us=25)
+
+
+def test_undo_must_be_backed_by_journaled_audio(tmp_path: Path) -> None:
+    durable, notes = open_store(tmp_path / "joat.sqlite3")
+    with durable:
+        _recording_with_frames(notes, 2)
+        with pytest.raises(VoiceNoteConflictError, match="not backed"):
+            notes.undo_range("capture-1", first_frame_ordinal=1, last_frame_ordinal=5, now_us=20)
+
+
+def test_discard_purges_quiet_and_undone_spans(tmp_path: Path) -> None:
     durable, notes = open_store(tmp_path / "joat.sqlite3")
     with durable:
         _recording_with_frames(notes, 2)
         notes.append_transcript(
             "capture-1", text="Private", first_frame_ordinal=0,
-            last_frame_ordinal=0, now_us=20, speaker="other",
+            last_frame_ordinal=0, now_us=20,
         )
+        notes.undo_range("capture-1", first_frame_ordinal=0, last_frame_ordinal=0, now_us=21)
         notes.append_quiet_span(
             "capture-1", first_frame_ordinal=1, last_frame_ordinal=1,
-            reason="silence", now_us=21,
+            reason="silence", now_us=22,
         )
-        notes.discard("capture-1", now_us=22)
+        notes.discard("capture-1", now_us=23)
 
-        for table in ("voice_note_quiet_spans", "voice_note_segment_speakers"):
+        for table in ("voice_note_quiet_spans", "voice_note_undone_spans"):
             row = durable.execute(
                 f"SELECT count(*) FROM {table} WHERE capture_id='capture-1'"
             ).fetchone()

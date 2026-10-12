@@ -16,9 +16,9 @@ import re
 import secrets
 import time
 import wave
-from collections import Counter, deque
+from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -88,6 +88,8 @@ HOLD_PREROLL_US = 1_200_000
 #: The clock title a tapped start gets; the summary replaces it.
 DEFAULT_TITLE = re.compile(r"^Note \d{2}:\d{2}$")
 _BYTES_PER_SECOND = 16_000 * 2
+#: A paragraph stops growing near the store's section limit (20,000).
+_MAX_PARAGRAPH_CHARS = 18_000
 
 NoteMode = Literal["continuous", "hold"]
 
@@ -105,7 +107,7 @@ class VoiceNoteCaptureSnapshot:
     mode: NoteMode = "continuous"
     #: True while the touchpad is held and the note is listening.
     holding: bool = False
-    #: Seconds of audio journaled so far.
+    #: Whole seconds the note has listened, on a steady clock (the REC timer).
     recorded_s: int = 0
     #: True while audio of this note is waiting for, or in, transcription.
     transcribing: bool = False
@@ -113,10 +115,9 @@ class VoiceNoteCaptureSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class LiveLine:
-    """One transcript section as the live page shows it."""
+    """One transcript section as the open note's page shows it."""
 
     text: str
-    speaker: str | None = None
 
 
 @dataclass(slots=True)
@@ -124,27 +125,10 @@ class _Chunk:
     first: int
     last: int
     loud: bool
-    #: Speaker guesses of the chunk's VOICED frames (silence says nothing).
-    speakers: Counter[str] = field(default_factory=Counter)
-    voiced: int = 0
-
-
-def speaker_label(speakers: Counter[str], voiced: int) -> str | None:
-    """'self' / 'other' when the Even app's per-frame guess clearly agrees.
-
-    Counted over voiced frames only. At least half of them must carry a
-    self/other guess, and one side must hold two thirds of those; anything
-    less is unlabelled rather than mislabelled.
-    """
-    mine, theirs = speakers.get("self", 0), speakers.get("other", 0)
-    labelled = mine + theirs
-    if voiced <= 0 or labelled == 0 or labelled * 2 < voiced:
-        return None
-    if mine * 3 >= labelled * 2:
-        return "self"
-    if theirs * 3 >= labelled * 2:
-        return "other"
-    return None
+    #: Cut from a held touchpad: the hold, not the chunk, is the input.
+    in_hold: bool = False
+    #: The paragraph its words join: one hold, or one continuous stretch.
+    paragraph: int = -1
 
 
 class VoiceNoteCaptureController:
@@ -210,10 +194,28 @@ class VoiceNoteCaptureController:
         self._queue: deque[_Chunk] = deque()
         self._failed: list[_Chunk] = []
         self._worker: asyncio.Task[None] | None = None
+        # "Undo last input" (Even's QuickNote): the frame range of each input
+        # with words in it, oldest first — a hold, or a sentence of a
+        # continuous recording — and the hold now being journaled.
+        self._inputs: list[tuple[int, int, int]] = []
+        # Paragraphs (FEAT-002): words of one continuous stretch flow on as
+        # one paragraph, as Conversate shows them; each hold is its own, as
+        # QuickNote makes them. `_open_para` is the newest one with words:
+        # (section ordinal, paragraph, last accounted frame, text).
+        self._paragraph = 0
+        self._open_para: tuple[int, int, int, str] | None = None
+        self._hold_first: int | None = None
+        self._hold_last: int | None = None
+        self._hold_loud = False
         # Monotonic seconds: when capture last (re)started, when the newest
         # frame arrived. The no-audio guard reads these.
         self._capture_began: float | None = None
         self._last_audio: float | None = None
+        # The REC timer: monotonic seconds listened in finished stretches, and
+        # when the current one began. Wall time, not audio bytes — frames
+        # arrive in bursts, and a timer read from them jumps.
+        self._listened_before = 0.0
+        self._listen_since: float | None = None
         # Bound method identity is otherwise recreated on every attribute read;
         # AudioRouter requires the exact owner that acquired the capture lane.
         self._capture_callback = self._record_frame
@@ -246,7 +248,7 @@ class VoiceNoteCaptureController:
             failure_code=self._capture_error,
             mode=self._mode,
             holding=self._holding,
-            recorded_s=note.raw_bytes // _BYTES_PER_SECOND,
+            recorded_s=int(self.elapsed_s()),
             transcribing=self._transcribing(),
         )
 
@@ -256,11 +258,17 @@ class VoiceNoteCaptureController:
         if capture_id is None or limit < 1:
             return ()
         lines = [
-            LiveLine(segment.text, segment.speaker)
+            LiveLine(segment.text)
             for segment in self._notes.segments(capture_id)
             if segment.kind == "transcript"
         ]
         return tuple(lines[-limit:])
+
+    def elapsed_s(self) -> float:
+        """Seconds the open note has listened (recording or held), steady."""
+        since = self._listen_since
+        running = self._monotonic() - since if since is not None else 0.0
+        return self._listened_before + max(0.0, running)
 
     def silent_for_s(self) -> float:
         """Seconds the open capture has gone without a frame; 0 when not capturing."""
@@ -323,6 +331,72 @@ class VoiceNoteCaptureController:
     def control_keep(self) -> str:
         return self._keep()
 
+    def control_discard(self) -> str:
+        """The exit prompt's Discard (Even's QuickNote): no second question.
+
+        The prompt itself was the confirmation; the spoken grammar keeps its
+        two steps because one misheard word must not purge a note.
+        """
+        note = self._active_note()
+        if note is None:
+            return "No Voice Note is active."
+        self._request_discard()
+        return self._confirm_discard()
+
+    def control_undo(self) -> str:
+        """"Undo last input" (Even's QuickNote menu): drop the newest paragraph.
+
+        A paragraph is one hold, or one sentence of a continuous recording.
+        Its audio stays accounted for; its words leave the note, including
+        words still being transcribed.
+        """
+        note = self._active_note()
+        if note is None:
+            return "No Voice Note is open."
+        if self._holding:
+            return "Let go of the touchpad first."
+        while self._inputs:
+            paragraph, first, last = self._inputs.pop()
+            if self._notes.is_undone(note.capture_id, first, last):
+                continue
+            self._notes.undo_range(
+                note.capture_id,
+                first_frame_ordinal=first,
+                last_frame_ordinal=last,
+                now_us=self._now(note),
+            )
+            self._close_paragraph(paragraph)
+            self._notify()
+            return "Removed the last paragraph."
+        return "Nothing to undo."
+
+    def _close_paragraph(self, paragraph: int) -> None:
+        """Words after an undone paragraph start a new one."""
+        if self._open_para is not None and self._open_para[1] == paragraph:
+            self._open_para = None
+        if paragraph == self._paragraph:
+            self._paragraph += 1
+
+    def control_hold_cancel(self) -> str | None:
+        """The held touchpad opened the glasses' menu instead (tap, then
+        long press): end the hold and keep none of its words."""
+        note = self._active_note()
+        if note is None or not self._holding:
+            return None
+        held = self._release_hold(note)
+        if held is not None:
+            if held in self._inputs:
+                self._inputs.remove(held)
+            self._notes.undo_range(
+                note.capture_id,
+                first_frame_ordinal=held[1],
+                last_frame_ordinal=held[2],
+                now_us=self._now(self._notes.get(note.capture_id)),
+            )
+            self._close_paragraph(held[0])
+        self._notify()
+        return "Menu opened; the held audio was not kept."
+
     async def control_stop(self) -> str:
         return await self._stop()
 
@@ -364,6 +438,8 @@ class VoiceNoteCaptureController:
             note.capture_id, "recording", now_us=self._now(note),
         )
         self._holding = True
+        self._hold_first = self._hold_last = None
+        self._hold_loud = False
         if not self._begin_lane(preroll_us=HOLD_PREROLL_US):
             self._holding = False
             self._notes.transition(
@@ -379,12 +455,25 @@ class VoiceNoteCaptureController:
         note = self._active_note()
         if note is None or not self._holding:
             return None
+        self._release_hold(note)
+        self._notify()
+        return f"Paused Voice Note: {note.title}."
+
+    def _release_hold(self, note: VoiceNote) -> tuple[int, int, int] | None:
+        """End a hold; (paragraph, first, last), recorded as one input if loud."""
         self._holding = False
         self._end_lane()
         if note.state == "recording":
             self._notes.transition(note.capture_id, "paused", now_us=self._now(note))
-        self._notify()
-        return f"Paused Voice Note: {note.title}."
+        first, last, loud = self._hold_first, self._hold_last, self._hold_loud
+        self._hold_first = self._hold_last = None
+        self._hold_loud = False
+        if first is None or last is None:
+            return None
+        held = (self._paragraph, first, last)
+        if loud:
+            self._inputs.append(held)
+        return held
 
     def interrupt_for_shutdown(self) -> bool:
         """Close an active lane and retain raw data without claiming a save."""
@@ -450,6 +539,7 @@ class VoiceNoteCaptureController:
 
     def _begin_lane(self, *, preroll_us: int = 0) -> bool:
         """Take the capture lane for a fresh contiguous stretch of audio."""
+        self._paragraph += 1
         self._last_generation = None
         self._last_seq = None
         self._last_received_at_us = None
@@ -464,10 +554,14 @@ class VoiceNoteCaptureController:
             )
         except AudioRouteConflictError:
             return False
+        self._listen_since = self._monotonic()
         return True
 
     def _end_lane(self) -> None:
         """Release the lane and hand the stretch's last chunk to STT."""
+        if self._listen_since is not None:
+            self._listened_before += max(0.0, self._monotonic() - self._listen_since)
+            self._listen_since = None
         if self._audio.capturing:
             try:
                 self._audio.end_capture(self._capture_callback)
@@ -753,6 +847,10 @@ class VoiceNoteCaptureController:
             self._journal_generation = frame.connection_generation
             self._journal_seq = frame.seq
             self._last_audio = self._monotonic()
+            if self._holding:
+                if self._hold_first is None:
+                    self._hold_first = journaled.ordinal
+                self._hold_last = journaled.ordinal
             self._extend_chunk(journaled, frame)
         except Exception:
             # Stop receiving immediately. The active durable row and any raw
@@ -765,15 +863,17 @@ class VoiceNoteCaptureController:
     def _extend_chunk(self, journaled: VoiceNoteFrame, frame: AudioFrame) -> None:
         chunk = self._chunk
         if chunk is None:
-            chunk = self._chunk = _Chunk(journaled.ordinal, journaled.ordinal, False)
+            chunk = self._chunk = _Chunk(
+                journaled.ordinal, journaled.ordinal, False,
+                in_hold=self._holding, paragraph=self._paragraph,
+            )
             self._chunk_bytes = 0
         chunk.last = journaled.ordinal
         self._chunk_bytes += len(frame.pcm)
         if rms(frame.pcm) >= _SILENCE_RMS:
             chunk.loud = True
-            chunk.voiced += 1
-            if frame.speaker:
-                chunk.speakers[frame.speaker] += 1
+            if chunk.in_hold:
+                self._hold_loud = True
         utterance_closed = self._vad.feed(frame.pcm) is not None
         if utterance_closed or self._chunk_bytes >= _MAX_CHUNK_BYTES:
             self._cut()
@@ -785,6 +885,18 @@ class VoiceNoteCaptureController:
         self._chunk_bytes = 0
         if chunk is None:
             return
+        if not chunk.in_hold:
+            if chunk.loud:
+                # A continuous stretch is one input, grown chunk by chunk; a
+                # hold is recorded whole when it is released.
+                if self._inputs and self._inputs[-1][0] == chunk.paragraph:
+                    paragraph, first, _last = self._inputs[-1]
+                    self._inputs[-1] = (paragraph, first, chunk.last)
+                else:
+                    self._inputs.append((chunk.paragraph, chunk.first, chunk.last))
+            elif chunk.paragraph == self._paragraph:
+                # A long silence (a whole chunk of it) ends the paragraph.
+                self._paragraph += 1
         self._queue.append(chunk)
         if self._worker is None or self._worker.done():
             try:
@@ -812,6 +924,10 @@ class VoiceNoteCaptureController:
 
     async def _transcribe_chunk(self, capture_id: str, chunk: _Chunk, *, final: bool) -> bool:
         """Account for one chunk. False when it stays untranscribed."""
+        if self._notes.is_undone(capture_id, chunk.first, chunk.last):
+            # The wearer took this input back before its words arrived; the
+            # undone span already accounts for the audio.
+            return True
         if not chunk.loud:
             self._notes.append_quiet_span(
                 capture_id,
@@ -843,16 +959,51 @@ class VoiceNoteCaptureController:
                 reason="no_words",
                 now_us=self._now(self._notes.get(capture_id)),
             )
+            # No words, no paragraph: Undo must reach the one before it.
+            entry = (chunk.paragraph, chunk.first, chunk.last)
+            if entry in self._inputs:
+                self._inputs.remove(entry)
+            self._advance_paragraph(chunk)
             return True
-        self._notes.append_transcript(
+        self._add_words(capture_id, chunk, transcript.text.strip())
+        return True
+
+    def _advance_paragraph(self, chunk: _Chunk) -> None:
+        """An accounted chunk with no words keeps its paragraph contiguous."""
+        para = self._open_para
+        if para is not None and para[1] == chunk.paragraph and chunk.first == para[2] + 1:
+            self._open_para = (para[0], para[1], chunk.last, para[3])
+
+    def _add_words(self, capture_id: str, chunk: _Chunk, words: str) -> None:
+        """The chunk's words continue its paragraph, or begin a new one.
+
+        Only the very next audio of the same stretch or hold continues it: a
+        chunk retried out of order, or one after a chunk that failed, starts
+        its own paragraph rather than splice words out of order.
+        """
+        para = self._open_para
+        now_us = self._now(self._notes.get(capture_id))
+        if (
+            para is not None
+            and para[1] == chunk.paragraph
+            and chunk.first == para[2] + 1
+            and len(para[3]) + 1 + len(words) <= _MAX_PARAGRAPH_CHARS
+        ):
+            text = f"{para[3]} {words}"
+            self._notes.extend_transcript(
+                capture_id, ordinal=para[0], text=text,
+                last_frame_ordinal=chunk.last, now_us=now_us,
+            )
+            self._open_para = (para[0], para[1], chunk.last, text)
+            return
+        segment = self._notes.append_transcript(
             capture_id,
-            text=transcript.text.strip(),
+            text=words,
             first_frame_ordinal=chunk.first,
             last_frame_ordinal=chunk.last,
-            now_us=self._now(self._notes.get(capture_id)),
-            speaker=speaker_label(chunk.speakers, chunk.voiced),
+            now_us=now_us,
         )
-        return True
+        self._open_para = (segment.ordinal, chunk.paragraph, chunk.last, words)
 
     async def _finish_transcription(self, capture_id: str) -> bool:
         """Save's half of transcription: drain, retry, then account for the rest.
@@ -885,12 +1036,7 @@ class VoiceNoteCaptureController:
         )
         for group in self._transcription_groups(leftovers):
             chunk = _Chunk(group[0].ordinal, group[-1].ordinal, loud=False)
-            for frame in group:
-                if rms(frame.pcm) >= _SILENCE_RMS:
-                    chunk.loud = True
-                    chunk.voiced += 1
-                    if frame.speaker:
-                        chunk.speakers[frame.speaker] += 1
+            chunk.loud = any(rms(frame.pcm) >= _SILENCE_RMS for frame in group)
             if not await self._transcribe_chunk(capture_id, chunk, final=True):
                 unaccounted.append(chunk)
         if not unaccounted:
@@ -968,8 +1114,14 @@ class VoiceNoteCaptureController:
         self._chunk_bytes = 0
         self._queue.clear()
         self._failed = []
+        self._inputs = []
+        self._open_para = None
+        self._hold_first = self._hold_last = None
+        self._hold_loud = False
         self._capture_began = None
         self._last_audio = None
+        self._listened_before = 0.0
+        self._listen_since = None
         worker = self._worker
         self._worker = None
         if worker is not None and not worker.done():
@@ -1061,7 +1213,7 @@ class VoiceNoteCaptureController:
         ]
         for segment in self._notes.segments(note.capture_id):
             if segment.kind == "transcript":
-                lines.append(labelled(segment.text, segment.speaker))
+                lines.append(segment.text)
             elif segment.kind == "gap":
                 lines.append(f"**AUDIO/TRANSCRIPTION GAP:** {segment.text}")
             else:
@@ -1110,15 +1262,6 @@ class VoiceNoteCaptureController:
         )
 
 
-def labelled(text: str, speaker: str | None) -> str:
-    """A transcript section as the wearer reads it: who, when JOAT knows."""
-    if speaker == "self":
-        return f"You: {text}"
-    if speaker == "other":
-        return f"Them: {text}"
-    return text
-
-
 __all__ = [
     "DEFAULT_TITLE",
     "HOLD_PREROLL_US",
@@ -1126,6 +1269,4 @@ __all__ = [
     "NoteMode",
     "VoiceNoteCaptureController",
     "VoiceNoteCaptureSnapshot",
-    "labelled",
-    "speaker_label",
 ]

@@ -37,7 +37,7 @@ class FakeWriter:
         return NotesWrite(f"Sent “{title}”.", True, note_id)
 
 
-def saved_recording(notes: VoiceNoteStore, *, speaker: str | None = "other") -> None:
+def saved_recording(notes: VoiceNoteStore) -> None:
     notes.create(
         capture_id="capture-1", idempotency_key="voice-note:capture-1",
         title="Supplier call", source_kind="g2.microphone", now_us=1_000_000,
@@ -45,12 +45,12 @@ def saved_recording(notes: VoiceNoteStore, *, speaker: str | None = "other") -> 
     notes.transition("capture-1", "recording", now_us=1_000_001)
     notes.append_frame(
         "capture-1", connection_generation="g", seq=0, source="glasses",
-        speaker=speaker, pcm=b"\x01\x00", received_at_us=1_000_002,
+        speaker="other", pcm=b"\x01\x00", received_at_us=1_000_002,
     )
     notes.transition("capture-1", "finalizing", now_us=1_000_003)
     notes.append_transcript(
         "capture-1", text="We can deliver on the 14th.", first_frame_ordinal=0,
-        last_frame_ordinal=0, now_us=1_000_004, speaker=speaker,
+        last_frame_ordinal=0, now_us=1_000_004,
     )
     notes.finalize(
         "capture-1", complete=True,
@@ -70,7 +70,7 @@ def build(tmp_path: Path) -> tuple[DurableStore, VoiceNoteStore, NoteStore, Fake
     return durable, voice, text, writer, sync
 
 
-def test_a_recording_reads_as_overview_next_steps_then_who_said_what(tmp_path: Path) -> None:
+def test_a_recording_reads_as_overview_next_steps_then_the_plain_transcript(tmp_path: Path) -> None:
     durable, voice, _text, _writer, _sync = build(tmp_path)
     with durable:
         saved_recording(voice)
@@ -85,7 +85,8 @@ def test_a_recording_reads_as_overview_next_steps_then_who_said_what(tmp_path: P
         lines = list(document.lines)
         assert lines[lines.index("Overview") + 1] == "Delivery is on the 14th."
         assert "☐ Book the van" in lines
-        assert lines[-1] == "Them: We can deliver on the 14th."
+        # Plain words, as Even shows them: no speaker labels.
+        assert lines[-1] == "We can deliver on the 14th."
 
 
 async def test_the_first_write_creates_and_the_second_updates_the_same_note(

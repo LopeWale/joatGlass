@@ -23,7 +23,6 @@ from joat.persistence.voice_notes import VoiceNoteStore
 from joat.services.voice_note_capture import (
     LiveLine,
     VoiceNoteCaptureController,
-    speaker_label,
 )
 
 
@@ -554,7 +553,7 @@ async def test_a_sentence_reaches_the_live_page_while_recording(tmp_path: Path) 
         await settle()
 
         assert capture.snapshot.state == "recording"
-        assert capture.live_lines() == (LiveLine("We ship on Friday.", "self"),)
+        assert capture.live_lines() == (LiveLine("We ship on Friday."),)
         assert stt.calls == 1
         assert changes, "the live page is told about every change"
 
@@ -736,14 +735,129 @@ async def test_keep_after_discard_resumes_only_a_recording(tmp_path: Path) -> No
         assert capture.snapshot.state == "paused"
 
 
-async def test_speaker_labels_need_clear_agreement() -> None:
-    from collections import Counter
+def speak_and_pause(source: FakeFrameSource, seq: int) -> int:
+    """One spoken sentence then a second of quiet: the recorder cuts it."""
+    for _ in range(4):
+        source.emit(seq, pcm=SPEECH_200MS)
+        seq += 1
+    for _ in range(6):
+        source.emit(seq, pcm=QUIET_200MS, speaker=None)
+        seq += 1
+    return seq
 
-    assert speaker_label(Counter({"self": 8, "other": 1}), 10) == "self"
-    assert speaker_label(Counter({"other": 6}), 8) == "other"
-    assert speaker_label(Counter({"self": 5, "other": 5}), 10) is None
-    assert speaker_label(Counter({"self": 2}), 10) is None   # mostly unlabelled
-    assert speaker_label(Counter({"wearer": 10}), 10) is None
+
+async def test_undo_takes_back_the_last_hold_and_the_note_stays_complete(
+    tmp_path: Path,
+) -> None:
+    stt = ScriptedStt(["Buy milk.", "Call the plumber."])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start("hold")
+        capture.control_hold_start()
+        source.emit(10)
+        source.emit(11)
+        capture.control_hold_end()
+        capture.control_hold_start()
+        source.emit(20)
+        capture.control_hold_end()
+        await settle()
+
+        assert capture.control_undo() == "Removed the last paragraph."
+        assert [line.text for line in capture.live_lines()] == ["Buy milk."]
+        assert capture.control_undo() == "Removed the last paragraph."
+        assert capture.live_lines() == ()
+        assert capture.control_undo() == "Nothing to undo."
+
+        await capture.control_stop()
+        saved = notes.get("capture-1")
+        # Undone audio is still accounted for: complete, raw purged.
+        assert saved.state == "saved" and saved.raw_retained is False
+        assert saved.transcribed_segments == 0
+
+
+async def test_undo_reaches_words_still_being_transcribed(tmp_path: Path) -> None:
+    stt = ScriptedStt(["Never shown."])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start("hold")
+        capture.control_hold_start()
+        source.emit(10)
+        capture.control_hold_end()
+
+        assert capture.control_undo() == "Removed the last paragraph."
+        await settle()
+
+        assert capture.live_lines() == ()
+        assert stt.calls == 0
+
+
+async def test_a_continuous_stretch_flows_as_one_paragraph(tmp_path: Path) -> None:
+    """Conversate shows flowing words: the pause detector's cuts are not new
+    lines. Pausing ends the paragraph; Undo takes back the newest one."""
+    stt = ScriptedStt(["We ship on Friday.", "Then the review.", None, "After the pause."])
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start()
+        seq = speak_and_pause(source, 0)
+        seq = speak_and_pause(source, seq)
+        seq = speak_and_pause(source, seq)    # heard, but no words in it
+        await settle()
+        assert [line.text for line in capture.live_lines()] == [
+            "We ship on Friday. Then the review.",
+        ]
+
+        capture.control_pause()
+        capture.control_resume()
+        speak_and_pause(source, seq + 5)
+        await settle()
+        assert [line.text for line in capture.live_lines()] == [
+            "We ship on Friday. Then the review.", "After the pause.",
+        ]
+
+        assert capture.control_undo() == "Removed the last paragraph."
+        assert [line.text for line in capture.live_lines()] == [
+            "We ship on Friday. Then the review.",
+        ]
+        await capture.control_stop()
+        saved = notes.get("capture-1")
+        assert saved.state == "saved" and saved.transcribed_segments == 1
+
+
+async def test_a_hold_that_opened_the_menu_keeps_nothing(tmp_path: Path) -> None:
+    stt = ScriptedStt(["Buy milk.", "Never shown."])
+    durable, _notes, source, capture = build(tmp_path / "joat.sqlite3", stt)
+    with durable:
+        capture.control_start("hold")
+        capture.control_hold_start()
+        source.emit(10)
+        capture.control_hold_end()
+        await settle()
+        capture.control_hold_start()
+        source.emit(20)
+
+        assert capture.control_hold_cancel() is not None
+        await settle()
+
+        assert capture.snapshot.holding is False
+        assert [line.text for line in capture.live_lines()] == ["Buy milk."]
+        assert stt.calls == 1
+        # The earlier paragraph is still the one Undo reaches.
+        assert capture.control_undo() == "Removed the last paragraph."
+        assert capture.live_lines() == ()
+
+
+async def test_the_exit_prompt_discards_without_a_second_question(tmp_path: Path) -> None:
+    durable, notes, source, capture = build(tmp_path / "joat.sqlite3", ScriptedStt(["Words."]))
+    with durable:
+        capture.control_start("hold")
+        capture.control_hold_start()
+        source.emit(10)
+        capture.control_hold_end()
+
+        assert capture.control_discard().startswith("Discarded Voice Note")
+
+        assert capture.active is False
+        assert notes.get("capture-1").state == "discarded"
 
 
 async def test_silence_watch_reports_a_capture_with_no_audio(tmp_path: Path) -> None:
@@ -765,3 +879,25 @@ async def test_silence_watch_reports_a_capture_with_no_audio(tmp_path: Path) -> 
         assert capture.silent_for_s() == 0.5
         capture.control_pause()
         assert capture.silent_for_s() == 0.0
+
+
+async def test_the_rec_timer_counts_listening_time_not_audio_bytes(tmp_path: Path) -> None:
+    """Frames arrive in bursts; a timer read from them jumps. The REC timer
+    is wall time while listening, paused while paused."""
+    clock = [100.0]
+    durable = DurableStore(tmp_path / "joat.sqlite3")
+    notes = VoiceNoteStore(durable)
+    capture = VoiceNoteCaptureController(
+        notes, AudioRouter(FakeFrameSource()), FakeStt(), id_factory=lambda: "capture-1",
+        monotonic=lambda: clock[0],
+    )
+    with durable:
+        capture.control_start()
+        clock[0] = 103.4
+        assert capture.snapshot.recorded_s == 3          # no frame arrived at all
+        capture.control_pause()
+        clock[0] = 150.0
+        assert round(capture.elapsed_s(), 1) == 3.4      # paused: the timer stops
+        capture.control_resume()
+        clock[0] = 152.0
+        assert capture.snapshot.recorded_s == 5

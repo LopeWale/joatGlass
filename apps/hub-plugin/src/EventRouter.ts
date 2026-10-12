@@ -8,6 +8,7 @@ import type { CapabilityMenu } from './CapabilityMenu';
 import type { G2DiagnosticTrace, G2TraceEvent } from './G2DiagnosticTrace';
 import {
   CAPABILITY_MENU_ID_BASE,
+  QUICKNOTES_UNDO_MENU_ID,
   type BrainstormAction,
   type BrainstormHudScreen,
 } from './types';
@@ -216,12 +217,13 @@ export class EventRouter {
     return true;
   }
 
-  /** End a held note paragraph exactly once. */
-  private endNoteHold(via: string): void {
+  /** End a held note paragraph exactly once: kept on release, dropped when
+   * the press turned out to open the glasses' menu. */
+  private endNoteHold(via: string, phase: 'end' | 'cancel' = 'end'): void {
     if (!this.pendingNoteHold) return;
     this.pendingNoteHold = false;
-    console.info(`[EventRouter] long-press released via ${via} — note paragraph done`);
-    this.menu.sendQuickNotesHold?.('end');
+    console.info(`[EventRouter] long-press ${phase === 'end' ? 'released' : 'cancelled'} via ${via} — note paragraph ${phase === 'end' ? 'done' : 'dropped'}`);
+    this.menu.sendQuickNotesHold?.(phase);
   }
 
   /** A decision gate that offers retry (a Messages draft) takes the 2x tap
@@ -570,9 +572,10 @@ export class EventRouter {
         if (this.pendingMicLongPress) {
           // OS contextual overlay, not an app foreground transition. Do not
           // pause location or repaint underneath the still-mounted HUD.
-          // A note hold the overlay interrupted ends here: its release
-          // belongs to the menu now.
-          this.endNoteHold('contextual-menu');
+          // The press was the menu gesture (tap, then long press), not the
+          // wearer talking: the hold it started is cancelled, its audio not
+          // kept, and the release belongs to the menu now.
+          this.endNoteHold('contextual-menu', 'cancel');
           this.pendingMicLongPress = false;
           this.contextualMenuOverlayOpen = true;
           this.lifecycle?.onContextualMenu?.(true);
@@ -694,6 +697,12 @@ export class EventRouter {
     // internal controls, still routed because a host may show a cached menu.
     if (itemID >= CAPABILITY_MENU_ID_BASE) {
       void this.menu.openFromContextualMenu(itemID - CAPABILITY_MENU_ID_BASE);
+      return;
+    }
+    if (itemID === QUICKNOTES_UNDO_MENU_ID) {
+      // An open note's "Undo last input" (Even's QuickNote menu). Anywhere
+      // else a cached row of it does nothing.
+      this.menu.sendQuickNotesUndo?.();
       return;
     }
     switch (itemID) {

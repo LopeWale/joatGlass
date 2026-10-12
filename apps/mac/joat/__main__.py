@@ -1919,7 +1919,6 @@ async def main() -> None:
         notes=note_store,
         voice_notes=voice_note_store,
         voice_capture=voice_capture,
-        notes_sync=notes_sync,
         note_reminders=note_insight_commands.create_reminders_for,
         actions=action_journal,
         # Opening the sidebar row shows the wearer's actual work sessions,

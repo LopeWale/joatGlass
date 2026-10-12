@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-10-11 — QuickNotes matches Even's QuickNote and Conversate: no speaker labels, one "+ Create new note", Save / Discard / Cancel, Undo last input
+
+The wearer: "who is them? where did you see this in the Even Realities QuickNote and Conversate features?" Nowhere: Even's own screenshots (support.evenrealities.com, QuickNote and Conversate) show plain words, and the "You:" / "Them:" labels were JOAT's guess from the SDK's `speakerRole`. The wearer then chose to match Even on every point below.
+
+- **No speaker labels anywhere**: the open note, the note's page, the Apple Notes copy and the summary prompt. Migration 16 drops `voice_note_segment_speakers` (it had no rows) and nothing reads or writes a speaker.
+- **One row, "+ Create new note"** (Even's QuickNote list), in place of "● Record" and "✎ Quick note · hold to talk" (✎ is not in the firmware font and drew as a blank). The note it opens, titled **QUICKNOTES · NEW NOTE**, takes both: hold the touchpad to talk a paragraph (QuickNote), tap to record continuously (Conversate), tap again to pause. The "Save to Apple Notes" row is gone from the glasses; saving stays automatic, and "stop saving notes to Apple Notes" still turns it off.
+- **2x tap: Save / Discard / Cancel**, Even's exit prompt word for word. Discard leaves at once (no second question); Cancel or 2x tap returns to the note. A save shows itself on the list with no band (a note with gaps says "· gaps" on its row); the band had taken the next swipe. A spoken discard still asks again.
+- **Undo last input** is the first row of the glasses' menu (tap, then long press — Even's in-feature menu gesture) while a note is open. It removes the newest paragraph, including words still being transcribed; the audio stays accounted for (`voice_note_undone_spans`, migration 16), so an undo never turns a note into one with gaps. A press that opens that menu no longer talks into the note: the hold is cancelled and its audio not kept.
+- **Words flow like Conversate**: a continuous stretch of speech is one paragraph (the pause detector's cuts are not new lines; lines no longer start mid-sentence); a pause, a hold, or a whole chunk of silence starts the next. The page fills from the newest line (`paginateFromEnd`), with one footer line: no page counter, "swipe: page" when there are earlier words.
+- **The REC timer ticks once a second**, on a steady clock timed to each second, instead of every 5 s from audio bytes (it jumped). Measured in the simulator: 00:01 to 00:12, one update each, 1.00 s apart.
+- The note's page says "[recording gap]" instead of an internal code, and its tap hint is "tap: reminders".
+- Verified in the official simulator, screen by screen: the list, the new note, recording, paused, holding, the flowing paragraph, swiping back, the no-audio notice, the glasses menu with Undo last input first, Undo, the exit prompt and its Cancel, Save, the list with the generated title, the note's page and its reminders tap. **Not verified on physical glasses.**
+- Tests: Mac unit tests for the store (undo, extend), the recorder (paragraphs, undo, cancelled hold, timer, discard) and the pages; plugin 1192 passed, typecheck clean. **Both sides change: a new package and a JOAT restart (migration 16).**
+
 ## 2026-10-11 — Build JOAT 0.1.122
 
 - Packed from `6dd1eb4` with `scripts/pack.sh`, the `com.example.joat` manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.122 above the last recorded build (0.1.121); app.json, package.json and package-lock.json all 0.1.122. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1190 tests passed, typecheck clean. Mac 3546 passed, 1 deselected (the known `test_whisper_cold_start` failure).

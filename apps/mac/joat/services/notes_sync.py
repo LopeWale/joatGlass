@@ -5,7 +5,9 @@ this is the explicit cloud copy RULES.md #8 allows: after a recording is
 saved and summarized, and after a text note is saved, the note is written
 to Apple Notes on this Mac (folder "JOAT", default account) and iCloud
 carries it to the phone. One switch turns it off: ``notes.json`` in JOAT's
-Application Support folder, toggled from the QuickNotes page or by voice.
+Application Support folder, toggled by voice ("stop saving notes to Apple
+Notes"). The glasses carry no settings row for it, as Even's QuickNote
+list carries none.
 """
 
 from __future__ import annotations
@@ -27,7 +29,6 @@ from ..persistence.note_exports import NoteExportStore, NoteKind
 from ..persistence.notes import NoteNotFoundError, NoteStore
 from ..persistence.voice_notes import VoiceNote, VoiceNoteError, VoiceNoteStore
 from .notes_export import DEFAULT_FOLDER, NotesWrite
-from .voice_note_capture import labelled
 
 log = logging.getLogger(__name__)
 
@@ -144,8 +145,7 @@ def voice_document(notes: VoiceNoteStore, capture_id: str) -> NoteDocument:
         else "Transcript (incomplete — the recording had gaps)"
     )
     body = [
-        labelled(segment.text, segment.speaker) if segment.kind == "transcript"
-        else "[recording gap]"
+        segment.text if segment.kind == "transcript" else "[recording gap]"
         for segment in notes.segments(capture_id)
         if segment.kind in ("transcript", "gap")
     ]

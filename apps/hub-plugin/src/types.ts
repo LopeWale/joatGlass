@@ -806,6 +806,13 @@ export type CapabilityName = (typeof CAPABILITIES)[number];
  * and 1-5 are the retired internal controls, so capabilities start at 10. */
 export const CAPABILITY_MENU_ID_BASE = 10;
 
+/** An open QuickNote's page — Even's "New note" (FEAT-002). */
+export const QUICKNOTES_NOTE_TITLE = 'QUICKNOTES · NEW NOTE';
+/** "Undo last input" in the glasses' menu while that page is open (Even's
+ * QuickNote menu). Id 6: 1-5 are retired controls, 10+ the capabilities. */
+export const QUICKNOTES_UNDO_MENU_ID = 6;
+export const QUICKNOTES_UNDO_MENU_LABEL = 'Undo last input';
+
 /**
  * The overview's right panel is a vertical rail of tabs. Order is the rail
  * order, top to bottom; Notifications is first because it is what the

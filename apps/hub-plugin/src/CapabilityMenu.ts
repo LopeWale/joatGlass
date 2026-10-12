@@ -15,7 +15,7 @@ import { PANEL_TAB_TITLES, panelTabForTitle, pomodoroBlockLabel, pomodoroRemaini
  * on one of them reaches the Mac as its row zero (the Navigation control,
  * a reader's "tap: continue" / "tap: confirm"). */
 const TEXT_PAGE_TITLES = new Set([
-  'MESSAGES · CONVERSATION', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL', 'QUICKNOTES · LIVE',
+  'MESSAGES · CONVERSATION', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL', QUICKNOTES_NOTE_TITLE,
   'NOTIFICATIONS · DETAIL', 'NAVIGATION', 'NEWS · ARTICLE', 'SEARCH · RESULT',
   'MESSAGES · REVIEW', 'MESSAGES · COMPOSE', 'MESSAGES · SETUP', 'MESSAGES · ACCESS',
   'MESSAGES · RETRY', 'MESSAGES · SENT', 'MESSAGES · FAILED', 'MESSAGES · CANCELLED',
@@ -66,10 +66,11 @@ function isImageMonth(title: string, grid: readonly unknown[] | undefined, selec
   return parsePlanningMonthTitle(title) !== undefined && grid?.length === 42 && selectable;
 }
 
-/** An open QuickNote (FEAT-002): its words as they are heard, a text page
- * the Mac repaints in place. A tap pauses or resumes it, 2x tap asks what
- * to do with it, and a long press held on it talks into it. */
-const LIVE_NOTE_TITLE = 'QUICKNOTES · LIVE';
+/** An open QuickNote (FEAT-002), Even's "New note" page: its words as they
+ * are heard, a text page the Mac repaints in place. A long press held on it
+ * talks a paragraph, a tap records or pauses, 2x tap opens Save / Discard /
+ * Cancel, and the glasses' menu carries Undo last input. */
+const LIVE_NOTE_TITLE = QUICKNOTES_NOTE_TITLE;
 /** The rows 2x tap leaves through to the open note: the finish question and
  * the discard confirmation. 2x tap on them returns to the note. */
 const NOTE_QUESTION_TITLES = new Set(['QUICKNOTES · DISCARD?', 'QUICKNOTES · FINISH']);
@@ -83,6 +84,7 @@ function isQuickNotesReaderTitle(title: string): boolean {
 import { reminderDueCompleteFor } from './ReminderDueReceipt';
 import {
   CAPABILITIES,
+  QUICKNOTES_NOTE_TITLE,
   VOICE_REQUEST_PREFIX,
   type InputEventPayload,
   type MessageUIMessage,
@@ -1794,16 +1796,31 @@ export class CapabilityMenu {
 
   /** The held touchpad on the live page: press starts listening, release
    * ends the paragraph. The Mac owns the note; only the gesture travels. */
-  sendQuickNotesHold(phase: 'start' | 'end'): void {
+  sendQuickNotesHold(phase: 'start' | 'end' | 'cancel'): void {
     if (!this.pendingRequestId) return;
     this.link.send({
       kind: 'input',
       event: {
         containerName: 'capability-lifecycle',
-        selectedName: phase === 'start' ? 'quicknotes-hold-start' : 'quicknotes-hold-end',
+        selectedName: `quicknotes-hold-${phase}`,
         requestId: this.pendingRequestId,
       },
     });
+  }
+
+  /** "Undo last input", chosen in the glasses' menu on an open note (Even's
+   * QuickNote menu). The Mac removes the newest paragraph and repaints. */
+  sendQuickNotesUndo(): boolean {
+    if (!this.isQuickNotesLive()) return false;
+    this.link.send({
+      kind: 'input',
+      event: {
+        containerName: 'capability-lifecycle',
+        selectedName: 'quicknotes-undo',
+        requestId: this.pendingRequestId,
+      },
+    });
+    return true;
   }
 
   private isQuickNotesReader(): boolean {

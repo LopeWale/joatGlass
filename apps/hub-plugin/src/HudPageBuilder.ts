@@ -128,6 +128,13 @@ export const ASSISTANT_ANSWER_PAGE = {
   textWidth: REGION_TEXT_WIDTH,
 } as const;
 
+/** A page's own row in the glasses' contextual menu, ahead of the
+ * capabilities (ids below CAPABILITY_MENU_ID_BASE). */
+export interface MenuLeadItem {
+  id: number;
+  name: string;
+}
+
 /** A reader's firmware text page (a News article): the answer page's
  * lines, inset so no glyph is drawn within 16 px of either side, the edge
  * the wearer asked to keep clear (2026-10-06). The container's own 4 px
@@ -336,16 +343,21 @@ export class HudPageBuilder {
    * The retired ids stay handled in EventRouter because
    * a host may still be showing a cached menu.
    */
-  private systemMenu(): MenuContainerProperty {
+  private systemMenu(lead: readonly MenuLeadItem[] = []): MenuContainerProperty {
     return new MenuContainerProperty({
-      // Filter after attaching the original index so surviving action IDs
-      // never move when a phone-owned entry disappears from the menu.
-      menuItems: CAPABILITIES.map((name, index) => ({ name, index }))
-        .filter(({ name }) => name !== 'Settings')
-        .map(({ name, index }) => new MenuItemProperty({
-        itemID: CAPABILITY_MENU_ID_BASE + index,
-        itemName: name,
-      })),
+      // A page's own controls lead (an open QuickNote's "Undo last input",
+      // as Even's in-feature menu leads with the feature's controls); then
+      // the capabilities. Filter after attaching the original index so
+      // surviving action IDs never move when a phone-owned entry disappears.
+      menuItems: [
+        ...lead.map(({ id, name }) => new MenuItemProperty({ itemID: id, itemName: name })),
+        ...CAPABILITIES.map((name, index) => ({ name, index }))
+          .filter(({ name }) => name !== 'Settings')
+          .map(({ name, index }) => new MenuItemProperty({
+            itemID: CAPABILITY_MENU_ID_BASE + index,
+            itemName: name,
+          })),
+      ],
     });
   }
 
@@ -393,8 +405,8 @@ export class HudPageBuilder {
     });
   }
 
-  private menuConfig(): { menuObject?: MenuContainerProperty } {
-    return this.contextualMenu ? { menuObject: this.systemMenu() } : {};
+  private menuConfig(lead?: readonly MenuLeadItem[]): { menuObject?: MenuContainerProperty } {
+    return this.contextualMenu ? { menuObject: this.systemMenu(lead) } : {};
   }
 
   private minimalStartupText(): TextContainerProperty {
@@ -717,13 +729,13 @@ export class HudPageBuilder {
   textPageLayout(
     body: string,
     chrome: { status?: string; hint?: string } = {},
-    options: { inset?: boolean } = {},
+    options: { inset?: boolean; menuLead?: readonly MenuLeadItem[] } = {},
   ): RebuildPageContainer {
     if (!options.inset) return this.assistantAnswerLayout(body, chrome);
     const side = { x: READER_TEXT_PAGE.x, width: READER_TEXT_PAGE.width };
     return new RebuildPageContainer({
       containerTotalNum: 3,
-      ...this.menuConfig(),
+      ...this.menuConfig(options.menuLead),
       textObject: [
         this.statusBar(chrome.status ?? ''),
         this.main(ASSISTANT_ANSWER_PAGE.bodyHeight, 1, 4, (body || ' ').slice(0, 1000), side),
