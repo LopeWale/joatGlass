@@ -154,7 +154,7 @@ describe('resolveHudOverview', () => {
       title: 'Connecting',
       primary: 'Waiting for JOAT on your Mac…',
       recovery: 'This screen will refresh automatically.',
-      hint: '2x tap: menu · long tap: mic',
+      hint: '2x tap: menu',
     });
   });
 
@@ -169,7 +169,7 @@ describe('resolveHudOverview', () => {
       title: 'Reconnecting',
       primary: 'Restoring JOAT on your Mac…',
       recovery: 'This screen will refresh automatically.',
-      hint: '2x tap: menu · long tap: mic',
+      hint: '2x tap: menu',
     });
   });
 
@@ -620,7 +620,7 @@ describe('the resting overview wears one footer on every tab', () => {
       mainBrightness: 4,
       context: '',
       tray: '',
-      hint: 'tap: open · swipe: tabs · long tap: mic · “JOAT …”',
+      hint: 'tap: open · swipe: tabs · “JOAT …”',
       ...(rail ? { rail: { activeTab: 'notifications' } } : {}),
     }, {});
     const footer = texts[texts.length - 1];
@@ -633,6 +633,6 @@ describe('the resting overview wears one footer on every tab', () => {
   });
 
   it('keeps the chrome hint where there is no rail to swipe', () => {
-    expect(overviewFooter(false)).toBe('tap: open · swipe: tabs · long tap: mic · “JOAT …”');
+    expect(overviewFooter(false)).toBe('tap: open · swipe: tabs · “JOAT …”');
   });
 });

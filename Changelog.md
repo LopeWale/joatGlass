@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-12 — Long tap no longer turns the mic on or off
+
+The wearer: the footer's "long tap: mic" "is fucking up my quickNote experience because i use the long tap on quickNote to record and it also turns the mic on; the mic can stay on right?"
+
+- **Long tap keeps only its specific jobs** (`EventRouter.handleLongPress`): hold to talk on an open QuickNote, refresh an expanded News or Search tab, cancel a running Brainstorm/terminal job. Anywhere else it does nothing. It is still consumed in every event class (list, text, sys), so the release never reaches the Mac as a scroll or phantom input, and a tap-then-long-press that opened the glasses menu still cancels a note hold.
+- **"long tap: mic" is gone from every footer**: the resting overview (`Chrome.HINT`, now `tap: open · swipe: tabs · "JOAT …"`), the panel overview, Pomodoro, and the four status cards (now `2x tap: menu`).
+- **What still controls the mic.** Taking the glasses off still stops it (`DeviceMonitor`, the privacy fail-safe). Putting them back on follows the phone setting Listening → After an interruption: "Ask first" shows "Resume listening?" for 8 s, and a missed or declined card leaves the mic off. There is now no glasses gesture to turn it back on; the Mac opens it again when the plugin reconnects, and QuickNotes reopens it for a note. "Resume automatically" turns it back on as soon as the glasses are on. A cached host menu's old Mute row (item 2) still toggles it.
+- Tests: the long-tap block now asserts that the mic is never started or stopped, that every class is consumed, and that the carve-outs still run. The footer hints are asserted free of "long tap". Plugin 1224 passed; typecheck clean. **Plugin only: needs the new build.**
+
 ## 2026-10-12 — QuickNotes: words reach the glasses ~0.6 s sooner, and a pause no longer starts a new sentence
 
 The wearer: "the latency between when I say something and when it shows on the glasses … reduce it a little bit. It is very important that we do not lose quality", and from their first note: "the only thing is capitalization when a period or [comma] is needed".

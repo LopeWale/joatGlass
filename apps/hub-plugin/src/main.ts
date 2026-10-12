@@ -1608,7 +1608,7 @@ async function renderVisualState(
     ContainerId.Tray, 2,
   );
   await hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
-  await hud.showText('tap: open · swipe: tabs · long tap: mic', ContainerId.Hint, 1);
+  await hud.showText('tap: open · swipe: tabs', ContainerId.Hint, 1);
 }
 
 function productivityLifecycleFixture(

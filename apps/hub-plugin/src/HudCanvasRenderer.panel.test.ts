@@ -48,8 +48,9 @@ describe('panel page copy', () => {
     // Long press is the mic on every resting tab and on the pomodoro page
     // (excluded from the refresh carve-out), so both must say so. The
     // pomodoro hint must NOT promise a refresh it will never send.
-    expect(PANEL_OVERVIEW_HINT).toContain('long tap: mic');
-    expect(POMODORO_EXPANDED_HINT).toContain('long tap: mic');
+    // Long tap is no longer the mic (2026-10-12): no footer may offer it.
+    expect(PANEL_OVERVIEW_HINT).not.toContain('long tap');
+    expect(POMODORO_EXPANDED_HINT).not.toContain('long tap');
     expect(POMODORO_EXPANDED_HINT).not.toContain('refresh');
   });
 

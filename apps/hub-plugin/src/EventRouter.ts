@@ -150,7 +150,9 @@ export class EventRouter {
   }
 
   /**
-   * Long-press → mute/unmute the glasses mic.
+   * Long-press: hold to talk on an open note, refresh News/Search, cancel a
+   * running work session — and nothing elsewhere. It was the mic mute until
+   * 2026-10-12; the mic now stays on (doff still stops it).
    *
    * Checked in EVERY event class because the SDK README is explicit that
    * Long press/release are delivered inside the matching list, text, or
@@ -193,12 +195,12 @@ export class EventRouter {
         this.menu.refreshPanel();
         return true;
       }
-      if (toggleMic) {
-        console.info(`[EventRouter] long-press via ${via} — toggling mic`);
-        this.toggleMic();
-      }
-      // Consumed silently: one press is one toggle, and the release must not
-      // reach the Mac as a phantom input.
+      // Long tap no longer mutes (the wearer, 2026-10-12: it fought the
+      // QuickNotes hold, and "the mic can stay on"). Outside the carve-outs
+      // above and a held note it does nothing; doff still stops the mic.
+      // Consumed silently: the release must not reach the Mac as a phantom
+      // input. (`pendingMicLongPress` keeps its name: it still separates a
+      // plain long press from the OS menu's tap-then-long-press.)
       return true;
     }
     if (type !== OsEventTypeList.LONG_PRESS_EVENT) return false;

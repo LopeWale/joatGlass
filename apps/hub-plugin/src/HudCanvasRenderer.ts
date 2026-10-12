@@ -178,9 +178,9 @@ export const PANEL_RAIL = {
  * affordance from the footer while it kept working. The pomodoro page
  * names it too: that tab is excluded from the refresh carve-out
  * (CapabilityMenu.isPanelRefreshable), so a hold there opens the mic. */
-export const PANEL_OVERVIEW_HINT = 'tap: open · swipe: tabs · long tap: mic';
+export const PANEL_OVERVIEW_HINT = 'tap: open · swipe: tabs';
 export const PANEL_EXPANDED_HINT = 'tap: open · long tap: refresh · 2x tap: back';
-export const POMODORO_EXPANDED_HINT = 'tap: choose · long tap: mic · 2x tap: back';
+export const POMODORO_EXPANDED_HINT = 'tap: choose · 2x tap: back';
 
 export interface HudNotificationRow {
   source: string;
@@ -825,7 +825,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       title: 'Offline',
       primary: 'JOAT on your Mac is unavailable.',
       recovery: 'Open JOAT on your Mac to reconnect.',
-      hint: '2x tap: menu · long tap: mic',
+      hint: '2x tap: menu',
     };
   }
   if (/\breconnecting\b/i.test(input.status)) {
@@ -834,7 +834,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       title: 'Reconnecting',
       primary: 'Restoring JOAT on your Mac…',
       recovery: 'This screen will refresh automatically.',
-      hint: '2x tap: menu · long tap: mic',
+      hint: '2x tap: menu',
     };
   }
   if (/\bconnecting\b/i.test(input.status)) {
@@ -843,7 +843,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       title: 'Connecting',
       primary: 'Waiting for JOAT on your Mac…',
       recovery: 'This screen will refresh automatically.',
-      hint: '2x tap: menu · long tap: mic',
+      hint: '2x tap: menu',
     };
   }
   if (!main && !context && !tray) {
@@ -852,7 +852,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
       title: 'Ready',
       primary: 'Ask JOAT anything.',
       recovery: 'Say “JOAT …” · tap then hold for menu.',
-      hint: '2x tap: menu · long tap: mic',
+      hint: '2x tap: menu',
     };
   }
 

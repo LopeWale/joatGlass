@@ -432,14 +432,14 @@ describe('EventRouter — confirm gestures', () => {
     expect(imu.declineByTap).toHaveBeenCalledTimes(1);
   });
 
-  it('leaves long tap as the mic when no decision is pending', () => {
+  it('a long tap with no decision pending is not a retry (and not the mic since 2026-10-12)', () => {
     const retry = vi.fn(() => true);
     const { fire, audio } = withRetry(retry);
     fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
     fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
 
     expect(retry).not.toHaveBeenCalled();
-    expect(audio.stop).toHaveBeenCalledTimes(1);
+    expect(audio.stop).not.toHaveBeenCalled();
   });
 
   it('an explicit eventType 0 also confirms, for hosts that do send it', () => {
@@ -958,30 +958,40 @@ describe('EventRouter — text and list', () => {
   });
 });
 
-describe('EventRouter — long tap mutes the mic', () => {
+describe('EventRouter — long tap never touches the mic (2026-10-12)', () => {
   /**
-   * An earlier build ceded long-press to the glasses OS, believing a
-   * declared menuObject made the OS open its contextual menu on that
-   * gesture. The SDK README says the opposite twice — long press and
-   * release "remain regular list/text/sys events", "delivered inside the
-   * matching list, text, or system event" — there is no bridge verb that
-   * opens a menu, and on hardware the gesture did nothing at all.
+   * Long tap was the mic mute. The wearer: it "is fucking up my quickNote
+   * experience because i use the long tap on quickNote to record and it also
+   * turns the mic on; the mic can stay on". It keeps its specific jobs —
+   * hold to talk on an open note, refresh on News/Search, cancel a running
+   * work session — and does nothing anywhere else. Doff still stops the mic.
    *
-   * It must therefore be handled in EVERY event class, and BEFORE each
-   * branch's relay: on a text-capture page the textEvent relay would
-   * otherwise forward it to the Mac as an ordinary scroll.
+   * It is still handled in EVERY event class, BEFORE each branch's relay
+   * (the SDK delivers long press/release inside list, text or sys events):
+   * on a text-capture page the relay would otherwise forward it to the Mac
+   * as an ordinary scroll.
    */
   const LONG_PRESS = OsEventTypeList.LONG_PRESS_EVENT;
   const RELEASE = OsEventTypeList.LONG_PRESS_RELEASE_EVENT;
 
-  it('toggles the mic when a plain sysEvent long tap reaches release', () => {
+  it('a plain long tap on the overview leaves the mic as it is', () => {
     const r = make();
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
     r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
-    expect(r.audio.stop).toHaveBeenCalledTimes(1);
+    expect(r.audio.stop).not.toHaveBeenCalled();
+    expect(r.audio.start).not.toHaveBeenCalled();
+    expect(r.sent).toEqual([]);
   });
 
-  it('cancels a running terminal job instead of muting (2026-10-06)', () => {
+  it('a muted mic is not un-muted by long tap either', () => {
+    const r = make();
+    r.audio.isOpen = false;
+    r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
+    r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
+    expect(r.audio.start).not.toHaveBeenCalled();
+  });
+
+  it('cancels a running terminal job (2026-10-06)', () => {
     const r = make(false, undefined, false, true);
     r.brainstorm.handleLongPress.mockReturnValue(true);
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
@@ -991,17 +1001,15 @@ describe('EventRouter — long tap mutes the mic', () => {
     expect(r.audio.start).not.toHaveBeenCalled();
   });
 
-  it('keeps long tap as the mic on a Brainstorm page that is not a running job', () => {
+  it('on a Brainstorm page that is not a running job it does nothing', () => {
     const r = make(false, undefined, false, true);
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
     r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
     expect(r.brainstorm.handleLongPress).toHaveBeenCalledTimes(1);
-    expect(r.audio.stop).toHaveBeenCalledTimes(1);
+    expect(r.audio.stop).not.toHaveBeenCalled();
   });
 
-  it('refreshes an expanded panel tab instead of muting — the one carve-out', () => {
-    // Menu open (a data view owns input) AND that view is a panel tab's top
-    // level: the wearer's ruling is that long press re-fetches it there.
+  it('refreshes an expanded News/Search tab', () => {
     const r = make(true, undefined, false, false, false, false, false, true);
     r.fire({ textEvent: { eventType: LONG_PRESS, containerName: 'main' } });
     r.fire({ textEvent: { eventType: RELEASE, containerName: 'main' } });
@@ -1010,50 +1018,39 @@ describe('EventRouter — long tap mutes the mic', () => {
     expect(r.sent).toEqual([]);
   });
 
-  it('keeps the mic on the pomodoro page — expanded, but nothing to re-fetch', () => {
-    // The defect the simulator sweep surfaced: POMODORO satisfies
-    // isPanelExpanded, so the hold used to fire a refresh the wearer could
-    // not see and swallow the mic, with the hint naming neither.
+  it('on the Pomodoro page (nothing to re-fetch) it does nothing', () => {
     const r = make(true, undefined, false, false, false, false, false, true, false);
     r.fire({ textEvent: { eventType: LONG_PRESS, containerName: 'main' } });
     r.fire({ textEvent: { eventType: RELEASE, containerName: 'main' } });
     expect(r.menu.refreshPanel).not.toHaveBeenCalled();
-    expect(r.audio.stop).toHaveBeenCalledTimes(1);
+    expect(r.audio.stop).not.toHaveBeenCalled();
   });
 
-  it('keeps the mic on long press inside an opened article, and on the overview', () => {
+  it('inside an opened article it does nothing', () => {
     const r = make(true);
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
     r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
     expect(r.menu.refreshPanel).not.toHaveBeenCalled();
-    expect(r.audio.stop).toHaveBeenCalledTimes(1);
+    expect(r.audio.stop).not.toHaveBeenCalled();
   });
 
-  it('toggles the mic from a textEvent — the relay must not swallow it', () => {
+  it('a textEvent long tap is consumed, not relayed to the Mac as a scroll', () => {
     const r = make();
     r.fire({ textEvent: { eventType: LONG_PRESS, containerName: 'main' } });
     r.fire({ textEvent: { eventType: RELEASE, containerName: 'main' } });
-    expect(r.audio.stop).toHaveBeenCalledTimes(1);
-    expect(r.sent).toEqual([]); // not relayed to the Mac as a scroll
-  });
-
-  it('toggles the mic from a listEvent', () => {
-    const r = make();
-    r.fire({ listEvent: { eventType: LONG_PRESS } });
-    r.fire({ listEvent: { eventType: RELEASE } });
-    expect(r.audio.stop).toHaveBeenCalledTimes(1);
+    expect(r.audio.stop).not.toHaveBeenCalled();
     expect(r.sent).toEqual([]);
   });
 
-  it('un-mutes when the mic is off, reusing lastSource', () => {
+  it('a listEvent long tap is consumed', () => {
     const r = make();
-    r.audio.isOpen = false;
-    r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
-    r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
-    expect(r.audio.start).toHaveBeenCalledWith(r.audio.lastSource);
+    r.fire({ listEvent: { eventType: LONG_PRESS } });
+    r.fire({ listEvent: { eventType: RELEASE } });
+    expect(r.audio.stop).not.toHaveBeenCalled();
+    expect(r.sent).toEqual([]);
   });
 
-  it('release is consumed silently — one press, one toggle, no phantom input', () => {
+  it('a stray release is consumed silently — no phantom input', () => {
     const r = make();
     r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
     expect(r.audio.stop).not.toHaveBeenCalled();
@@ -1329,11 +1326,11 @@ describe('EventRouter prompt ownership', () => {
     expect(f.menu.handleList).not.toHaveBeenCalled();
   });
 
-  it('keeps hold-to-mute instead of refreshing the hidden News page', () => {
+  it('does not refresh the hidden News page behind a question (nor touch the mic)', () => {
     const f = question();
     f.fire({ textEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
     f.fire({ textEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
-    expect(f.audio.stop).toHaveBeenCalledOnce();
+    expect(f.audio.stop).not.toHaveBeenCalled();
     expect(f.menu.refreshPanel).not.toHaveBeenCalled();
   });
 
@@ -1446,11 +1443,14 @@ describe('EventRouter — a long press held on an open QuickNote talks into it (
     expect(r.audio.stop).not.toHaveBeenCalled();
   });
 
-  it('elsewhere a long press is still the mic', () => {
+  it('elsewhere a long press does nothing: no hold, and no mic toggle (2026-10-12)', () => {
     const r = make();
-    Object.assign(r.menu, { isQuickNotesLive: vi.fn(() => false), sendQuickNotesHold: vi.fn() });
+    const hold = vi.fn();
+    Object.assign(r.menu, { isQuickNotesLive: vi.fn(() => false), sendQuickNotesHold: hold });
     r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_EVENT } });
     r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT } });
-    expect(r.audio.stop).toHaveBeenCalledOnce();
+    expect(hold).not.toHaveBeenCalled();
+    expect(r.audio.stop).not.toHaveBeenCalled();
+    expect(r.audio.start).not.toHaveBeenCalled();
   });
 });
