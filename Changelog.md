@@ -3,7 +3,7 @@
 ## 2026-10-13 — Build JOAT 0.1.129
 
 - Packed from `06e5023` (clean tree) with `scripts/pack.sh`, the `com.example.joat` manifest and the MacBook-first, Mac Mini-second private WSS candidates. app.json, package.json and package-lock.json all 0.1.129 (last build 0.1.128). `--sdk-ver 0.0.16` (the newest on npm), minimum Even App 2.2.10. Plugin 1236 tests passed, typecheck clean.
-- Canonical `apps/hub-plugin/joat.ehpk`: 178774 bytes, SHA-256 `77a3705ddf5bf739ffea2a765747431dd483a02ccb3dc94d960dc51dbaa0c8db`. Adds to 0.1.128: bounded mic calls and JOAT's heartbeat (`51ceb51`). Install through a Beta group (docs/HUB_PLUGIN.md Path B). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+- Canonical `apps/hub-plugin/joat.ehpk`: 178774 bytes, SHA-256 `77a3705ddf5bf739ffea2a765747431dd483a02ccb3dc94d960dc51dbaa0c8db`. Adds to 0.1.128: bounded mic calls and JOAT's heartbeat (`51ceb51`). Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-13 — A paused note survives a reconnect, a stuck mic call no longer drops the link, and JOAT keeps its own heartbeat
 
@@ -15,7 +15,7 @@ The wearer: the plugin "dropping out or freezing is still a problem … especial
 
 **3. JOAT's own heartbeat** (`protocol.LinkPing`/`LinkPong`, `HubGatewayTransport._heartbeat`, `MacLink.armLiveness`). The websockets library's Ping is answered by the phone's network stack and page JavaScript cannot send Pings (RFC 6455 §5.5.2–5.5.3), so neither side could tell a frozen plugin page or a vanished Mac from a quiet link. The plugin says `heartbeat: true` in its hello; the Mac then sends `link.ping` every 10 s, the plugin answers `link.pong` straight from MacLink (not behind slow HUD work), and the Mac closes a link silent for 45 s with 4408 "no heartbeat" so the plugin reconnects and re-syncs. The plugin, once pinged, drops a link that brings nothing for 45 s and dials again. Both sides restart the clock after their own stall (a Mac event-loop stall, a suspended phone page), so a pause on one side is not blamed on the other. Older plugins (no `heartbeat`) are never pinged or held to it; older Macs never ping, so the plugin never enforces it.
 
-**4. Setup guide: Beta, not Private builds** (`docs/HUB_PLUGIN.md` Path B), after Even's Beta Testing page: "Private builds survive briefly but not 5 minutes" of phone lock; Beta behaves like a released app. Step-by-step portal and phone steps, the 5-minute lock check, and a note for contributors.
+**4. Setup guide** (`docs/HUB_PLUGIN.md` Path B). Corrected the same day: the first version gave Beta-group steps copied from Even's Testing docs, but the portal (tabs Builds, Testing group, Store listing) has no "Beta groups" tab. The guide now says only what is confirmed: a Private build does not survive a 5-minute lock (Even's docs), and the Beta path from this portal is unconfirmed.
 
 Tests: plugin 1236 passed (bounded mic: give up at 5 s, next call not stuck, late success adopted or turned off, hung stop finishes; heartbeat: pong outside the HUD queue, quiet link redialed, a Mac that never pings never enforced, a suspended page restarts the clock), typecheck clean. Mac: heartbeat over a real socket (answering plugin stays, silent one closed 4408, older plugin left alone), protocol wire shapes mirrored in types.ts, paused note re-attached after reconnect and its tap counts, no pull-back after the wearer left, nothing when no note is open.
 

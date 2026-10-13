@@ -550,34 +550,26 @@ the glasses render the plugin within a second, and saved edits hot-reload
 without re-scanning. Phone and Mac must be on the same network, and the
 engine must be up for voice/cards (the script warns on both).
 
-### Path B — packed Beta build (the one to wear every day)
+### Path B — packed build (survives without the dev server)
 
 ```
 cd apps/hub-plugin && npm run pack     # -> apps/hub-plugin/joat.ehpk (gitignored)
 ```
 
-Install it through a **Beta group**, not Private builds. Even's Beta
-Testing page (updated 2026-09-18): "Local Testing dies the second the
-phone locks", "Private builds survive briefly but not 5 minutes", and Beta
-is the only mode that behaves like a released app. A JOAT on a Private
-build is expected to vanish while the phone is locked in a pocket, which
-is exactly when a paused QuickNote waits for you.
+Upload it with **Upload a build** in the project at hub.evenrealities.com;
+the portal marks it **Private**. As of 2026-10-13 the project shows the
+tabs **Builds**, **Testing group** and **Store listing**.
 
-1. hub.evenrealities.com → sign in → open your project.
-2. **Beta groups** tab → create a group (e.g. `self-test`) → add your own
-   account email (each tester has a ten-invitation limit).
-3. **Builds** tab → upload `joat.ehpk`.
-4. Assign that build to your `self-test` group.
-5. On the phone: Even Realities app → **Me → Beta tester** → **Install**.
-   Remove an older Private install so two copies do not fight over the
-   glasses.
-6. Check it the way Even's reviewers do: open JOAT, lock the phone for 5
-   minutes, unlock — it should still be where you left it.
-
-A new build needs the same upload, assign and reinstall. Iteration is
-slow, so do Path A first. Each contributor uploads their own build to
-their own project, with their own Mac's address in `app.json` and
-`apps/hub-plugin/.env`. Source: https://hub.evenrealities.com/docs/test/beta-testing
+Lock survival depends on how a build is installed. Even's Testing pages:
+"Private builds survive backgrounding briefly but don't pass the 5-minute
+lock test the QA reviewer runs", and Beta builds behave like a released
+app. Those pages describe a "Private builds" tab and a "Beta groups" tab,
+which this portal does not show, so how to get a Beta-equivalent install
+from **Testing group** is not confirmed. Until it is, expect a Private
+install to be killed while the phone is locked; JOAT's reconnect, the
+heartbeat and the QuickNote re-attach bring the session back when the
+plugin returns. Iteration is rebuild → re-upload → reinstall, so do Path A
+first.
 
 **Bump the version before every upload.** `--enforce-manual-version` means
 the packer never invents one; nothing bumps it automatically, so an
