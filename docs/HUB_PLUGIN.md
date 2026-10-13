@@ -608,15 +608,23 @@ wearer: a Wi-Fi blip during the pairing frame would leave the Mac holding a
 token no phone has, 401-ing the real phone forever. Unacked offers keep the
 window open, so a failed pairing costs a retry, not a manual reset.
 
-Loopback is exempt from token comparison — the simulator and `speak_test.py`
-run on the Mac itself, and a local process could read the token file anyway.
+With **Private Tailnet home brain** on (the normal setup), nothing is exempt:
+every peer, loopback included, must present the key. A hand-run engine
+without it still trusts loopback for the simulator and `speak_test.py`.
 
-- Token store: `~/Library/Application Support/JOAT/pairing.json` (0600).
-- Pairing-window marker:
-  `~/Library/Application Support/JOAT/pairing-window.json` (0600, 120 seconds).
+- Token store (since 2026-10-13): the login keychain, item
+  `com.joat.shell.pairing` / `glasses`, readable without a macOS prompt only
+  by JOAT.app. The app hands the key to the engine over its private launch
+  pipe and keeps any newly paired key there. The first launch moves an old
+  `pairing.json` into the keychain and deletes it; a `pairing.json` that
+  reappears later is ignored. A hand-run engine still uses `pairing.json`.
+- Pairing window: opened only by JOAT.app's **Pair / Replace Glasses**, over
+  that same pipe, for 120 seconds. No file opens it.
+- Only the same glasses take the link: while a display that named its
+  glasses holds it, a newer display must name the same glasses in its hello
+  within 3 s, or it is closed 4409 and waits as a standby.
 - **Re-pair**: press **Pair / Replace Glasses** in JOAT.app, then connect the
-  intended glasses within 120 seconds. Deleting or corrupting `pairing.json`
-  leaves pairing closed; filesystem loss is never authorization.
+  intended glasses within 120 seconds.
 - **Stuck on "reconnecting" after reinstalling the plugin**: the Mac is
   paired to a token the phone no longer has (reinstall, cleared storage, a
   different phone). The phone cannot fix this itself — it cannot

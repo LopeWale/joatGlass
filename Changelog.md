@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-10-13 — Only your glasses can hold your glasses: the key moves to the keychain
+
+The wearer: "How is it possible for you to take over my glasses when you're testing … this project is shared with other contributors, and I'm not trying to leave a security gap."
+
+**What was true (checked on this Mac).** JOAT listens on loopback only, reached through Tailscale Serve (tailnet only, no Funnel); with Private Tailnet home brain every peer needs the pairing key, and unkeyed peers are refused (2026-10-12 07:24–07:49 and 15:01–15:15 in brain.log). The key was not in git or the Project. But it lived in `~/Library/Application Support/JOAT/pairing.json`, which any program running as the wearer can read, and any program could open a pairing window by writing `pairing-window.json`. And the newest authenticated display always won, so anything holding the key took the glasses from the phone.
+
+**Changes**
+- **The key lives in the login keychain** (`PairingKeychain.swift`). An item JOAT.app adds without an access object gets the default access, which trusts only the app that created it; any other program reading it makes macOS ask the wearer ([SecAccessCreate](https://developer.apple.com/documentation/security/secaccesscreate(_:_:_:)), [Access Control Lists](https://developer.apple.com/documentation/security/access-control-lists)). The file-based keychain is used because the data protection keychain needs access-group entitlements authorized by a provisioning profile, and JOAT.app has none ([TN3137](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains)).
+- **The engine gets the key from JOAT.app over its private launch pipe** (`EngineCommandChannel` ↔ `ChildCommandPipe`): `pairing.state` app → engine, `pairing.confirmed` engine → app. The engine says `"pairing": 1` in its hello; JOAT.app sets `JOAT_PAIRING_CHANNEL=1` at launch. Either side without the other keeps the old file behaviour, so an old app and a new engine (or the reverse) still pair. The pipe now starts before the gateway listens, and the engine waits up to 10 s for the key, so the phone is never refused for a key not yet delivered (it would only see 403, which never clears its token).
+- **First launch moves `pairing.json` into the keychain**, reads it back, then deletes both files. A `pairing.json` that appears after that is ignored and removed, never trusted.
+- **Only JOAT.app's Pair / Replace Glasses opens a window**, sent over the pipe; `PairingWindowStore` is gone. A phone key is kept only if it was paired inside that window (+30 s for the acknowledgement).
+- **Only the same glasses take the link** (`hub_gateway._may_take_over`). While a display that named its glasses holds the link, a newer display must name the same glasses in its hello within 3 s, or it is closed 4409 ("glasses held by another device") and waits as a standby. The phone coming back and its own second page still take over at once; a simulator or harness does not.
+- `speak_test.py` refuses the live JOAT on :8787 unless `--live`.
+- Stopped a leftover plugin dev server (port 5193) a Claude session started on 2026-10-11.
+
+Tests: Swift `EngineCommandChannelTests` + new `PairingKeychainTests` (23 passed); Python pairing, local-command pipe (real child process: forged identity and invalid key ignored, window applied, new key handed back), gateway takeover (other glasses wait, silent display waits, same glasses take over without losing earlier frames). SecItem add/update/read/delete smoke-tested on this Mac with a throwaway item. **Needs a JOAT.app build + install and a restart to take effect.**
+
+Not changed: the Even AI agent token (`agent-token`) is still a file, because the wearer copies it into the Even app; it can move to the keychain with a Reveal button in JOAT.app.
+
 ## 2026-10-12 — The overview's QuickNotes ages keep counting
 
 The wearer: "the quick notes time does not update on the overview when it is the current active tab. But when I click to go to the actual quick note page, I see the updated time."

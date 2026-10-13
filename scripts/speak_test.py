@@ -88,7 +88,17 @@ def main() -> None:
     ap.add_argument("--rate", type=int, default=175)
     ap.add_argument("--lead", type=float, default=3.0)
     ap.add_argument("--tail", type=float, default=2.0)
+    ap.add_argument("--live", action="store_true",
+                    help="allow the wearer's own JOAT on port 8787 (it acts as a display)")
     args = ap.parse_args()
+    # This harness impersonates the plugin. Pointed at the wearer's running
+    # JOAT it is a second display beside the glasses (2026-10-13: "how is it
+    # possible for you to take over my glasses when you're testing"), so it
+    # only goes there when asked by name.
+    if ":8787/" in args.url and not args.live:
+        print("refusing the wearer's live JOAT on :8787 — run a separate engine "
+              "on another --port and pass --url, or add --live", file=sys.stderr)
+        raise SystemExit(2)
     try:
         asyncio.run(run(args.phrase, args.url, args.voice, args.rate,
                         args.lead, args.tail))

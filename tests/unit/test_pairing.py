@@ -183,3 +183,70 @@ class TestRecovery:
         store.confirm(token)
         assert store.token == token
         assert store.token == token  # repeated reads stay stable
+
+
+class TestShellPairingStore:
+    """Under JOAT.app the key lives in its keychain, not in pairing.json."""
+
+    def test_nothing_is_paired_or_open_until_the_app_speaks(self) -> None:
+        from joat.core.pairing import ShellPairingStore
+
+        store = ShellPairingStore()
+        assert not store.known
+        assert store.token is None
+        assert store.window_open is False
+
+    def test_the_apps_key_is_the_key(self) -> None:
+        from joat.core.pairing import ShellPairingStore
+
+        store = ShellPairingStore()
+        store.apply("key-from-keychain", None)
+        assert store.known and store.token == "key-from-keychain"
+        assert store.window_open is False
+
+    def test_a_window_only_while_unpaired_and_never_past_five_minutes(self) -> None:
+        from joat.core.pairing import ShellPairingStore
+
+        now = [1_000.0]
+        store = ShellPairingStore(clock=lambda: now[0])
+        store.apply(None, now[0] + 3_600)
+        assert store.window_open
+        now[0] += 301
+        assert store.window_open is False
+        store.apply("key", now[0] + 60)
+        assert store.window_open is False
+
+    def test_only_the_app_opens_a_window(self) -> None:
+        import pytest
+
+        from joat.core.pairing import ShellPairingStore
+
+        store = ShellPairingStore()
+        with pytest.raises(PermissionError):
+            store.begin_pairing()
+        assert store.window_open is False
+
+    def test_a_new_phone_key_goes_to_the_app(self) -> None:
+        from joat.core.pairing import ShellPairingStore
+
+        handed: list[str] = []
+        store = ShellPairingStore()
+        store.apply(None, 10**12)
+        store.set_on_confirmed(handed.append)
+        store.confirm("new-phone-key")
+        assert handed == ["new-phone-key"]
+        assert store.token == "new-phone-key" and store.window_open is False
+
+    def test_invalid_state_is_refused(self) -> None:
+        import math
+
+        import pytest
+
+        from joat.core.pairing import ShellPairingStore
+
+        store = ShellPairingStore()
+        with pytest.raises(ValueError):
+            store.apply("", None)
+        with pytest.raises(ValueError):
+            store.apply(None, math.inf)
+        assert not store.known

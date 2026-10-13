@@ -254,7 +254,8 @@ class TestConnection:
         ] == ["nonphysical"]
 
     async def test_newest_connection_wins(self, transport) -> None:
-        """Reconnect-after-sleep is common; two live plugins are not."""
+        """Reconnect-after-sleep is common; two live plugins are not. The
+        newcomer names the same glasses, as the phone coming back does."""
         t, url = transport
         first = await websockets.connect(url)
         await _wait_for(lambda: t.connected)
@@ -269,6 +270,9 @@ class TestConnection:
         await asyncio.sleep(0.01)
         assert t.connection_generation == first_generation
         async with websockets.connect(url) as second:
+            await second.send(json.dumps({
+                "kind": "hello", "sn": "G2", "model": "g2", "launchSource": "physical",
+            }))
             await _wait_for(lambda: t.connection_generation > first_generation)
             await second.send(json.dumps({"kind": "device", "connect": "connected"}))
             await _wait_for(lambda: t.device is not None)
@@ -1173,6 +1177,98 @@ class TestPluginReplacement:
                 }
             await _wait_for(lambda: not t.connected)
             assert disconnects == [True]
+
+    @staticmethod
+    def _hello(serial: str) -> str:
+        return json.dumps({"kind": "hello", "sn": serial, "model": "g2", "launchSource": "appMenu"})
+
+    async def test_a_display_naming_other_glasses_waits_instead_of_taking_the_link(
+        self, paired_transport, caplog,
+    ) -> None:
+        """The wearer, 2026-10-13: "how is it possible for you to take over my
+        glasses when you're testing". A simulator or harness holding the key
+        names other glasses (or none); it may not evict the phone's link."""
+        t, url, store = paired_transport
+        token = await _pair(url)
+        await _wait_for(lambda: not t.connected)
+        async with websockets.connect(url) as phone:
+            await _authenticate(phone, token)
+            await phone.send(self._hello("S200REALGLASSES"))
+            await _wait_for(lambda: t.hello is not None)
+            active, generation = t._conn, t.connection_generation
+            caplog.set_level(logging.WARNING, logger="joat.ble.hub_gateway")
+
+            async with websockets.connect(url) as harness:
+                await _authenticate(harness, token)
+                await harness.send(self._hello("TESTHARNESS"))
+                with pytest.raises(websockets.ConnectionClosed):
+                    await asyncio.wait_for(harness.recv(), 2)
+                assert harness.close_code == 4409
+                assert harness.close_reason == "glasses held by another device"
+
+            assert t._conn is active and t.connection_generation == generation
+            assert t.hello is not None and t.hello.sn == "S200REALGLASSES"
+            assert phone.close_code is None
+            assert "refused a takeover" in caplog.text
+            await t.send(HudText(text="Still yours"))
+            assert json.loads(await asyncio.wait_for(phone.recv(), 2))["text"] == "Still yours"
+
+    async def test_a_display_that_names_no_glasses_in_time_waits(
+        self, unused_tcp_port, tmp_path,
+    ) -> None:
+        store = PairingStore(tmp_path / "pairing.json")
+        store.begin_pairing()
+        t = HubGatewayTransport(
+            host=HOST, port=unused_tcp_port, pairing=store, trust_loopback=False,
+            takeover_hello_timeout_s=0.3,
+        )
+        await t.start()
+        url = f"ws://{HOST}:{unused_tcp_port}"
+        try:
+            token = await _pair(url)
+            await _wait_for(lambda: not t.connected)
+            async with websockets.connect(url) as phone:
+                await _authenticate(phone, token)
+                await phone.send(self._hello("S200REALGLASSES"))
+                await _wait_for(lambda: t.hello is not None)
+                active = t._conn
+                async with websockets.connect(url) as silent:
+                    await _authenticate(silent, token)
+                    await silent.send(json.dumps({"kind": "device", "connect": "connected"}))
+                    with pytest.raises(websockets.ConnectionClosed):
+                        await asyncio.wait_for(silent.recv(), 2)
+                    assert silent.close_code == 4409
+                assert t._conn is active and phone.close_code is None
+        finally:
+            await t.stop()
+
+    async def test_the_same_glasses_take_their_link_back_and_lose_no_frame(
+        self, paired_transport,
+    ) -> None:
+        """The phone coming back (or its own second page) names the same
+        glasses: newest still wins, and what it sent before its hello lands."""
+        t, url, store = paired_transport
+        token = await _pair(url)
+        await _wait_for(lambda: not t.connected)
+        devices: list[Device] = []
+        t.on_device(devices.append)
+        async with websockets.connect(url) as first:
+            await _authenticate(first, token)
+            await first.send(self._hello("S200REALGLASSES"))
+            await _wait_for(lambda: t.hello is not None)
+            generation = t.connection_generation
+            async with websockets.connect(url) as second:
+                await _authenticate(second, token)
+                await second.send(json.dumps({"kind": "device", "connect": "connected", "battery": 71}))
+                await second.send(self._hello("S200REALGLASSES"))
+                await asyncio.wait_for(first.wait_closed(), 2)
+                assert first.close_code == 4409
+                assert first.close_reason == "plugin connection replaced"
+                assert t.connection_generation == generation + 1
+                await _wait_for(lambda: len(devices) == 1)
+                assert devices[0].battery == 71
+                await t.send(HudText(text="Back on your glasses"))
+                assert json.loads(await asyncio.wait_for(second.recv(), 2))["text"] == "Back on your glasses"
 
     async def test_standby_dial_never_evicts_the_display_holding_the_glasses(
         self, paired_transport,

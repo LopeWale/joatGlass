@@ -68,7 +68,7 @@ from .audio.whisper_serve import WhisperServeEngine
 from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
 from .services.brainstorm_control import BrainstormControl, BrainstormRoom
-from .core.pairing import PairingStore
+from .core.pairing import PairingStore, ShellPairingStore
 from .channels.biome import DEFAULT_STREAM_DIR, BiomeNotificationStore
 from .channels.cards import CardLog
 from .channels.contacts import RelationshipBook
@@ -300,6 +300,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 async def main() -> None:
     command_pipe = ChildCommandPipe.from_environment()
+    # JOAT.app keeps the pairing key in its keychain and says so at launch;
+    # a hand-run engine (or an older app) keeps using pairing.json.
+    shell_pairing = (
+        ShellPairingStore()
+        if command_pipe is not None and os.environ.pop("JOAT_PAIRING_CHANNEL", "") == "1"
+        else None
+    )
     parser = build_argument_parser()
     args = parser.parse_args()
     try:
@@ -350,7 +357,7 @@ async def main() -> None:
     transport = HubGatewayTransport(
         host=gateway_policy.host,
         port=args.port,
-        pairing=PairingStore(),
+        pairing=shell_pairing if shell_pairing is not None else PairingStore(),
         trust_loopback=gateway_policy.trust_loopback,
         g2_diagnostics=g2_diagnostics,
         location_probe=args.location_probe,
@@ -2228,31 +2235,10 @@ async def main() -> None:
     finished_notes = await voice_capture.finish_interrupted()
     if finished_notes:
         log.info("saved %d QuickNotes a restart had interrupted", len(finished_notes))
-    await transport.start()
-    log.info("brain up — plugin dial target is ws://<this-mac>:%d/glasses", args.port)
 
-    # The door Even AI knocks on (services/agent_endpoint.py): Even's own
-    # assistant, pointed at this brain through Agent Configure. Loopback
-    # only; Tailscale Serve carries it to the phone over HTTPS.
-    agent_endpoint: AgentEndpoint | None = None
-    if replier is not None and not args.no_agent_endpoint:
-        agent_endpoint = AgentEndpoint(
-            # The door's own seats: no resumed CLI session, so the history
-            # the Even app sends with each request is the whole memory.
-            door_replier or replier, agent_secret, port=args.agent_port, tools=belt,
-            model_label=lambda: models.current("assistant") or "joat",
-        )
-        try:
-            await agent_endpoint.start()
-        except OSError as exc:
-            agent_endpoint = None
-            log.warning("agent endpoint not started (%s) — Even AI cannot reach "
-                        "the brain until it is", exc)
-        else:
-            log.info("Even AI agent endpoint: http://127.0.0.1:%d/v1/chat/completions "
-                     "(expose with: tailscale serve --bg --set-path /agent "
-                     "http://127.0.0.1:%d)", agent_endpoint.port, agent_endpoint.port)
-
+    # JOAT.app's private pipe starts before the gateway listens: under the
+    # app it carries the pairing key, so the glasses are never asked for a
+    # key the engine has not been given yet.
     def local_capabilities() -> dict[str, Capability]:
         terminal = status.agent_terminal_projection()
         return {
@@ -2296,8 +2282,38 @@ async def main() -> None:
         asyncio.create_task(command_pipe.run(
             {"news.refresh": local_news_refresh, "service.retry": local_service_retry},
             local_capabilities,
+            pairing=shell_pairing,
         ), name="mac-local-commands") if command_pipe is not None else None
     )
+    if shell_pairing is not None and not await shell_pairing.wait_known(10.0):
+        # Fail closed: until the app sends the key every peer is refused.
+        log.warning("JOAT.app has not sent the pairing key yet — the glasses "
+                    "are refused until it does")
+    await transport.start()
+    log.info("brain up — plugin dial target is ws://<this-mac>:%d/glasses", args.port)
+
+    # The door Even AI knocks on (services/agent_endpoint.py): Even's own
+    # assistant, pointed at this brain through Agent Configure. Loopback
+    # only; Tailscale Serve carries it to the phone over HTTPS.
+    agent_endpoint: AgentEndpoint | None = None
+    if replier is not None and not args.no_agent_endpoint:
+        agent_endpoint = AgentEndpoint(
+            # The door's own seats: no resumed CLI session, so the history
+            # the Even app sends with each request is the whole memory.
+            door_replier or replier, agent_secret, port=args.agent_port, tools=belt,
+            model_label=lambda: models.current("assistant") or "joat",
+        )
+        try:
+            await agent_endpoint.start()
+        except OSError as exc:
+            agent_endpoint = None
+            log.warning("agent endpoint not started (%s) — Even AI cannot reach "
+                        "the brain until it is", exc)
+        else:
+            log.info("Even AI agent endpoint: http://127.0.0.1:%d/v1/chat/completions "
+                     "(expose with: tailscale serve --bg --set-path /agent "
+                     "http://127.0.0.1:%d)", agent_endpoint.port, agent_endpoint.port)
+
 
     # Diagnostic: a starved loop delays every reply, and looks exactly
     # like a slow model in the logs unless it is measured directly.

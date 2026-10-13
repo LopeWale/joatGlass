@@ -5,23 +5,31 @@ HUD, stream mic-shaped input, and answer confirmation gates. A missing or
 corrupt token file therefore must not silently authorize the next LAN peer.
 Pairing is permitted only during a short window explicitly opened on the Mac.
 
-Loopback clients are exempt by default: the simulator and speak_test run on
-the Mac itself, and any local process could read the token file anyway. The
-trust boundary this enforces is the network, not the machine.
+Two stores hold the key:
+
+- ``ShellPairingStore`` when JOAT.app runs the engine. The key lives in the
+  login keychain, readable without a system prompt only by JOAT.app, which
+  hands it to the engine over the private inherited pipe. No file holds it,
+  and only the app's Pair Glasses opens a window (2026-10-13: any program
+  running as the wearer could read pairing.json, or write the window marker).
+- ``PairingStore``, the file, when the engine is run by hand.
 
 To pair or replace a phone, use the native Mac app's Pair Glasses action.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import math
 import os
 import secrets
 import stat
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +37,29 @@ _DEFAULT_PATH = "~/Library/Application Support/JOAT/pairing.json"
 _WINDOW_FILENAME = "pairing-window.json"
 _DEFAULT_WINDOW_SECONDS = 120.0
 _MAX_WINDOW_SECONDS = 300.0
+#: The plugin keeps any non-empty token up to this length (Pairing.ts).
+_MAX_TOKEN_LENGTH = 4096
+
+
+def is_pairing_token(value: object) -> bool:
+    """A token the plugin could hold: a bounded, non-empty string."""
+    return isinstance(value, str) and 0 < len(value) <= _MAX_TOKEN_LENGTH and "\x00" not in value
+
+
+class PairingAuthority(Protocol):
+    """What the gateway needs from whichever store holds the key."""
+
+    @property
+    def token(self) -> str | None: ...
+
+    @property
+    def window_open(self) -> bool: ...
+
+    def begin_pairing(self, duration_s: float = _DEFAULT_WINDOW_SECONDS) -> None: ...
+
+    def forget(self) -> bool: ...
+
+    def confirm(self, token: str) -> None: ...
 
 
 class PairingStore:
@@ -174,3 +205,89 @@ class PairingStore:
             # A valid token still keeps the gateway closed to untrusted peers;
             # the marker will also expire independently.
             log.warning("paired successfully but could not remove expired window marker")
+
+
+class ShellPairingStore:
+    """The pairing key as JOAT.app holds it: in the keychain, never a file.
+
+    JOAT.app reads the key from the login keychain (an item only the app can
+    read without macOS asking the wearer) and sends it, with any pairing
+    window its Pair Glasses opened, over the private pipe it launched the
+    engine with (services/local_commands.py). A phone paired during that
+    window is handed back the same way, to be saved in the keychain.
+
+    Until the app has said what it holds, nothing is paired and no window is
+    open, so every peer is refused: the safe direction.
+    """
+
+    def __init__(self, *, clock: Callable[[], float] = time.time) -> None:
+        self._clock = clock
+        self._token: str | None = None
+        self._window_until: float | None = None
+        self._on_confirmed: Callable[[str], None] | None = None
+        self._known = asyncio.Event()
+
+    @property
+    def known(self) -> bool:
+        """Whether JOAT.app has sent what it holds yet."""
+        return self._known.is_set()
+
+    async def wait_known(self, timeout_s: float) -> bool:
+        try:
+            await asyncio.wait_for(self._known.wait(), timeout_s)
+        except TimeoutError:
+            return False
+        return True
+
+    def set_on_confirmed(self, callback: Callable[[str], None] | None) -> None:
+        """Where a newly paired key goes: the pipe back to JOAT.app."""
+        self._on_confirmed = callback
+
+    def apply(self, token: str | None, window_until: float | None) -> None:
+        """Adopt JOAT.app's state: its key, or no key and maybe a window."""
+        if token is not None and not is_pairing_token(token):
+            raise ValueError("invalid pairing token")
+        if window_until is not None and not math.isfinite(window_until):
+            raise ValueError("invalid pairing window")
+        now = self._clock()
+        self._token = token
+        if token is None and window_until is not None and window_until > now:
+            self._window_until = min(window_until, now + _MAX_WINDOW_SECONDS)
+        else:
+            self._window_until = None
+        self._known.set()
+
+    @property
+    def token(self) -> str | None:
+        return self._token
+
+    @property
+    def window_open(self) -> bool:
+        return (
+            self._token is None
+            and self._window_until is not None
+            and self._window_until > self._clock()
+        )
+
+    def begin_pairing(self, duration_s: float = _DEFAULT_WINDOW_SECONDS) -> None:
+        """Refused: only JOAT.app's Pair Glasses opens a window here."""
+        raise PermissionError("pairing windows are opened from JOAT.app")
+
+    def forget(self) -> bool:
+        self.begin_pairing()
+        return False
+
+    def confirm(self, token: str) -> None:
+        """A phone acknowledged this key: use it, and hand it to JOAT.app."""
+        self._token = token
+        self._window_until = None
+        callback = self._on_confirmed
+        if callback is None:
+            log.error("paired, but JOAT.app is not connected to keep the key — "
+                      "the phone must pair again after the next restart")
+            return
+        try:
+            callback(token)
+        except Exception:
+            log.error("paired, but the key could not be handed to JOAT.app — "
+                      "the phone must pair again after the next restart")

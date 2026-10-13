@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+import time
 from uuid import uuid4
 
 import pytest
@@ -504,3 +505,70 @@ def test_service_retry_remains_available_for_existing_unready_owner(state):
     assert capability.configured and capability.available
     assert capability.disconnected and not capability.active
     assert capability.denied == (state in {"approval_required", "blocked"})
+
+
+PAIRING_CHILD = '''
+import asyncio, sys
+from joat.core.pairing import ShellPairingStore
+from joat.services.local_commands import ChildCommandPipe, Capability, CommandResult, ACTIONS
+async def main():
+    pipe = ChildCommandPipe.from_environment()
+    store = ShellPairingStore()
+    async def owner():
+        return CommandResult("succeeded", "completed")
+    async def watch():
+        await store.wait_known(5)
+        print(f"state token={store.token} window={store.window_open}", file=sys.stderr, flush=True)
+        store.confirm("phone-key-2")
+    asyncio.get_running_loop().create_task(watch())
+    await pipe.run({a: owner for a in ACTIONS},
+                   lambda: {a: Capability(configured=True, available=True) for a in ACTIONS},
+                   pairing=store)
+asyncio.run(main())
+'''
+
+
+async def test_the_app_alone_sets_the_pairing_key_and_receives_a_new_one():
+    """2026-10-13: the key moved from pairing.json into JOAT.app's keychain.
+    Only the launching app's exact identity can set it or open a window, and
+    a phone paired in that window goes back to the app, never to a file."""
+    child = await start_child(program=PAIRING_CHILD)
+    try:
+        hello = json.loads(await asyncio.wait_for(child.stdout.readline(), 2))
+        assert hello["kind"] == "hello" and hello["pairing"] == 1
+        identity = {key: hello[key] for key in ("v", "epoch", "engine_pid", "parent_pid")}
+        forged = {**identity, "epoch": str(uuid4()), "kind": "pairing.state",
+                  "token": "forged-key", "window_expires_at": None}
+        invalid = {**identity, "kind": "pairing.state", "token": "", "window_expires_at": None}
+        real = {**identity, "kind": "pairing.state", "token": None,
+                "window_expires_at": time.time() + 60}
+        for message in (forged, invalid, real):
+            child.stdin.write(json.dumps(message).encode() + b"\n")
+        await child.stdin.drain()
+        confirmed = None
+        while confirmed is None:
+            frame = json.loads(await asyncio.wait_for(child.stdout.readline(), 5))
+            if frame["kind"] == "pairing.confirmed":
+                confirmed = frame
+        assert confirmed["token"] == "phone-key-2"
+        assert {key: confirmed[key] for key in identity} == identity
+        child.stdin.close()
+        await asyncio.wait_for(child.wait(), 5)
+        assert b"state token=None window=True" in await child.stderr.read()
+    finally:
+        if child.returncode is None:
+            child.kill()
+            await child.wait()
+
+
+async def test_an_engine_without_the_keychain_channel_says_nothing_about_pairing():
+    child = await start_child()
+    try:
+        hello = json.loads(await asyncio.wait_for(child.stdout.readline(), 2))
+        assert "pairing" not in hello
+        child.stdin.close()
+        await asyncio.wait_for(child.wait(), 2)
+    finally:
+        if child.returncode is None:
+            child.kill()
+            await child.wait()

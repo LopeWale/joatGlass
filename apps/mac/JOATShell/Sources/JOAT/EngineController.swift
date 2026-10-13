@@ -145,6 +145,8 @@ final class EngineController: ObservableObject {
     @Published var privateTailnetGateway: Bool
 
     let commands = EngineCommandChannel()
+    /// The glasses pairing key, kept in the keychain (PairingKeychain.swift).
+    private let pairingKeys = PairingKeyHolder()
 
     private var process: Process?
     private var userStopped = false
@@ -174,6 +176,8 @@ final class EngineController: ObservableObject {
             environment: ProcessInfo.processInfo.environment,
             previewBundle: Self.isDesignPreviewBundle
         ) else { return }
+        commands.onConnected = { [weak self] in self?.handOverPairingKey() }
+        commands.onPairingConfirmed = { [weak self] token in self?.keepPairedKey(token) }
         accessibilityTrusted = AXIsProcessTrusted()
         do {
             try NativeBridgeServer.shared.start()
@@ -377,6 +381,8 @@ final class EngineController: ObservableObject {
         let commandLaunch = commands.prepare()
         env["JOAT_COMMAND_EPOCH"] = commandLaunch.epoch
         env["JOAT_COMMAND_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
+        // The engine takes the pairing key from this app, not pairing.json.
+        env["JOAT_PAIRING_CHANNEL"] = "1"
         p.environment = env
         p.standardInput = commandLaunch.input
         p.standardOutput = commandLaunch.output
@@ -486,21 +492,53 @@ final class EngineController: ObservableObject {
 
     /// Open the only path by which a remote peer may become trusted.
     ///
-    /// The marker is local-user authority and expires after 120 seconds. The
-    /// Python gateway fails closed when the token is absent or corrupt unless
-    /// this marker exists, so deleting pairing.json can never authorize a peer.
+    /// Pair / Replace Glasses: the key leaves the keychain and the engine is
+    /// told, over its private pipe, that a 120-second window is open. Nothing
+    /// on disk opens it, so no other program can.
     func openPairingWindow() {
         guard !isPreview else { return }
-        let directory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/JOAT")
+        guard commands.isConnected, commands.supportsPairing else {
+            pairingNotice = "Pairing stayed closed: JOAT is still starting. Try again in a moment."
+            return
+        }
         do {
-            let expiresAt = try PairingWindowStore(directory: directory).open()
+            let expiresAt = try pairingKeys.openWindow()
+            try commands.sendPairingState(token: nil, windowExpiresAt: expiresAt)
             let time = expiresAt.formatted(date: .omitted, time: .shortened)
             pairingNotice = "Pairing open until \(time). Connect the intended glasses now."
             appendLog("pairing window opened locally for 120 seconds")
         } catch {
             pairingNotice = "Pairing stayed closed: \(error.localizedDescription)"
             appendLog("pairing window failed closed: \(error.localizedDescription)")
+        }
+    }
+
+    /// The engine said hello: hand it the keychain's key (moving pairing.json
+    /// into the keychain the first time), or no key and any open window.
+    private func handOverPairingKey() {
+        guard commands.supportsPairing else { return }
+        do {
+            try pairingKeys.migrateLegacyFile()
+            let current = try pairingKeys.state()
+            try commands.sendPairingState(
+                token: current.token, windowExpiresAt: current.windowExpiresAt)
+        } catch {
+            pairingNotice = "The glasses key could not be read: \(error.localizedDescription)"
+            appendLog("[shell] pairing key not handed to the engine: \(error.localizedDescription)")
+        }
+    }
+
+    /// A phone paired during this app's window: keep its key in the keychain.
+    private func keepPairedKey(_ token: String) {
+        do {
+            try pairingKeys.keep(token)
+            try? commands.sendPairingState(token: token, windowExpiresAt: nil)
+            pairingNotice = "Glasses paired. The key is kept in your keychain."
+            appendLog("[shell] glasses paired; key kept in the keychain")
+        } catch {
+            pairingNotice = "Paired, but the key was not kept (\(error.localizedDescription)). "
+                + "Pair again after JOAT restarts."
+            appendLog("[shell] paired key not kept: \(error.localizedDescription)")
         }
     }
 

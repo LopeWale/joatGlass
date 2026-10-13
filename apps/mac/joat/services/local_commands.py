@@ -5,10 +5,16 @@ import asyncio
 from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import asdict, dataclass
 import json
+import logging
+import math
 import os
 import sys
 from typing import Any, BinaryIO
 from uuid import UUID
+
+from ..core.pairing import ShellPairingStore, is_pairing_token
+
+log = logging.getLogger(__name__)
 
 ACTIONS = frozenset({"news.refresh", "service.retry"})
 MAX_FRAME = 16_384
@@ -85,9 +91,18 @@ class LocalCommandDispatcher:
             result[action] = values
         return result
 
-    def publish(self, kind: str = "capabilities") -> None:
+    def publish(self, kind: str = "capabilities", **extra: Any) -> None:
         if not self._closed:
-            self._emit({**self.identity, "kind": kind, "capabilities": self.capabilities()})
+            self._emit({**self.identity, "kind": kind, "capabilities": self.capabilities(), **extra})
+
+    def is_from_parent(self, message: Any) -> bool:
+        """The exact launch identity, from the parent that still owns us."""
+        if self._closed or self._current_parent() != self.identity["parent_pid"]:
+            return False
+        return isinstance(message, dict) and all(
+            type(message.get(k)) is type(v) and message.get(k) == v
+            for k, v in self.identity.items()
+        )
 
     def _ack(self, request_id: str, action: str, outcome: str, reason: str) -> None:
         if not self._closed:
@@ -221,7 +236,8 @@ class ChildCommandPipe:
             os.dup2(null_input.fileno(), sys.stdin.fileno())
         return cls(epoch, int(parent), output, input_pipe)
 
-    async def run(self, owners: Mapping[str, Owner], projection: Projection) -> None:
+    async def run(self, owners: Mapping[str, Owner], projection: Projection,
+                  pairing: ShellPairingStore | None = None) -> None:
         loop = asyncio.get_running_loop()
         reader = asyncio.StreamReader(limit=MAX_FRAME)
         transport, _ = await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), self.input)
@@ -247,8 +263,14 @@ class ChildCommandPipe:
                 dispatcher.close()
                 transport.close()
         heartbeat_task.add_done_callback(heartbeat_finished)
+        if pairing is not None:
+            def confirmed(token: str) -> None:
+                emit({**dispatcher.identity, "kind": "pairing.confirmed", "token": token})
+            pairing.set_on_confirmed(confirmed)
         try:
-            dispatcher.publish("hello")
+            # "pairing": the app may move the key into its keychain and send
+            # it here. An engine without it keeps using pairing.json.
+            dispatcher.publish("hello", **({"pairing": 1} if pairing is not None else {}))
             while data := await reader.readline():
                 if len(data) > MAX_FRAME:
                     break
@@ -256,12 +278,42 @@ class ChildCommandPipe:
                     message = json.loads(data)
                 except (ValueError, UnicodeDecodeError):
                     break
+                if isinstance(message, dict) and message.get("kind") == "pairing.state":
+                    if pairing is not None and dispatcher.is_from_parent(message):
+                        _apply_pairing_state(pairing, message)
+                    continue
                 dispatcher.receive(message)
         except (OSError, ValueError):
             pass
         finally:
+            if pairing is not None:
+                pairing.set_on_confirmed(None)
             dispatcher.close()
             heartbeat_task.cancel()
             await asyncio.gather(heartbeat_task, return_exceptions=True)
             transport.close()
             self.output.close()
+
+
+def _apply_pairing_state(pairing: ShellPairingStore, message: Mapping[str, Any]) -> None:
+    """JOAT.app's keychain state: its key, or none and maybe a window.
+
+    Anything malformed is ignored, leaving the previous state: a bad frame
+    can never open a window or replace the key.
+    """
+    token = message.get("token")
+    window = message.get("window_expires_at")
+    if token is not None and not is_pairing_token(token):
+        log.warning("ignored a pairing state with an invalid key")
+        return
+    if window is not None and (
+        type(window) not in (int, float) or not math.isfinite(window)
+    ):
+        log.warning("ignored a pairing state with an invalid window")
+        return
+    pairing.apply(token, None if window is None else float(window))
+    log.info("pairing state from JOAT.app: %s", (
+        "paired" if token is not None
+        else "pairing window open" if pairing.window_open
+        else "not paired"
+    ))

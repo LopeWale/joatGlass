@@ -46,6 +46,13 @@ final class EngineCommandChannel: ObservableObject {
     }
 
     @Published private(set) var isConnected = false
+    /// The engine takes the glasses pairing key from this app's keychain
+    /// over this pipe (it said `"pairing": 1` in its hello).
+    @Published private(set) var supportsPairing = false
+    /// The engine said hello; the app hands it the pairing key now.
+    var onConnected: (@MainActor () -> Void)?
+    /// A phone paired during this app's window; the app keeps its key.
+    var onPairingConfirmed: (@MainActor (String) -> Void)?
     @Published private(set) var capabilities: [Action: Capability] = [:]
     @Published private(set) var requests: [Action: RequestState] = [:]
 
@@ -64,6 +71,8 @@ final class EngineCommandChannel: ObservableObject {
         let action: Action?
         let outcome: Outcome?
         let reason: String?
+        let pairing: Int?
+        let token: String?
     }
     private let parentPID: Int32
     private let now: () -> TimeInterval
@@ -77,6 +86,7 @@ final class EngineCommandChannel: ObservableObject {
     private var attachedAt: TimeInterval = 0
     private var heartbeatTask: Task<Void, Never>?
     private static let maximumFrameBytes = 16 * 1024
+    private static let maximumTokenBytes = 4096
     private static let reasons: Set<String> = [
         "completed", "partial", "unavailable", "not_configured", "denied", "busy",
         "invalid_request", "duplicate", "timeout", "cancelled", "superseded",
@@ -199,6 +209,7 @@ final class EngineCommandChannel: ObservableObject {
                 : "Engine disconnected before acknowledgement. Result unknown.")
         }
         isConnected = false
+        supportsPairing = false
         capabilities = [:]
         identity = nil
         deadlines = [:]
@@ -257,12 +268,20 @@ final class EngineCommandChannel: ObservableObject {
     private func accept(_ envelope: Envelope, identity: Identity) -> Bool {
         guard envelope.v == 1, envelope.epoch == identity.epoch,
               envelope.engine_pid == identity.enginePID, envelope.parent_pid == parentPID else { return false }
-        guard ["hello", "capabilities", "ack"].contains(envelope.kind) else { return false }
+        guard ["hello", "capabilities", "ack", "pairing.confirmed"].contains(envelope.kind) else { return false }
         if envelope.kind == "hello" {
             guard !isConnected, let projection = envelope.capabilities,
                   Action.allCases.allSatisfy({ projection[$0.rawValue] != nil }) else { return false }
             isConnected = true
+            supportsPairing = envelope.pairing == 1
         } else if !isConnected { return false }
+        if envelope.kind == "pairing.confirmed" {
+            guard supportsPairing, let token = envelope.token, !token.isEmpty,
+                  token.utf8.count <= Self.maximumTokenBytes else { return false }
+            lastContact = now()
+            onPairingConfirmed?(token)
+            return true
+        }
         if envelope.kind == "capabilities" && envelope.capabilities == nil { return false }
         if envelope.kind == "ack" {
             guard let id = envelope.request_id, UUID(uuidString: id) != nil,
@@ -284,7 +303,18 @@ final class EngineCommandChannel: ObservableObject {
             capabilities = Dictionary(uniqueKeysWithValues: Action.allCases.map { ($0, projection[$0.rawValue]!) })
         }
         lastContact = now()
+        if envelope.kind == "hello" { onConnected?() }
         return true
+    }
+
+    /// Hand the engine the keychain's key, or no key and the open window.
+    func sendPairingState(token: String?, windowExpiresAt: Date?) throws {
+        guard isConnected, supportsPairing else { throw CocoaError(.fileWriteUnknown) }
+        try writePayload([
+            "kind": "pairing.state",
+            "token": token.map { $0 as Any } ?? NSNull(),
+            "window_expires_at": windowExpiresAt.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
+        ])
     }
 
     private func finish(_ action: Action, outcome: Outcome, notice: String) {
@@ -306,12 +336,17 @@ final class EngineCommandChannel: ObservableObject {
     }
 
     private func write(kind: String, requestID: String, action: Action? = nil, timeout: Int? = nil) throws {
-        guard let identity else { throw CocoaError(.fileWriteUnknown) }
-        var payload: [String: Any] = ["v": 1, "epoch": identity.epoch,
-            "engine_pid": identity.enginePID, "parent_pid": parentPID,
-            "kind": kind, "request_id": requestID]
+        var payload: [String: Any] = ["kind": kind, "request_id": requestID]
         if let action { payload["action"] = action.rawValue }
         if let timeout { payload["timeout_ms"] = timeout }
+        try writePayload(payload)
+    }
+
+    private func writePayload(_ fields: [String: Any]) throws {
+        guard let identity else { throw CocoaError(.fileWriteUnknown) }
+        var payload: [String: Any] = ["v": 1, "epoch": identity.epoch,
+            "engine_pid": identity.enginePID, "parent_pid": parentPID]
+        payload.merge(fields) { _, new in new }
         var data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         data.append(10)
         if let testWriter { try testWriter(data); return }

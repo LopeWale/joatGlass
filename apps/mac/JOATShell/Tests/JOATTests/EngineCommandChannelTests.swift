@@ -275,4 +275,53 @@ final class EngineCommandChannelTests: XCTestCase {
         XCTAssertEqual(f.channel.state(for: .newsRefresh)?.outcome, .timedOut)
         XCTAssertEqual(f.writes.last?["kind"] as? String, "cancel")
     }
+
+    // MARK: pairing key (2026-10-13: out of pairing.json, into the keychain)
+
+    func testAnEngineThatTakesTheKeySaysSoAndIsHandedItOnHello() throws {
+        let f = Fixture()
+        var connected = 0
+        f.channel.onConnected = { connected += 1 }
+        f.receive("hello", additions: [
+            "capabilities": ["news.refresh": f.capability, "service.retry": f.capability],
+            "pairing": 1,
+        ])
+        XCTAssertTrue(f.channel.supportsPairing)
+        XCTAssertEqual(connected, 1)
+        try f.channel.sendPairingState(token: "phone-key", windowExpiresAt: nil)
+        XCTAssertEqual(f.writes.last?["kind"] as? String, "pairing.state")
+        XCTAssertEqual(f.writes.last?["token"] as? String, "phone-key")
+        XCTAssertTrue(f.writes.last?["window_expires_at"] is NSNull)
+        XCTAssertEqual(f.writes.last?["engine_pid"] as? Int, 456)
+        XCTAssertEqual(f.writes.last?["epoch"] as? String, f.epoch)
+        let expires = Date(timeIntervalSince1970: 2_000)
+        try f.channel.sendPairingState(token: nil, windowExpiresAt: expires)
+        XCTAssertTrue(f.writes.last?["token"] is NSNull)
+        XCTAssertEqual(f.writes.last?["window_expires_at"] as? Double, 2_000)
+    }
+
+    func testAnOlderEngineIsNeverSentTheKey() {
+        let f = Fixture()
+        f.hello()
+        XCTAssertFalse(f.channel.supportsPairing)
+        XCTAssertThrowsError(try f.channel.sendPairingState(token: "phone-key", windowExpiresAt: nil))
+        XCTAssertTrue(f.writes.isEmpty)
+    }
+
+    func testAPhonePairedInTheWindowIsHandedBackToTheApp() {
+        let f = Fixture()
+        var kept: [String] = []
+        f.channel.onPairingConfirmed = { kept.append($0) }
+        f.receive("hello", additions: [
+            "capabilities": ["news.refresh": f.capability, "service.retry": f.capability],
+            "pairing": 1,
+        ])
+        f.receive("pairing.confirmed", additions: ["token": "new-phone-key"])
+        XCTAssertEqual(kept, ["new-phone-key"])
+        XCTAssertTrue(f.channel.isConnected)
+        f.receive("pairing.confirmed", additions: ["token": ""])
+        XCTAssertEqual(kept, ["new-phone-key"])
+        XCTAssertFalse(f.channel.isConnected)
+    }
 }
+

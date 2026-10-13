@@ -46,7 +46,7 @@ from ..core.log_redaction import (
     install_websocket_secret_redaction as _install_redaction,
 )
 from ..core.confirmation import ConfirmationResult
-from ..core.pairing import PairingStore
+from ..core.pairing import PairingAuthority, PairingStore
 from ..core.protocol import (
     Audio,
     AudioSource,
@@ -120,6 +120,17 @@ PLUGIN_WATCHDOG_TOLERANCE_S = 3.0
 # Consecutive watchdog-shaped drops before the warning. Two can be a phone
 # backgrounding its WebView twice; three in a row is the loop.
 PLUGIN_WATCHDOG_LOOP_THRESHOLD = 3
+# Only the same glasses can take the link from the glasses (the wearer,
+# 2026-10-13: "how is it possible for you to take over my glasses when you're
+# testing"). Newest-wins exists so a phone can come back after its own socket
+# died; it also let any display holding the key evict the phone. While the
+# link is held by a display that named its glasses, a newer one must name the
+# same glasses in its hello, within this long, or it waits as a standby.
+TAKEOVER_HELLO_TIMEOUT_S = 3.0
+# Frames a newcomer may send before its hello while that is decided.
+TAKEOVER_BUFFER_FRAMES = 64
+# What the plugin sends when the phone reports no glasses.
+_NO_GLASSES_SERIALS = frozenset({"", "unknown"})
 
 
 ImuCallback = Callable[[Imu], None]
@@ -182,18 +193,20 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
     One, not many: the G2 has a single wearer and a single HUD, so a second
     connection is a stale tab or a duplicate sideload, not a feature. The newest
     connection wins and the previous one is closed — reconnect-after-sleep is
-    far more common than genuine concurrent use.
+    far more common than genuine concurrent use — but only when it names the
+    same glasses as the connection it replaces (see TAKEOVER_HELLO_TIMEOUT_S).
     """
 
     def __init__(
         self,
         host: str = "0.0.0.0",
         port: int = 8787,
-        pairing: PairingStore | None = None,
+        pairing: PairingAuthority | None = None,
         trust_loopback: bool = True,
         auth_timeout_s: float = 4.0,
         g2_diagnostics: G2DiagnosticStore | None = None,
         location_probe: bool = False,
+        takeover_hello_timeout_s: float = TAKEOVER_HELLO_TIMEOUT_S,
     ) -> None:
         if location_probe and g2_diagnostics is None:
             raise ValueError("location_probe requires g2_diagnostics receipt storage")
@@ -202,6 +215,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._pairing = pairing
         self._trust_loopback = trust_loopback
         self._auth_timeout_s = auth_timeout_s
+        self._takeover_hello_timeout_s = takeover_hello_timeout_s
         self._g2_diagnostics = g2_diagnostics
         self._g2_diagnostic_session_marker: tuple[int, int] | None = None
         self._location_probe = location_probe
@@ -1060,7 +1074,11 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         """
         if self._pairing is None:
             return False
-        self._pairing.begin_pairing()
+        try:
+            self._pairing.begin_pairing()
+        except PermissionError:
+            # Under JOAT.app only its Pair Glasses opens a window.
+            return False
         self._refusals.clear()
         self._lockout_warned = False
         log.info("pairing window opened locally for 120 seconds")
@@ -1249,9 +1267,87 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
 
     # ── receiving ────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _glasses(hello: Hello | None) -> str | None:
+        """The glasses a hello names, or None when it names none."""
+        if hello is None:
+            return None
+        serial = hello.sn.strip()
+        return None if serial.casefold() in _NO_GLASSES_SERIALS else serial
+
+    @staticmethod
+    def _parse_hello(raw: str | bytes) -> Hello | None:
+        if not isinstance(raw, str):
+            return None
+        try:
+            message = parse_uplink(json.loads(raw))
+        except (json.JSONDecodeError, ProtocolError, TypeError, ValueError):
+            return None
+        return message if isinstance(message, Hello) else None
+
+    async def _newcomer_hello(
+        self, conn: ServerConnection, frames: list[str | bytes],
+    ) -> Hello | None:
+        """Read a newcomer's frames, in order, until its hello or the timeout.
+
+        Every frame read is kept in ``frames`` so an admitted newcomer loses
+        nothing it sent while this was decided.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._takeover_hello_timeout_s
+        checked = 0
+        while True:
+            for raw in frames[checked:]:
+                hello = self._parse_hello(raw)
+                if hello is not None:
+                    return hello
+            checked = len(frames)
+            remaining = deadline - loop.time()
+            if remaining <= 0 or len(frames) >= TAKEOVER_BUFFER_FRAMES:
+                return None
+            try:
+                frames.append(await asyncio.wait_for(conn.recv(), timeout=remaining))
+            except (asyncio.TimeoutError, websockets.ConnectionClosed):
+                return None
+
+    async def _may_take_over(
+        self, conn: ServerConnection, frames: list[str | bytes],
+    ) -> bool:
+        """Whether this authenticated newcomer may replace the current link.
+
+        A link held by a display that named its glasses is handed only to a
+        display naming the same glasses: the phone coming back, or the phone's
+        own second page. Anything else (a simulator, a test harness, another
+        phone) waits as a standby until the glasses' link is gone.
+        """
+        if self._conn is None or self._glasses(self.hello) is None:
+            return True
+        hello = await self._newcomer_hello(conn, frames)
+        holder = self._glasses(self.hello) if self._conn is not None else None
+        if holder is None:
+            return True
+        newcomer = self._glasses(hello)
+        if newcomer == holder:
+            return True
+        log.warning(
+            "refused a takeover: %s asked for the link while glasses %s hold it",
+            f"a display naming glasses {newcomer}" if newcomer else "a display naming no glasses",
+            holder,
+        )
+        try:
+            await conn.close(
+                code=PLUGIN_REPLACED_CLOSE_CODE, reason="glasses held by another device",
+            )
+        except websockets.ConnectionClosed:
+            pass
+        return False
+
     async def _session(self, conn: ServerConnection) -> None:
         pairing_identity_digest, initial_raw = await self._authenticate(conn)
         if pairing_identity_digest is None:
+            return
+        pending: list[str | bytes] = [] if initial_raw is None else [initial_raw]
+        if not await self._may_take_over(conn, pending):
             return
         session_id = secrets.token_urlsafe(18)
         previous = self._conn
@@ -1300,8 +1396,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
             # Never resume this superseded handler's startup or receive loop.
             if self._conn is not conn:
                 return
-            if initial_raw is not None:
-                self._dispatch(initial_raw, session_id)
+            for raw in pending:
+                self._dispatch(raw, session_id)
             if self._g2_diagnostics is not None:
                 await conn.send(json.dumps(G2DiagnosticControl(enabled=True).to_wire()))
             if self._conn is not conn:
