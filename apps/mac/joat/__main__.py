@@ -134,7 +134,8 @@ from .agents.panel_tools import (
 )
 from .services.news import NewsService
 from .services.local_commands import (
-    Capability, ChildCommandPipe, CommandResult, service_retry_capability,
+    ACTIONS as LOCAL_ACTIONS, Capability, ChildCommandPipe, CommandResult, Owner,
+    Projection, service_retry_capability,
 )
 from .services.panel_commands import NewsCommands, PomodoroCommands, SearchCommands
 from .services.panels import PanelPublisher
@@ -306,6 +307,29 @@ async def main() -> None:
         ShellPairingStore()
         if command_pipe is not None and os.environ.pop("JOAT_PAIRING_CHANNEL", "") == "1"
         else None
+    )
+    # The app's private pipe answers at once, before the model loading below:
+    # JOAT.app drops a pipe that has not said hello within 30 s of launch
+    # (EngineCommandChannel.checkDeadlines), and under the app the pipe also
+    # carries the pairing key. Each owner joins when it exists; until then
+    # its action reads as not configured and is refused.
+    command_owners: dict[str, Owner] = {}
+    command_projection: list[Projection] = []
+
+    def late_owner(action: str) -> Owner:
+        async def run() -> CommandResult:
+            owner = command_owners.get(action)
+            if owner is None:
+                return CommandResult("refused", "unavailable")
+            return await owner()
+        return run
+
+    command_task = (
+        asyncio.create_task(command_pipe.run(
+            {action: late_owner(action) for action in LOCAL_ACTIONS},
+            lambda: command_projection[0]() if command_projection else {},
+            pairing=shell_pairing,
+        ), name="mac-local-commands") if command_pipe is not None else None
     )
     parser = build_argument_parser()
     args = parser.parse_args()
@@ -2236,9 +2260,7 @@ async def main() -> None:
     if finished_notes:
         log.info("saved %d QuickNotes a restart had interrupted", len(finished_notes))
 
-    # JOAT.app's private pipe starts before the gateway listens: under the
-    # app it carries the pairing key, so the glasses are never asked for a
-    # key the engine has not been given yet.
+    # The owners behind JOAT.app's private pipe (started at the top of main).
     def local_capabilities() -> dict[str, Capability]:
         terminal = status.agent_terminal_projection()
         return {
@@ -2278,13 +2300,10 @@ async def main() -> None:
             return CommandResult("refused", "denied")
         return CommandResult("failed", "unavailable")
 
-    command_task = (
-        asyncio.create_task(command_pipe.run(
-            {"news.refresh": local_news_refresh, "service.retry": local_service_retry},
-            local_capabilities,
-            pairing=shell_pairing,
-        ), name="mac-local-commands") if command_pipe is not None else None
-    )
+    command_owners.update({
+        "news.refresh": local_news_refresh, "service.retry": local_service_retry,
+    })
+    command_projection.append(local_capabilities)
     if shell_pairing is not None and not await shell_pairing.wait_known(10.0):
         # Fail closed: until the app sends the key every peer is refused.
         log.warning("JOAT.app has not sent the pairing key yet — the glasses "
