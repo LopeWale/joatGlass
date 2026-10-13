@@ -266,8 +266,7 @@ const QUICKNOTES_NOTE_MENU = [{ id: QUICKNOTES_UNDO_MENU_ID, name: QUICKNOTES_UN
 /**
  * A Messages page scrolls on the glass instead of turning seven-line pages
  * (the wearer's ruling, 2026-10-11). The firmware scrolls an overflowing
- * capture text container one line a swipe and draws its own scrollbar
- * (docs/EVEN_RESEARCH_QUESTIONS.md, "What the firmware scrolls by itself"),
+ * capture text container one line a swipe and draws its own scrollbar,
  * and only the boundary swipe reaches the plugin, which then asks the Mac
  * for the next chunk. The page is cut only by the container's byte cap.
  */

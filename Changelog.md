@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-13 — Repo cleanup: research notes, audits and stray images removed
+
+The wearer asked for the research markdown and stray images to go. Removed: `docs/audits/`, `docs/plans/`, `docs/features/` (FEAT-001/002 specs and sim frames), `docs/design/` (old HUD mockups), and `PRODUCTIVITY_SYSTEM_RESEARCH`, `EVEN_RESEARCH_QUESTIONS`, `VOICE_GAP_RECOVERY`, `WHISPER_COLD_START`, `REAL_G2_NAVIGATION_FIELD_RUN`, `MAC_APP_REDESIGN`, `MAC_CONTROLS_ACCEPTANCE`, `LOCAL_COMMAND_CHANNEL` from `docs/`, plus `design-qa.md`, `sheet.png`, `font-scales-green.png` and the two `apps/hub-plugin/glasses_*.png` simulator shots. Links to them in `DESIGN.md`, `docs/HUD_DASHBOARD.md`, `docs/AGENT_TERMINAL_ROADMAP.md`, `HudPresenter.ts` and `whisperkit.py` now state the fact without the dead reference. Older entries below still name some of these files; they are history. Plugin 1236 tests and typecheck, Python 3620 tests passed.
+
 ## 2026-10-13 — Build JOAT 0.1.129
 
 - Packed from `06e5023` (clean tree) with `scripts/pack.sh`, the `com.example.joat` manifest and the MacBook-first, Mac Mini-second private WSS candidates. app.json, package.json and package-lock.json all 0.1.129 (last build 0.1.128). `--sdk-ver 0.0.16` (the newest on npm), minimum Even App 2.2.10. Plugin 1236 tests passed, typecheck clean.

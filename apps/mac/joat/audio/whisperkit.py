@@ -29,9 +29,9 @@ SAMPLE_WIDTH = 2  # signed 16-bit
 CHANNELS = 1
 # A batch transcription that has not answered by now is not going to: the
 # wearer has been watching "hearing you…" the whole time. The bound is set
-# above the measured cold path (docs/WHISPER_COLD_START.md records ~80 s
-# to first readiness on this Mac) so it never cuts a slow-but-live model,
-# only a hung one. The audit's A5: this wait had no deadline at all.
+# above the measured cold path (~80 s to first readiness on this Mac) so it
+# never cuts a slow-but-live model, only a hung one. Before this bound the
+# wait had no deadline at all.
 DEFAULT_INFERENCE_DEADLINE_S = 90.0
 
 

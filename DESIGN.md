@@ -53,8 +53,7 @@ chrome, and no visual element that asks the wearer to study the glass.
 - **Token ownership/runtime mapping:** this file mirrors the canonical runtime
   geometry in `apps/hub-plugin/src/HudPageBuilder.ts` and the pixels authored by
   `apps/hub-plugin/src/HudCanvasRenderer.ts`. Drift is gated by builder,
-  presenter, renderer/surface tests, the official Even Hub simulator, and the
-  retained comparison in `design-qa.md`.
+  presenter, renderer/surface tests and the official Even Hub simulator.
 
 ## Colors
 

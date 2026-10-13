@@ -180,7 +180,7 @@ User-provided deployment update was verified from this Mac over Tailscale HTTPS:
 - Both cards advertise JSONRPC protocol 1.0. OpenClaw advertises no streaming or push notifications; Hermes advertises both. Those advertised capabilities require their own authenticated acceptance tests before the app enables them.
 - **Discovery defect:** OpenClaw's public `supportedInterfaces[0].url` advertises `http://127.0.0.1:18789/a2a/v1`. Remote discovery must advertise the public `https://home-mac.example-tailnet.ts.net:8443/a2a/v1` address. The diagnostic explicitly used the supplied public endpoint and did not follow the loopback URL. The card also omits bearer security metadata despite the API requiring it. No remote configuration was modified.
 
-Local content-free receipt: `dist/mac-workspace/control-audit/a2a-openclaw.json`. Existing port-443 OpenClaw WebSocket pairing is a separate authenticated connection and remains configured.
+Existing port-443 OpenClaw WebSocket pairing is a separate authenticated connection and remains configured.
 
 ### Ordered connection work
 

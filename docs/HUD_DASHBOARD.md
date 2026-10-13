@@ -11,7 +11,7 @@ brightness-zero text container as the sole gesture-capture layer. The semantic
 Main/Context/Tray streams below remain presenter inputs; their old firmware text
 container diagrams are the architecture record, not the current render path.
 The canonical contract is [DESIGN.md](../DESIGN.md), with visual acceptance in
-[design-qa.md](../design-qa.md) and official Even Hub simulator captures.
+official Even Hub simulator captures.
 
 ### The right pane is a rail of tabs (2026-09-02)
 
