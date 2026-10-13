@@ -1082,3 +1082,63 @@ describe('explicit Mac choice survives connection failures', () => {
     link.close();
   });
 });
+
+describe('MacLink JOAT heartbeat (2026-10-13)', () => {
+  afterEach(() => vi.useRealTimers());
+
+  function connected(heartbeatSilenceMs = 45_000) {
+    vi.useFakeTimers();
+    const link = new MacLink({ urls: ['ws://m:1/g'], token: 'fixture', heartbeatSilenceMs });
+    const handled: string[] = [];
+    link.onMessage(async (message) => { handled.push(message.kind); });
+    link.connect();
+    const socket = sockets[sockets.length - 1]!;
+    socket.open();
+    socket.receive({ kind: 'auth.accepted' });
+    socket.sent.length = 0;
+    return { link, socket, handled };
+  }
+
+  it('answers a ping at once, outside the ordered HUD handlers', () => {
+    const { socket, handled } = connected();
+    socket.receive({ kind: 'link.ping', seq: 7 });
+    expect(socket.sent.map((s) => JSON.parse(s))).toEqual([{ kind: 'link.pong', seq: 7 }]);
+    expect(handled).toEqual([]);
+  });
+
+  it('a heartbeat link that goes quiet is dropped and dialed again', async () => {
+    const { link, socket } = connected();
+    const dials = sockets.length;
+    socket.receive({ kind: 'link.ping', seq: 1 });
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(socket.closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(socket.closed).toBe(true);
+    expect(link.linkState).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(sockets.length).toBe(dials + 1);
+    link.close();
+  });
+
+  it('a Mac that never pings is never held to the heartbeat', async () => {
+    const { link, socket } = connected();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(socket.closed).toBe(false);
+    expect(link.linkState).toBe('connected');
+    link.close();
+  });
+
+  it('a page that was suspended restarts the clock instead of dropping the link', async () => {
+    const { link, socket } = connected();
+    socket.receive({ kind: 'link.ping', seq: 1 });
+    // The phone suspended this page for a minute: no ticks ran, then one late
+    // tick. Pings that arrived meanwhile are delivered after it.
+    vi.setSystemTime(Date.now() + 60_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(socket.closed).toBe(false);
+    socket.receive({ kind: 'link.ping', seq: 2 });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(socket.closed).toBe(false);
+    link.close();
+  });
+});

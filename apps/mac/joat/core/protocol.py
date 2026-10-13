@@ -34,6 +34,9 @@ PLUGIN_REPLACED_CLOSE_CODE = 4409
 # whether the glasses are free) is refused with this while a display holds
 # them. Twin: apps/hub-plugin/src/types.ts.
 PLUGIN_SLOT_OCCUPIED_CLOSE_CODE = 4410
+# The Mac heard nothing from a plugin that keeps a JOAT heartbeat for too long
+# (its page is frozen or gone). Twin: apps/hub-plugin/src/types.ts.
+PLUGIN_HEARTBEAT_LOST_CLOSE_CODE = 4408
 
 # Request ids the MAC mints for voice-initiated surfaces. The plugin adopts a
 # list whose request id carries this prefix instead of dropping it as stale,
@@ -161,6 +164,21 @@ class Hello:
     """The PHONE's IANA zone, from Intl in the WebView. The Mac formats
     every time the wearer reads and its own zone is right only by
     coincidence. Optional: older plugins omit it and the Mac's stands in."""
+    heartbeat: bool = False
+    """The plugin answers ``link.ping`` with ``link.pong`` (2026-10-13).
+    Older plugins omit it and are never held to a heartbeat."""
+
+
+@dataclass(frozen=True, slots=True)
+class LinkPong:
+    """The plugin page's answer to ``link.ping``: its JavaScript is running.
+
+    A WebSocket Pong is answered by the phone's network stack and page
+    JavaScript cannot send Pings (RFC 6455 5.5.2-5.5.3), so it cannot prove
+    the plugin page is alive. This can.
+    """
+
+    seq: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -594,7 +612,7 @@ UplinkMessage = (
     | Location | G2Diagnostic | BrainstormAction | NavigationAction | NavigationRouteAck
     | NavigationViewAck | NavigationState | NavigationRerouteRequest
     | NavigationOrigin | NavigationOriginFailure | ReminderDueAck | ReminderDueComplete
-    | ProductivityViewAck | PromptAck | PromptCancel | ControlAction
+    | ProductivityViewAck | PromptAck | PromptCancel | ControlAction | LinkPong
 )
 
 
@@ -605,6 +623,16 @@ UplinkMessage = (
 class AuthAccepted:
     def to_wire(self) -> dict[str, Any]:
         return {"kind": "auth.accepted"}
+
+
+@dataclass(frozen=True, slots=True)
+class LinkPing:
+    """The Mac's JOAT heartbeat; the plugin answers ``link.pong``."""
+
+    seq: int
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"kind": "link.ping", "seq": self.seq}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1986,6 +2014,7 @@ DownlinkMessage = (
     | Shutdown
     | PairingSet
     | ControlState
+    | LinkPing
 )
 
 
@@ -2690,6 +2719,7 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 launch_source=payload.get("launchSource", "unknown"),
                 user_name=str(payload.get("userName", "")),
                 time_zone=_optional_time_zone(payload.get("timeZone")),
+                heartbeat=payload.get("heartbeat") is True,
             )
         case "audio":
             # Coerce samples HERE so one malformed value is a ProtocolError
@@ -2791,6 +2821,11 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
             )
         case "pairing":
             return PairingAck(token=str(_require(payload, "token", kind)))
+        case "link.pong":
+            seq = _require(payload, "seq", kind)
+            if type(seq) is not int or seq < 0:
+                raise ProtocolError("link.pong seq must be a non-negative integer")
+            return LinkPong(seq=seq)
         case "g2.diagnostic":
             _trace_shape(payload, {"kind", "event"})
             return G2Diagnostic(event=_parse_g2_diagnostic(_require(payload, "event", kind)))

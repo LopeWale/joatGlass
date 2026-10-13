@@ -1917,7 +1917,14 @@ async def main() -> None:
         if active is not None:
             active.cancel()
         capabilities.on_disconnect()
-        asyncio.get_running_loop().create_task(orchestrator.on_connect())
+
+        async def connected() -> None:
+            await orchestrator.on_connect()
+            # A note left open (recording or paused) on the glass gets its
+            # page back, after the greeting so nothing paints over it.
+            await capabilities.reattach_open_note()
+
+        asyncio.get_running_loop().create_task(connected())
         # A plugin that just connected has an empty tab cache. Fill it now
         # so its first swipe onto News paints from memory.
         asyncio.get_running_loop().create_task(panels.publish_all())

@@ -94,7 +94,12 @@ export interface MacLinkOptions {
   downlinkHandlerTimeoutMs?: number;
   /** How often a replaced display asks whether the glasses' slot is free. */
   standbyRetryMs?: number;
+  /** A heartbeat link that brings nothing for this long is dead. */
+  heartbeatSilenceMs?: number;
 }
+
+/** How often this page checks the Mac's heartbeat. */
+export const LIVENESS_TICK_MS = 5_000;
 
 /** A standby dial: the Mac refuses it (HTTP 409, or close 4410) while
  * another display holds the glasses, so it can never kick the live one. */
@@ -124,6 +129,11 @@ export class MacLink {
   /** The dial in flight only asks for a FREE slot (see STANDBY_QUERY). */
   private standbyDial = false;
   private standbyTimer?: ReturnType<typeof setTimeout>;
+  private livenessTimer?: ReturnType<typeof setInterval>;
+  private lastDownlinkAtMs = 0;
+  private lastLivenessTickMs = 0;
+  /** The Mac on this socket keeps JOAT's heartbeat (it has pinged). */
+  private heartbeatSeen = false;
   private handler?: DownlinkHandler;
   private ingressHandler?: (msg: DownlinkMessage, context: DownlinkContext) => void;
   private downlinkDispatcher?: DownlinkDispatcher;
@@ -140,6 +150,7 @@ export class MacLink {
   private readonly dialMs: number;
   private readonly downlinkMs: number;
   private readonly standbyMs: number;
+  private readonly heartbeatSilenceMs: number;
   private dialTimer?: ReturnType<typeof setTimeout>;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private staleTokenHandler?: (origin: string, tokens: PairingTokensByOrigin) => void;
@@ -171,6 +182,7 @@ export class MacLink {
     this.dialMs = opts.dialTimeoutMs ?? 4_000;
     this.downlinkMs = opts.downlinkHandlerTimeoutMs ?? 15_000;
     this.standbyMs = opts.standbyRetryMs ?? 10_000;
+    this.heartbeatSilenceMs = opts.heartbeatSilenceMs ?? 45_000;
   }
 
   /** The URL currently being dialed (for status surfaces). */
@@ -299,6 +311,7 @@ export class MacLink {
     };
     this.downlinkDispatcher = dispatcher;
     this.socket = socket;
+    this.heartbeatSeen = false;
 
     // A host that DROPS packets (wrong subnet, asleep, AP isolation) never
     // errors — it hangs until the OS timeout, minutes later. With several
@@ -321,8 +334,18 @@ export class MacLink {
     };
     socket.onmessage = (event) => {
       if (this.socket !== socket) return;
+      this.lastDownlinkAtMs = Date.now();
       try {
         const message = JSON.parse(String(event.data)) as DownlinkMessage;
+        if (message.kind === 'link.ping') {
+          // Answered here, not behind the ordered HUD handlers: it proves
+          // this page runs, whatever a slow page change is doing.
+          if (this.authenticated) {
+            this.heartbeatSeen = true;
+            this.rawSend({ kind: 'link.pong', seq: message.seq });
+          }
+          return;
+        }
         if (message.kind === 'auth.accepted') {
           if (!this.authenticated) {
             if (this.standbyDial) {
@@ -339,6 +362,7 @@ export class MacLink {
             this.attempt = 0;
             this.failedTokensByOrigin.delete(this.activeOrigin);
             this.reportState('connected');
+            this.armLiveness(socket);
             const location = this.pendingLocation;
             this.pendingLocation = undefined;
             if (location !== undefined) this.rawSend(location);
@@ -609,8 +633,47 @@ export class MacLink {
     this.reportState('closed');
   }
 
+  /**
+   * JOAT's heartbeat, this side. Once the Mac has pinged on this socket, a
+   * link that brings nothing for heartbeatSilenceMs is dead (the Mac asleep,
+   * the network gone) even though the socket still reads open: drop it and
+   * dial again. A tick that arrives far too late means this page was itself
+   * suspended; that silence was ours, so the clock restarts.
+   */
+  private armLiveness(socket: WebSocket): void {
+    this.clearLiveness();
+    const start = Date.now();
+    this.lastDownlinkAtMs = start;
+    this.lastLivenessTickMs = start;
+    this.livenessTimer = setInterval(() => {
+      if (this.socket !== socket || !this.authenticated) {
+        this.clearLiveness();
+        return;
+      }
+      const tick = Date.now();
+      const suspended = tick - this.lastLivenessTickMs > 2 * LIVENESS_TICK_MS;
+      this.lastLivenessTickMs = tick;
+      if (suspended) {
+        this.lastDownlinkAtMs = tick;
+        return;
+      }
+      if (this.heartbeatSeen && tick - this.lastDownlinkAtMs > this.heartbeatSilenceMs) {
+        console.warn('[MacLink] no heartbeat from the Mac — reconnecting');
+        this.expireSocket(socket);
+      }
+    }, LIVENESS_TICK_MS);
+  }
+
+  private clearLiveness(): void {
+    if (this.livenessTimer !== undefined) {
+      clearInterval(this.livenessTimer);
+      this.livenessTimer = undefined;
+    }
+  }
+
   /** Detach and close the current socket so it can no longer drive state. */
   private abandon(): void {
+    this.clearLiveness();
     const prev = this.socket;
     if (prev === undefined) return;
     this.revokeDownlinkDispatcher(prev);

@@ -508,6 +508,9 @@ class CapabilityRouter:
         self._live_check_pending = False
         self._live_ticker: asyncio.Task[None] | None = None
         self._mic_reopened = False
+        # The open note's page was on the glass when the link went: the next
+        # connection gets it back (reattach_open_note).
+        self._reattach_note = False
         if voice_capture is not None:
             voice_capture.add_listener(self._on_capture_change)
         self._activity_rows: list[ActionActivity] = []
@@ -802,6 +805,11 @@ class CapabilityRouter:
 
     def on_disconnect(self) -> None:
         """Drop any Mac-private reply target when the glasses link disappears."""
+        if self._active_capability is not None:
+            self._reattach_note = (
+                self._active_capability == "QUICKNOTES"
+                and self._note_page in {"live", "finish", "discard"}
+            )
         self._terminal_opening_revision += 1
         self._active_capability = None
         self._active_request_id = None
@@ -832,6 +840,7 @@ class CapabilityRouter:
             self.clear_message_selection("capability-open")
         self._active_request_id = request_id
         self._active_capability = self._canonical_capability(name)
+        self._reattach_note = False
         token = self._request_context.set(request_id)
         try:
             match name:
@@ -868,6 +877,24 @@ class CapabilityRouter:
             self._request_context.reset(token)
             if planning_token is not None:
                 self._planning_context.reset(planning_token)
+
+    async def reattach_open_note(self) -> bool:
+        """Give a new connection back the open note's page.
+
+        The plugin keeps showing a note's page across a reconnect, but the
+        Mac had let go of it, so every tap on it was dropped as stale and the
+        note looked frozen (the wearer, 2026-10-13: "the quick note just
+        freezes if I am quiet for a bit", with it paused; brain.log 08:08 and
+        08:16). The page is sent again under a fresh Mac-minted generation,
+        which the plugin adopts, and taps on it count again.
+        """
+        capture = self._voice_capture
+        if not self._reattach_note or capture is None or not capture.active:
+            self._reattach_note = False
+            return False
+        await self.open("QuickNotes", request_id=voice_request_id())
+        log.info("open note's page given back to the new connection")
+        return True
 
     async def _show_brainstorm(self) -> None:
         """Open Brainstorm on its LAST session, or on an invitation.

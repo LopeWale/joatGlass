@@ -64,6 +64,8 @@ from ..core.protocol import (
     Hello,
     Imu,
     Input,
+    LinkPing,
+    LinkPong,
     Location,
     LocationRefresh,
     LocationProbeControl,
@@ -90,6 +92,7 @@ from ..core.protocol import (
     SavedPlace,
     CONFIRM_PROMPT_MAX_UTF16_UNITS,
     MESSAGE_REVIEW_PROMPT_MAX_UTF16_UNITS,
+    PLUGIN_HEARTBEAT_LOST_CLOSE_CODE,
     PLUGIN_REPLACED_CLOSE_CODE,
     PLUGIN_SLOT_OCCUPIED_CLOSE_CODE,
     parse_uplink,
@@ -131,6 +134,13 @@ TAKEOVER_HELLO_TIMEOUT_S = 3.0
 TAKEOVER_BUFFER_FRAMES = 64
 # What the plugin sends when the phone reports no glasses.
 _NO_GLASSES_SERIALS = frozenset({"", "unknown"})
+# JOAT's own heartbeat, for plugins that say they keep one (Hello.heartbeat).
+# The websockets library's Ping is answered by the phone's network stack, so
+# it cannot tell a frozen plugin page from a live one (RFC 6455 5.5.2-5.5.3).
+HEARTBEAT_INTERVAL_S = 10.0
+# Silence after which the plugin page is taken for frozen or gone and its
+# link is closed, so it reconnects (and re-syncs) when it wakes.
+HEARTBEAT_SILENCE_S = 45.0
 
 
 ImuCallback = Callable[[Imu], None]
@@ -207,6 +217,8 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         g2_diagnostics: G2DiagnosticStore | None = None,
         location_probe: bool = False,
         takeover_hello_timeout_s: float = TAKEOVER_HELLO_TIMEOUT_S,
+        heartbeat_interval_s: float = HEARTBEAT_INTERVAL_S,
+        heartbeat_silence_s: float = HEARTBEAT_SILENCE_S,
     ) -> None:
         if location_probe and g2_diagnostics is None:
             raise ValueError("location_probe requires g2_diagnostics receipt storage")
@@ -216,6 +228,9 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._trust_loopback = trust_loopback
         self._auth_timeout_s = auth_timeout_s
         self._takeover_hello_timeout_s = takeover_hello_timeout_s
+        self._heartbeat_interval_s = heartbeat_interval_s
+        self._heartbeat_silence_s = heartbeat_silence_s
+        self._last_uplink_at = time.monotonic()
         self._g2_diagnostics = g2_diagnostics
         self._g2_diagnostic_session_marker: tuple[int, int] | None = None
         self._location_probe = location_probe
@@ -1379,6 +1394,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         self._refusals.pop(host, None)
         self._lockout_warned = False
         connected_at = time.monotonic()
+        self._last_uplink_at = connected_at
         log.info("plugin connected")
         if self._dropped_while_disconnected:
             log.info(
@@ -1406,8 +1422,12 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 await conn.send(json.dumps(LocationProbeControl(enabled=True).to_wire()))
             if self._conn is not conn:
                 return
-            async for raw in conn:
-                self._dispatch(raw, session_id)
+            heartbeat = asyncio.create_task(self._heartbeat(conn, session_id))
+            try:
+                async for raw in conn:
+                    self._dispatch(raw, session_id)
+            finally:
+                heartbeat.cancel()
         except websockets.ConnectionClosed:
             pass
         finally:
@@ -1441,6 +1461,41 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
                 self._conn is not None and self._conn is not conn,
             )
             self._note_link_end(lifetime_s, close_code)
+
+    async def _heartbeat(self, conn: ServerConnection, session_id: str) -> None:
+        """Ping a plugin that keeps JOAT's heartbeat; close it when it goes quiet.
+
+        Any frame from the plugin counts as a sign of life. When this Mac's
+        own loop stalled, frames that arrived meanwhile are still queued, so
+        the silence is ours, not the plugin's: the clock restarts.
+        """
+        seq = 0
+        last_tick = time.monotonic()
+        while True:
+            await asyncio.sleep(self._heartbeat_interval_s)
+            if self._conn is not conn or self._session_id != session_id:
+                return
+            now = time.monotonic()
+            if now - last_tick > 2 * self._heartbeat_interval_s:
+                self._last_uplink_at = now
+            last_tick = now
+            if self.hello is None or not self.hello.heartbeat:
+                continue
+            silent = now - self._last_uplink_at
+            if silent > self._heartbeat_silence_s:
+                log.warning("no heartbeat from the plugin for %.0fs — closing its link", silent)
+                try:
+                    await conn.close(
+                        code=PLUGIN_HEARTBEAT_LOST_CLOSE_CODE, reason="no heartbeat",
+                    )
+                except websockets.ConnectionClosed:
+                    pass
+                return
+            seq += 1
+            try:
+                await conn.send(json.dumps(LinkPing(seq=seq).to_wire()))
+            except websockets.ConnectionClosed:
+                return
 
     def _note_link_end(self, lifetime_s: float, close_code: object) -> None:
         """Name the plugin's downlink-watchdog loop when the link keeps dying
@@ -1484,6 +1539,7 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         if session_id != self._session_id:
             log.debug("dropping stale plugin frame")
             return
+        self._last_uplink_at = time.monotonic()
         try:
             payload = json.loads(raw)
             message = parse_uplink(payload)
@@ -1495,6 +1551,9 @@ class HubGatewayTransport(GlassesTransport, AudioFrameSource):
         match message:
             case Auth():
                 # Replays on an established session are inert.
+                return
+            case LinkPong():
+                # Its arrival (above) is the whole message.
                 return
             case Hello():
                 self.hello = message

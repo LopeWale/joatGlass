@@ -1312,6 +1312,24 @@ class TestDownlinkWire:
         # from under the wearer with no warning.
         assert Shutdown().to_wire()["exitMode"] == 1
 
+    def test_heartbeat_wire_shapes(self) -> None:
+        # Mirror: link.ping / link.pong and hello.heartbeat in types.ts.
+        from joat.core.protocol import PLUGIN_HEARTBEAT_LOST_CLOSE_CODE, LinkPing, LinkPong
+
+        assert LinkPing(seq=3).to_wire() == {"kind": "link.ping", "seq": 3}
+        assert parse_uplink({"kind": "link.pong", "seq": 3}) == LinkPong(seq=3)
+        for bad in ({"kind": "link.pong"}, {"kind": "link.pong", "seq": "3"},
+                    {"kind": "link.pong", "seq": True}, {"kind": "link.pong", "seq": -1}):
+            with pytest.raises(ProtocolError):
+                parse_uplink(bad)
+        hello = {"kind": "hello", "sn": "S", "model": "g2", "launchSource": "appMenu"}
+        assert parse_uplink(hello).heartbeat is False  # type: ignore[union-attr]
+        assert parse_uplink({**hello, "heartbeat": True}).heartbeat is True  # type: ignore[union-attr]
+        source = (Path(__file__).resolve().parents[2] / "apps/hub-plugin/src/types.ts").read_text()
+        assert f"PLUGIN_HEARTBEAT_LOST_CLOSE_CODE = {PLUGIN_HEARTBEAT_LOST_CLOSE_CODE};" in source
+        assert "{ kind: 'link.ping'; seq: number }" in source
+        assert "{ kind: 'link.pong'; seq: number }" in source
+
     def test_pairing_ack_uplink_parses(self) -> None:
         # The Mac persists the token ONLY on this ack; a drifted key would
         # silently reopen the pairing window forever.

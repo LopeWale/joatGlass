@@ -1901,3 +1901,56 @@ class TestLockoutRecovery:
         assert store.token is None
         assert t.forget_pairing() is True
         assert store.window_open is True
+
+
+class TestHeartbeat:
+    """JOAT's own heartbeat (2026-10-13). A WebSocket Pong comes from the
+    phone's network stack, so only an answer from the plugin page proves the
+    page is alive. Plugins that do not announce it are never held to it."""
+
+    @staticmethod
+    async def _gateway(port: int) -> HubGatewayTransport:
+        t = HubGatewayTransport(
+            host=HOST, port=port, heartbeat_interval_s=0.05, heartbeat_silence_s=0.3,
+        )
+        await t.start()
+        return t
+
+    @staticmethod
+    def _hello(heartbeat: bool) -> str:
+        return json.dumps({"kind": "hello", "sn": "S200", "model": "g2",
+                           "launchSource": "appMenu", **({"heartbeat": True} if heartbeat else {})})
+
+    async def test_a_plugin_that_answers_stays_and_a_silent_one_is_closed(self, unused_tcp_port) -> None:
+        t = await self._gateway(unused_tcp_port)
+        try:
+            async with websockets.connect(f"ws://{HOST}:{unused_tcp_port}") as ws:
+                await ws.send(self._hello(True))
+                answered = 0
+                deadline = time.monotonic() + 0.8
+                while time.monotonic() < deadline:
+                    frame = json.loads(await asyncio.wait_for(ws.recv(), 1))
+                    if frame["kind"] == "link.ping":
+                        await ws.send(json.dumps({"kind": "link.pong", "seq": frame["seq"]}))
+                        answered += 1
+                assert answered >= 5
+                assert t.connected and ws.close_code is None
+                # The page freezes: it stops answering.
+                with pytest.raises(websockets.ConnectionClosed):
+                    while True:
+                        await asyncio.wait_for(ws.recv(), 2)
+                assert ws.close_code == 4408
+                assert ws.close_reason == "no heartbeat"
+        finally:
+            await t.stop()
+
+    async def test_an_older_plugin_without_the_heartbeat_is_left_alone(self, unused_tcp_port) -> None:
+        t = await self._gateway(unused_tcp_port)
+        try:
+            async with websockets.connect(f"ws://{HOST}:{unused_tcp_port}") as ws:
+                await ws.send(self._hello(False))
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(ws.recv(), 0.6)
+                assert t.connected and ws.close_code is None
+        finally:
+            await t.stop()

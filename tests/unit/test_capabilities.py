@@ -2659,6 +2659,48 @@ class TestCapabilityViews:
             await asyncio.sleep(0.05)
             assert capture.calls[-1] == "hold_end"
 
+    async def test_a_paused_note_answers_taps_again_after_a_reconnect(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """The wearer, 2026-10-13: "the quick note just freezes if I am quiet
+        for a bit", with it paused. A reconnect let go of the note's page,
+        and every tap on it was dropped as stale (brain.log 08:08, 08:16)."""
+        capture = FakeVoiceCapture(state="paused", title="Bay arm notes")
+        router, transport, _ = make_router(tmp_path, voice_capture=capture)
+        await router.open("QuickNotes", request_id="notes-before")
+        pages = lambda: [m for m in transport.sent if isinstance(m, HudList)]  # noqa: E731
+        assert pages()[-1].title == "QUICKNOTES · NEW NOTE"
+
+        router.on_disconnect()                      # the link drops
+        router.on_disconnect()                      # and the next hello clears again
+        router.on_input(InputEvent(container_name="capdata", selected_name="QUICKNOTES",
+                                   selected_index=0, request_id="notes-before"))
+        await asyncio.sleep(0.05)
+        assert "toggle" not in capture.calls, "the old page's tap is still stale"
+
+        assert await router.reattach_open_note() is True
+        back = pages()[-1]
+        assert back.title == "QUICKNOTES · NEW NOTE"
+        assert back.request_id is not None and back.request_id.startswith(VOICE_REQUEST_PREFIX)
+        router.on_input(InputEvent(container_name="capdata", selected_name="QUICKNOTES",
+                                   selected_index=0, request_id=back.request_id))
+        await wait_until(lambda: "toggle" in capture.calls)
+
+    async def test_a_reconnect_does_not_pull_the_wearer_back_into_a_note_they_left(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        capture = FakeVoiceCapture(state="paused", title="Bay arm notes")
+        router, transport, _ = make_router(tmp_path, voice_capture=capture)
+        await router.open("QuickNotes", request_id="notes-before")
+        await router.open("Messages", request_id="messages-now")
+        router.on_disconnect()
+        sent = len(transport.sent)
+        assert await router.reattach_open_note() is False
+        assert len(transport.sent) == sent
+
+    async def test_no_open_note_means_nothing_to_give_back(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        capture = FakeVoiceCapture(state="idle", title="Note", active=False)
+        router, transport, _ = make_router(tmp_path, voice_capture=capture)
+        await router.open("QuickNotes", request_id="notes-list")
+        router.on_disconnect()
+        assert await router.reattach_open_note() is False
+
     async def test_the_rec_timer_repaints_each_new_second_once(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         capture = FakeVoiceCapture(state="recording", title="Standup")
         capture.recorded_s = 10

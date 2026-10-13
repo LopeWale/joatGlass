@@ -1,5 +1,5 @@
 import { AudioInputSource } from '@evenrealities/even_hub_sdk';
-import type { BridgeClient } from './BridgeClient';
+import { BRIDGE_CALL_TIMEOUT_MS, SettleTimeout, settleWithin, type BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 import type { UplinkMessage } from './types';
 
@@ -166,38 +166,84 @@ export class AudioStreamer {
     if (this.open) return this.lastSource === source;
     return this.control(async () => {
       if (signal?.aborted || epoch !== this.controlEpoch || !this.desiredOpen) return false;
+      let call: Promise<boolean>;
       try {
         const bridge =
           source === AudioInputSource.Glasses ? this.client.assertStarted() : this.client.require();
-        const ok = await bridge.audioControl(true, source);
-        if (!ok) return false;
+        call = bridge.audioControl(true, source);
       } catch (err) {
         // A host without mic support must degrade the mic, not kill boot.
         console.warn('[AudioStreamer] audioControl unavailable on this host:', err);
         return false;
       }
+      let ok: boolean;
+      try {
+        ok = await settleWithin(call, BRIDGE_CALL_TIMEOUT_MS, 'audioControl(true)');
+      } catch (err) {
+        if (!(err instanceof SettleTimeout)) {
+          console.warn('[AudioStreamer] audioControl unavailable on this host:', err);
+          return false;
+        }
+        // The host may still turn the mic on. Adopt it then if it is still
+        // wanted; otherwise turn it off, never leaving a hot mic behind.
+        console.warn('[AudioStreamer]', err.message);
+        void call.then(
+          (late) => { if (late) this.lateStart(source, epoch, signal); },
+          () => undefined,
+        );
+        return false;
+      }
+      if (!ok) return false;
       if (signal?.aborted || epoch !== this.controlEpoch || !this.desiredOpen) {
         // A stop/reconnect overtook this start while the native call was in
         // flight. Turn it off again after the late success; merely ignoring the
         // result would leave a hot microphone behind false local state.
-        try {
-          await this.client.require().audioControl(false);
-        } catch {
-          // Best-effort compensation; link-loss cleanup will retry stop.
-        }
+        await this.closeNative();
         return false;
       }
-      this.open = true;
-      this.lastSource = source;
-      // A stream just opened has had no chance to deliver yet.
-      this.lastFrameAtMs = this.now();
-      this.onState?.(true);
-      this.flushTimer = setInterval(() => {
-        this.flush();
-        this.checkLiveness();
-      }, this.flushMs);
+      this.opened(source);
       return true;
     });
+  }
+
+  /** The native mic is on for this page: stream it. */
+  private opened(source: AudioInputSource): void {
+    this.open = true;
+    this.lastSource = source;
+    // A stream just opened has had no chance to deliver yet.
+    this.lastFrameAtMs = this.now();
+    this.onState?.(true);
+    this.flushTimer = setInterval(() => {
+      this.flush();
+      this.checkLiveness();
+    }, this.flushMs);
+  }
+
+  /** A start that ran out of time succeeded after all. */
+  private lateStart(source: AudioInputSource, epoch: number, signal?: AbortSignal): void {
+    if (this.open) return;
+    if (!signal?.aborted && epoch === this.controlEpoch && this.desiredOpen) {
+      console.info('[AudioStreamer] mic opened late');
+      this.opened(source);
+      return;
+    }
+    void this.control(() => this.closeNative());
+  }
+
+  /**
+   * Turn the native mic off, bounded. Every native mic call is: Even's
+   * advice is that one flaky hop can hang ~30 s (BRIDGE_CALL_TIMEOUT_MS).
+   * Unbounded, a hung call held every later mic call behind it, and the
+   * Mac's `audio.control` waited on it until MacLink's 15 s downlink watchdog
+   * dropped the link: 45 times on 2026-10-13, each one cancelling the
+   * question the wearer had just asked.
+   */
+  private async closeNative(): Promise<void> {
+    try {
+      await settleWithin(this.client.require().audioControl(false), BRIDGE_CALL_TIMEOUT_MS, 'audioControl(false)');
+    } catch {
+      // Best-effort: a host without audio support, or one that did not answer.
+    }
   }
 
   /** The question owns only the microphone it opened. External starts/stops
@@ -244,18 +290,24 @@ export class AudioStreamer {
       try {
         const bridge =
           source === AudioInputSource.Glasses ? this.client.assertStarted() : this.client.require();
-        if (await bridge.audioControl(true, source)) {
+        if (await settleWithin(bridge.audioControl(true, source), BRIDGE_CALL_TIMEOUT_MS, 'audioControl(true)')) {
           this.lastFrameAtMs = this.now();
           console.info(`[AudioStreamer] mic re-armed (${reason})`);
           return true;
         }
       } catch (err) {
+        if (err instanceof SettleTimeout) {
+          // No answer is not a refusal: keep the stream and let the next
+          // liveness check try again.
+          console.warn(`[AudioStreamer] mic re-arm unanswered (${reason}):`, err.message);
+          return undefined;
+        }
         console.warn(`[AudioStreamer] mic re-arm failed (${reason}):`, err);
       }
       return false;
     });
-    if (!ok && epoch === this.controlEpoch && this.open) await this.stop();
-    return ok && this.open;
+    if (ok === false && epoch === this.controlEpoch && this.open) await this.stop();
+    return ok === true && this.open;
   }
 
   /** A stream that went silent re-arms itself, at most every
@@ -288,13 +340,7 @@ export class AudioStreamer {
     this.flushTimer = undefined;
     this.buffer = [];
     this.carry = null;
-    await this.control(async () => {
-      try {
-        await this.client.require().audioControl(false);
-      } catch {
-        // Host without audio support: nothing was ever on.
-      }
-    });
+    await this.control(() => this.closeNative());
   }
 
   // A byte left over when an event ends mid-sample; prepended to the next

@@ -1090,6 +1090,8 @@ async function boot(): Promise<void> {
       sn: device?.sn ?? 'unknown',
       model: device?.model ?? 'unknown',
       launchSource: client.getLaunchSource() ?? 'unknown',
+      // MacLink answers link.ping, so the Mac may hold this page to it.
+      heartbeat: true,
       ...(user?.name ? { userName: user.name } : {}),
       // Read at announce time, not at module load: `announce` fires again on
       // every reconnect, so a wearer who landed while the link was down is

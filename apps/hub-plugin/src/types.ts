@@ -8,6 +8,9 @@ export const PLUGIN_REPLACED_CLOSE_CODE = 4409;
 /** A standby dial (`?standby=1`) refused: another display holds the glasses.
  * Twin: apps/mac/joat/core/protocol.py. */
 export const PLUGIN_SLOT_OCCUPIED_CLOSE_CODE = 4410;
+/** The Mac heard nothing from this page for too long and closed the link.
+ * Twin: apps/mac/joat/core/protocol.py. */
+export const PLUGIN_HEARTBEAT_LOST_CLOSE_CODE = 4408;
 
 /** Container IDs — stable across rebuilds so textContainerUpgrade can target them. */
 export const ContainerId = {
@@ -487,7 +490,10 @@ export type UplinkMessage =
     /** The PHONE's IANA zone. The Mac formats every time the wearer reads,
      * and its own zone is only right by coincidence — see phoneTimeZone. */
     timeZone?: string;
+    /** This page answers link.ping (MacLink); the Mac may then hold it to it. */
+    heartbeat?: true;
   }
+  | { kind: 'link.pong'; seq: number }
   | { kind: 'audio'; source: 'glasses' | 'phone'; seq: number; pcm: number[]; speaker?: string; audioEpoch?: string }
   | { kind: 'imu'; x: number; y: number; z: number; at: number }
   | { kind: 'input'; event: InputEventPayload }
@@ -629,6 +635,7 @@ export type DownlinkMessage =
   | PromptPartialMessage
   /** The socket is usable only after this frame. */
   | { kind: 'auth.accepted' }
+  | { kind: 'link.ping'; seq: number }
   | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean; textColor?: number; contentKind?: HudContentKind; traceId?: string }
   | {
     kind: 'assistant.overlay';

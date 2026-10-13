@@ -590,3 +590,87 @@ describe('AudioStreamer stream liveness (Even Hub Background & Lifecycle)', () =
     expect(calls).toEqual([]);
   });
 });
+
+describe('AudioStreamer bounded mic calls (2026-10-13)', () => {
+  // A host mic call that never answered held every later mic call behind it,
+  // and the Mac's `audio.control` waited until MacLink's 15 s watchdog
+  // dropped the link — 45 times in one day.
+  function rig() {
+    const calls: boolean[] = [];
+    const pending: Array<(ok: boolean) => void> = [];
+    let hang = true;
+    const audioControl = (open: boolean) => {
+      calls.push(open);
+      if (open && hang) return new Promise<boolean>((resolve) => pending.push(resolve));
+      return Promise.resolve(true);
+    };
+    const client = {
+      assertStarted: () => ({ audioControl }),
+      require: () => ({ audioControl }),
+    } as unknown as BridgeClient;
+    const audio = new AudioStreamer(client, { send: () => undefined } as unknown as MacLink);
+    return { audio, calls, pending, answer: () => { hang = false; } };
+  }
+
+  it('a start the host never answers gives up within the bridge limit', async () => {
+    const { audio } = rig();
+    const started = audio.start(AudioInputSource.Glasses);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(started).resolves.toBe(false);
+    expect(audio.isOpen).toBe(false);
+  });
+
+  it('the next mic call is not stuck behind a hung one', async () => {
+    const { audio, answer } = rig();
+    const first = audio.start(AudioInputSource.Glasses);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await first;
+    answer();
+    await expect(audio.start(AudioInputSource.Glasses)).resolves.toBe(true);
+    expect(audio.isOpen).toBe(true);
+  });
+
+  it('a start that succeeds late is adopted while the mic is still wanted', async () => {
+    const { audio, pending } = rig();
+    const states: boolean[] = [];
+    audio.onState = (open) => states.push(open);
+    const started = audio.start(AudioInputSource.Glasses);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(started).resolves.toBe(false);
+    pending[0]!(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(audio.isOpen).toBe(true);
+    expect(states).toEqual([true]);
+  });
+
+  it('a start that succeeds after the mic was stopped is turned off again', async () => {
+    const { audio, calls, pending } = rig();
+    const started = audio.start(AudioInputSource.Glasses);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await started;
+    await audio.stop();
+    calls.length = 0;
+    pending[0]!(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(audio.isOpen).toBe(false);
+    expect(calls).toEqual([false]);
+  });
+
+  it('a stop the host never answers still finishes', async () => {
+    let hangStop = false;
+    const audioControl = (open: boolean) =>
+      !open && hangStop ? new Promise<boolean>(() => undefined) : Promise.resolve(true);
+    const client = {
+      assertStarted: () => ({ audioControl }),
+      require: () => ({ audioControl }),
+    } as unknown as BridgeClient;
+    const audio = new AudioStreamer(client, { send: () => undefined } as unknown as MacLink);
+    await audio.start(AudioInputSource.Glasses);
+    hangStop = true;
+    const stopped = audio.stop();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(stopped).resolves.toBeUndefined();
+    hangStop = false;
+    await expect(audio.start(AudioInputSource.Glasses)).resolves.toBe(true);
+  });
+});
