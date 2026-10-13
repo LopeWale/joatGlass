@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-13 — Build JOAT 0.1.129
+
+- Packed from `06e5023` (clean tree) with `scripts/pack.sh`, the `com.example.joat` manifest and the MacBook-first, Mac Mini-second private WSS candidates. app.json, package.json and package-lock.json all 0.1.129 (last build 0.1.128). `--sdk-ver 0.0.16` (the newest on npm), minimum Even App 2.2.10. Plugin 1236 tests passed, typecheck clean.
+- Canonical `apps/hub-plugin/joat.ehpk`: 178774 bytes, SHA-256 `77a3705ddf5bf739ffea2a765747431dd483a02ccb3dc94d960dc51dbaa0c8db`. Adds to 0.1.128: bounded mic calls and JOAT's heartbeat (`51ceb51`). Install through a Beta group (docs/HUB_PLUGIN.md Path B). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-13 — A paused note survives a reconnect, a stuck mic call no longer drops the link, and JOAT keeps its own heartbeat
 
 The wearer: the plugin "dropping out or freezing is still a problem … especially the AI, because it is not working right now. Plus, the quick note just freezes if I am quiet for a bit", while paused. Research and evidence: project doc `claude/background-link-research-2026-10-13.md`.
