@@ -58,3 +58,6 @@ build/
 
 # TypeScript incremental build artifact
 *.tsbuildinfo
+
+# Personal plugin builds (each build carries its builder's own Mac addresses)
+apps/hub-plugin/*.ehpk

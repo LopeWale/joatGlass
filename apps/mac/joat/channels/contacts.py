@@ -1,6 +1,6 @@
 """Resolve phone numbers and emails to contact names.
 
-"+14055550123 · Messages" tells the wearer nothing at a glance; "Dele ·
+"+14055550123 · Messages" tells the wearer nothing at a glance; "Sam ·
 Messages" tells them everything. Messages' own store only carries the raw
 handle, so the name has to come from Contacts.
 
