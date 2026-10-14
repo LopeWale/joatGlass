@@ -40,6 +40,10 @@ targets:
     sources:
       - path: Sources/JOAT
       - path: Resources
+      # The News page's sources: the engine's own catalog (one file for
+      # both, so the page never offers a feed the engine can't read).
+      - path: ../joat/services/news_sources.json
+        buildPhase: resources
     entitlements:
       path: JOAT.entitlements
       properties:

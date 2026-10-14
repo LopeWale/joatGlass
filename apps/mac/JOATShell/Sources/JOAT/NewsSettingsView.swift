@@ -42,7 +42,39 @@ final class NewsSettingsModel {
         next.categories.removeAll { $0 == id }
         if enabled { next.categories.append(id) }
         let selected = Set(next.categories)
-        next.categories = NewsConfig.categories.map(\.id).filter { selected.contains($0) }
+        next.categories = NewsCatalog.shared.categories.map(\.id).filter { selected.contains($0) }
+        _ = save(next)
+    }
+
+    func isSourceOn(_ source: NewsSource, in category: NewsCategory) -> Bool {
+        config.activeSourceIDs(in: category).contains(source.id)
+    }
+
+    /// The last source on in a subject stays on: switching the subject off
+    /// is how it reads nothing (the engine would read its defaults again).
+    func canSwitchOff(_ source: NewsSource, in category: NewsCategory) -> Bool {
+        config.activeSourceIDs(in: category) != [source.id]
+    }
+
+    /// Only this subject's choice is written: the others keep following
+    /// their recommended sources until the wearer changes them too.
+    func setSource(_ source: NewsSource, in category: NewsCategory, enabled: Bool) {
+        let ids = Set(category.sources.map(\.id))
+        var here = config.activeSourceIDs(in: category).filter { $0 != source.id }
+        if enabled { here.append(source.id) }
+        guard !here.isEmpty else { return }
+        var chosen = (config.sources ?? []).filter { !ids.contains($0) }
+        if Set(here) != Set(category.defaultSourceIDs) { chosen += here }
+        var next = config
+        next.sources = chosen.isEmpty ? nil : chosen
+        _ = save(next)
+    }
+
+    var usesRecommendedSources: Bool { config.sources == nil }
+
+    func useRecommendedSources() {
+        var next = config
+        next.sources = nil
         _ = save(next)
     }
 
@@ -90,19 +122,39 @@ struct NewsSettingsView: View {
             LocalCommandView(commands: commands, action: .newsRefresh,
                              title: "Refresh News", detail: "Fetch your selected feeds now on this Mac.")
             GroupBox("Your interests") {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Headlines from BBC, NPR, and Google News. Choose the subjects you want to follow.")
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Free headlines, straight from each publisher's own feed. Choose your subjects, then the sources for each; a subject starts with its recommended sources.")
                         .font(.callout).foregroundStyle(.secondary)
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 175), alignment: .leading)], alignment: .leading, spacing: 16) {
-                        ForEach(NewsConfig.categories) { category in
+                    ForEach(NewsCatalog.shared.categories) { category in
+                        VStack(alignment: .leading, spacing: 8) {
                             Toggle(category.label, isOn: Binding(
                                 get: { model.config.categories.contains(category.id) },
                                 set: { model.setCategory(category.id, enabled: $0) }
-                            )).toggleStyle(.checkbox)
+                            )).toggleStyle(.checkbox).font(.body.weight(.medium))
+                            if model.config.categories.contains(category.id) && !category.sources.isEmpty {
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), alignment: .leading)],
+                                          alignment: .leading, spacing: 8) {
+                                    ForEach(category.sources) { source in
+                                        Toggle(source.name, isOn: Binding(
+                                            get: { model.isSourceOn(source, in: category) },
+                                            set: { model.setSource(source, in: category, enabled: $0) }
+                                        ))
+                                        .toggleStyle(.checkbox)
+                                        .disabled(!model.canSwitchOff(source, in: category))
+                                        .help(source.isDefault ? "Recommended · \(source.url)" : source.url)
+                                    }
+                                }.padding(.leading, 22)
+                            }
                         }
+                        if category.id != NewsCatalog.shared.categories.last?.id { Divider() }
                     }
-                    Text("If you remove every interest and custom feed, JOAT restores its default interests.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("If you remove every interest and custom feed, JOAT restores its default interests.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer(minLength: 12)
+                        Button("Use Recommended Sources") { model.useRecommendedSources() }
+                            .disabled(model.usesRecommendedSources)
+                    }
                 }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
             }
             GroupBox("Your feeds") {

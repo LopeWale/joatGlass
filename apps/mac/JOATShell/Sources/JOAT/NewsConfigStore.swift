@@ -1,46 +1,33 @@
 import Foundation
 
 /// The News tab's configuration, exactly as the engine reads it
-/// (apps/mac/joat/services/news.py, `NewsConfig`): which free-feed
-/// categories to poll, any feeds of the wearer's own, and the cadence.
-/// Keys are camelCase because the JSON is the contract between this app
-/// and the Python brain; the brain re-reads the file when it changes, so
-/// saving here is enough — no restart, no message.
-struct NewsCategory: Identifiable, Equatable {
-    let id: String
-    let label: String
-}
-
+/// (apps/mac/joat/services/news.py, `NewsConfig`): which subjects to poll,
+/// which of each subject's free sources, any feeds of the wearer's own,
+/// and the cadence. Keys are camelCase because the JSON is the contract
+/// between this app and the Python brain; the brain re-reads the file when
+/// it changes, so saving here is enough — no restart, no message.
 struct NewsConfig: Codable, Equatable {
-    /// Category ids the engine knows, in the order the Mac app lists them.
-    /// Each maps to three key-free feeds on the engine side (BBC, NPR,
-    /// Google News); an id the engine does not know is ignored there.
-    static let categories: [NewsCategory] = [
-        NewsCategory(id: "top", label: "Top stories"),
-        NewsCategory(id: "world", label: "World"),
-        NewsCategory(id: "us", label: "US"),
-        NewsCategory(id: "business", label: "Business"),
-        NewsCategory(id: "technology", label: "Technology"),
-        NewsCategory(id: "science", label: "Science"),
-        NewsCategory(id: "health", label: "Health"),
-        NewsCategory(id: "sports", label: "Sports"),
-        NewsCategory(id: "entertainment", label: "Entertainment"),
-    ]
-    static let defaultCategories = ["top", "technology", "world"]
+    static var defaultCategories: [String] { NewsCatalog.shared.defaultCategories }
     static let minimumRefreshMinutes = 5
     static let maximumRefreshMinutes = 24 * 60
 
     var categories: [String] = NewsConfig.defaultCategories
     var customFeeds: [String] = []
     var refreshMinutes: Int = 15
+    /// The catalog sources the wearer chose, by id; nil until they change
+    /// one. A subject with none of its sources here reads its defaults —
+    /// the engine's rule (`NewsConfig.enabled_sources`).
+    var sources: [String]?
 
     /// The engine clamps too; clamping here keeps the file honest. One
     /// rule is mirrored on purpose: nothing selected and no feed of your
     /// own is the DEFAULT set, not an empty tab — the engine substitutes
     /// the defaults for that file, so the app must show what it will do.
-    var normalized: NewsConfig {
+    var normalized: NewsConfig { normalized(in: .shared) }
+
+    func normalized(in catalog: NewsCatalog) -> NewsConfig {
         var copy = self
-        let known = Set(NewsConfig.categories.map(\.id))
+        let known = Set(catalog.categories.map(\.id))
         var seenCategories = Set<String>()
         var seenFeeds = Set<String>()
         copy.categories = categories.filter { known.contains($0) && seenCategories.insert($0).inserted }
@@ -49,7 +36,12 @@ struct NewsConfig: Codable, Equatable {
             .filter { $0.hasPrefix("https://") || $0.hasPrefix("http://") }
             .filter { seenFeeds.insert($0).inserted }
         if copy.categories.isEmpty && copy.customFeeds.isEmpty {
-            copy.categories = NewsConfig.defaultCategories
+            copy.categories = catalog.defaultCategories
+        }
+        if let sources {
+            // Catalog order, known ids only, each once.
+            let chosen = Set(sources)
+            copy.sources = catalog.sourceIDs.filter { chosen.contains($0) }
         }
         copy.refreshMinutes = min(
             NewsConfig.maximumRefreshMinutes,
@@ -58,18 +50,27 @@ struct NewsConfig: Codable, Equatable {
         return copy
     }
 
+    /// The sources the engine reads for `category`: those chosen there, or
+    /// its defaults when none are.
+    func activeSourceIDs(in category: NewsCategory) -> [String] {
+        let chosen = Set(sources ?? [])
+        let picked = category.sources.map(\.id).filter { chosen.contains($0) }
+        return picked.isEmpty ? category.defaultSourceIDs : picked
+    }
+
     /// Decoding is tolerant of a hand-edited file: any missing key keeps
     /// its default, and the engine tolerates the same shapes.
     init() {}
 
-    init(categories: [String], customFeeds: [String] = [], refreshMinutes: Int = 15) {
+    init(categories: [String], customFeeds: [String] = [], refreshMinutes: Int = 15, sources: [String]? = nil) {
         self.categories = categories
         self.customFeeds = customFeeds
         self.refreshMinutes = refreshMinutes
+        self.sources = sources
     }
 
     private enum CodingKeys: String, CodingKey {
-        case categories, customFeeds, refreshMinutes
+        case categories, customFeeds, refreshMinutes, sources
     }
 
     init(from decoder: Decoder) throws {
@@ -78,6 +79,7 @@ struct NewsConfig: Codable, Equatable {
             ?? NewsConfig.defaultCategories
         customFeeds = try container.decodeIfPresent([String].self, forKey: .customFeeds) ?? []
         refreshMinutes = try container.decodeIfPresent(Int.self, forKey: .refreshMinutes) ?? 15
+        sources = try container.decodeIfPresent([String].self, forKey: .sources)
     }
 }
 
