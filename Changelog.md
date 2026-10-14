@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-14 — Build JOAT 0.1.130
+
+- Packed from `a92d780` (clean tree) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.130 above the last recorded build; app.json, package.json and package-lock.json all 0.1.130. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1243 tests passed, typecheck clean.
+- `apps/hub-plugin/joat.ehpk`: 179044 bytes, SHA-256 `d83ee67c0797e9c9f7c7438cae2c5de1de431a657e14c4339ec258e11b3f6d7b`. Adds to 0.1.129 the two freeze fixes (`af5b947`). Plugin only: no Mac restart. Not installed or verified on physical glasses.
+
 ## 2026-10-14 — The glasses no longer freeze: two input traps fixed
 
 The wearer: "there are issues with the glasses freezing up". brain.log: 07:37–07:43 and 08:15–08:18 the mic kept streaming but no tap reached the Mac until JOAT was reopened.
