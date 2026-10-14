@@ -178,7 +178,24 @@ def only_prompt_words(text: str, prompt: str | None) -> bool:
         return False
     heard = re.findall(r"[a-z0-9']+", text.lower())
     bias = set(re.findall(r"[a-z0-9']+", prompt.lower()))
-    return bool(heard) and all(w in bias for w in heard) and any(len(w) >= 4 for w in heard)
+
+    def of_prompt(word: str) -> bool:
+        # Near-misses of a content word count too: "Joats." is the name with
+        # an s (2026-10-14, three wakes by similarity), not new speech.
+        return word in bias or (len(word) >= 4 and any(
+            len(b) >= 4 and difflib.SequenceMatcher(None, word, b).ratio() >= 0.8 for b in bias))
+
+    return bool(heard) and all(of_prompt(w) for w in heard) and any(len(w) >= 4 for w in heard)
+
+
+_NAME_ALOUD = re.compile(
+    r"^[\s\W]*(?:(?:hey|hi|ok|okay)[\s,.!]+)?(?:j|ch|dj|g)[a-z']{1,7}[\s.!?,]*$", re.I,
+)
+"""What a spoken JOAT sounds like to Whisper WITHOUT the prompt: one short
+word on a j/ch sound, maybe after "hey". Measured on the live model with
+three voices, clean and over hum: Chode, Chau, Jode, Jote, Jokes, Jolts,
+Jules, Jolt, Jobe, Joe, Jones, Jodes. Speech that is not the name — another
+person talking nearby — is not this."""
 
 
 def wav_bytes(pcm: bytes) -> bytes:
@@ -579,6 +596,14 @@ class WhisperServeEngine(SttEngine):
             return text
         if not plain.strip() or is_sound_event(plain):
             log.info("dropped prompt-word hallucination chars=%d (nothing heard without the prompt)",
+                     len(text))
+            return ""
+        if not _NAME_ALOUD.match(plain):
+            # 2026-10-14 08:15:02: room noise came back "JOAT." with the
+            # prompt, and the check passed it because the plain pass heard
+            # SOMETHING — people talking nearby (a dozen non-wearer
+            # utterances that minute). Words were there; the name was not.
+            log.info("dropped prompt-word transcript chars=%d (other speech, not the name, without the prompt)",
                      len(text))
             return ""
         log.info("prompt-word transcript confirmed without the prompt chars=%d", len(text))

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-14 — JOAT no longer wakes on other people's speech
+
+The wearer: "why did JOAT reply yes when I was not talking to it? … JOAT just randomly answers when I don't say anything or I was never even using the word."
+
+- **08:15:02** (the "Yes?" card over the paused QuickNote): Whisper, prompted, heard "JOAT." on room sound. The 10-12 check heard the same audio without the prompt and kept it because *something* came back: people talking nearby (a dozen non-wearer utterances 08:14–08:18). The check proved speech, not the name.
+- **Now the no-prompt pass must sound like the name** (`whisper_serve._NAME_ALOUD`): one short word on a j/ch sound, maybe after "hey". These are the renderings measured on the live model for a spoken JOAT (Chode, Chau, Jode, Jote, Joke(s), Jolt(s), Jules, Jobe, Joe, Jones). Anything else is dropped (`other speech, not the name, without the prompt`). Near-misses of the name ("Joats.", three similarity wakes this morning) now get the same check (`only_prompt_words`). Requests that carry words of their own ("JOAT, what time is it?") are unchanged and pay no second pass.
+- Tests: other people's sentence dropped and logged without content; every measured rendering kept; "Joats." checked. Whisper and orchestrator suites 159 passed; mypy clean. **Mac only: takes effect when JOAT restarts.**
+
 ## 2026-10-14 — Build JOAT 0.1.130
 
 - Packed from `f6cd5e8` (clean tree) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.130 above the last recorded build; app.json, package.json and package-lock.json all 0.1.130. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1243 tests passed, typecheck clean.

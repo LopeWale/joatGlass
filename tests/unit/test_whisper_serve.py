@@ -760,6 +760,25 @@ class TestShortEchoIsHeardAgainWithoutThePrompt:
         assert heard is not None and heard.text == "JOAT."
         assert calls == [True, False]
 
+    async def test_other_peoples_speech_is_not_the_name(self, monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+        # 2026-10-14 08:15:02: "JOAT." with the prompt, room talk without it.
+        engine, _ = self.engine(monkeypatch, "JOAT.", "So I told him we would be there by six.")
+        with caplog.at_level(logging.INFO, logger="joat.audio.whisper_serve"):
+            assert await self.hear(engine) is None
+        assert "other speech, not the name" in caplog.text
+
+    async def test_every_measured_rendering_of_the_name_is_kept(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        for plain in ("Chode.", "Chau.", "Jode.", "Jote", "Jokes.", "Jolts.", "Jules.",
+                      "Joke.", "Hey Jode.", "Hey Jolt.", "Joe."):
+            engine, _ = self.engine(monkeypatch, "JOAT.", plain)
+            heard = await self.hear(engine)
+            assert heard is not None and heard.text == "JOAT.", plain
+
+    async def test_a_near_miss_of_the_name_is_checked_too(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        engine, calls = self.engine(monkeypatch, "Joats.", "")
+        assert await self.hear(engine) is None
+        assert calls == [True, False]
+
     async def test_a_sound_annotation_without_the_prompt_counts_as_nothing(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         engine, _ = self.engine(monkeypatch, "JOAT", "[BLANK_AUDIO]")
         assert await self.hear(engine) is None
