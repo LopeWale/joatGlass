@@ -202,22 +202,17 @@ describe('CapabilityMenu — the overview tab rail', () => {
     menu.handleClick();
     const opened = await menu.presentList(
       'NEWS · ARTICLE',
-      ['Rover lands · NPR · 5m', 'The rover touched down at dawn.'],
+      ['Rover lands · NPR · 5m\n', 'The rover touched down at dawn.\n'],
       'panel-news-7',
       false,
-      'down more · 2x tap: back',
+      'left x2: back',
     );
     expect(opened).toBe(true);
     expect(menu.isPanelExpanded()).toBe(false); // inside the reader
-    // A boundary swipe with a Mac-authored "down more" hint pages the reader.
+    // The article arrived whole: a swipe at either end asks the Mac for
+    // nothing (the plugin moves through the text on its own).
     sent.length = 0;
     expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
-    expect(sent[0]?.event).toMatchObject({
-      containerName: 'cappage', selectedName: 'NEWS',
-      eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, requestId: 'panel-news-7',
-    });
-    // "up previous" was not offered on page one, so an upward swipe is not a request.
-    sent.length = 0;
     menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT);
     expect(sent).toEqual([]);
 

@@ -4,11 +4,11 @@ import { TEXT_CONTAINER_MAX_BYTES } from './FirmwareLimits';
 import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder, PROMPT_QUESTION_HINT, READER_TEXT_PAGE } from './HudPageBuilder';
 import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
-import { paginateHanging, paginateMeasured } from './FirmwareText';
+import { firmwareLineCount, paginateHanging, paginateMeasured } from './FirmwareText';
 import { getTextWidth } from '@evenrealities/pretext';
 import { ContainerId } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
-import { readerParagraphs } from './EvenFont';
+import { readerParagraphs, readerRows } from './EvenFont';
 
 /** A Messages reader's firmware pages: explicit lines at the inset reader
  * width, each message's rows hanging under its first word. */
@@ -289,6 +289,63 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     const since = r.operations.slice(before);
     expect(since.filter((op) => op.startsWith('visual:') || op.startsWith('rebuild:4:'))).toEqual([]);
     expect(since.filter((op) => /^rebuild:0:\d+:1$/.test(op))).toHaveLength(1);
+  });
+});
+
+/** The lines a reader reads: each screen's lines after the ones it carried
+ * over from the screen before (the longest end of one that opens the next). */
+function readThrough(screens: readonly (readonly string[])[]): string[] {
+  const read: string[] = [];
+  for (const screen of screens) {
+    let carried = Math.min(read.length, screen.length);
+    while (carried > 0 && read.slice(read.length - carried).join('\n') !== screen.slice(0, carried).join('\n')) carried -= 1;
+    read.push(...screen.slice(carried));
+  }
+  return read;
+}
+
+/**
+ * A News article reads as one continuous document (the wearer, 2026-10-14:
+ * "a single continuous flow that I could scroll as I'm reading"). Each swipe
+ * moves a seven-line window down the whole text by six lines, in place.
+ */
+describe('HudPresenter News article as one continuous document', () => {
+  const ARTICLE = { title: 'NEWS · ARTICLE', hint: 'left x2: back', selectable: false, nativeTextPage: true };
+  const paragraphs = Array.from({ length: 14 }, (_, index) => (
+    `Paragraph ${index + 1} of the article runs long enough to wrap across several lines of the reader page, the way prose does.`
+  ));
+  const rows = readerRows([], ['Fixture Wire · 12m · Rates hold', ...paragraphs].join('\n'));
+
+  it('never cuts a section: every screen is full, and each begins on the line the last one ended on', async () => {
+    const r = rig();
+    expect(await r.hud.showList(rows, ARTICLE)).toBe(true);
+    const capacity = READER_TEXT_PAGE.lineCapacity;
+    const screens = [text(r.rebuilds[r.rebuilds.length - 1], 'main') ?? ''];
+    expect(text(r.rebuilds[r.rebuilds.length - 1], 'hint')).toMatch(/^1\/\d+ · swipe: more · 2x tap: back$/u);
+    while (r.hud.scrollTextPage('down')) {
+      await vi.waitFor(() => expect(r.upgrades.filter((u) => u.containerName === 'main')).toHaveLength(screens.length));
+      const mains = r.upgrades.filter((u) => u.containerName === 'main');
+      screens.push(mains[mains.length - 1]?.content ?? '');
+    }
+    expect(screens.length).toBeGreaterThan(3);
+    for (const [index, screen] of screens.entries()) {
+      const lines = screen.split('\n');
+      // Full screens all the way to the end, and never more than the
+      // container shows, so the firmware has nothing to scroll inside one.
+      expect(lines).toHaveLength(capacity);
+      for (const line of lines) expect(firmwareLineCount(line, READER_TEXT_PAGE.textWidth)).toBe(1);
+      if (index > 0) {
+        const previous = screens[index - 1]!.split('\n');
+        expect(previous).toContain(lines[0]);
+        if (index < screens.length - 1) expect(lines[0]).toBe(previous[previous.length - 1]);
+      }
+    }
+    // Every word of the article, in order, once the overlaps are dropped.
+    const words = (value: string) => value.split(/\s+/u).filter(Boolean);
+    const shown = screens.map((screen) => screen.split('\n'));
+    expect(words(readThrough(shown).join(' '))).toEqual(words(readerParagraphs(rows).join(' ')));
+    // No request ever left for the Mac: the whole article is here.
+    expect(r.rebuilds).toHaveLength(1);
   });
 });
 

@@ -665,6 +665,11 @@ export type DownlinkMessage =
     /** Mac-owned archive page identity; note IDs never cross this boundary. */
     quickNotesPage?: { index: number; count: number };
     items: string[];
+    /** A reader's whole text (a News article: its metadata line, then the
+     * article), after any rows in `items`. Not a list row, so not held to
+     * the firmware's 20 x 63-byte list caps: the plugin lays it out as one
+     * continuous document. Mac counterpart: HudList.body in core/protocol.py. */
+    body?: string;
     /** Display context only, independent of routing and private action targets. */
     contextLabel?: string;
     /** First navigation/view control in the unchanged Mac-owned row array. */

@@ -71,6 +71,7 @@ import {
   type BrainstormVisualState,
 } from './VisualFixtures';
 import { MacG2DiagnosticTrace, type G2TraceEvent } from './G2DiagnosticTrace';
+import { readerRows } from './EvenFont';
 import {
   isNavigationVisualState,
   navigationVisualFixture,
@@ -921,7 +922,7 @@ async function boot(): Promise<void> {
         // owner. A stale response must not clear the current controller.
         if (await awaitCurrent(menu.presentList(
           msg.title,
-          msg.items,
+          typeof msg.body === 'string' ? readerRows(msg.items, msg.body) : msg.items,
           msg.requestId,
           msg.selectable ?? false,
           msg.hint,
@@ -1438,7 +1439,7 @@ async function renderVisualState(
       if (state === 'panel-article') {
         const article = panelArticleFixture();
         await menu.presentList(
-          article.title, article.items, hud.rail.requestId('news'), false, article.hint,
+          article.title, readerRows(article.items, article.body), hud.rail.requestId('news'), false, article.hint,
         );
       }
       return;

@@ -8,6 +8,7 @@ import {
   firmwareLineCount,
   firmwareLineWidth,
   fitLines,
+  paginateContinuous,
   paginateFromEnd,
   paginateHanging,
   paginateMeasured,
@@ -30,6 +31,54 @@ const prose = Array.from({ length: 14 }, (_, index) => (
 )).join('\n');
 
 const words = (text: string) => text.split(/\s+/u).filter((word) => word.length > 0);
+
+/** The lines a reader reads: each screen's lines after the ones it carried
+ * over from the screen before (the longest end of one that opens the next). */
+function readThrough(screens: readonly (readonly string[])[]): string[] {
+  const read: string[] = [];
+  for (const screen of screens) {
+    let carried = Math.min(read.length, screen.length);
+    while (carried > 0 && read.slice(read.length - carried).join('\n') !== screen.slice(0, carried).join('\n')) carried -= 1;
+    read.push(...screen.slice(carried));
+  }
+  return read;
+}
+
+describe('paginateContinuous', () => {
+  const screens = paginateContinuous(prose, WIDTH, LINES);
+  const lines = screens.map((screen) => screen.split('\n'));
+
+  it('windows one laid-out document: full screens, one line carried over each swipe', () => {
+    expect(screens.length).toBeGreaterThan(3);
+    for (const [index, screen] of lines.entries()) {
+      expect(screen).toHaveLength(LINES);
+      for (const line of screen) expect(firmwareLineWidth(line)).toBeLessThanOrEqual(WIDTH);
+      if (index > 0 && index < lines.length - 1) {
+        expect(screen[0]).toBe(lines[index - 1]![LINES - 1]);
+      }
+    }
+    // The last screen ends on the last word, still full.
+    const last = words(screens[screens.length - 1]!);
+    const all = words(prose);
+    expect(last[last.length - 1]).toBe(all[all.length - 1]);
+  });
+
+  it('keeps every word in order once the carried lines are dropped', () => {
+    expect(words(readThrough(lines).join(' '))).toEqual(words(prose));
+  });
+
+  it('stays within the container\'s byte cap with wide glyphs', () => {
+    const accented = 'Ça été très éprouvé à Øresund, où l’été dure. '.repeat(40);
+    for (const screen of paginateContinuous(accented, WIDTH, LINES)) {
+      expect(utf8ByteLength(screen)).toBeLessThanOrEqual(TEXT_CONTAINER_MAX_BYTES);
+    }
+  });
+
+  it('shows a short text on one screen, and nothing as one blank one', () => {
+    expect(paginateContinuous('Two short words.', WIDTH, LINES)).toEqual(['Two short words.']);
+    expect(paginateContinuous('', WIDTH, LINES)).toEqual([' ']);
+  });
+});
 
 describe('paginateMeasured', () => {
   it('fills pages to the measured line capacity and keeps every word in order', () => {

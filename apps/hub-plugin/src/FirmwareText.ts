@@ -165,6 +165,58 @@ export function paginateMeasured(
   return pages.length > 0 ? pages : [' '];
 }
 
+/** Every paragraph of `text` wrapped into explicit lines that fit
+ * `innerWidth`, so the firmware never breaks one again. Blank paragraphs
+ * are dropped. */
+function explicitLines(text: string, innerWidth: number): string[] {
+  return text.replace(/\r\n?/gu, NEWLINE).split(NEWLINE)
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph.length > 0)
+    .flatMap((paragraph) => wrapWords(paragraph.split(/\s+/u).filter(Boolean), innerWidth));
+}
+
+/**
+ * Long text read as ONE continuous document (a News article), the way a
+ * PDF reader's single-page continuous view reads: the words are laid out
+ * once into explicit lines, and each screen is a window of `maxLines` of
+ * them. A swipe moves the window down by all but one line, so the line
+ * just read stays on top and the eye carries straight on. Nothing is cut
+ * into sections: no screen ends half empty mid-article, and the last screen
+ * ends on the last line, as full as every other.
+ *
+ * A screen never holds more than `maxLines` lines, so its text container
+ * never overflows: the firmware has nothing to scroll inside it, and every
+ * swipe reaches the plugin, which moves the window.
+ */
+export function paginateContinuous(
+  text: string,
+  innerWidth: number,
+  maxLines: number,
+  maxUnits = NATIVE_PAGE_MAX_UNITS,
+): string[] {
+  const lines = explicitLines(text, innerWidth);
+  if (lines.length === 0) return [' '];
+  const capacity = Math.max(1, maxLines);
+  // The lines from `start` that fit one container (count and byte cap).
+  const span = (start: number): number => {
+    let count = Math.min(capacity, lines.length - start);
+    while (count > 1 && !pageFits(lines.slice(start, start + count).join(NEWLINE), maxUnits)) count -= 1;
+    return count;
+  };
+  const pages: string[] = [];
+  let start = 0;
+  for (;;) {
+    const count = span(start);
+    pages.push(lines.slice(start, start + count).join(NEWLINE));
+    if (start + count >= lines.length) break;
+    // The last line read becomes the top line; the final screen is pulled
+    // up to end on the article's last line instead of running short.
+    const overlap = count > 1 ? 1 : 0;
+    start = Math.max(start + 1, Math.min(start + count - overlap, lines.length - capacity));
+  }
+  return pages;
+}
+
 /**
  * Live words as firmware pages counted from the NEWEST end (an open
  * QuickNote): every paragraph wrapped into explicit lines that fit
@@ -178,10 +230,7 @@ export function paginateFromEnd(
   maxLines: number,
   maxUnits = NATIVE_PAGE_MAX_UNITS,
 ): string[] {
-  const lines = text.replace(/\r\n?/gu, NEWLINE).split(NEWLINE)
-    .map((paragraph) => paragraph.trim())
-    .filter((paragraph) => paragraph.length > 0)
-    .flatMap((paragraph) => wrapWords(paragraph.split(/\s+/u).filter(Boolean), innerWidth));
+  const lines = explicitLines(text, innerWidth);
   const pages: string[] = [];
   let page: string[] = [];
   for (let index = lines.length - 1; index >= 0; index -= 1) {

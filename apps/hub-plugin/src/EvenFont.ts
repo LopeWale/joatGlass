@@ -174,6 +174,14 @@ export function readerParagraphs(rows: readonly string[]): string[] {
   return paragraphs.flatMap((paragraph) => paragraph.split(/\r\n|\r|\n/u));
 }
 
+/** A reader that arrives whole (`hud.list` with `body`): its metadata rows,
+ * then the text, as rows `readerParagraphs` reads back as exactly those
+ * paragraphs — each row ends its own paragraph, so the metadata never runs
+ * into the article's first sentence. */
+export function readerRows(items: readonly string[], body: string): string[] {
+  return [...items.map((row) => `${row.trimEnd()}\n`), `${body}\n`];
+}
+
 const SPEAKER = /^([^:\s][^:]{0,31}): \S/u;
 
 /** The geometry of a reader page (576x288, the wearer's margins:

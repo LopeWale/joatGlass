@@ -552,23 +552,23 @@ export function panelVisualPushes(nowMs = Date.now()): HudPanelMessage[] {
   ];
 }
 
-/** An opened headline, as PanelPublisher sends it: a metadata line with
- * the page position, then the page as word-bounded chunks the plugin
- * re-wraps, under a hint that names only the pages that exist. */
-export function panelArticleFixture(): { title: string; items: string[]; hint: string } {
+/** An opened headline, as PanelPublisher sends it: no list rows, the
+ * metadata then the whole article as `body`, read as one continuous
+ * document. Written for the fixture; long enough to cross many screens. */
+export function panelArticleFixture(): { title: string; items: string[]; body: string; hint: string } {
   return {
     title: 'NEWS · ARTICLE',
-    items: [
-      'BBC · 12m · Consumer sentiment rises to 48.9 · 1/3',
-      'Consumer sentiment in the US rose slightly this month,',
-      'reaching 48.9 after four consecutive months of decline,',
-      'according to a survey published on Tuesday. The reading',
-      'remains well below its long-run average, and respondents',
-      'continued to cite prices and borrowing costs as their main',
-      'concerns. Economists said the small improvement was',
-      'consistent with a labour market that is cooling without',
-      'breaking, and with fuel prices that have eased.',
-    ],
-    hint: 'down more · 2x tap: back',
+    items: [],
+    body: [
+      'Fixture Wire · 12m · Consumer sentiment rises to 48.9',
+      'Consumer sentiment rose slightly this month, reaching 48.9 after four consecutive months of decline, according to a survey published on Tuesday. The reading remains well below its long-run average, and respondents continued to cite prices and borrowing costs as their main concerns.',
+      'Economists said the small improvement was consistent with a labour market that is cooling without breaking, and with fuel prices that have eased since the summer. Households with incomes in the top third reported the largest gains in confidence, while lower-income respondents were broadly unchanged.',
+      'Expectations for inflation over the next year fell to 3.1 percent from 3.4 percent, the lowest reading since the spring. Longer-run expectations held steady at 2.9 percent. Analysts watch these figures closely because they can influence how businesses set prices and how workers negotiate wages.',
+      'Spending plans were mixed. Fewer respondents said it was a good time to buy large household items such as appliances and furniture, citing high prices, while plans to buy a vehicle improved for a second month as dealers offered more incentives.',
+      'The survey director said the results showed consumers were cautious rather than pessimistic. Many respondents mentioned the coming holiday season, and a growing share said they intended to keep spending close to last year’s level rather than cut back.',
+      'Retailers will be watching the next two readings carefully. Holiday sales account for a large share of annual revenue for many stores, and several chains have already said they expect shoppers to look harder for discounts this year.',
+      'The final reading for the month is due in two weeks.',
+    ].join('\n'),
+    hint: 'left x2: back',
   };
 }

@@ -675,15 +675,6 @@ class CapabilityRouter:
             asyncio.get_running_loop().create_task(
                 self._panels.refresh(event.selected_name, event.request_id)
             )
-        elif (
-            event.container_name == "cappage"
-            and self._panels is not None
-            and self._panels.owns(event.selected_name)
-        ):
-            # A boundary swipe inside an opened headline or result.
-            asyncio.get_running_loop().create_task(
-                self._panels.page(event.selected_name, event.event_type, event.request_id)
-            )
         elif event.container_name == "cappage" and event.selected_name == "QUICKNOTES · LIST":
             state = self._note_list
             if (state is None or state.page_pending or self._note_reader is not None

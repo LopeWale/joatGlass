@@ -1176,10 +1176,6 @@ export class CapabilityMenu {
 
     if (this.view === 'data') {
       const eventType = list.eventType ?? 0;
-      if (eventType !== OsEventTypeList.CLICK_EVENT && this.canRequestPanelPage(eventType)) {
-        this.requestPanelPage(eventType);
-        return true;
-      }
       if (this.dashboard) {
         if (eventType === OsEventTypeList.CLICK_EVENT) return this.selectDataRow();
         this.dashboardScroll(
@@ -1277,10 +1273,6 @@ export class CapabilityMenu {
       }
       if (this.dashboard) {
         this.dashboardScroll(delta);
-        return true;
-      }
-      if (this.canRequestPanelPage(eventType)) {
-        this.requestPanelPage(eventType);
         return true;
       }
       // Every remaining page is a firmware list, which moves its own
@@ -1746,17 +1738,6 @@ export class CapabilityMenu {
     await this.openCapability('QuickNotes', CAPABILITIES.length + 1);
   }
 
-  /** The reader for an opened headline or result: the Mac owns the page
-   * cursor, and only a hint it authored ("down more", "up previous")
-   * makes a boundary swipe into a page request. */
-  private canRequestPanelPage(eventType: number): boolean {
-    if (this.view !== 'data' || this.dataPagePending || !this.pendingRequestId) return false;
-    if (panelTabForTitle(this.pendingTitle) === undefined || this.dataReturn === undefined) {
-      return false;
-    }
-    return this.hintOffersPage(eventType);
-  }
-
   /** Every reader shares one contract: the Mac's own footer says which
    * neighbouring page exists, and only that swipe becomes a request. */
   private hintOffersPage(eventType: number): boolean {
@@ -1767,21 +1748,6 @@ export class CapabilityMenu {
       return this.dataHint?.includes('down more') === true;
     }
     return false;
-  }
-
-  private requestPanelPage(eventType: number): void {
-    if (!this.pendingRequestId || !this.pendingTitle) return;
-    this.dataPagePending = true;
-    this.link.send({
-      kind: 'input',
-      event: {
-        containerName: 'cappage',
-        selectedName: this.pendingTitle,
-        eventType,
-        requestId: this.pendingRequestId,
-      },
-    });
-    this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
   }
 
   private canRequestQuickNotesListPage(eventType: number, selectedIndex = this.selectedIndex): boolean {

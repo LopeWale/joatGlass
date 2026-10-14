@@ -25,7 +25,6 @@ from typing import Protocol
 from ..core.interfaces import GlassesTransport
 from ..core.protocol import (
     PANEL_TABS,
-    EventType,
     HudList,
     HudPanel,
     HudPanelPomodoro,
@@ -109,16 +108,9 @@ def paginate(text: str) -> tuple[str, ...]:
     )
 
 
-def reader_hint(index: int, total: int) -> str:
-    """The footer names only the pages that exist; the plugin turns a
-    boundary swipe into a page request only when the hint offers it."""
-    if total <= 1:
-        return "left x2: back"
-    if index == 0:
-        return "down more · left x2: back"
-    if index + 1 < total:
-        return "up previous · down more · left x2: back"
-    return "up previous · left x2: back"
+#: A reader's footer: the plugin adds the swipe and the screen count, since
+#: it lays the whole text out and moves through it on its own.
+READER_HINT = "left x2: back"
 
 
 class PanelProvider(Protocol):
@@ -238,23 +230,6 @@ class PanelPublisher:
             log.warning("panel refresh failed tab=%s", tab, exc_info=True)
         await self.publish(tab)
 
-    async def page(self, name: str | None, event_type: int | None, request_id: str | None) -> None:
-        """A boundary swipe inside an opened reader: move the Mac's cursor."""
-        tab = self._tab_for(name)
-        if tab is None:
-            return
-        state = self._tabs[tab]
-        reader = state.reader
-        if reader is None or parse_panel_request_id(request_id) != (tab, reader.revision):
-            return
-        if event_type == EventType.SCROLL_TOP and reader.index > 0:
-            reader.index -= 1
-        elif event_type == EventType.SCROLL_BOTTOM and reader.index + 1 < len(reader.pages):
-            reader.index += 1
-        else:
-            return
-        await self._send_reader(tab, reader)
-
     async def _open(self, tab: str, index: int) -> Reader | None:
         state = self._tabs[tab]
         if state.opening:
@@ -278,17 +253,18 @@ class PanelPublisher:
         return reader
 
     async def _send_reader(self, tab: str, reader: Reader) -> None:
-        total = len(reader.pages)
-        counter = f"{reader.index + 1}/{total}"
+        # The whole text in one message: the plugin reads it as one
+        # continuous document, each swipe moving a window over it. Sent a
+        # ten-row page at a time, every page ended half empty, repeated the
+        # metadata on top, and cost a swipe and a round trip to cross (the
+        # wearer, 2026-10-14). The metadata leads as its own paragraph, in
+        # full; the pages are exact source spans, so joined they are the text.
         label = " ".join(reader.metadata.split()) or ("Article" if tab == "news" else "Result")
-        metadata = f"{counter} · {label}"
-        # Counter-first metadata identifies prepared rows on the Hub. Only
-        # this preview may be shortened; the body rows are exact source spans.
-        metadata_row = paginate_reader_text(metadata)[0][0]
         await self._transport.send(HudList(
-            items=[metadata_row, *reader._prepared_pages[reader.index]],
+            items=[],
+            body=f"{label}\n{''.join(reader.pages)}",
             title=reader.title,
-            hint=reader_hint(reader.index, total),
+            hint=READER_HINT,
             # The plugin matches this against the id it opened the reader
             # under; a refresh since then must not orphan the page.
             request_id=panel_request_id(tab, reader.revision),
@@ -308,5 +284,5 @@ __all__ = [
     "PanelSnapshot",
     "Reader",
     "paginate",
-    "reader_hint",
+    "READER_HINT",
 ]

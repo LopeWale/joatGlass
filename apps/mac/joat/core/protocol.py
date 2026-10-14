@@ -69,6 +69,11 @@ def utf16_slice(text: str, units: int) -> str:
     return text
 
 
+#: The longest reader text one `hud.list` carries whole (`HudList.body`):
+#: about eight thousand words, far past any article the reader opens.
+READER_BODY_MAX_UNITS = 48_000
+
+
 class ContainerId(IntEnum):
     """Stable across rebuilds so text upgrades can target them."""
 
@@ -946,6 +951,11 @@ class HudList:
     # events; a tap on one of these rows is the page request. Mirror:
     # `pageControls` in apps/hub-plugin/src/types.ts.
     page_controls: tuple[int | None, int | None] | None = None
+    # A reader's whole text (a News article: its metadata line, then the
+    # article), after any rows in `items`. It is no list row, so the list
+    # caps below do not apply: the plugin lays it out as one continuous
+    # document. Mirror: `body` in apps/hub-plugin/src/types.ts.
+    body: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         # SDK caps: 20 items, 64 chars each. Truncate here rather than let the
@@ -955,6 +965,8 @@ class HudList:
             "items": [utf16_slice(s, 64) for s in self.items[:20]],
             "selectable": self.selectable,
         }
+        if self.body is not None:
+            message["body"] = utf16_slice(self.body, READER_BODY_MAX_UNITS)
         if self.planning_navigation is not None:
             can_go_back, selected_index = self.planning_navigation
             limit = 41 if self.planning_grid is not None else max(0, len(message["items"]) - 1)

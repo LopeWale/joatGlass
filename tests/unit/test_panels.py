@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 from typing import Any
-import unicodedata
 
 import pytest
 
-from joat.core.protocol import DownlinkMessage, EventType, HudList, HudPanel
+from joat.core.protocol import READER_BODY_MAX_UNITS, DownlinkMessage, HudList, HudPanel
 from joat.services.panels import (
+    READER_HINT,
     PanelPublisher,
     PanelSnapshot,
     Reader,
     paginate,
-    reader_hint,
 )
 
 
@@ -122,9 +121,11 @@ class TestTaps:
         assert page.title == "NEWS · ARTICLE"
         assert page.request_id == "panel-news-1"
         assert page.selectable is False
-        assert page.items[0] == "1/3 · BBC · 1m · A"
-        assert page.items[1:] == ["page one words"]
-        assert page.hint == "down more · left x2: back"
+        # The whole article in one message, read on the glass as one
+        # continuous document: the metadata, then every page's words.
+        assert page.items == []
+        assert page.body == "BBC · 1m · A\npage one wordspage two wordspage three"
+        assert page.hint == "left x2: back"
 
     async def test_a_stale_tap_is_dropped(self) -> None:
         transport = Transport()
@@ -171,32 +172,14 @@ class TestRefreshAndPaging:
         assert pushed.revision == 2
         assert pushed.rows == ("[0m] fresh · BBC",)
 
-    async def test_paging_moves_the_mac_owned_cursor_within_bounds(self) -> None:
+    async def test_a_reader_is_sent_once_and_never_paged(self) -> None:
         transport = Transport()
         publisher, _ = panels(transport)
         await publisher.publish("news")
         await publisher.select("NEWS", 0, "panel-news-1")
-        await publisher.page("NEWS", EventType.SCROLL_BOTTOM, "panel-news-1")
-        assert last_list(transport).items[1:] == ["page two words"]
-        assert last_list(transport).hint == "up previous · down more · left x2: back"
-        await publisher.page("NEWS", EventType.SCROLL_BOTTOM, "panel-news-1")
-        assert last_list(transport).hint == "up previous · left x2: back"
-        sent = len(transport.sent)
-        await publisher.page("NEWS", EventType.SCROLL_BOTTOM, "panel-news-1")  # at the end
-        await publisher.page("NEWS", EventType.SCROLL_TOP, "panel-news-9")  # stale
-        assert len(transport.sent) == sent
-        await publisher.page("NEWS", EventType.SCROLL_TOP, "panel-news-1")
-        assert last_list(transport).items[1:] == ["page two words"]
-
-    async def test_a_new_push_forgets_the_open_reader(self) -> None:
-        transport = Transport()
-        publisher, _ = panels(transport)
-        await publisher.publish("news")
-        await publisher.select("NEWS", 0, "panel-news-1")
-        await publisher.activate("news")
-        sent = len(transport.sent)
-        await publisher.page("NEWS", EventType.SCROLL_BOTTOM, "panel-news-2")
-        assert len(transport.sent) == sent
+        readers = [m for m in transport.sent if isinstance(m, HudList)]
+        assert len(readers) == 1
+        assert not hasattr(publisher, "page")
 
 
 class TestPagination:
@@ -211,11 +194,9 @@ class TestPagination:
         assert paginate("   ") == ("   ",)
         assert paginate("") == ("No text is available for this page.",)
 
-    def test_hints_name_only_the_pages_that_exist(self) -> None:
-        assert reader_hint(0, 1) == "left x2: back"
-        assert reader_hint(0, 3) == "down more · left x2: back"
-        assert reader_hint(1, 3) == "up previous · down more · left x2: back"
-        assert reader_hint(2, 3) == "up previous · left x2: back"
+    def test_the_footer_promises_no_mac_page(self) -> None:
+        # The plugin moves through the text and names the swipe itself.
+        assert READER_HINT == "left x2: back"
 
     async def test_reader_chunks_fit_the_list_caps(self) -> None:
         transport = Transport()
@@ -232,18 +213,14 @@ class TestPagination:
         await publisher.publish("news")
         await publisher.select("NEWS", 0, "panel-news-1")
         wire = last_list(transport).to_wire()
-        assert len(wire["items"]) <= 20
-        assert all(len(item) <= 64 for item in wire["items"])
+        # No list rows at all: the text rides in `body`, whole.
+        assert wire["items"] == []
+        assert wire["body"] == "M" * 90 + "\n" + " ".join(["antidisestablishmentarianism"] * 40)
 
-
-def _reader_columns(text: str) -> int:
-    """Independent bounds for the fixture characters, not the paginator."""
-    return sum(
-        0 if char in "\r\n" or unicodedata.combining(char) else
-        8 if char == "\t" else
-        2 if ord(char) > 0xFFFF or unicodedata.east_asian_width(char) in ("W", "F") else 1
-        for char in text
-    )
+    def test_an_endless_body_is_capped_on_the_wire_without_splitting_a_pair(self) -> None:
+        wire = HudList(items=[], body="🙂" * READER_BODY_MAX_UNITS).to_wire()
+        assert len(wire["body"].encode("utf-16-le")) // 2 <= READER_BODY_MAX_UNITS
+        assert set(wire["body"]) == {"🙂"}
 
 
 class TestLosslessReaders:
@@ -268,9 +245,9 @@ class TestLosslessReaders:
         provider.open = open_source  # type: ignore[method-assign]
         publisher = PanelPublisher(transport, {tab: provider})  # type: ignore[dict-item]
         await publisher.open_by_voice(tab, 0)
-        items = last_list(transport).to_wire()["items"]
-        assert items[0] == f"1/1 · {label}"
-        assert items[1:] == ["body words"]
+        wire = last_list(transport).to_wire()
+        assert wire["items"] == []
+        assert wire["body"] == f"{label}\nbody words"
 
     @pytest.mark.parametrize("tab,title", [("news", "NEWS · ARTICLE"), ("search", "SEARCH · RESULT")])
     @pytest.mark.parametrize("source", [
@@ -279,7 +256,7 @@ class TestLosslessReaders:
         "  start\r\n\r\nsecond  line \tkeeps spaces  \r\n" * 24 + "  LATER MARKER  ",
         "🙂" * 320 + "LATER MARKER",
     ], ids=["unbroken-440", "cjk-440", "crlf-and-spaces", "emoji-320-and-tail"])
-    async def test_every_source_character_survives_wire_pages_and_reverse_navigation(
+    async def test_every_source_character_survives_on_the_wire(
         self, tab: str, title: str, source: str,
     ) -> None:
         transport = Transport()
@@ -294,30 +271,11 @@ class TestLosslessReaders:
         publisher = PanelPublisher(transport, {tab: provider})  # type: ignore[dict-item]
         reader = await publisher.open_by_voice(tab, 0)
         assert reader is not None
-        assert "".join(reader.pages) == source
-        total = len(reader.pages)
-        request_id = f"panel-{tab}-1"
-        forward: list[list[str]] = []
-        for index in range(total):
-            if index:
-                await publisher.page(title, EventType.SCROLL_BOTTOM, request_id)
-            wire = last_list(transport).to_wire()
-            items = wire["items"]
-            assert "".join(items[1:]) == reader.pages[index]
-            assert items[0].startswith(f"{index + 1}/{total} · ")
-            assert 1 <= len(items[1:]) <= 10
-            assert all(len(row.encode("utf-16-le")) // 2 <= 64 for row in items)
-            assert all(_reader_columns(row) <= 62 for row in items)
-            assert wire["requestId"] == request_id
-            forward.append(items)
-
-        assert "".join(row for page in forward for row in page[1:]) == source
-        for index in range(total - 2, -1, -1):
-            await publisher.page(title, EventType.SCROLL_TOP, request_id)
-            assert last_list(transport).to_wire()["items"] == forward[index]
-        sent = len(transport.sent)
-        await publisher.page(title, EventType.SCROLL_TOP, request_id)
-        assert len(transport.sent) == sent
+        wire = last_list(transport).to_wire()
+        # Every character, in one message: nothing capped, trimmed or split.
+        assert wire["body"] == "Origin · " + "🙂" * 80 + "\n" + source
+        assert wire["requestId"] == f"panel-{tab}-1"
+        assert wire["title"] == title
 
     async def test_provider_page_boundaries_never_insert_or_remove_whitespace(self) -> None:
         transport = Transport()
@@ -331,43 +289,8 @@ class TestLosslessReaders:
         publisher = PanelPublisher(transport, {"news": provider})  # type: ignore[dict-item]
         reader = await publisher.open_by_voice("news", 0)
         assert reader is not None
-        displayed = []
-        for index in range(len(reader.pages)):
-            if index:
-                await publisher.page("NEWS", EventType.SCROLL_BOTTOM, "panel-news-1")
-            displayed.extend(last_list(transport).to_wire()["items"][1:])
-        assert "".join(displayed) == "".join(original_pages)
-
-
-class TestReaderSurvivesABackgroundRefresh:
-    """The news poller bumps the tab's revision every pass. A wearer mid-
-    article must keep paging; the reader answers under the revision it was
-    opened with, and only a voice open (activate) closes it."""
-
-    async def test_paging_keeps_working_after_a_routine_push(self) -> None:
-        transport = Transport()
-        publisher, _ = panels(transport)
-        await publisher.publish("news")            # revision 1
-        await publisher.select("NEWS", 0, "panel-news-1")
-        await publisher.publish("news")            # the poller: revision 2
-        assert last_panel(transport).revision == 2
-        await publisher.page("NEWS", EventType.SCROLL_BOTTOM, "panel-news-1")
-        page = last_list(transport)
-        assert page.items[1:] == ["page two words"]
-        assert page.request_id == "panel-news-1"  # what the plugin opened under
-        # A tap on the OLD list after that push is still refused: the rows moved.
-        await publisher.select("NEWS", 0, "panel-news-1")
-        assert isinstance(transport.sent[-1], HudList)  # nothing new was opened
-
-    async def test_a_voice_open_closes_the_reader(self) -> None:
-        transport = Transport()
-        publisher, _ = panels(transport)
-        await publisher.publish("news")
-        await publisher.select("NEWS", 0, "panel-news-1")
-        await publisher.activate("news")
-        sent = len(transport.sent)
-        await publisher.page("NEWS", EventType.SCROLL_BOTTOM, "panel-news-1")
-        assert len(transport.sent) == sent
+        body = last_list(transport).to_wire()["body"]
+        assert body == "BBC\n" + "".join(original_pages)
 
 
 class StatusRowProvider(Provider):

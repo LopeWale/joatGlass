@@ -142,10 +142,12 @@ describe('panel visual fixtures', () => {
     const pomodoro = pushes[1]!.pomodoro!;
     expect(pomodoro.endsAtUnixMs).toBe(1_000_000 + pomodoro.remainingMs);
     expect(pomodoro.remainingMs).toBeLessThanOrEqual(pomodoro.lengthMs);
+    // The article arrives whole: no list rows, the text in `body`, and a
+    // footer that promises no Mac page (the plugin moves through it).
     const article = panelArticleFixture();
-    expect(article.items.length).toBeLessThanOrEqual(20);
-    for (const item of article.items) expect(item.length).toBeLessThanOrEqual(64);
-    expect(article.hint).toContain('down more');
+    expect(article.items).toEqual([]);
+    expect(article.body.split('\n').length).toBeGreaterThan(5);
+    expect(article.hint).not.toMatch(/down more|up previous/);
     expect(PANEL_VISUAL_STATES.every(isPanelVisualState)).toBe(true);
     expect(isPanelVisualState('overview')).toBe(false);
     expect(panelVisualTab('panel-search-expanded')).toBe('search');

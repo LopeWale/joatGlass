@@ -18,7 +18,7 @@ import {
   validAssistantConversationSnapshot,
   type ConversationExitResult,
 } from './AssistantConversationSurface';
-import { paginateFromEnd, paginateHanging, paginateMeasured } from './FirmwareText';
+import { paginateContinuous, paginateFromEnd, paginateHanging, paginateMeasured } from './FirmwareText';
 import { OVERLAY_GAP, cardTop, overlayConversation } from './ConversationOverlay';
 import { paginateEven, readerParagraphs, type EvenReaderLine } from './EvenFont';
 import { hasImageHeader, withImageHeader } from './HeaderImage';
@@ -252,6 +252,15 @@ let evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '0') =
  * stroke at full brightness, where the 55% image's thin strokes look faded
  * (the wearer, 2026-10-07). */
 const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', QUICKNOTES_NOTE_TITLE]);
+/** A News article or a search result is one continuous document: the Mac
+ * sends it whole and each swipe moves a window over it
+ * (paginateContinuous), instead of seven-line pages cut from ten-row
+ * sections that each ended half empty and cost a swipe and a round trip
+ * to cross (the wearer, 2026-10-14). */
+const CONTINUOUS_READERS = new Set(['NEWS · ARTICLE', 'SEARCH · RESULT']);
+function readsContinuously(title: string): boolean {
+  return CONTINUOUS_READERS.has(title.trim().toUpperCase());
+}
 /** Text pages laid out as speakers' turns ("Them: …" with its wrapped rows
  * under the words): a Messages thread. */
 function speakerPaged(title: string): boolean {
@@ -2201,7 +2210,8 @@ export class HudPresenter {
     // the page's own width: a slice per line left ragged short lines.
     // A Messages page stands each message's wrapped rows under its words,
     // after the sender's name (the wearer's ruling, 2026-10-07).
-    const paginate = speakerPaged(surface.options.title) ? paginateHanging : paginateMeasured;
+    const paginate = readsContinuously(surface.options.title) ? paginateContinuous
+      : speakerPaged(surface.options.title) ? paginateHanging : paginateMeasured;
     const scrolls = scrollsOnGlass(surface.options.title);
     const pages = paginate(
       readerParagraphs(surface.items).join('\n'),
