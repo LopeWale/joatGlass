@@ -4,7 +4,7 @@ import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
 import type { HudStatusModel } from './HudStatus';
-import { ContainerId, type BrainstormHudModel } from './types';
+import { ContainerId, HeaderImageId, type BrainstormHudModel } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
 
 // These tests pin the IMAGE overview (VITE_NATIVE_OVERVIEW=0). The text
@@ -162,5 +162,49 @@ describe('the head line of the native terminal page', () => {
     expect(r.since(mark)).toEqual(['upgrade:terminal-head']);
     expect(last(r.upgrades)?.content).toBe('9:42 · BRAINSTORM · ○ · ▇');
     expect(r.rebuilds).toHaveLength(1);
+  });
+
+  it('is the image spine where the painter can draw it, like every other firmware page', async () => {
+    const operations: string[] = [];
+    const rebuilds: RebuildPageContainer[] = [];
+    const headers: string[] = [];
+    const client = {
+      require: () => ({
+        rebuildPageContainer: vi.fn(async (page: RebuildPageContainer) => { rebuilds.push(page); return true; }),
+        textContainerUpgrade: vi.fn(async (upgrade: TextContainerUpgrade) => {
+          operations.push(`upgrade:${upgrade.containerName}`);
+          return true;
+        }),
+      }),
+    } as unknown as BridgeClient;
+    const visual = {
+      paint: vi.fn(async () => true),
+      forgetPage: vi.fn(),
+      whenIdle: vi.fn(async () => true),
+      withPageTransition: vi.fn(async (replace: () => Promise<boolean>) => replace()),
+      paintHeader: vi.fn(async (_model: HudStatusModel, label: string) => { headers.push(label); return true; }),
+      canPaintHeader: () => true,
+    };
+    vi.useFakeTimers();
+    try {
+      const hud = new HudPresenter(client, new HudPageBuilder(), visual);
+      await hud.setStatusModel(at941);
+      expect(await hud.showBrainstorm(session)).toBe(true);
+      await vi.runAllTimersAsync();
+      const page = last(rebuilds);
+      // The status line became the two header halves; no text head remains.
+      expect(page?.textObject?.map((c) => c.containerName)).toEqual(['terminal-body']);
+      expect(page?.imageObject?.map((c) => c.containerID)).toEqual([HeaderImageId.Left, HeaderImageId.Right]);
+      expect(last(headers)).toBe('BRAINSTORM');
+
+      // A clock tick repaints the spine; it never writes a head that is gone.
+      const mark = operations.length;
+      expect(await hud.setStatusModel(at942)).toBe(true);
+      expect(await hud.showBrainstorm({ ...session, activeSpeaker: 'Claude · round 1/3 · 3 calls' })).toBe(true);
+      expect(operations.slice(mark)).not.toContain('upgrade:terminal-head');
+      expect(rebuilds).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

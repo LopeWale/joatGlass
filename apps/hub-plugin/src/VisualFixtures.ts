@@ -245,12 +245,13 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     },
     'terminal-sessions': {
       title: 'AGENT TERMINAL',
-      hint: 'tap: open · say “terminal …” to send',
+      // capabilities._show_agent_terminal over picker_rows' visible-lane
+      // form ("<agent> · <state>"), the one __main__ wires up.
+      hint: 'tap: choose agent · double-click: back',
       selectable: true,
       items: [
-        '▸ work · working · run the http audit',
-        '  calendar · needs recovery · 1 waiting',
-        '  gateway · idle',
+        'Hermes · Working',
+        'OpenClaw · Needs approval',
       ],
     },
     messages: {
@@ -319,7 +320,7 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     },
     notifications: {
       title: 'NOTIFICATIONS',
-      hint: 'tap detail · left x2 overview',
+      hint: 'tap: read · left x2: back',
       selectable: true,
       items: [
         '[now] Adaeze · Messages · Call me now',
@@ -329,13 +330,13 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     },
     'notification-detail': {
       title: 'NOTIFICATIONS · DETAIL',
-      hint: 'left x2 overview',
+      hint: 'left x2: back',
       selectable: false,
       items: ['Adaeze · Messages', 'Call me now', 'Shown just now'],
     },
     calendar: {
       title: 'CALENDAR · 7 DAYS',
-      hint: 'tap detail · left x2 overview',
+      hint: 'tap: detail · left x2: back',
       selectable: true,
       items: [
         'Design review · Fri 16:30',
@@ -345,13 +346,13 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     },
     'calendar-detail': {
       title: 'CALENDAR · DETAIL',
-      hint: 'left x2 overview',
+      hint: 'left x2 Planning',
       selectable: false,
       items: ['Design review', 'Starts Fri Aug 28 · 16:30', 'Ends Fri Aug 28 · 17:15'],
     },
     tasks: {
       title: 'TASKS',
-      hint: 'tap detail · left x2 overview',
+      hint: 'tap: detail · left x2: back',
       selectable: true,
       items: [
         'Buy filters · Due today 18:00',
@@ -361,7 +362,7 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     },
     'task-detail': {
       title: 'TASKS · DETAIL',
-      hint: 'left x2 overview',
+      hint: 'left x2 Planning',
       selectable: false,
       items: ['Buy filters', 'Due today · 18:00', 'Complete by voice · exact title'],
     },
@@ -419,7 +420,7 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     },
     activity: {
       title: 'ACTIVITY',
-      hint: 'tap detail · left x2 overview',
+      hint: 'tap: detail · left x2: back',
       selectable: true,
       items: [
         'Calendar create · Succeeded',
@@ -429,7 +430,7 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
     },
     'activity-detail': {
       title: 'ACTIVITY · DETAIL',
-      hint: 'left x2 overview',
+      hint: 'left x2: back',
       selectable: false,
       items: ['Calendar create', 'State · Succeeded', 'Action ref · 4b31a870'],
     },

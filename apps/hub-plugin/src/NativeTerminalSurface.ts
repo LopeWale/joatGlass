@@ -8,13 +8,19 @@ import type { BridgeClient } from './BridgeClient';
 import { TerminalConversationViewport } from './TerminalConversation';
 import { TEXT_CONTAINER_MAX_BYTES, fitUtf8 } from './FirmwareLimits';
 import { wrapTerminalParagraph } from './TerminalText';
-import type { BrainstormHudModel, TerminalConversationMessage } from './types';
+import { ContainerId, type BrainstormHudModel, type TerminalConversationMessage } from './types';
 
 /** Page-local identities. The layout callback must use these exact values so
- * every update addresses the same native container created on entry. */
+ * every update addresses the same native container created on entry.
+ *
+ * The head is the page's status line, so it takes the StatusBar id: that is
+ * how withImageHeader (HeaderImage.ts) finds the line to swap for the image
+ * spine every other firmware page carries. With ids 16/17 the terminal was
+ * the one page left drawing "9:41 · BRAINSTORM · ● · ■" in firmware text,
+ * and 17 would have collided with the spine's right half (HeaderImageId). */
 export const NativeTerminalContainer = {
-  Head: { id: 16, name: 'terminal-head' },
-  Body: { id: 17, name: 'terminal-body' },
+  Head: { id: ContainerId.StatusBar, name: 'terminal-head' },
+  Body: { id: 14, name: 'terminal-body' },
 } as const;
 
 /** The fixed page fits one firmware line above nine body lines on 576x288.
@@ -96,6 +102,10 @@ export type NativeTerminalLayoutFactory = (
 
 export interface NativeTerminalSurfaceOptions {
   measureTextWidth?: (text: string) => number;
+  /** Whether the mounted page's status line is the image spine. The
+   * presenter repaints that from the status model, so the head text
+   * container is not on the glass to upgrade. */
+  imageHeader?: () => boolean;
 }
 
 export interface NativeTerminalSurfaceState {
@@ -299,6 +309,7 @@ function validLayout(layout: RebuildPageContainer, page: NativeTerminalPage): bo
 export class NativeTerminalSurface {
   private readonly viewport = new TerminalConversationViewport();
   private readonly measureTextWidth: (text: string) => number;
+  private readonly imageHeader: () => boolean;
   private desired?: DesiredTerminal;
   private prompt?: TerminalPrompt;
   private active = false;
@@ -328,6 +339,7 @@ export class NativeTerminalSurface {
     // A row is one firmware line when the firmware's own measurement
     // (leading spaces dropped, glyphs rounded one by one) fits the width.
     this.measureTextWidth = options.measureTextWidth ?? firmwareLineWidth;
+    this.imageHeader = options.imageHeader ?? (() => false);
   }
 
   async present(
@@ -697,6 +709,8 @@ export class NativeTerminalSurface {
   private async upgradeHead(snapshot: RenderSnapshot): Promise<boolean> {
     const previous = this.physicalHeadText;
     if (previous === snapshot.page.headText) return true;
+    // The spine is the image header: the presenter already redrew it.
+    if (this.imageHeader()) return true;
     try {
       const accepted = await this.client.require().textContainerUpgrade(
         new TextContainerUpgrade({

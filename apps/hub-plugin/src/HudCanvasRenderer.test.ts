@@ -59,8 +59,17 @@ describe('selected visual geometry', () => {
     expect(hudDisplayTitle('JOAT')).toBe('JOAT');
     expect(hudDisplayTitle('NOTIFICATIONS')).toBe('Notifications');
     expect(hudDisplayTitle('QUICKNOTES')).toBe('QuickNotes');
-    expect(hudDisplayTitle('PLANNING · PLAN · SEPTEMBER 2026')).toBe('Planning · Month · September 2026');
-    expect(hudDisplayTitle('PLANNING · PLAN · AUG 31–SEP 6')).toBe('Planning · Week · Aug 31–Sep 6');
+    // Every Planning title fits the spine's label box whole (no "…").
+    expect(hudDisplayTitle('PLANNING · PLAN · SEPTEMBER 2026')).toBe('Planning · Month · Sep 2026');
+    expect(hudDisplayTitle('PLANNING · PLAN · MAY 2026')).toBe('Planning · Month · May 2026');
+    expect(hudDisplayTitle('PLANNING · PLAN · SEP 7–13')).toBe('Planning · Week · Sep 7–13');
+    expect(hudDisplayTitle('PLANNING · PLAN · AUG 31–SEP 6')).toBe('Planning · Aug 31–Sep 6');
+    for (const title of [
+      'PLANNING · PLAN · SEPTEMBER 2026', 'CALENDAR · PLAN · NOVEMBER 2026',
+      'PLANNING · PLAN · AUG 31–SEP 6', 'PLANNING · PLAN · WED SEP 30',
+    ]) {
+      expect(evenTextWidth(hudDisplayTitle(title).toUpperCase())).toBeLessThanOrEqual(SPINE_LABEL_BOX.width);
+    }
     expect(hudDisplayTitle('PLANNING · PLAN · TUE SEP 1')).toBe('Planning · Day · Tue Sep 1');
     expect(hudDisplayTitle('PLANNING · PLAN · SETUP')).toBe('Planning · Setup');
     expect(hudDisplayTitle('Already Mixed')).toBe('Already Mixed');

@@ -618,6 +618,11 @@ export class HudPresenter {
       client,
       (page) => layouts.nativeTerminalLayout(page),
       (page) => this.replaceNativePage(page, 'terminal-conversation-native'),
+      {
+        // Same spine as every firmware page (withHeader); setStatusModel
+        // repaints it, so the surface leaves the head alone.
+        imageHeader: () => this.imageHeaderShown && this.pageOwner === 'terminal-conversation-native',
+      },
     );
     // Header and column images just switched off (one hung on the glasses):
     // redraw the page on the glass with both as firmware text.

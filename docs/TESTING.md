@@ -182,6 +182,15 @@ include `sidebar`, `more`, `notifications`, `notification-detail`, `calendar`,
 development-only and proves layout/renderer output; it does not prove BLE tile
 upload, Even input delivery, or physical-glasses legibility.
 
+Both routes are gated on `import.meta.env.DEV`, which Vite derives from
+`NODE_ENV` (`DEV: !isProduction`, where `isProduction` is
+`NODE_ENV === "production"`). A dev server started from a shell that exports
+`NODE_ENV=production` ignores `?joatVisual=` without an error and boots the
+normal reconnecting Home. Start it with `NODE_ENV=development npm run dev` when
+the environment is not yours. The README's screenshots are these fixtures,
+captured in the official simulator and converted with
+`scripts/hud_visual_evidence.py`.
+
 Capability navigation falsification is covered at both protocol ends. The Hub
 suite forces rejected Sidebar, More, Settings, and loading-focus paints and
 asserts that no invisible view remains interactive. It also rejects delayed

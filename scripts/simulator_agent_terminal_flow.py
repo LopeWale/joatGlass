@@ -762,13 +762,16 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
 
     def is_terminal_page(event):
         text = event.get('text')
-        return (event.get('operation') == 'rebuild'
-                and event.get('containerTotalNum') == 2
-                and event.get('imageCount') == 0
-                and event.get('list') == []
-                and isinstance(text, list)
-                and [(item.get('containerID'), item.get('containerName'), item.get('isEventCapture'))
-                     for item in text] == [(16, 'terminal-head', 0), (17, 'terminal-body', 1)])
+        if not (event.get('operation') == 'rebuild' and event.get('list') == [] and isinstance(text, list)):
+            return False
+        texts = [(item.get('containerID'), item.get('containerName'), item.get('isEventCapture'))
+                 for item in text]
+        # The head is the StatusBar line; where the image spine can be drawn
+        # (HeaderImage.ts) it is swapped for the two header halves.
+        return ((texts == [(1, 'terminal-head', 0), (14, 'terminal-body', 1)]
+                 and event.get('containerTotalNum') == 2 and event.get('imageCount') == 0)
+                or (texts == [(14, 'terminal-body', 1)]
+                    and event.get('containerTotalNum') == 3 and event.get('imageCount') == 2))
 
     def is_visual_page(event):
         return (event.get('operation') in {'startup', 'rebuild'}
@@ -791,21 +794,25 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
         events = (await console_payloads())[after:]
         pages = [event for event in events if is_terminal_page(event)]
         assert len(pages) == 1, f'{label}: expected one terminal entry rebuild, got {len(pages)}'
-        assert not [event for event in events if event.get('operation') == 'image'], f'{label}: entry wrote raster images'
-        assert page['text'][0]['content'] == 'JOAT · AGENT TERMINAL'
+        # Only the header halves (HeaderImageId 16/17) may be images.
+        assert not [event for event in events if event.get('operation') == 'image'
+                    and event.get('containerID') not in (16, 17)], f'{label}: entry wrote raster images'
+        head = next((item for item in page['text'] if item.get('containerName') == 'terminal-head'), None)
+        assert head is None or 'AGENT TERMINAL' in head['content']
         return page
 
     async def assert_terminal_visit(after, label):
         events = (await console_payloads())[after:]
         completed = [event for event in events if event.get('operation') in {'rebuild', 'text', 'image'}]
         rebuilds = [event for event in completed if event.get('operation') == 'rebuild']
-        images = [event for event in completed if event.get('operation') == 'image']
+        images = [event for event in completed if event.get('operation') == 'image'
+                  and event.get('containerID') not in (16, 17)]
         upgrades = [event for event in completed if event.get('operation') == 'text']
         assert len(rebuilds) == 1 and is_terminal_page(rebuilds[0]), \
             f'{label}: terminal visit performed {len(rebuilds)} rebuilds instead of one entry rebuild'
         assert not images, f'{label}: active terminal performed raster image writes'
         assert upgrades, f'{label}: active terminal performed no native text upgrades'
-        assert all((event.get('containerID'), event.get('containerName')) == (17, 'terminal-body')
+        assert all((event.get('containerID'), event.get('containerName')) == (14, 'terminal-body')
                    for event in upgrades), f'{label}: active terminal updated outside terminal-body'
         assert all(event.get('result') in {'true', 'undefined'} for event in upgrades), f'{label}: SDK rejected a body upgrade'
         return upgrades
@@ -814,7 +821,7 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
         return await bridge_event(
             after,
             {'text'},
-            lambda event: (event.get('containerID'), event.get('containerName')) == (17, 'terminal-body')
+            lambda event: (event.get('containerID'), event.get('containerName')) == (14, 'terminal-body')
             and (changed_from is None or event.get('content') != changed_from),
         )
 
@@ -822,11 +829,11 @@ async def run(out: Path, *, lifecycle: bool = False, streaming_restart: bool = F
         events = await console_payloads()
         prior = next((event for event in reversed(events)
                       if event.get('operation') in {'text', 'rebuild'}
-                      and ((event.get('containerID'), event.get('containerName')) == (17, 'terminal-body')
+                      and ((event.get('containerID'), event.get('containerName')) == (14, 'terminal-body')
                            or is_terminal_page(event))), None)
         assert prior is not None, f'{label}: terminal has no body receipt'
         before_text = (prior.get('content') if prior.get('operation') == 'text'
-                       else prior['text'][1]['content'])
+                       else next(item for item in prior['text'] if item.get('containerName') == 'terminal-body')['content'])
         before_footer = before_text.splitlines()[-1].lower()
         assert 'up: older' in before_footer, f'{label}: scrollable tail did not advertise older content'
         assert 'down: newer' not in before_footer, f'{label}: tail advertised a false newer direction'

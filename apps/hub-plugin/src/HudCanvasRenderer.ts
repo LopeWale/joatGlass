@@ -707,10 +707,16 @@ export function hudDisplayTitle(value: string): string {
     const root = titleCaseHudWords(planning[1] ?? 'PLANNING');
     const period = planning[2] ?? '';
     const scope = planningScopeForDisplay(period);
-    const displayedPeriod = titleCaseHudWords(period);
-    return scope
-      ? `${root} · ${scope} · ${displayedPeriod}`
-      : `${root} · ${displayedPeriod}`;
+    // The month is named as the grid names it ("SEP 2026"): spelled out,
+    // "PLANNING · MONTH · SEPTEMBER 2026" ran past the spine's label box
+    // and drew "SEPTEMB…" on every month view.
+    const displayedPeriod = titleCaseHudWords(
+      scope === 'Month' ? period.replace(/^([A-Z]{3})[A-Z]+ /, '$1 ') : period,
+    );
+    const full = scope ? `${root} · ${scope} · ${displayedPeriod}` : `${root} · ${displayedPeriod}`;
+    // A cross-month week ("AUG 31–SEP 6") still does not fit with its scope
+    // word; the range already says it is a week.
+    return evenTextWidth(upper(full)) <= SPINE_LABEL_BOX.width ? full : `${root} · ${displayedPeriod}`;
   }
   return normalized.split(' · ').map((part) => {
     if (part === 'JOAT' || /^\d+$/.test(part)) return part;

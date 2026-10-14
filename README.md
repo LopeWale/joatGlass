@@ -2,6 +2,18 @@
 
 A personal AI assistant for the Even Realities G2 smart glasses, powered by an always-on Mac Studio (the brain) and an iPhone (relay/companion). Voice in, HUD out — with a cited planning debate loop (Codex proposes, Claude critiques, local MLX judges) gated by a source Verifier that denies anything it can't verify against the live web.
 
+## On the glasses
+
+The G2's 576×288 display, captured in Even's official simulator with demo data (the `?joatVisual=<state>` fixtures in [docs/TESTING.md](docs/TESTING.md)).
+
+| | |
+|---|---|
+| ![Home](docs/images/hud-home.png)<br>**Home**: next event, unread, tabs | ![Planning](docs/images/hud-planning.png)<br>**Planning**: calendar and reminders on one month |
+| ![Messages](docs/images/hud-messages.png)<br>**Messages**: threads, new message by voice | ![Conversation](docs/images/hud-messages-conversation.png)<br>**Conversation**: tap to reply |
+| ![QuickNotes](docs/images/hud-quicknotes.png)<br>**QuickNotes**: recordings and text notes | ![Recording](docs/images/hud-quicknote-recording.png)<br>**Recording**: save, pause or discard |
+| ![Note summary](docs/images/hud-quicknote-summary.png)<br>**Note**: summary, key points, to-dos | ![Agent Terminal](docs/images/hud-agent-terminal.png)<br>**Agent Terminal**: pick an agent, speak to it |
+| ![Brainstorm](docs/images/hud-brainstorm.png)<br>**Brainstorm**: Codex and Claude debate live | ![Brainstorm sessions](docs/images/hud-brainstorm-sessions.png)<br>**Brainstorm sessions**: resume a past one |
+
 ## System at a glance
 
 ```
