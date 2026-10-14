@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-14 — The glasses no longer freeze: two input traps fixed
+
+The wearer: "there are issues with the glasses freezing up". brain.log: 07:37–07:43 and 08:15–08:18 the mic kept streaming but no tap reached the Mac until JOAT was reopened.
+
+- **The contextual-menu flag always comes down** (`EventRouter`). The router drops every gesture, 2x tap included, while it believes the OS menu is open. Even's Contextual Menu docs: opening the menu fires foreground-enter and closing it fires foreground-exit, and only that exit lowered the flag. A lost exit, a menu click delivered after it, or a stale long press (a hold on a QuickNote whose release never came) mistaken for the menu on a real return to JOAT locked the glasses until a reopen. Now a real tap, 2x tap or swipe reaching the page lowers it (while the menu is open those gestures belong to the menu), it expires after 30 s (`CONTEXT_MENU_MAX_MS`), and only a long press from the last 3 s can stand for the menu (`MENU_LONG_PRESS_WINDOW_MS`).
+- **A JOAT card over another page never eats a gesture.** Reproduced in the official simulator (`scripts/simulator_freeze_probe.py`): with a QuickNote open and paused, the "JOAT: Yes?" card (the name alone at 08:15:02) took the touchpad: a tap did nothing, the first 2x tap only drew "Continue?", and even 33 s later taps reached nothing. Now a tap with no Continue? to answer, or one 2x tap, closes the card and gives the page back; swipes still scroll a long answer, and a tap on Continue? still continues. Even's QA rule: "Every gesture has a visible response". Re-run: one tap closed the card and the note's own 2x tap then finished it.
+- Research (Even docs, SDK 0.0.12–0.0.16 packages, Apple, community protocol notes): the SDK has no bridge-call timeouts and no background-state API in any version; Private builds are documented not to survive a 5-minute phone lock, Beta builds are.
+- Tests: the menu flag (late click after exit, lost exit then a swipe, the opening long press, 30 s expiry, stale press), the card (tap and 2x tap close, a failed close not reported). Plugin 1243 passed; typecheck clean.
+
 ## 2026-10-14 — Open-source ready: no personal Mac, glasses or signing values in the repo, MIT license
 
 The wearer: "you hardcoded my mac and glasses so if i made this repo public, that would make it hard for people to use". Even Hub's network whitelist is exact origins only, no wildcards ([Networking](https://hub.evenrealities.com/docs/build/networking)), so every plugin build is personal to the Mac it dials.

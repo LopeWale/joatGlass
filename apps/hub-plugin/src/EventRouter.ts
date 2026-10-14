@@ -67,6 +67,7 @@ export interface AssistantOverlayInputOwner {
   scrollAssistantConversation(direction: 'up' | 'down'): boolean;
   continueAssistantConversation(): Promise<boolean>;
   requestAssistantConversationExit(): Promise<'inactive' | 'prompted' | 'exited' | 'failed'>;
+  dismissAssistantConversation(conversationId: string, revision: number): Promise<boolean>;
   hasVisibleNotification(): boolean;
   visibleNotificationId?(): string | undefined;
   dismissVisibleNotification(): Promise<boolean>;
@@ -111,6 +112,11 @@ export interface PromptInputOwner {
  * directly silently never matches, which is exactly how a confirm gate ends
  * up looking wired while never firing.
  */
+/** Longest the OS contextual menu is believed open without its exit event. */
+export const CONTEXT_MENU_MAX_MS = 30_000;
+/** A long press opens the OS menu at once; an older one is not the menu. */
+export const MENU_LONG_PRESS_WINDOW_MS = 3_000;
+
 export class EventRouter {
   /**
    * The SDK still delivers raw long-press/release events when the OS opens a
@@ -124,6 +130,10 @@ export class EventRouter {
   /** A long press is talking into an open QuickNote (FEAT-002). */
   private pendingNoteHold = false;
   private contextualMenuOverlayOpen = false;
+  /** When the overlay flag was raised, and when the current long press
+   * began: both bound how long either can stand in for the OS menu. */
+  private contextualMenuOpenedAt = 0;
+  private longPressStartedAt = 0;
 
   constructor(
     private readonly client: BridgeClient,
@@ -213,12 +223,49 @@ export class EventRouter {
       // gesture, which then ends the hold.
       this.pendingNoteHold = true;
       this.pendingMicLongPress = true;
+      this.longPressStartedAt = Date.now();
       console.info('[EventRouter] long-press on a live note — listening');
       this.menu.sendQuickNotesHold?.('start');
       return true;
     }
     this.pendingMicLongPress = !this.contextualMenuOverlayOpen;
+    this.longPressStartedAt = Date.now();
     return true;
+  }
+
+  /** The OS contextual menu is up: gestures belong to it until it closes. */
+  private openContextualMenuOverlay(): void {
+    if (!this.contextualMenuOverlayOpen) this.lifecycle?.onContextualMenu?.(true);
+    this.contextualMenuOverlayOpen = true;
+    this.contextualMenuOpenedAt = Date.now();
+  }
+
+  private closeContextualMenuOverlay(via: string): void {
+    if (!this.contextualMenuOverlayOpen) return;
+    this.contextualMenuOverlayOpen = false;
+    this.lifecycle?.onContextualMenu?.(false);
+    if (via !== 'foreground-exit') console.info(`[EventRouter] contextual-menu flag cleared via ${via}`);
+  }
+
+  /**
+   * A tap, double tap or swipe that reached THIS page. While the OS menu is
+   * really open the menu owns those gestures, so one arriving here means the
+   * menu has closed — whatever happened to its foreground-exit event. Long
+   * press/release (the menu's own opening gesture), lifecycle and IMU
+   * reports never count.
+   */
+  private isWearerGesture(event: EvenHubEvent): boolean {
+    const touch = new Set<number | undefined>([
+      undefined, OsEventTypeList.CLICK_EVENT, OsEventTypeList.DOUBLE_CLICK_EVENT,
+      OsEventTypeList.SCROLL_TOP_EVENT, OsEventTypeList.SCROLL_BOTTOM_EVENT,
+    ]);
+    if (event.textEvent) return touch.has(event.textEvent.eventType);
+    if (event.listEvent) return touch.has(event.listEvent.eventType);
+    const sys = event.sysEvent;
+    if (!sys || sys.imuData) return false;
+    if (sys.eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) return true;
+    return (sys.eventType === undefined || sys.eventType === OsEventTypeList.CLICK_EVENT)
+      && sys.eventSource !== undefined;
   }
 
   /** A press that ends without its release reaching handleLongPress: the
@@ -282,6 +329,17 @@ export class EventRouter {
         event.audioEvent.audioPcm, event.audioEvent.speakerRole, event.audioEvent.source,
       );
     }
+    if (this.contextualMenuOverlayOpen) {
+      // 2026-10-14: the flag had no way down but a foreground-exit event. If
+      // that event never came (or the menu click arrived after it and raised
+      // the flag again), every gesture was dropped while the mic streamed,
+      // until the wearer reopened JOAT. A real gesture here, or a menu that
+      // has been "open" for longer than anyone uses one, ends it.
+      if (this.isWearerGesture(event)) this.closeContextualMenuOverlay('gesture');
+      else if (Date.now() - this.contextualMenuOpenedAt > CONTEXT_MENU_MAX_MS) {
+        this.closeContextualMenuOverlay('timeout');
+      }
+    }
     const gesture = this.gestures.resolve(event);
     if (gesture?.intent === 'back' && !this.contextualMenuOverlayOpen) {
       this.recordGesture('double_press', gesture.delivery);
@@ -329,8 +387,7 @@ export class EventRouter {
       // The simulator's `context_menu` automation input does not replay the
       // physical raw long-press. Preserve the same overlay boundary before
       // its following foreground-exit event reaches lifecycle consumers.
-      if (!this.contextualMenuOverlayOpen) this.lifecycle?.onContextualMenu?.(true);
-      this.contextualMenuOverlayOpen = true;
+      this.openContextualMenuOverlay();
       this.pendingMicLongPress = false;
       this.recordGesture('menu_item', 'menu');
       this.handleMenu(event.menuItemClickEvent.itemID ?? 0);
@@ -588,7 +645,8 @@ export class EventRouter {
     // mistaken for confirms.
     switch (type) {
       case OsEventTypeList.FOREGROUND_ENTER_EVENT:
-        if (this.pendingMicLongPress) {
+        if (this.pendingMicLongPress
+          && Date.now() - this.longPressStartedAt <= MENU_LONG_PRESS_WINDOW_MS) {
           // OS contextual overlay, not an app foreground transition. Do not
           // pause location or repaint underneath the still-mounted HUD.
           // The press was the menu gesture (tap, then long press), not the
@@ -596,10 +654,11 @@ export class EventRouter {
           // kept, and the release belongs to the menu now.
           this.endNoteHold('contextual-menu', 'cancel');
           this.pendingMicLongPress = false;
-          this.contextualMenuOverlayOpen = true;
-          this.lifecycle?.onContextualMenu?.(true);
+          this.openContextualMenuOverlay();
           return;
         }
+        // A stale press is not the menu: this is a real return to JOAT.
+        this.pendingMicLongPress = false;
         this.lifecycle?.onForegroundEnter();
         return;
       case OsEventTypeList.FOREGROUND_EXIT_EVENT:
@@ -607,8 +666,7 @@ export class EventRouter {
           // Closing the contextual overlay is not app backgrounding. In
           // particular, do not leave LocationSessionManager marked background
           // after the wearer chose a menu action.
-          this.contextualMenuOverlayOpen = false;
-          this.lifecycle?.onContextualMenu?.(false);
+          this.closeContextualMenuOverlay('foreground-exit');
           return;
         }
         // Gone to the background mid-press: its release will not come, and
@@ -784,36 +842,44 @@ export class EventRouter {
       owner.scrollAssistantConversation('down');
       return true;
     }
-    if (type === OsEventTypeList.CLICK_EVENT) {
-      if (owner.isAssistantConversationContinuePromptVisible()) {
-        void owner.continueAssistantConversation().then((continued) => {
-          if (!continued) return;
-          this.link.sendConversationAction({
-            kind: 'input',
-            event: {
-              containerName: 'assistant-conversation',
-              selectedName: 'continue',
-              conversationId: identity.conversationId,
-              conversationRevision: identity.revision,
-            },
-          });
+    if (type === OsEventTypeList.CLICK_EVENT
+      && owner.isAssistantConversationContinuePromptVisible()) {
+      void owner.continueAssistantConversation().then((continued) => {
+        if (!continued) return;
+        this.link.sendConversationAction({
+          kind: 'input',
+          event: {
+            containerName: 'assistant-conversation',
+            selectedName: 'continue',
+            conversationId: identity.conversationId,
+            conversationRevision: identity.revision,
+          },
         });
-      }
+      });
       return true;
     }
-    if (type !== OsEventTypeList.DOUBLE_CLICK_EVENT) return false;
-    void owner.requestAssistantConversationExit().then((result) => {
-      if (result !== 'exited') return;
-      this.link.sendConversationAction({
-        kind: 'input',
-        event: {
-          containerName: 'assistant-conversation',
-          selectedName: 'exit',
-          conversationId: identity.conversationId,
-          conversationRevision: identity.revision,
-        },
+    if (type !== OsEventTypeList.CLICK_EVENT && type !== OsEventTypeList.DOUBLE_CLICK_EVENT) {
+      return false;
+    }
+    // Tap (with no Continue? to answer) and 2x tap both close the card and
+    // give the page underneath back, in one gesture. Before 2026-10-14 a tap
+    // did nothing and 2x tap only drew "Continue?", so a "Yes?" card over an
+    // open QuickNote ate every gesture until the wearer found a second 2x
+    // tap — reproduced in the simulator, and the freeze the wearer reported.
+    // Even's QA rule: "Every gesture has a visible response".
+    void owner.dismissAssistantConversation(identity.conversationId, identity.revision)
+      .then((exited) => {
+        if (!exited) return;
+        this.link.sendConversationAction({
+          kind: 'input',
+          event: {
+            containerName: 'assistant-conversation',
+            selectedName: 'exit',
+            conversationId: identity.conversationId,
+            conversationRevision: identity.revision,
+          },
+        });
       });
-    });
     return true;
   }
 

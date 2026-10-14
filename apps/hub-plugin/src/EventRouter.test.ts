@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AudioInputSource, EventSourceType, OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk';
-import { EventRouter, type LifecycleHandler } from './EventRouter';
+import { CONTEXT_MENU_MAX_MS, EventRouter, MENU_LONG_PRESS_WINDOW_MS, type LifecycleHandler } from './EventRouter';
 import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
@@ -97,6 +97,7 @@ function make(
     requestAssistantConversationExit: vi.fn(async (): Promise<
       'inactive' | 'prompted' | 'exited' | 'failed'
     > => 'inactive'),
+    dismissAssistantConversation: vi.fn(async (_id: string, _rev: number) => true),
     hasVisibleNotification: vi.fn(() => notificationVisible),
     dismissVisibleNotification: vi.fn(async () => true),
   };
@@ -643,32 +644,25 @@ describe('EventRouter — lifecycle', () => {
 });
 
 describe('EventRouter — text and list', () => {
-  it('keeps conversation gestures on the one persistent surface and asks before Back exits', async () => {
+  it('keeps swipes on the conversation surface; one 2x tap closes it (2026-10-14)', async () => {
     const { fire, sent, menu, assistantOverlay } = make();
     assistantOverlay.hasAssistantConversation.mockReturnValue(true);
     assistantOverlay.assistantConversationIdentity.mockReturnValue({
       conversationId: 'voice-a', revision: 7,
     });
     assistantOverlay.scrollAssistantConversation.mockReturnValue(true);
-    assistantOverlay.requestAssistantConversationExit
-      .mockResolvedValueOnce('prompted')
-      .mockResolvedValueOnce('exited');
 
     fire({ textEvent: { containerName: 'conversation', eventType: OsEventTypeList.SCROLL_TOP_EVENT } });
-    fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
     fire({ sysEvent: {
       eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
       eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
     } });
     await Promise.resolve();
-    fire({ sysEvent: {
-      eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
-      eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
-    } });
     await Promise.resolve();
 
     expect(assistantOverlay.scrollAssistantConversation).toHaveBeenCalledWith('up');
-    expect(assistantOverlay.requestAssistantConversationExit).toHaveBeenCalledTimes(2);
+    expect(assistantOverlay.dismissAssistantConversation).toHaveBeenCalledWith('voice-a', 7);
+    expect(assistantOverlay.requestAssistantConversationExit).not.toHaveBeenCalled();
     expect(menu.toggle).not.toHaveBeenCalled();
     expect(sent).toContainEqual({
       kind: 'input', event: {
@@ -676,6 +670,40 @@ describe('EventRouter — text and list', () => {
         conversationId: 'voice-a', conversationRevision: 7,
       },
     });
+  });
+
+  it('a tap with no Continue? to answer closes the card instead of doing nothing (2026-10-14)', async () => {
+    // Reproduced freeze: "JOAT: Yes?" over an open QuickNote swallowed every
+    // tap. Even QA: "Every gesture has a visible response".
+    const { fire, sent, assistantOverlay } = make();
+    assistantOverlay.hasAssistantConversation.mockReturnValue(true);
+    assistantOverlay.assistantConversationIdentity.mockReturnValue({
+      conversationId: 'voice-yes', revision: 1,
+    });
+    fire({ sysEvent: { eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_R } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(assistantOverlay.dismissAssistantConversation).toHaveBeenCalledWith('voice-yes', 1);
+    expect(assistantOverlay.continueAssistantConversation).not.toHaveBeenCalled();
+    expect(sent).toContainEqual(expect.objectContaining({
+      event: expect.objectContaining({ selectedName: 'exit', conversationId: 'voice-yes' }),
+    }));
+  });
+
+  it('a card that could not be closed is not reported to the Mac as closed', async () => {
+    const { fire, sent, assistantOverlay } = make();
+    assistantOverlay.hasAssistantConversation.mockReturnValue(true);
+    assistantOverlay.assistantConversationIdentity.mockReturnValue({
+      conversationId: 'voice-b', revision: 2,
+    });
+    assistantOverlay.dismissAssistantConversation.mockResolvedValueOnce(false);
+    fire({ sysEvent: {
+      eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
+      eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_R,
+    } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sent).toEqual([]);
   });
 
   it('continues from the visible inactivity question only after the footer repaint succeeds', async () => {
@@ -1452,5 +1480,72 @@ describe('EventRouter — a long press held on an open QuickNote talks into it (
     expect(hold).not.toHaveBeenCalled();
     expect(r.audio.stop).not.toHaveBeenCalled();
     expect(r.audio.start).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('EventRouter — the contextual-menu flag always comes down (2026-10-14)', () => {
+  /**
+   * The router believes the OS contextual menu is open from its
+   * foreground-enter (after a long press) or a menu click until its
+   * foreground-exit, and drops every gesture meanwhile. Before this, nothing
+   * else lowered the flag: a missing exit — or a menu click delivered after
+   * it — left the glasses ignoring every tap and 2x tap while the mic kept
+   * streaming, until JOAT was reopened (brain.log 2026-10-14 07:37 and 08:15).
+   */
+  const LONG_PRESS = OsEventTypeList.LONG_PRESS_EVENT;
+  const ENTER = { sysEvent: { eventType: OsEventTypeList.FOREGROUND_ENTER_EVENT } };
+  const EXIT = { sysEvent: { eventType: OsEventTypeList.FOREGROUND_EXIT_EVENT } };
+  const TAP = { sysEvent: { eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_R } };
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('a menu click delivered after its exit no longer locks out every later tap', () => {
+    const r = make();
+    r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
+    r.fire(ENTER);
+    r.fire(EXIT);
+    r.fire({ menuItemClickEvent: { itemID: 3 } }); // late: raises the flag again
+    r.fire(TAP);
+    expect(r.lifecycle.onContextualMenu).toHaveBeenLastCalledWith(false);
+    expect(r.sent.length + r.menu.toggle.mock.calls.length
+      + (r.menu.openSettings as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0);
+  });
+
+  it('a real swipe or tap after a lost exit is handled, not dropped', () => {
+    const r = make();
+    r.fire({ menuItemClickEvent: { itemID: 3 } }); // flag up, no exit will come
+    const before = r.sent.length;
+    r.fire({ textEvent: { containerName: 'main', eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
+    expect(r.lifecycle.onContextualMenu).toHaveBeenLastCalledWith(false);
+    expect(r.sent.length).toBeGreaterThan(before);
+  });
+
+  it('the long press that opened the menu does not itself lower the flag', () => {
+    const r = make();
+    r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
+    r.fire(ENTER);
+    r.fire({ sysEvent: { eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT, eventSource: 1 } });
+    expect(r.lifecycle.onContextualMenu).toHaveBeenCalledTimes(1);
+    expect(r.lifecycle.onContextualMenu).toHaveBeenCalledWith(true);
+  });
+
+  it('a flag left up with no gesture expires after CONTEXT_MENU_MAX_MS', () => {
+    vi.useFakeTimers();
+    const r = make();
+    r.fire({ menuItemClickEvent: { itemID: 3 } });
+    vi.advanceTimersByTime(CONTEXT_MENU_MAX_MS + 1);
+    r.fire({ audioEvent: { audioPcm: new Uint8Array(4), source: 'glasses' } });
+    expect(r.lifecycle.onContextualMenu).toHaveBeenLastCalledWith(false);
+  });
+
+  it('a stale long press does not turn a real return to JOAT into the menu', () => {
+    vi.useFakeTimers();
+    const r = make();
+    r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } }); // release lost
+    vi.advanceTimersByTime(MENU_LONG_PRESS_WINDOW_MS + 1);
+    r.fire(ENTER);
+    expect(r.lifecycle.onForegroundEnter).toHaveBeenCalledTimes(1);
+    expect(r.lifecycle.onContextualMenu).not.toHaveBeenCalled();
   });
 });
