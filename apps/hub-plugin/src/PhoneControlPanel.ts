@@ -117,7 +117,9 @@ function brainLabel(url: string): string {
   try {
     const parsed = new URL(url);
     const host = parsed.hostname;
-    const device = host.includes('mac-mini') ? 'Mac Mini' : host.includes('macbook') ? 'MacBook Pro' : 'JOAT Mac';
+    // Tailscale already named the machine; its first DNS label is what the
+    // owner calls it (the same rule the Mac uses for OpenClaw hosts).
+    const device = /^\d+(\.\d+){3}$/.test(host) ? host : host.split('.')[0] || 'JOAT Mac';
     const transport = host.endsWith('.ts.net') ? 'Tailscale' : 'Local network';
     return `${device} · ${transport}${parsed.protocol === 'wss:' ? ' (secure)' : ''}`;
   } catch { return 'Approved JOAT connection'; }

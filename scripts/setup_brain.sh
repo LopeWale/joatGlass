@@ -12,9 +12,9 @@
 #               the first utterance
 #
 # What it does NOT do: start JOAT.app's native bridge or edit the plugin's
-# app.json whitelist. Adding a new Mac's hostname is a deliberate security
-# decision — this script only TELLS you when the current machine isn't
-# whitelisted.
+# release URLs. Adding a Mac the plugin may dial is a deliberate security
+# decision — this script only TELLS you when the current machine is missing
+# from JOAT_RELEASE_WS_URLS in apps/hub-plugin/.env.
 
 set -euo pipefail
 
@@ -91,18 +91,20 @@ fi
 say "running the test suite"
 "$VENV/bin/python" -m pytest -q "$REPO_DIR/tests" | tail -1
 
-# ── 7. Whitelist check (the silent-failure trap) ────────────────────────────
-HOSTNAME_LOCAL="$(scutil --get LocalHostName 2>/dev/null || hostname -s).local"
-MANIFEST="$REPO_DIR/apps/hub-plugin/app.json"
-if [ -f "$MANIFEST" ]; then
-  if ! grep -qi "$HOSTNAME_LOCAL" "$MANIFEST" && ! grep -q "$(hostname -s)" "$MANIFEST"; then
-    warn "this Mac ($HOSTNAME_LOCAL) is NOT in $MANIFEST's network whitelist."
-    warn "The Hub blocks unlisted hosts SILENTLY — add ws://$HOSTNAME_LOCAL:8787 (or"
-    warn "this machine's tailnet name) to the whitelist AND VITE_MAC_WS_URL, then"
-    warn "rebuild the plugin. See docs/HUB_PLUGIN.md."
-  else
-    say "hostname appears in the plugin whitelist"
-  fi
+# ── 7. Plugin target check (the silent-failure trap) ────────────────────────
+# A packaged plugin can reach only the Macs named in JOAT_RELEASE_WS_URLS in
+# apps/hub-plugin/.env (they become its whole network whitelist).
+PLUGIN_ENV="$REPO_DIR/apps/hub-plugin/.env"
+SHORT_NAME="$(hostname -s)"
+if ! grep -q '^JOAT_RELEASE_WS_URLS=' "$PLUGIN_ENV" 2>/dev/null; then
+  warn "no JOAT_RELEASE_WS_URLS in apps/hub-plugin/.env yet — copy .env.example there,"
+  warn "set your package id and this Mac's wss://<name>.<tailnet>.ts.net/glasses URL,"
+  warn "then npm run pack. See apps/hub-plugin/README.md."
+elif ! grep '^JOAT_RELEASE_WS_URLS=' "$PLUGIN_ENV" | grep -qi "$SHORT_NAME"; then
+  warn "this Mac ($SHORT_NAME) does not appear in JOAT_RELEASE_WS_URLS — the plugin"
+  warn "will not dial it. Add its Tailscale /glasses URL and repack the plugin."
+else
+  say "this Mac appears in the plugin's release URLs"
 fi
 
 # ── 8. Optional launchd service ─────────────────────────────────────────────

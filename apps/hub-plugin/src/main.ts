@@ -100,14 +100,13 @@ const MAC_WS_URLS = ((): readonly string[] => {
   // Fall back AFTER filtering: an empty or whitespace-only env var survives
   // `??` and would otherwise leave zero candidates and abort boot.
   //
-  // The fallback must itself be whitelisted in app.json. This was
-  // `wss://mac.local:8787/glasses`, a host that appears in no manifest —
-  // and because the choice is made at runtime the literal ships in every
-  // bundle whether or not it is ever dialled, so a packaged release carried
-  // an origin its own manifest did not allow.
+  // The fallback must itself be whitelisted in the checked-in app.json, which
+  // allows only the loopback gateway the simulator uses. A packaged release
+  // always sets VITE_MAC_WS_URL to the builder's own Macs (scripts/pack.sh),
+  // so no one's personal host is ever baked into the shared source.
   return parsed.length > 0
     ? parsed
-    : ['wss://laptop-mac.example-tailnet.ts.net/glasses'];
+    : ['ws://127.0.0.1:8787/glasses'];
 })();
 
 /** Accept a remembered candidate only when it remains in this package's

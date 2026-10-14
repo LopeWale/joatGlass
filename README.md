@@ -56,12 +56,31 @@ utilsG2/
 | [docs/TESTING.md](docs/TESTING.md) | Three testing tiers (vitest / simulator / glasses), event-shape probe, nod calibration |
 | [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) | What to do next, in order, and what's deliberately deferred |
 
-## Quick start (Phase 0)
+## Run your own
 
-1. Clone the vendor repos: see `docs/STARTER_REPOS.md` (start with `men-g2-ble-gateway`).
-2. G2 on stock firmware v2.2.20; disconnect the phone (one BLE central per lens).
-3. Run the gateway on the Mac, wire STT → the mind (`claude -p` or `codex exec` on your subscriptions; MLX offline) → `textContainerUpgrade` on the HUD. Or skip the plugin for questions: run `scripts/setup_even_ai_door.sh` on the Mac and point Even AI's Agent Configure at the URL it prints (docs/NEXT_STEPS.md §6).
-4. Target: round-trip voice → HUD under 3 seconds.
+JOAT is not on the Even Hub store: Even Hub fixes a plugin's network
+whitelist at packaging time with no wildcards, so every install is built for
+its owner's own Mac. Everything personal lives in two ignored `.env` files;
+nothing about your Mac is committed.
+
+You need a Mac (Apple silicon), Even G2 glasses with the Even Realities App,
+[Tailscale](https://tailscale.com) on the Mac and the phone, an Even Hub
+developer account, and an Apple Developer account to sign `JOAT.app`.
+
+1. **Mac engine.** Clone this repo, then run `./scripts/setup_brain.sh`
+   (Python venv, dependencies, WhisperKit, tests).
+2. **Mac app.** `cp .env.example .env`, set `JOAT_TEAM_ID` to your Apple team
+   ID, then `./scripts/build_app.sh --install`. In JOAT.app's Settings, turn on
+   **Private Tailnet home brain** and restart it.
+3. **Private HTTPS route.** On the Mac:
+   `tailscale serve --bg --set-path /glasses http://127.0.0.1:8787`
+4. **Your plugin build.** In `apps/hub-plugin`: `cp .env.example .env`, set
+   `JOAT_PACKAGE_ID` (your own reverse-domain id) and `JOAT_RELEASE_WS_URLS`
+   (`wss://<your-mac>.<your-tailnet>.ts.net/glasses`), then
+   `npm ci && npm run pack`. Upload the resulting `joat.ehpk` to your own
+   Even Hub developer project and install it on your phone.
+5. **Pair once.** Open JOAT.app's pairing window, then open JOAT on the
+   glasses. See [docs/MAC_APP.md](docs/MAC_APP.md) for details.
 
 ## Key constraints (read RULES.md before coding)
 
@@ -70,3 +89,7 @@ utilsG2/
 - Claude critic: invoke the official `claude` binary only; never reuse OAuth tokens in third-party clients.
 - Every consequential computer-use action requires explicit confirmation (IMU nod or R1 ring).
 - Stay on stock G2 firmware (ECDSA-P256-signed images block custom firmware).
+
+## License
+
+[MIT](LICENSE)

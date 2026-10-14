@@ -41,7 +41,7 @@ def test_probe_reports_only_content_free_app_owned_readiness(tmp_path: Path) -> 
 
     result = probe._probe(
         status_path=status_path,
-        expected_host="home-mac.example-tailnet.TS.NET.",
+        expected_host="HOME-MAC.EXAMPLE-TAILNET.TS.NET.",
         now=110.0,
     )
 

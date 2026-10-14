@@ -14,24 +14,29 @@ function networkWhitelist(manifest) {
   return network.whitelist;
 }
 
-test('packages only the selected private WSS origin, never local development routes', () => {
+test('the checked-in manifest is generic: placeholder id, loopback simulator origins only', () => {
+  assert.equal(sourceManifest.package_id, 'com.example.joat');
+  for (const origin of networkWhitelist(sourceManifest)) {
+    assert.match(origin, /^ws:\/\/(127\.0\.0\.1|localhost):8787$/);
+  }
+});
+
+test('packages only the builder\'s selected WSS origin and package id', () => {
   const release = buildReleaseManifest(
     'wss://home-mac.example-tailnet.ts.net/glasses',
+    'com.yourname.joat',
     sourceManifest,
   );
 
-  assert.deepEqual(networkWhitelist(release), [
-    'wss://home-mac.example-tailnet.ts.net',
-  ]);
-  assert.ok(
-    networkWhitelist(sourceManifest).some((origin) => origin.startsWith('ws://')),
-    'the checked-in development manifest keeps a local plain-WS route',
-  );
+  assert.deepEqual(networkWhitelist(release), ['wss://home-mac.example-tailnet.ts.net']);
+  assert.equal(release.package_id, 'com.yourname.joat');
+  assert.equal(sourceManifest.package_id, 'com.example.joat', 'the source manifest is not mutated');
 });
 
-test('keeps multiple selected WSS brain origins explicit and preserves other permissions', () => {
+test('keeps multiple selected WSS origins explicit and preserves other permissions', () => {
   const release = buildReleaseManifest(
     'wss://home-mac.example-tailnet.ts.net/glasses,wss://laptop-mac.example-tailnet.ts.net/glasses',
+    'com.yourname.joat',
     sourceManifest,
   );
 
@@ -39,19 +44,19 @@ test('keeps multiple selected WSS brain origins explicit and preserves other per
     'wss://home-mac.example-tailnet.ts.net',
     'wss://laptop-mac.example-tailnet.ts.net',
   ]);
-  assert.equal(release.package_id, sourceManifest.package_id);
   assert.deepEqual(
     release.permissions.filter((permission) => permission.name !== 'network'),
     sourceManifest.permissions.filter((permission) => permission.name !== 'network'),
   );
 });
 
-test('does not produce a release manifest for an unreviewed Mini', () => {
+test('refuses the placeholder package id or a plain-WS candidate', () => {
   assert.throws(
-    () => buildReleaseManifest(
-      'wss://unknown-mini.example-tailnet.ts.net/glasses',
-      sourceManifest,
-    ),
-    /not in app\.json/,
+    () => buildReleaseManifest('wss://home-mac.example-tailnet.ts.net/glasses', 'com.example.joat', sourceManifest),
+    /placeholder/,
+  );
+  assert.throws(
+    () => buildReleaseManifest('ws://127.0.0.1:8787/glasses', 'com.yourname.joat', sourceManifest),
+    /must use wss/,
   );
 });

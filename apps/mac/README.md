@@ -79,8 +79,8 @@ For the private Tailnet home-Mini topology, enable **Private Tailnet home
 brain** in the app's Settings once and restart it. The engine then listens only
 on `127.0.0.1:8787` while still requiring Hub pairing; configure the Mini's
 private Tailscale Serve HTTPS proxy to that loopback address and build the
-plugin with the port-443 `wss://<mini>.ts.net/glasses` candidate. The exact
-origin must already appear in `app.json`. This is not a public Funnel and does
+plugin with the port-443 `wss://<mini>.ts.net/glasses` candidate listed in
+`JOAT_RELEASE_WS_URLS`. This is not a public Funnel and does
 not make loopback an authentication exemption.
 
 Each home brain has one-time setup: its `openclaw.json` contains only the
@@ -89,11 +89,10 @@ device identity/token in that Mac's Keychain and the OpenClaw host approves
 that device. See [the Mac app deployment contract](../../docs/MAC_APP.md#home-mac-mini-brain-contract)
 before treating a new mini as an Agent Terminal failover.
 
-The one step it will not automate: adding the new Mac's hostname to the plugin's
-`app.json` network whitelist (and `VITE_MAC_WS_URL`). That is a deliberate
-security decision — the script detects the mismatch and tells you exactly what
-to add, but a human commits it. The whitelist already carries the MacBook and
-the mac mini; a third machine is one more pair of `ws://`/`wss://` entries.
+The one step it will not automate: adding the new Mac's Tailscale URL to
+`JOAT_RELEASE_WS_URLS` in `apps/hub-plugin/.env` and repacking the plugin.
+That is a deliberate security decision — the script detects the mismatch and
+tells you what to add, but you make the change.
 
 Model choice: `JOAT_STT_MODEL=<name>` overrides the default `large-v3_turbo`
 (e.g. `base` on a low-RAM machine).

@@ -68,11 +68,16 @@ def test_voice_latency_receipt_is_explicitly_opt_in() -> None:
     assert parser.parse_args(["--voice-latency-diagnostics"]).voice_latency_diagnostics is True
 
 
-def test_known_home_mini_serve_origin_is_declared_without_raw_gateway_tls() -> None:
+def test_checked_in_manifest_is_generic_and_never_declares_raw_gateway_tls() -> None:
+    # Personal Mac origins come from apps/hub-plugin/.env at pack time; the
+    # shared manifest carries only the simulator's loopback gateway.
     manifest = json.loads(
         (Path(__file__).parents[2] / "apps/hub-plugin/app.json").read_text()
     )
     whitelist = manifest["permissions"][2]["whitelist"]
 
-    assert "wss://home-mac.example-tailnet.ts.net" in whitelist
+    assert manifest["package_id"] == "com.example.joat"
+    assert whitelist and all(
+        entry in {"ws://127.0.0.1:8787", "ws://localhost:8787"} for entry in whitelist
+    )
     assert all(not entry.startswith("wss://") or ":8787" not in entry for entry in whitelist)

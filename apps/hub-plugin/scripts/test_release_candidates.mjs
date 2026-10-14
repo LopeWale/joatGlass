@@ -1,25 +1,16 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-  allowedNetworkOrigins,
   releaseCandidateUrls,
+  validatePackageId,
   validateReleaseCandidates,
 } from './release_candidates.mjs';
 
-// Release-candidate validation must exercise the checked-in source allowlist.
-// `test_release_manifest.mjs` separately proves that the package narrows it
-// to the exact WSS origins selected for a release.
-const manifest = JSON.parse(
-  readFileSync(new URL('../app.json', import.meta.url), 'utf8'),
-);
-
-test('accepts only actual explicitly whitelisted private G2 gateway URLs', () => {
+test('accepts private WSS /glasses gateway URLs in the order given', () => {
   assert.deepEqual(
     validateReleaseCandidates(
       'wss://home-mac.example-tailnet.ts.net/glasses,wss://laptop-mac.example-tailnet.ts.net/glasses',
-      manifest,
     ),
     [
       'wss://home-mac.example-tailnet.ts.net/glasses',
@@ -28,45 +19,34 @@ test('accepts only actual explicitly whitelisted private G2 gateway URLs', () =>
   );
 });
 
-test('rejects raw development transport even when the manifest allows it', () => {
+test('rejects raw development transport', () => {
   assert.throws(
-    () => validateReleaseCandidates('ws://laptop-mac.local:8787/glasses', manifest),
+    () => validateReleaseCandidates('ws://laptop-mac.local:8787/glasses'),
     /must use wss/,
   );
 });
 
-test('rejects an unreviewed origin, alternate path, or duplicate endpoint', () => {
+test('rejects an alternate path or a duplicate endpoint', () => {
   assert.throws(
-    () => validateReleaseCandidates('wss://unknown.example-tailnet.ts.net/glasses', manifest),
-    /not in app\.json/,
-  );
-  assert.throws(
-    () => validateReleaseCandidates('wss://home-mac.example-tailnet.ts.net/other', manifest),
+    () => validateReleaseCandidates('wss://home-mac.example-tailnet.ts.net/other'),
     /origin-local \/glasses URL/,
   );
   assert.throws(
     () => validateReleaseCandidates(
       'wss://home-mac.example-tailnet.ts.net/glasses,wss://home-mac.example-tailnet.ts.net/glasses',
-      manifest,
     ),
     /duplicated/,
   );
 });
 
-test('rejects an absent or malformed network declaration', () => {
+test('rejects an empty candidate list', () => {
   assert.throws(() => releaseCandidateUrls(''), /non-empty/);
-  assert.throws(() => allowedNetworkOrigins({}), /network permissions/);
-  assert.throws(
-    () => allowedNetworkOrigins({ permissions: [{ name: 'network', whitelist: ['ok', 4] }] }),
-    /whitelist is invalid/,
-  );
 });
 
 test('never echoes rejected credential-bearing candidate input', () => {
   assert.throws(
     () => validateReleaseCandidates(
       'wss://operator:private-token@home-mac.example-tailnet.ts.net/glasses',
-      manifest,
     ),
     (error) => {
       assert.ok(error instanceof Error);
@@ -75,4 +55,12 @@ test('never echoes rejected credential-bearing candidate input', () => {
       return true;
     },
   );
+});
+
+test('package ids follow the Even Hub reverse-domain rule and are never the placeholder', () => {
+  assert.equal(validatePackageId('com.yourname.joat'), 'com.yourname.joat');
+  for (const bad of ['joat', 'com.your-name.joat', 'com.YourName.joat', 'com.1st.joat', 'com.your_name.joat', '']) {
+    assert.throws(() => validatePackageId(bad), /reverse-domain/, bad);
+  }
+  assert.throws(() => validatePackageId('com.example.joat'), /placeholder/);
 });

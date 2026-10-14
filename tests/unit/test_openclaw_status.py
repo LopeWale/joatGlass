@@ -45,7 +45,7 @@ def test_openclaw_status_accepts_only_sanitized_fields(tmp_path: Path) -> None:
 
     status.set_openclaw(
         state="connected_read_only",
-        endpoint_host="home-mac.example-tailnet.TS.NET",
+        endpoint_host="HOME-MAC.EXAMPLE-TAILNET.TS.NET",
         scopes=("operator.read",),
         reason="write_scope_required",
     )

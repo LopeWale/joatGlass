@@ -89,7 +89,7 @@ targets:
         # Stable identity matters beyond distribution: TCC keys Full Disk
         # Access and Accessibility grants to the signing identity, so an
         # ad-hoc or churning signature makes the user re-grant every build.
-        DEVELOPMENT_TEAM: YOURTEAMID
+        DEVELOPMENT_TEAM: ${JOAT_TEAM_ID}
       configs:
         Debug:
           # Never let an unsigned Xcode build replace the installed app's
@@ -117,7 +117,7 @@ targets:
         # preserving the Debug app's distinct TCC identity.
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "Developer ID Application"
-        DEVELOPMENT_TEAM: YOURTEAMID
+        DEVELOPMENT_TEAM: ${JOAT_TEAM_ID}
 
 schemes:
   JOAT:

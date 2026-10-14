@@ -7,11 +7,11 @@ Ordered, with the reasoning. Everything here is Phase 0 unless noted.
 Build config (`package.json`, `vite.config.ts`, `tsconfig.json`) and `app.json` exist; the
 manifest was generated with the official CLI (`evenhub init`, from
 `@evenrealities/evenhub-cli` — the binary is `evenhub`/`eh`, not `even-hub`) and merged.
-The whitelist carries both tailnet names (MacBook + mac mini, `ws://` and `wss://` each)
-plus the MacBook's `.local` mDNS fallback; `VITE_MAC_WS_URL` dials the MacBook's tailnet
-URL. Adding another Mac = one more whitelist pair + (if it should be the dial target)
-the `.env` line — `scripts/setup_brain.sh` detects and prints exactly this when run on
-a non-whitelisted machine.
+The checked-in manifest is generic (placeholder package id, loopback simulator
+origins only). Each builder's package id and Mac URLs live in the ignored
+`apps/hub-plugin/.env` (`JOAT_PACKAGE_ID`, `JOAT_RELEASE_WS_URLS`); `npm run pack`
+writes them into the packaged manifest. Adding another Mac = one more URL there and a
+repack — `scripts/setup_brain.sh` warns when run on a Mac that is missing from it.
 
 ## 2. Stand up the Mac side of the link — DONE
 

@@ -21,21 +21,20 @@ See [../../docs/HUB_PLUGIN.md](../../docs/HUB_PLUGIN.md) for the SDK reference a
 ## Status
 
 - Build is wired: `package.json`, `vite.config.ts`, `tsconfig.json`, and `app.json` all exist. `npm run build` typechecks + bundles; `npm test` runs vitest.
-- `app.json`'s `network` permission `whitelist` must carry the Mac's WebSocket
-  origin exactly (scheme and port included). Direct development can use plain
-  `ws://…:8787`; an unattended Tailnet home brain uses portless
-  `wss://<mini>.ts.net` behind Tailscale Serve. The ignored `.env` remains
-  development-only. A deployable EHPK must explicitly set
-  `JOAT_RELEASE_WS_URLS` to one or more allowlisted `wss://…/glasses` URLs;
-  `npm run pack` rejects raw, unlisted, duplicate, or wrong-path candidates.
+- The checked-in `app.json` is generic: a placeholder package id
+  (`com.example.joat`) and only the loopback origins the simulator uses. Even
+  Hub's network whitelist is fixed per package and takes no wildcards, so every
+  build is personal. Put your own settings in the ignored `.env` (see
+  `.env.example`), then `npm run pack`:
 
   ```sh
-  JOAT_RELEASE_WS_URLS=wss://home-mac.example-tailnet.ts.net/glasses npm run pack
+  JOAT_PACKAGE_ID=com.yourname.joat
+  JOAT_RELEASE_WS_URLS=wss://your-mac.your-tailnet.ts.net/glasses
   ```
 
-  For several predeclared home brains, pass a comma-separated list. Each one
-  must already have its exact origin in `app.json`; this is intentional because
-  Even Hub does not treat the runtime candidate list as a network allowlist.
+  The pack writes those values into the packaged `app.json`: your package id,
+  and exactly your `wss://…/glasses` origins as the network whitelist. It
+  rejects plain `ws://`, wrong paths, duplicates and the placeholder id.
 - IMU nod thresholds in `ImuMonitor` are untuned guesses — calibrate with `scripts/imu_capture.py` (see [docs/TESTING.md](../../docs/TESTING.md)).
 
 ## Dev loop

@@ -153,7 +153,7 @@ def test_probe_reads_only_the_serve_status_command() -> None:
 
     assert preflight.probe(
         tailscale_bin="/usr/local/bin/tailscale",
-        expected_host="home-mac.example-tailnet.TS.NET.",
+        expected_host="HOME-MAC.EXAMPLE-TAILNET.TS.NET.",
         run=runner,
     )["status"] == "ready"
     assert calls == [(

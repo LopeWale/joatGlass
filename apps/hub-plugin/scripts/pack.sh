@@ -5,6 +5,18 @@ set -euo pipefail
 plugin_dir=${0:A:h:h}
 cd "$plugin_dir"
 
+# Release settings come from the environment or, failing that, from this
+# directory's ignored `.env`. Only the requested key is read from the file;
+# it is never sourced.
+release_setting() {
+  local key=$1 value=${(P)1:-}
+  if [[ -z "$value" && -f .env ]]; then
+    value=$(sed -n "s/^${key}=//p" .env | tail -n 1)
+    value=${value%\"}; value=${value#\"}
+  fi
+  print -r -- "$value"
+}
+
 # This packages the WORKING TREE, not a commit. That is convenient during
 # development and a hazard at release: a pack run in this repo quietly
 # archived another concurrent session's uncommitted, unreviewed renderer
@@ -33,12 +45,14 @@ fi
 # Every package is a new version. The Hub keys private builds by version and
 # silently REPLACES an existing one on upload, so a repacked number loses the
 # build it overwrites and leaves the glasses unable to say which code they
-# run. Changelog.md records every build as "Build JOAT X.Y.Z"; app.json must
-# be above all of them before a pack. JOAT_RELEASE_ALLOW_REBUILD=1 repacks a
-# recorded version deliberately (a rebuild of the same revision).
+# run. The maintainer's Changelog.md records each of their uploads as "Build
+# JOAT X.Y.Z"; with JOAT_RELEASE_CHANGELOG_GUARD=1, app.json must be above all
+# of them before a pack. Anyone else's builds are not in that log, so the
+# guard is off unless set. JOAT_RELEASE_ALLOW_REBUILD=1 repacks a recorded
+# version deliberately (a rebuild of the same revision).
 version=$(node -p "JSON.parse(require('fs').readFileSync('app.json','utf8')).version")
 changelog="$plugin_dir/../../Changelog.md"
-if [[ -f "$changelog" ]]; then
+if [[ "$(release_setting JOAT_RELEASE_CHANGELOG_GUARD)" == "1" && -f "$changelog" ]]; then
   last_built=$(grep -oE 'Build JOAT [0-9]+\.[0-9]+\.[0-9]+' "$changelog" | awk '{print $3}' | sort -V | tail -n 1)
   if [[ -n "$last_built" && "$(print -l "$version" "$last_built" | sort -V | tail -n 1)" == "$last_built" ]]; then
     if [[ "${JOAT_RELEASE_ALLOW_REBUILD:-0}" != "1" ]]; then
@@ -62,16 +76,19 @@ if [[ "$package_version" != "$version" || "$lock_version" != "$version" ]]; then
   exit 67
 fi
 
-# A deployable package must never inherit the ignored developer `.env` route.
-# The caller selects the reviewed, private WSS G2 gateway explicitly; the
-# validator then requires every candidate to be an exact app.json allowlist
-# origin and the fixed /glasses path. `release_manifest.mjs` narrows the
-# packaged permission set to exactly those selected WSS origins.
-if [[ -z "${JOAT_RELEASE_WS_URLS:-}" ]]; then
-  print -u2 "JOAT_RELEASE_WS_URLS is required (for example: wss://home-mac.example-tailnet.ts.net/glasses)"
+# A package is personal to whoever builds it: their own Even Hub package id
+# and their own Mac(s) (JOAT_PACKAGE_ID, JOAT_RELEASE_WS_URLS). The packaged
+# allowlist is exactly the selected private WSS origins, never the developer
+# VITE_MAC_WS_URL route.
+JOAT_PACKAGE_ID=$(release_setting JOAT_PACKAGE_ID)
+JOAT_RELEASE_WS_URLS=$(release_setting JOAT_RELEASE_WS_URLS)
+if [[ -z "$JOAT_PACKAGE_ID" || -z "$JOAT_RELEASE_WS_URLS" ]]; then
+  print -u2 "set JOAT_PACKAGE_ID and JOAT_RELEASE_WS_URLS in apps/hub-plugin/.env (see .env.example), for example:"
+  print -u2 "  JOAT_PACKAGE_ID=com.yourname.joat"
+  print -u2 "  JOAT_RELEASE_WS_URLS=wss://your-mac.your-tailnet.ts.net/glasses"
   exit 64
 fi
-node scripts/release_candidates.mjs "$JOAT_RELEASE_WS_URLS" app.json
+node scripts/release_candidates.mjs "$JOAT_RELEASE_WS_URLS"
 
 # Never package the shared dev `dist/` directory. Simulator acceptance can
 # legitimately place synthetic PCM fixtures there while another terminal is
@@ -96,7 +113,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-node scripts/release_manifest.mjs "$JOAT_RELEASE_WS_URLS" app.json "$release_manifest"
+node scripts/release_manifest.mjs "$JOAT_RELEASE_WS_URLS" "$JOAT_PACKAGE_ID" app.json "$release_manifest"
 
 # A release build sets publicDir=false, so NOTHING in public/ is copied.
 # That is what keeps DEV fixtures out of the bundle (see vite.config.ts) —

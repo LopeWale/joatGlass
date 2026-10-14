@@ -243,7 +243,7 @@ def test_gateway_profile_canonicalizes_stable_keychain_identity_origin() -> None
     gateway = importlib.import_module("joat.agents.openclaw_gateway")
 
     profile = gateway.GatewayProfile(
-        "WSS://home-mac.example-tailnet.TS.NET:443/"
+        "WSS://HOME-MAC.EXAMPLE-TAILNET.TS.NET:443/"
     )
 
     assert profile.url == "wss://home-mac.example-tailnet.ts.net"

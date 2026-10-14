@@ -1438,9 +1438,9 @@ class TestLocationAndIdentity:
 
     def test_hello_user_name_is_optional(self) -> None:
         msg = parse_uplink({"kind": "hello", "sn": "S", "model": "g2",
-                            "launchSource": "x", "userName": "Emmanuel"})
+                            "launchSource": "x", "userName": "Alex"})
         assert isinstance(msg, Hello)
-        assert msg.user_name == "Emmanuel"
+        assert msg.user_name == "Alex"
         bare = parse_uplink({"kind": "hello", "sn": "S", "model": "g2",
                              "launchSource": "x"})
         assert isinstance(bare, Hello)

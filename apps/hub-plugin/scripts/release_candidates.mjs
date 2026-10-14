@@ -3,16 +3,12 @@
 /**
  * Validate the public, build-time WebSocket candidates that become part of a
  * release. Pairing tokens never pass through this script: it accepts only
- * endpoint URLs and validates them against the reviewed manifest allowlist.
+ * endpoint URLs. Each builder names their own Mac(s) in their local config;
+ * those candidates become the packaged allowlist (release_manifest.mjs).
  */
 
-import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
-
-function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
 
 export function releaseCandidateUrls(value) {
   if (typeof value !== 'string') {
@@ -25,30 +21,27 @@ export function releaseCandidateUrls(value) {
   return candidates;
 }
 
-export function allowedNetworkOrigins(manifest) {
-  if (!isRecord(manifest) || !Array.isArray(manifest.permissions)) {
-    throw new Error('app manifest does not declare network permissions');
+/**
+ * Even Hub package ids: reverse-domain, at least two segments, each segment a
+ * lowercase letter followed by lowercase letters or digits (no hyphens or
+ * underscores). Every builder needs their own; the Hub keys builds by it.
+ */
+export function validatePackageId(value) {
+  if (typeof value !== 'string' || !/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/.test(value)) {
+    throw new Error('package id must be reverse-domain lowercase, e.g. com.yourname.joat');
   }
-  const network = manifest.permissions.find((permission) => (
-    isRecord(permission) && permission.name === 'network'
-  ));
-  if (!isRecord(network) || !Array.isArray(network.whitelist)) {
-    throw new Error('app manifest does not declare a network whitelist');
+  if (value === 'com.example.joat') {
+    throw new Error('choose your own package id; com.example.joat is the placeholder');
   }
-  const origins = network.whitelist.filter((entry) => typeof entry === 'string');
-  if (origins.length !== network.whitelist.length) {
-    throw new Error('app manifest network whitelist is invalid');
-  }
-  return new Set(origins);
+  return value;
 }
 
 /**
- * A production Glasses package must explicitly choose one or more HTTPS/TLS
- * origins already approved by Even Hub. The /glasses path is the only public
- * JOAT gateway route; raw dev URLs and arbitrary paths cannot leak into it.
+ * A production Glasses package must explicitly choose one or more TLS
+ * origins. The /glasses path is the only public JOAT gateway route; raw dev
+ * URLs and arbitrary paths cannot leak into it.
  */
-export function validateReleaseCandidates(value, manifest) {
-  const approvedOrigins = allowedNetworkOrigins(manifest);
+export function validateReleaseCandidates(value) {
   const seen = new Set();
   return releaseCandidateUrls(value).map((candidate) => {
     let url;
@@ -65,9 +58,6 @@ export function validateReleaseCandidates(value, manifest) {
     if (url.pathname !== '/glasses' || url.search || url.hash || url.username || url.password) {
       throw new Error('release candidate must be an origin-local /glasses URL');
     }
-    if (!approvedOrigins.has(url.origin)) {
-      throw new Error(`release candidate origin is not in app.json: ${url.origin}`);
-    }
     if (seen.has(url.href)) {
       throw new Error('release candidate is duplicated');
     }
@@ -76,28 +66,19 @@ export function validateReleaseCandidates(value, manifest) {
   });
 }
 
-function readManifest(path) {
-  try {
-    return JSON.parse(readFileSync(path, 'utf8'));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown error';
-    throw new Error(`cannot read app manifest: ${message}`);
-  }
-}
-
 function isDirectExecution() {
   return process.argv[1] !== undefined
     && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 }
 
 if (isDirectExecution()) {
-  const [rawCandidates, manifestPath] = process.argv.slice(2);
-  if (rawCandidates === undefined || manifestPath === undefined || process.argv.length !== 4) {
-    console.error('usage: release_candidates.mjs <wss-url[,wss-url]> <app.json>');
+  const [rawCandidates] = process.argv.slice(2);
+  if (rawCandidates === undefined || process.argv.length !== 3) {
+    console.error('usage: release_candidates.mjs <wss-url[,wss-url]>');
     process.exitCode = 64;
   } else {
     try {
-      const candidates = validateReleaseCandidates(rawCandidates, readManifest(manifestPath));
+      const candidates = validateReleaseCandidates(rawCandidates);
       console.log(`validated ${candidates.length} private release candidate(s)`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error';

@@ -25,6 +25,10 @@
 #      itself returns HTTP 401):
 #        xcrun notarytool store-credentials joat \
 #          --apple-id you@example.com --team-id YOURTEAMID --password abcd-efgh-ijkl-mnop
+#
+# Signing uses YOUR Apple Developer team: set JOAT_TEAM_ID in the environment
+# or in the repo's ignored .env (JOAT_TEAM_ID=ABCDE12345). It reaches both
+# project.yml (DEVELOPMENT_TEAM) and the export options.
 
 set -euo pipefail
 
@@ -33,7 +37,8 @@ SHELL_DIR="$REPO_DIR/apps/mac/JOATShell"
 DIST="$REPO_DIR/dist"
 ARCHIVE="$DIST/JOAT.xcarchive"
 APP="$DIST/JOAT.app"
-TEAM_ID="${JOAT_TEAM_ID:-YOURTEAMID}"
+# Read only this one key from .env; never source it (it also holds API keys).
+TEAM_ID="${JOAT_TEAM_ID:-$(sed -n 's/^JOAT_TEAM_ID=//p' "$REPO_DIR/.env" 2>/dev/null | tail -n 1)}"
 KEYCHAIN_PROFILE="${JOAT_NOTARY_PROFILE:-joat}"
 
 say() { printf '\033[1;32m[app]\033[0m %s\n' "$*"; }
@@ -50,6 +55,8 @@ for arg in "$@"; do
 done
 
 command -v xcodegen >/dev/null || die "xcodegen missing: brew install xcodegen"
+[ -n "$TEAM_ID" ] || die "set JOAT_TEAM_ID (your Apple Developer team ID) in the environment or the repo's .env"
+export JOAT_TEAM_ID="$TEAM_ID"   # project.yml reads it as \${JOAT_TEAM_ID}
 
 say "refreshing the app icon asset catalog"
 "$REPO_DIR/.venv/bin/python" "$REPO_DIR/scripts/make_icon.py" \

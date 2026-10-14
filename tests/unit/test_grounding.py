@@ -23,8 +23,8 @@ class TestGrounding:
         assert Grounding().facts() == ""
 
     def test_facts_are_bulleted_lines(self) -> None:
-        g = Grounding([static_fact("Wearer: Emmanuel"), static_fact("Battery: 87%")])
-        assert g.facts() == "- Wearer: Emmanuel\n- Battery: 87%"
+        g = Grounding([static_fact("Wearer: Alex"), static_fact("Battery: 87%")])
+        assert g.facts() == "- Wearer: Alex\n- Battery: 87%"
 
     def test_a_broken_source_never_costs_the_answer(self) -> None:
         def boom() -> str:

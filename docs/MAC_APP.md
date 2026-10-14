@@ -100,10 +100,10 @@ once while logged into that mini's normal macOS user:
    mini's `~/Library/Application Support/JOAT/openclaw.json`, then approve the
    resulting **per-mini** OpenClaw device request. The identity and token stay
    in that mini's Keychain; they are not copied from the development Mac.
-4. Ensure the mini's exact Tailscale WebSocket origin is present in the packed
-   Even `app.json` network whitelist and in the comma-separated candidate list
-   baked into the package. Even Hub enforces exact declared network origins;
-   adding a new mini requires a reviewed package update, not a runtime URL
+4. Add the mini's `wss://…/glasses` URL to `JOAT_RELEASE_WS_URLS` in
+   `apps/hub-plugin/.env` and repack. The pack makes those URLs the package's
+   entire network whitelist. Even Hub enforces exact declared origins with no
+   wildcards, so adding a new mini requires a new package, not a runtime URL
    field.
 5. Pair the G2 once through JOAT.app's local 120-second pairing window, then
    enable JOAT.app's Login Item. Thereafter the glasses/phone reconnect to the
@@ -162,17 +162,22 @@ off. It does not print existing route values, connect a WebSocket, touch the
 G2 pairing token, or contact Hermes. Run it once after configuring Serve—not
 before ordinary glasses use.
 
-When producing the EHPK for that Mini, do not let the ignored development
-`.env` choose its raw `:8787` address. Build only with its approved TLS route:
+When producing the EHPK for that Mini, never use the development
+`VITE_MAC_WS_URL` (`:8787`). Set its TLS route and your package id in
+`apps/hub-plugin/.env`, then pack:
 
 ```sh
-cd apps/hub-plugin
-JOAT_RELEASE_WS_URLS=wss://home-mac.example-tailnet.ts.net/glasses npm run pack
+# apps/hub-plugin/.env
+JOAT_PACKAGE_ID=com.yourname.joat
+JOAT_RELEASE_WS_URLS=wss://home-mac.example-tailnet.ts.net/glasses
+
+cd apps/hub-plugin && npm run pack
 ```
 
-The packer rejects an unlisted origin, non-TLS transport, non-`/glasses` path,
-or duplicate candidate before it creates `joat.ehpk`. This builds the artifact;
-it does not upload, install, configure Serve, or grant pairing.
+The packer rejects non-TLS transport, a non-`/glasses` path, a duplicate
+candidate or the placeholder package id before it creates `joat.ehpk`. This
+builds the artifact; it does not upload, install, configure Serve, or grant
+pairing.
 
 The wearer-facing candidate in the packaged plugin is the port-443 origin
 `wss://home-mac.example-tailnet.ts.net/glasses`; the accompanying manifest
