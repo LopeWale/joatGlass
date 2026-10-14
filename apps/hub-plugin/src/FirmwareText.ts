@@ -167,36 +167,53 @@ export function paginateMeasured(
 
 /** Every paragraph of `text` wrapped into explicit lines that fit
  * `innerWidth`, so the firmware never breaks one again. Blank paragraphs
- * are dropped. */
-function explicitLines(text: string, innerWidth: number): string[] {
-  return text.replace(/\r\n?/gu, NEWLINE).split(NEWLINE)
-    .map((paragraph) => paragraph.trim())
-    .filter((paragraph) => paragraph.length > 0)
-    .flatMap((paragraph) => wrapWords(paragraph.split(/\s+/u).filter(Boolean), innerWidth));
+ * are dropped, or with `keepGaps` kept as one empty line between
+ * paragraphs (never two in a row, never first or last). */
+function explicitLines(text: string, innerWidth: number, keepGaps = false): string[] {
+  const lines: string[] = [];
+  for (const raw of text.replace(/\r\n?/gu, NEWLINE).split(NEWLINE)) {
+    const paragraph = raw.trim();
+    if (paragraph.length === 0) {
+      if (keepGaps && lines.length > 0 && lines[lines.length - 1] !== '') lines.push('');
+      continue;
+    }
+    lines.push(...wrapWords(paragraph.split(/\s+/u).filter(Boolean), innerWidth));
+  }
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  return lines;
 }
 
 /**
  * Long text read as ONE continuous document (a News article), the way a
  * PDF reader's single-page continuous view reads: the words are laid out
  * once into explicit lines, and each screen is a window of `maxLines` of
- * them. A swipe moves the window down by all but one line, so the line
- * just read stays on top and the eye carries straight on. Nothing is cut
- * into sections: no screen ends half empty mid-article, and the last screen
- * ends on the last line, as full as every other.
+ * them. A swipe moves the window down `advance` lines (at most all but
+ * one), so the lines just read stay on top and the eye carries straight
+ * on. Nothing is cut into sections: no screen ends half empty mid-article,
+ * and the last screen ends on the last line, as full as every other.
+ * Paragraph breaks are kept as one empty line, and a screen never opens
+ * on one.
  *
- * A screen never holds more than `maxLines` lines, so its text container
- * never overflows: the firmware has nothing to scroll inside it, and every
- * swipe reaches the plugin, which moves the window.
+ * The SDK has no scroll position and no smooth scroll (Even's own
+ * text-heavy template: "On G2 you can't scroll. You turn pages."). A
+ * window of lines moved in place with `textContainerUpgrade` is the
+ * closest thing to a scroll it allows, the technique Even's community
+ * readers use (1-3 lines a swipe). A screen never holds more than
+ * `maxLines` lines, so its text container never overflows: the firmware
+ * has nothing to scroll inside it, and every swipe reaches the plugin,
+ * which moves the window.
  */
 export function paginateContinuous(
   text: string,
   innerWidth: number,
   maxLines: number,
   maxUnits = NATIVE_PAGE_MAX_UNITS,
+  advance = Math.max(1, maxLines - 1),
 ): string[] {
-  const lines = explicitLines(text, innerWidth);
+  const lines = explicitLines(text, innerWidth, true);
   if (lines.length === 0) return [' '];
   const capacity = Math.max(1, maxLines);
+  const step = Math.max(1, Math.min(capacity - 1, advance));
   // The lines from `start` that fit one container (count and byte cap).
   const span = (start: number): number => {
     let count = Math.min(capacity, lines.length - start);
@@ -209,10 +226,12 @@ export function paginateContinuous(
     const count = span(start);
     pages.push(lines.slice(start, start + count).join(NEWLINE));
     if (start + count >= lines.length) break;
-    // The last line read becomes the top line; the final screen is pulled
-    // up to end on the article's last line instead of running short.
-    const overlap = count > 1 ? 1 : 0;
-    start = Math.max(start + 1, Math.min(start + count - overlap, lines.length - capacity));
+    // Down `step` lines, never past this screen's last line; the final
+    // screen is pulled up to end on the article's last line instead of
+    // running short, and no screen opens on a paragraph gap.
+    let next = Math.max(start + 1, Math.min(start + Math.min(step, Math.max(1, count - 1)), lines.length - capacity));
+    while (lines[next] === '' && next < lines.length - 1) next += 1;
+    start = next;
   }
   return pages;
 }

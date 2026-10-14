@@ -559,8 +559,10 @@ export function panelArticleFixture(): { title: string; items: string[]; body: s
   return {
     title: 'NEWS · ARTICLE',
     items: [],
+    // The article template (PanelPublisher): headline, source and age, a
+    // blank line, then the paragraphs a blank line apart.
     body: [
-      'Fixture Wire · 12m · Consumer sentiment rises to 48.9',
+      'Consumer sentiment rises to 48.9\nFixture Wire · 12m',
       'Consumer sentiment rose slightly this month, reaching 48.9 after four consecutive months of decline, according to a survey published on Tuesday. The reading remains well below its long-run average, and respondents continued to cite prices and borrowing costs as their main concerns.',
       'Economists said the small improvement was consistent with a labour market that is cooling without breaking, and with fuel prices that have eased since the summer. Households with incomes in the top third reported the largest gains in confidence, while lower-income respondents were broadly unchanged.',
       'Expectations for inflation over the next year fell to 3.1 percent from 3.4 percent, the lowest reading since the spring. Longer-run expectations held steady at 2.9 percent. Analysts watch these figures closely because they can influence how businesses set prices and how workers negotiate wages.',
@@ -568,7 +570,7 @@ export function panelArticleFixture(): { title: string; items: string[]; body: s
       'The survey director said the results showed consumers were cautious rather than pessimistic. Many respondents mentioned the coming holiday season, and a growing share said they intended to keep spending close to last year’s level rather than cut back.',
       'Retailers will be watching the next two readings carefully. Holiday sales account for a large share of annual revenue for many stores, and several chains have already said they expect shoppers to look harder for discounts this year.',
       'The final reading for the month is due in two weeks.',
-    ].join('\n'),
+    ].join('\n\n'),
     hint: 'left x2: back',
   };
 }

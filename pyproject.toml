@@ -45,6 +45,10 @@ build-backend = "setuptools.build_meta"
 where = ["apps/mac"]
 include = ["joat*"]
 
+[tool.setuptools.package-data]
+# The News tab's source catalog (services/news.py reads it beside itself).
+"joat.services" = ["news_sources.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["apps/mac"]

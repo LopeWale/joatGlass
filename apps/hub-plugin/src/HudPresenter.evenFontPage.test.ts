@@ -3,7 +3,8 @@ import type { RebuildPageContainer } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import { measureTextWrap } from '@evenrealities/pretext';
 import { HudPageBuilder, READER_TEXT_PAGE } from './HudPageBuilder';
-import { HudPresenter, setEvenFontPagesForTest, setNativeOverviewForTest } from './HudPresenter';
+import { HudPresenter, PHANTOM_SCROLL_MS, setEvenFontPagesForTest, setNativeOverviewForTest } from './HudPresenter';
+import { readerRows } from './EvenFont';
 import type { HudVisualFrame } from './HudVisualSurface';
 import { ContainerId } from './types';
 
@@ -109,12 +110,14 @@ describe('HudPresenter Even-font reader page', () => {
 
   it('keeps a News article a firmware text page that pages in place', async () => {
     const r = rig();
-    const article = [
-      'BBC · 12m · Consumer sentiment rises to 48.9 · 1/3',
+    // The article template (PanelPublisher): headline, source and age, a
+    // blank line, then the story.
+    const article = readerRows([], [
+      'Consumer sentiment rises to 48.9', 'BBC · 12m', '',
       ...Array.from({ length: 24 }, (_, index) => `Sentence ${index + 1} of the article about consumer sentiment.`),
-    ];
+    ].join('\n'));
     expect(await r.hud.showList(article, {
-      title: 'NEWS · ARTICLE', hint: 'down more · 2x tap: back', selectable: false, nativeTextPage: true,
+      title: 'NEWS · ARTICLE', hint: 'left x2: back', selectable: false, nativeTextPage: true,
     })).toBe(true);
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(page?.imageObject?.some((image) => image.containerID === ContainerId.Image) ?? false).toBe(false);
@@ -131,9 +134,15 @@ describe('HudPresenter Even-font reader page', () => {
     expect(measureTextWrap(body, READER_TEXT_PAGE.textWidth).lineCount)
       .toBeLessThanOrEqual(READER_TEXT_PAGE.lineCapacity);
     // A swipe pages the firmware text in place: an upgrade, no rebuild.
+    // (Past the 80 ms in which a scroll is the glass re-laying the page out.)
     const rebuilds = r.rebuilds.length;
-    expect(r.hud.scrollTextPage('down')).toBe(true);
-    await vi.waitFor(() => expect(r.operations).toContain('upgrade'));
+    const later = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + PHANTOM_SCROLL_MS + 1);
+    try {
+      expect(r.hud.scrollTextPage('down')).toBe(true);
+      await vi.waitFor(() => expect(r.operations).toContain('upgrade'));
+    } finally {
+      later.mockRestore();
+    }
     expect(r.rebuilds).toHaveLength(rebuilds);
     expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
   });

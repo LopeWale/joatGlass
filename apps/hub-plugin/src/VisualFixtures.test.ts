@@ -147,6 +147,10 @@ describe('panel visual fixtures', () => {
     const article = panelArticleFixture();
     expect(article.items).toEqual([]);
     expect(article.body.split('\n').length).toBeGreaterThan(5);
+    // The Mac's article template: headline, source and age, a blank line,
+    // then paragraphs a single blank line apart.
+    expect(article.body.split('\n').slice(0, 3)).toEqual(['Consumer sentiment rises to 48.9', 'Fixture Wire · 12m', '']);
+    expect(article.body).not.toMatch(/\n\n\n/u);
     expect(article.hint).not.toMatch(/down more|up previous/);
     expect(PANEL_VISUAL_STATES.every(isPanelVisualState)).toBe(true);
     expect(isPanelVisualState('overview')).toBe(false);

@@ -69,8 +69,12 @@ def news_service(tmp_path, titles: list[str]) -> NewsService:
             for i, t in enumerate(titles)
         ]
 
+    # One feed of the wearer's own, so rows keep the feed's own name (a
+    # catalog feed's rows are named by news_sources.json).
+    config = tmp_path / "news.json"
+    config.write_text('{"categories": [], "customFeeds": ["https://x/feed"]}')
     return NewsService(
-        tmp_path / "news.json", fetch_feed=fetch,
+        config, fetch_feed=fetch,
         fetch_article=lambda url: ("T", "Article body. " * 50), clock=lambda: NOW,
     )
 

@@ -89,7 +89,10 @@ class TestOpen:
         reader = await svc.open(0)
         assert reader is not None
         assert reader.title == "SEARCH · RESULT"
-        assert reader.metadata == "example.com · Even Realities G2 review"
+        # The article template: the page's title is the headline, the
+        # domain the line under it.
+        assert reader.metadata == "example.com"
+        assert reader.headline == "Even Realities G2 review"
         assert reader.pages[0].startswith("Body text.")
         assert await svc.open(5) is None
 

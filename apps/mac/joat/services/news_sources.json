@@ -1,0 +1,72 @@
+{
+  "_about": "The News tab's free sources: one list for the engine (news.py) and the Mac app's News page (bundled by project.yml). Every feed is the publisher's own key-free RSS, links straight to the publisher's article page, and two current articles from each were fetched and read end to end through JOAT's extractor on 2026-10-14. Sources marked default are on until the wearer changes them. Left out on purpose: Google News (its links need JavaScript to reach the article), PBS NewsHour (its pages extract as one run-on block), News 9 (its article pages extract as a video hub, not the story), Reuters and AP (no working feeds), hard paywalls.",
+  "defaultCategories": ["top", "technology", "world"],
+  "categories": [
+    {"id": "top", "label": "Top stories", "sources": [
+      {"id": "npr-news", "name": "NPR", "url": "https://feeds.npr.org/1001/rss.xml", "default": true},
+      {"id": "guardian-us", "name": "Guardian", "url": "https://www.theguardian.com/us/rss", "default": true},
+      {"id": "bbc-news", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/rss.xml", "default": true},
+      {"id": "cbs-news", "name": "CBS News", "url": "https://www.cbsnews.com/latest/rss/main", "default": false},
+      {"id": "nbc-news", "name": "NBC News", "url": "https://feeds.nbcnews.com/nbcnews/public/news", "default": false}
+    ]},
+    {"id": "world", "label": "World", "sources": [
+      {"id": "bbc-world", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/world/rss.xml", "default": true},
+      {"id": "guardian-world", "name": "Guardian", "url": "https://www.theguardian.com/world/rss", "default": true},
+      {"id": "aljazeera", "name": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml", "default": true},
+      {"id": "dw", "name": "DW", "url": "https://rss.dw.com/rdf/rss-en-all", "default": false},
+      {"id": "npr-world", "name": "NPR", "url": "https://feeds.npr.org/1004/rss.xml", "default": false},
+      {"id": "cbs-world", "name": "CBS News", "url": "https://www.cbsnews.com/latest/rss/world", "default": false}
+    ]},
+    {"id": "us", "label": "US", "sources": [
+      {"id": "npr-national", "name": "NPR", "url": "https://feeds.npr.org/1003/rss.xml", "default": true},
+      {"id": "abc-us", "name": "ABC News", "url": "https://feeds.abcnews.com/abcnews/usheadlines", "default": true},
+      {"id": "cbs-us", "name": "CBS News", "url": "https://www.cbsnews.com/latest/rss/us", "default": true},
+      {"id": "guardian-us-news", "name": "Guardian", "url": "https://www.theguardian.com/us-news/rss", "default": false},
+      {"id": "bbc-us", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml", "default": false}
+    ]},
+    {"id": "business", "label": "Business", "sources": [
+      {"id": "npr-business", "name": "NPR", "url": "https://feeds.npr.org/1006/rss.xml", "default": true},
+      {"id": "guardian-business", "name": "Guardian", "url": "https://www.theguardian.com/us/business/rss", "default": true},
+      {"id": "bbc-business", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/business/rss.xml", "default": true},
+      {"id": "abc-money", "name": "ABC News", "url": "https://feeds.abcnews.com/abcnews/moneyheadlines", "default": false}
+    ]},
+    {"id": "technology", "label": "Technology", "sources": [
+      {"id": "ars-technica", "name": "Ars Technica", "url": "https://feeds.arstechnica.com/arstechnica/index", "default": true},
+      {"id": "engadget", "name": "Engadget", "url": "https://www.engadget.com/rss.xml", "default": true},
+      {"id": "guardian-tech", "name": "Guardian", "url": "https://www.theguardian.com/us/technology/rss", "default": true},
+      {"id": "bbc-tech", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/technology/rss.xml", "default": false},
+      {"id": "npr-tech", "name": "NPR", "url": "https://feeds.npr.org/1019/rss.xml", "default": false}
+    ]},
+    {"id": "science", "label": "Science", "sources": [
+      {"id": "phys-org", "name": "Phys.org", "url": "https://phys.org/rss-feed/", "default": true},
+      {"id": "sciencedaily", "name": "ScienceDaily", "url": "https://www.sciencedaily.com/rss/top/science.xml", "default": true},
+      {"id": "live-science", "name": "Live Science", "url": "https://www.livescience.com/feeds/all", "default": true},
+      {"id": "npr-science", "name": "NPR", "url": "https://feeds.npr.org/1007/rss.xml", "default": false},
+      {"id": "guardian-science", "name": "Guardian", "url": "https://www.theguardian.com/science/rss", "default": false}
+    ]},
+    {"id": "health", "label": "Health", "sources": [
+      {"id": "kff-health", "name": "KFF Health News", "url": "https://kffhealthnews.org/feed/", "default": true},
+      {"id": "npr-health", "name": "NPR", "url": "https://feeds.npr.org/1128/rss.xml", "default": true},
+      {"id": "bbc-health", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/health/rss.xml", "default": true},
+      {"id": "sciencedaily-health", "name": "ScienceDaily", "url": "https://www.sciencedaily.com/rss/health_medicine.xml", "default": false}
+    ]},
+    {"id": "sports", "label": "Sports", "sources": [
+      {"id": "espn", "name": "ESPN", "url": "https://www.espn.com/espn/rss/news", "default": true},
+      {"id": "cbs-sports", "name": "CBS Sports", "url": "https://www.cbssports.com/rss/headlines/", "default": false},
+      {"id": "guardian-sport", "name": "Guardian", "url": "https://www.theguardian.com/us/sport/rss", "default": true},
+      {"id": "npr-sports", "name": "NPR", "url": "https://feeds.npr.org/1055/rss.xml", "default": false}
+    ]},
+    {"id": "entertainment", "label": "Entertainment", "sources": [
+      {"id": "variety", "name": "Variety", "url": "https://variety.com/feed/", "default": true},
+      {"id": "deadline", "name": "Deadline", "url": "https://deadline.com/feed/", "default": true},
+      {"id": "hollywood-reporter", "name": "Hollywood Reporter", "url": "https://www.hollywoodreporter.com/feed/", "default": true},
+      {"id": "guardian-culture", "name": "Guardian", "url": "https://www.theguardian.com/us/culture/rss", "default": false},
+      {"id": "bbc-entertainment", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml", "default": false}
+    ]},
+    {"id": "oklahoma", "label": "Oklahoma (local)", "sources": [
+      {"id": "koco", "name": "KOCO 5", "url": "https://www.koco.com/topstories-rss", "default": true},
+      {"id": "oklahoma-watch", "name": "Oklahoma Watch", "url": "https://oklahomawatch.org/feed/", "default": true},
+      {"id": "free-press-okc", "name": "Free Press OKC", "url": "https://freepressokc.com/feed/", "default": false}
+    ]}
+  ]
+}

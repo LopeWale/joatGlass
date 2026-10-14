@@ -78,6 +78,30 @@ describe('paginateContinuous', () => {
     expect(paginateContinuous('Two short words.', WIDTH, LINES)).toEqual(['Two short words.']);
     expect(paginateContinuous('', WIDTH, LINES)).toEqual([' ']);
   });
+
+  it('slides `advance` lines a swipe over paragraphs a single blank line apart, never opening on the gap', () => {
+    // The article template's paragraphs, one with a stray extra blank line.
+    const article = prose.split('\n').join('\n\n').replace('\n\nParagraph 5', '\n\n\n\nParagraph 5');
+    const slid = paginateContinuous(article, WIDTH, LINES, undefined, 3).map((screen) => screen.split('\n'));
+    expect(slid.length).toBeGreaterThan(10);
+    for (const [index, screen] of slid.entries()) {
+      expect(screen.length).toBeGreaterThanOrEqual(LINES - 1);
+      expect(screen.length).toBeLessThanOrEqual(LINES);
+      expect(screen.some((line, at) => line === '' && screen[at + 1] === '')).toBe(false);
+      if (index === 0) continue;
+      expect(screen[0]).not.toBe('');
+      // Three lines on (four when the third was a gap); the rest is the
+      // screen before, so the eye keeps its place.
+      const previous = slid[index - 1]!;
+      const shift = previous.findIndex((_, at) => at > 0 && previous.slice(at).every((line, j) => screen[j] === line));
+      expect(shift).toBeGreaterThan(0);
+      expect(shift).toBeLessThanOrEqual(4);
+    }
+    expect(words(readThrough(slid).join(' '))).toEqual(words(prose));
+    const last = words(slid[slid.length - 1]!.join(' '));
+    const all = words(prose);
+    expect(last[last.length - 1]).toBe(all[all.length - 1]);
+  });
 });
 
 describe('paginateMeasured', () => {

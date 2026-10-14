@@ -1229,6 +1229,22 @@ async function boot(): Promise<void> {
   window.addEventListener('beforeunload', () => { void teardown(); });
 }
 
+/** Development only: `&joatArticle=<n>` opens real article n from
+ * public/__joat-dev-fixtures/dev-articles.json (bodies as the Mac sends
+ * them, written by a capture script), so real publishers' pages can be
+ * read in the official simulator instead of the fixture text. */
+async function loadDevArticle(): Promise<string | undefined> {
+  const requested = new URLSearchParams(window.location.search).get('joatArticle');
+  if (!import.meta.env.DEV || requested === null) return undefined;
+  try {
+    const response = await fetch(`/__joat-dev-fixtures/dev-articles.json?v=${Date.now()}`);
+    const articles = await response.json() as Array<{ body?: string }>;
+    return articles[Number(requested)]?.body;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Dev-fixture helper: decode the checked-in sample street panel. */
 async function loadDevMapPanel(): Promise<NavigationMapPanelModel | undefined> {
   try {
@@ -1438,8 +1454,9 @@ async function renderVisualState(
       else await menu.openPanelTab(tab);
       if (state === 'panel-article') {
         const article = panelArticleFixture();
+        const body = await loadDevArticle() ?? article.body;
         await menu.presentList(
-          article.title, readerRows(article.items, article.body), hud.rail.requestId('news'), false, article.hint,
+          article.title, readerRows(article.items, body), hud.rail.requestId('news'), false, article.hint,
         );
       }
       return;

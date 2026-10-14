@@ -1,25 +1,28 @@
 """The News tab: free feeds, fetched and read on the Mac.
 
 The wearer's ruling: why pay for a news API when the news is free. So this
-is RSS — BBC, NPR and Google News topic feeds, every one of them key-free
-and verified live on 2026-09-02 — fetched here, never on the glasses (the
-Even WebView enforces CORS and none of those publishers send the header).
-The Mac polls on a timer, keeps the newest headlines in memory, and pushes
-them to the plugin, which caches them so the tab paints from memory.
+is RSS — the publishers' own key-free feeds in news_sources.json, grouped by
+category with a few on by default (read end to end on 2026-10-14) — fetched
+here, never on the glasses (the Even WebView enforces CORS and the
+publishers don't send the header). The Mac polls on a timer, keeps the
+newest headlines in memory, and pushes them to the plugin, which caches
+them so the tab paints from memory.
 
-Which categories, and any feeds of the wearer's own, come from a small JSON
-file the JOAT Mac app writes; the poller re-reads it when it changes, so a
-new category shows up on the next refresh without a restart.
+Which categories and sources, and any feeds of the wearer's own, come from
+a small JSON file the JOAT Mac app writes (its News page lists the same
+catalog); the poller re-reads it when it changes, so a change shows up on
+the next refresh without a restart.
 
-Opening a headline fetches that one article and extracts its text
-(trafilatura) for the reader. Nothing is fetched speculatively.
+Opening a headline fetches that one article, extracts its text
+(trafilatura) and tidies it into one template for every publisher
+(`tidy_article`). Nothing is fetched speculatively.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import html
 import json
 import logging
@@ -43,6 +46,10 @@ DEFAULT_CONFIG_PATH = Path.home() / "Library/Application Support/JOAT/news.json"
 USER_AGENT = "JOAT-G2/0.1 (+personal reader)"
 #: A feed larger than this is not a feed. Same cap the verifier uses.
 MAX_BYTES = 2_000_000
+#: An article PAGE is markup, scripts and inline data around the story:
+#: Live Science's ran 2.06 MB (2026-10-14), so under the feed cap every
+#: one of its stories fell back to the feed's two-line summary.
+MAX_PAGE_BYTES = 8_000_000
 FETCH_TIMEOUT_S = 12.0
 #: Default poll cadence; the config file can shorten or lengthen it.
 DEFAULT_REFRESH_MINUTES = 15
@@ -53,57 +60,44 @@ MAX_HEADLINES = 20
 #: and age leave.
 ROW_CHARACTERS = 64
 
-_GOOGLE = "https://news.google.com/rss/headlines/section/topic/{topic}?hl=en-US&gl=US&ceid=US:en"
-#: Category → key-free feeds. Three sources per category so one outage
-#: never empties the tab. Order is the order they were verified.
-CATEGORY_FEEDS: dict[str, tuple[str, ...]] = {
-    "top": (
-        "https://feeds.bbci.co.uk/news/rss.xml",
-        "https://feeds.npr.org/1001/rss.xml",
-        "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
-    ),
-    "world": (
-        "https://feeds.bbci.co.uk/news/world/rss.xml",
-        "https://feeds.npr.org/1004/rss.xml",
-        _GOOGLE.format(topic="WORLD"),
-    ),
-    "us": (
-        "https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml",
-        "https://feeds.npr.org/1003/rss.xml",
-        _GOOGLE.format(topic="NATION"),
-    ),
-    "business": (
-        "https://feeds.bbci.co.uk/news/business/rss.xml",
-        "https://feeds.npr.org/1006/rss.xml",
-        _GOOGLE.format(topic="BUSINESS"),
-    ),
-    "technology": (
-        "https://feeds.bbci.co.uk/news/technology/rss.xml",
-        "https://feeds.npr.org/1019/rss.xml",
-        _GOOGLE.format(topic="TECHNOLOGY"),
-    ),
-    "science": (
-        "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
-        "https://feeds.npr.org/1007/rss.xml",
-        _GOOGLE.format(topic="SCIENCE"),
-    ),
-    "health": (
-        "https://feeds.bbci.co.uk/news/health/rss.xml",
-        "https://feeds.npr.org/1128/rss.xml",
-        _GOOGLE.format(topic="HEALTH"),
-    ),
-    "sports": (
-        "https://feeds.bbci.co.uk/sport/rss.xml",
-        "https://feeds.npr.org/1055/rss.xml",
-        _GOOGLE.format(topic="SPORTS"),
-    ),
-    "entertainment": (
-        "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml",
-        "https://feeds.npr.org/1008/rss.xml",
-        _GOOGLE.format(topic="ENTERTAINMENT"),
-    ),
+CATALOG_PATH = Path(__file__).with_name("news_sources.json")
+
+
+@dataclass(frozen=True, slots=True)
+class NewsSource:
+    """One publisher's feed in one category (news_sources.json)."""
+
+    id: str
+    category: str
+    name: str
+    url: str
+    default: bool
+
+
+def _load_catalog(path: Path = CATALOG_PATH) -> tuple[dict[str, tuple[NewsSource, ...]], tuple[str, ...]]:
+    """news_sources.json → category id → its sources, and the default
+    categories. One file for the engine and the Mac app's News page, so
+    the two can never offer different sources."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    catalog: dict[str, tuple[NewsSource, ...]] = {}
+    for category in raw["categories"]:
+        catalog[category["id"]] = tuple(
+            NewsSource(
+                id=source["id"], category=category["id"], name=source["name"],
+                url=source["url"], default=bool(source.get("default", False)),
+            )
+            for source in category["sources"]
+        )
+    defaults = tuple(c for c in raw.get("defaultCategories", ()) if c in catalog)
+    return catalog, defaults
+
+
+#: Category → its free, key-free sources; see news_sources.json for how
+#: they were chosen and which are on by default.
+CATALOG, DEFAULT_CATEGORIES = _load_catalog()
+SOURCES_BY_ID: dict[str, NewsSource] = {
+    source.id: source for sources in CATALOG.values() for source in sources
 }
-DEFAULT_CATEGORIES: tuple[str, ...] = ("top", "technology", "world")
 
 #: Feed titles as the publishers write them → the short name the row shows.
 _SOURCE_NAMES: tuple[tuple[str, str], ...] = (
@@ -127,6 +121,9 @@ class NewsConfig:
     categories: tuple[str, ...] = DEFAULT_CATEGORIES
     custom_feeds: tuple[str, ...] = ()
     refresh_minutes: int = DEFAULT_REFRESH_MINUTES
+    #: The sources the wearer chose, by id. None until they change one:
+    #: each enabled category then reads its default sources.
+    sources: tuple[str, ...] | None = None
 
     @classmethod
     def load(cls, path: Path = DEFAULT_CONFIG_PATH) -> NewsConfig:
@@ -147,7 +144,7 @@ class NewsConfig:
             return cls()
         categories = tuple(
             c for c in _strings(raw.get("categories"))
-            if c in CATEGORY_FEEDS
+            if c in CATALOG
         )
         custom = tuple(
             url for url in _strings(raw.get("customFeeds"))
@@ -156,24 +153,42 @@ class NewsConfig:
         minutes = raw.get("refreshMinutes", DEFAULT_REFRESH_MINUTES)
         if not isinstance(minutes, int) or isinstance(minutes, bool):
             minutes = DEFAULT_REFRESH_MINUTES
+        sources = (
+            tuple(s for s in _strings(raw.get("sources")) if s in SOURCES_BY_ID)
+            if isinstance(raw.get("sources"), list) else None
+        )
         return cls(
             categories=categories or (DEFAULT_CATEGORIES if not custom else ()),
             custom_feeds=custom,
             refresh_minutes=max(MIN_REFRESH_MINUTES, min(24 * 60, minutes)),
+            sources=sources,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "categories": list(self.categories),
             "customFeeds": list(self.custom_feeds),
             "refreshMinutes": self.refresh_minutes,
         }
+        if self.sources is not None:
+            out["sources"] = list(self.sources)
+        return out
+
+    def enabled_sources(self) -> tuple[NewsSource, ...]:
+        """The catalog sources to poll: in each enabled category, exactly
+        the ones the wearer chose there, or its defaults when they chose
+        none there (a subject switched on later starts with its defaults;
+        the Mac app never lets the last one in a subject be switched off)."""
+        chosen = set(self.sources or ())
+        out: list[NewsSource] = []
+        for category in self.categories:
+            picked = [source for source in CATALOG[category] if source.id in chosen]
+            out.extend(picked or [source for source in CATALOG[category] if source.default])
+        return tuple(out)
 
     def feeds(self) -> tuple[tuple[str, str], ...]:
         """(category, url) for every feed to poll, custom feeds last."""
-        out: list[tuple[str, str]] = []
-        for category in self.categories:
-            out.extend((category, url) for url in CATEGORY_FEEDS[category])
+        out = [(source.category, source.url) for source in self.enabled_sources()]
         out.extend(("custom", url) for url in self.custom_feeds)
         return tuple(out)
 
@@ -236,14 +251,14 @@ def _source_name(feed_title: str, entry_source: str) -> str:
     return shorten(head, 18)
 
 
-def _get(url: str, *, accept: str) -> bytes:
+def _get(url: str, *, accept: str, limit: int = MAX_BYTES) -> bytes:
     request = urllib.request.Request(
         url, headers={"Accept": accept, "User-Agent": USER_AGENT},
     )
     with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_S) as response:
-        body: bytes = response.read(MAX_BYTES + 1)
-    if len(body) > MAX_BYTES:
-        raise ValueError("feed body exceeds the size cap")
+        body: bytes = response.read(limit + 1)
+    if len(body) > limit:
+        raise ValueError("response body exceeds the size cap")
     return body
 
 
@@ -257,7 +272,7 @@ def fetch_feed(url: str, category: str, *, now: float | None = None) -> list[Hea
     for entry in parsed.entries:
         title = " ".join(str(entry.get("title", "") or "").split())
         link = str(entry.get("link", "") or "")
-        if not title or not link:
+        if not title or not link or _PROMO.search(title) or _PROMO_LINK.search(link):
             continue
         struct = entry.get("published_parsed") or entry.get("updated_parsed")
         published = _struct_to_unix(struct, reference)
@@ -312,21 +327,222 @@ def _struct_to_unix(struct: Any, fallback: float) -> float:
 
 
 def fetch_article_text(url: str) -> tuple[str, str]:
-    """Synchronous: one article page → (title, readable text). On a thread."""
-    page = _get(url, accept="text/html,application/xhtml+xml;q=0.9,*/*;q=0.5")
+    """Synchronous: one article page → (title, readable text). On a thread.
+
+    The text is tidied into one shape for every publisher (`tidy_article`).
+    No `favor_precision`: on real pages (2026-10-14) it kept a fifth of an
+    Ars Technica article and nothing at all of a PBS one, where the
+    default kept the whole story; what the default lets through besides
+    (captions, credits, share rows) is what `tidy_article` removes.
+    """
+    document = _get(url, accept="text/html,application/xhtml+xml;q=0.9,*/*;q=0.5", limit=MAX_PAGE_BYTES)
+    page_text = document.decode("utf-8", errors="replace")
     text = trafilatura.extract(
-        page.decode("utf-8", errors="replace"),
+        page_text,
         url=url,
         include_comments=False,
         include_tables=False,
-        favor_precision=True,
         output_format="txt",
     )
-    title = ""
-    metadata = trafilatura.extract_metadata(page.decode("utf-8", errors="replace"), default_url=url)
-    if metadata is not None and metadata.title:
-        title = str(metadata.title)
-    return title, (text or "").strip()
+    title = site = ""
+    metadata = trafilatura.extract_metadata(page_text, default_url=url)
+    if metadata is not None:
+        title = str(metadata.title or "")
+        site = str(metadata.sitename or "")
+    title = tidy_title(title, site)
+    return title, tidy_article(text or "", title=title)
+
+
+#: Lines that are page furniture, not the story: share rows, "Loading...",
+#: newsletter and "watch on" prompts, picture credits. Seen on the real
+#: pages of the catalog's publishers (2026-10-14); matched whole-line, so a
+#: sentence that merely contains the words stays.
+_FURNITURE = re.compile(
+    r"""^(?:
+        [-–•]?\s*(?:published|updated)(?:[\s\d:].{0,40})?
+      | related\s+topics
+      | you\s+must\s+confirm\s+your\s+public\s+display\s+name.*
+      | please\s+log\s*out\s+and\s+then\s+log\s*in\s+again.*
+      | (?:log|sign)\s+in\s+to\s+comment.*
+      | a\s+free\s+press\s+is\s+a\s+cornerstone.* | support\s+trusted\s+journalism.* | donate\s+now
+      | loading\.{0,3}
+      | recommended\s+stories | list\s+of\s+\d+\s+items?
+      | (?:watch|listen|read)\s+(?:on|more|now|next)\b.*
+      | popular\s+on\s+\S+.*
+      | advertisement | sponsored(?:\s+content)?
+      | [-–•]?\s*share(?:\s+this(?:\s+(?:article|story))?)?:? | [-–•]?\s*full\s+story
+      | copy\s+(?:url|link).*
+      | credit:? | image\s+(?:source|credit):?.* | photo(?:graph)?:.* | getty\s+images
+      | (?:edited|written|produced|reported)\s+by:.*
+      | (?:sign\s+up|subscribe)\b.*(?:newsletter|inbox|email).*
+      | .{0,120}\bsubscribe\s+to\s+(?:\S+\s+){0,5}newsletter\.?
+      | if\s+you\s+rely\s+on\s+our\s+team.*
+      | related(?:\s+(?:articles?|stories|coverage))?:?
+      | more\s+top\s+stories
+      | (?-i:FOR\s?SUBSCRIBERS).*
+      | npr\s+does\s+not\s+offer\s+or\s+accept\s+money.* | anyone\s+who\s+makes\s+such\s+an\s+offer.*
+      | this\s+article\s+is\s+for\s+informational\s+purposes\s+only.*
+      | .*\|\s*brought\s+to\s+you\s+by\b.*
+      | .*</?script\b.*
+      | sign\s+up | sign\s+up\s+today\b.* | .{0,40}\bnewsletter
+      | \((?:soundbite|music|archived\s+recording|laughter|applause)\b[^)]*\) | [\w .'-]{2,40}:\s*\(singing\).*
+      | every\s+day\s+we\s+strive\s+to\s+produce\s+journalism.* | .*\bpossible\s+without\s+your\s+support\.?
+    )$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+#: A label whose value is on the next line ("- Date:" / "- Oct 14"). Not
+#: "Share:": on ScienceDaily the story's first paragraph follows it.
+_LABELLED_VALUE = re.compile(r"^[-–•]?\s*(?:date|source):?$", re.IGNORECASE)
+#: A label that introduces a dek worth keeping ("- Summary:").
+_LABEL_ONLY = re.compile(r"^[-–•]?\s*summary:?$", re.IGNORECASE)
+#: An editor's credit line under a name ("Sadie Harley" / "Scientific Editor").
+_ROLE = re.compile(
+    r"^(?:scientific|chief|senior|managing|associate|contributing|deputy|science)?\s*editor$",
+    re.IGNORECASE,
+)
+#: A dateline standing alone near the top ("October 14, 2026").
+_BARE_DATE = re.compile(r"^(?:[A-Z][a-z]+\.? \d{1,2}, \d{4}|\d{1,2} [A-Z][a-z]+ \d{4})$")
+#: The closing author bio ("Jon is a Senior IT Reporter for Ars Technica…").
+_AUTHOR_BIO = re.compile(
+    r"^[A-Z][^.]{0,60}\b(?:is (?:an? |the )?(?:[\w-]+ ){0,4}"
+    r"(?:[Rr]eporter|[Ww]riter|[Ee]ditor|[Cc]orrespondent|[Jj]ournalist|[Cc]olumnist|[Oo]wner)\b"
+    r"|earned (?:her|his|their|a) (?:PhD|Ph\.D\.|doctorate|master's|degree)\b)",
+)
+#: Production credits that close a story ("With additional reporting by…",
+#: "X produced and edited this interview for broadcast."). Only the last
+#: few paragraphs are tested, so a sentence in the story that reads alike
+#: stays.
+_CREDIT = re.compile(
+    r"^(?:(?:with\s+)?additional\s+reporting\s+(?:by|from)\b.*"
+    r"|design\s+and\s+development\s+by\b.*"
+    r"|information\s+from\b.*\bwas\s+used\s+in\s+this\s+report.*"
+    r"|this\s+(?:newsletter|story|article|episode)\s+was\s+(?:edited|produced)\s+by\b.*"
+    r"|.*\bproduced\s+(?:and\s+edited\s+)?(?:this|the)\s+(?:interview|segment|video|audio|story)\b.*"
+    r"|.*\badapted\s+it\s+for\s+the\s+web\.?)$",
+    re.IGNORECASE,
+)
+#: Where a story's end matter starts: citations, reference blocks, the
+#: transcript notice, reader call-outs and sign-in widgets.
+_END_MATTER = re.compile(
+    r"^(?:story\s+source:?|cite\s+this\s+page:?|journal\s+reference:?|"
+    r"publication\s+details|more\s+information:?|provided\s+by\b.*|"
+    r"copyright\s*(?:©|\(c\)).*|get\s+in\s+touch|copy\s+to\s+clipboard|sign\s+in\s+or\s+register|"
+    r".*\(\d{4}[a-z]?\)\.\s.*\bdoi\.org/\S+)$",
+    re.IGNORECASE,
+)
+#: Where the story certainly ended, however early: a "republish this
+#: story" box (its HTML as text, then "Copy to Clipboard") or a sign-in
+#: widget (Oklahoma Watch, 2026-10-14).
+_HARD_END = re.compile(
+    r"^(?:copy\s+to\s+clipboard|sign\s+in\s+or\s+register|republish\s+this\s+(?:story|article))$"
+    r"|</?(?:p|a|div|img|span|script|iframe|figure|h[1-6])\b[^>]*>",
+    re.IGNORECASE,
+)
+#: Feed items that are advertising, not stories: sportsbook promo codes in
+#: a sports feed, shopping guides in a top-stories feed (2026-10-14).
+_PROMO = re.compile(r"\bpromo\s+code\b|\bbonus\s+bets?\b", re.IGNORECASE)
+_PROMO_LINK = re.compile(r"/(?:select/)?shopping/|/deals/", re.IGNORECASE)
+
+
+def tidy_title(title: str, site: str = "") -> str:
+    """The headline without the publisher tacked on ("… - Engadget")."""
+    title = " ".join(title.split())
+    match = re.match(r"^(.*\S)\s+[-–|]\s+([^-–|]{2,40})$", title)
+    if match and site:
+        tail, name = match.group(2).casefold(), site.casefold()
+        if tail in name or name in tail:
+            return match.group(1)
+    return title
+
+
+def _key(line: str) -> str:
+    return re.sub(r"[\W_]+", "", line.casefold())
+
+
+def _words(line: str) -> set[str]:
+    return set(re.findall(r"\w+", line.casefold()))
+
+
+def _restates(line: str, title: str) -> bool:
+    """A second wording of the headline (the feed's, above the page's own):
+    short, no closing full stop, and most of its words are the headline's."""
+    if not title or len(line) > 200 or line.rstrip().endswith("."):
+        return False
+    mine, theirs = _words(line), _words(title)
+    shorter = min(len(mine), len(theirs))
+    return shorter >= 4 and len(mine & theirs) >= 0.6 * shorter
+
+
+def tidy_article(text: str, *, title: str = "") -> str:
+    """Any publisher's extracted text in one shape: the story's own
+    paragraphs, each once, separated by a blank line, without the page's
+    furniture, picture captions, repeated headline, or end matter.
+
+    Picture captions are recognised by the credit line that follows them
+    on the page; a line repeated within a few lines (the same caption for
+    two screen sizes) is kept once.
+    """
+    lines = [" ".join(line.split()) for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    lines = [line for line in lines if line]
+    end = next((i for i, line in enumerate(lines) if i >= len(lines) * 0.6 and _END_MATTER.match(line)), len(lines))
+    end = next((i for i, line in enumerate(lines[:end]) if i >= 2 and _HARD_END.search(line)), end)
+    lines = lines[:end]
+    kept: list[str] = []
+    recent: list[str] = []
+    title_key = _key(title)
+    skip_next = False
+    dek_next = False
+    for index, line in enumerate(lines):
+        if skip_next:
+            skip_next = False
+            continue
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        if _LABELLED_VALUE.match(line):
+            skip_next = True
+            continue
+        if _LABEL_ONLY.match(line):
+            dek_next = True
+            continue
+        if dek_next:
+            # The dek is a paragraph, not a list item ("- Two cats…").
+            line = re.sub(r"^[-–•]\s+", "", line)
+            dek_next = False
+        if title and len(line) > len(title) + 20 and line.startswith(title):
+            # A teaser card: the headline run into its summary
+            # ("…press secretaryKatie Zacharia's first…"); the summary
+            # alone is kept, and once.
+            line = line[len(title):].lstrip(" :–-")
+        if re.fullmatch(r"credit:?", following, re.IGNORECASE):
+            # A caption, then "Credit:" and the credit itself.
+            continue
+        if re.fullmatch(r"credit:?", line, re.IGNORECASE):
+            skip_next = len(following) <= 60
+            continue
+        if _FURNITURE.match(line) or sum(ch.isalnum() for ch in line) < 2:
+            continue
+        if re.fullmatch(r"[A-Z]{2,6}(?:/[A-Z]{2,6})+", line):
+            continue  # a wire credit under a live-blog entry ("CBS/AP")
+        if _ROLE.match(line):
+            # The name above it was the credit's, not the story's.
+            if kept and len(kept[-1].split()) <= 4 and not kept[-1].endswith("."):
+                kept.pop()
+            continue
+        if len(kept) < 3 and (_BARE_DATE.match(line) or _restates(line, title)):
+            continue
+        key = _key(line)
+        if not key or key == title_key or key in recent:
+            continue
+        recent = [*recent[-7:], key]
+        kept.append(re.sub(r"^[–•]\s+", "- ", line))
+    # The close: production credits, then the author's bio (one or two
+    # paragraphs) — never the story's only paragraph.
+    while len(kept) > 1 and _CREDIT.match(kept[-1]):
+        kept.pop()
+    for start in range(max(1, len(kept) - 2), len(kept)):
+        if _AUTHOR_BIO.match(kept[start]):
+            del kept[start:]
+            break
+    return "\n\n".join(kept)
 
 
 FetchFeed = Callable[[str, str], list[Headline]]
@@ -417,7 +633,11 @@ class NewsService:
         failed refresh looked fresh. Now a pass reports whether the
         headlines OR the failure state changed, and only that publishes.
         """
-        feeds = self.config.feeds()
+        config = self.config
+        feeds = config.feeds()
+        # A catalog feed's rows carry the publisher's catalog name, not the
+        # feed's own title ("World", "All Top News --…", "Latest from Live…").
+        names = {source.url: source.name for source in config.enabled_sources()}
         fetching = asyncio.gather(
             *(asyncio.to_thread(self._fetch_feed, url, category) for category, url in feeds),
             return_exceptions=True,
@@ -451,7 +671,8 @@ class NewsService:
                     f" {status}" if isinstance(status, int) else "",
                 )
                 continue
-            merged.extend(result)
+            name = names.get(url)
+            merged.extend(replace(h, source=name) if name else h for h in result)
         before = (tuple(h.guid for h in self._headlines), self._last_error, self._partial)
         if failures and not merged and self._headlines:
             # Every feed failed: keep what the wearer already has, and say
@@ -536,21 +757,21 @@ class NewsService:
         except (OSError, ValueError, urllib.error.URLError) as exc:
             log.info("article unavailable (%s)", type(exc).__name__)
             title, text = headline.title, ""
+        lead, _, rest = text.partition("\n\n")
+        if rest and (_key(lead) == _key(headline.title) or _restates(lead, headline.title)):
+            # The feed's wording of the headline, above the page's own
+            # (BBC, 2026-10-14): the template shows one headline.
+            text = rest
         if not text and headline.summary and headline.summary.casefold() != headline.title.casefold():
             text = f"{headline.summary}\n\n(From the feed's summary; the full article could not be read on the Mac.)"
-        body = text or (
-            "The article text could not be read on the Mac. "
-            f"Headline: {headline.title}"
-        )
-        metadata = f"{headline.source} · {relative_age(headline.published_at, self._clock())}"
-        # No fixed pre-cut: the metadata row is clipped to one reader row
-        # downstream (panels), so a 40-char cap only threw away title the
-        # row could still show (2026-09-05 typography audit).
-        shown_title = title or headline.title
+        body = text or "The article text could not be read on the Mac."
+        # The article template (PanelPublisher): headline, then source and
+        # age, then the tidied paragraphs.
         return Reader(
             tab=self.tab,
             title="NEWS · ARTICLE",
-            metadata=f"{metadata} · {shown_title}",
+            metadata=f"{headline.source} · {relative_age(headline.published_at, self._clock())}",
+            headline=title or headline.title,
             pages=paginate(body),
         )
 

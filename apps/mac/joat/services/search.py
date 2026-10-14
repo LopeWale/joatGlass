@@ -203,10 +203,12 @@ class SearchService:
             log.info("result page unavailable (%s)", type(exc).__name__)
             title, text = result.title, ""
         body = text or result.snippet or "The page text could not be read on the Mac."
+        # The same article template as News: headline, source, text.
         return Reader(
             tab=self.tab,
             title="SEARCH · RESULT",
-            metadata=f"{result.domain} · {title or result.title}",
+            metadata=result.domain,
+            headline=title or result.title,
             pages=paginate(body),
         )
 

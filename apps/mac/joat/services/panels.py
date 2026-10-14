@@ -73,6 +73,9 @@ class Reader:
     #: bumps the tab's revision without closing the reader, so its page
     #: requests keep echoing THIS one and are answered, not refused.
     revision: int = 0
+    #: The story's own headline. With it the reader opens on the article
+    #: template: the headline, the metadata line, then the text.
+    headline: str = ""
     _prepared_pages: tuple[tuple[str, ...], ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -260,9 +263,13 @@ class PanelPublisher:
         # wearer, 2026-10-14). The metadata leads as its own paragraph, in
         # full; the pages are exact source spans, so joined they are the text.
         label = " ".join(reader.metadata.split()) or ("Article" if tab == "news" else "Result")
+        headline = " ".join(reader.headline.split())
+        # One template for every story: headline, "Source · age", a blank
+        # line, then the paragraphs (news.tidy_article spaces them alike).
+        head = f"{headline}\n{label}\n\n" if headline else f"{label}\n"
         await self._transport.send(HudList(
             items=[],
-            body=f"{label}\n{''.join(reader.pages)}",
+            body=f"{head}{''.join(reader.pages)}",
             title=reader.title,
             hint=READER_HINT,
             # The plugin matches this against the id it opened the reader
