@@ -2,8 +2,8 @@
 
 ## 2026-10-14 — Build JOAT 0.1.130
 
-- Packed from `a92d780` (clean tree) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.130 above the last recorded build; app.json, package.json and package-lock.json all 0.1.130. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1243 tests passed, typecheck clean.
-- `apps/hub-plugin/joat.ehpk`: 179044 bytes, SHA-256 `d83ee67c0797e9c9f7c7438cae2c5de1de431a657e14c4339ec258e11b3f6d7b`. Adds to 0.1.129 the two freeze fixes (`af5b947`). Plugin only: no Mac restart. Not installed or verified on physical glasses.
+- Packed from `f6cd5e8` (clean tree) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.130 above the last recorded build; app.json, package.json and package-lock.json all 0.1.130. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1243 tests passed, typecheck clean.
+- `apps/hub-plugin/joat.ehpk`: 179044 bytes, SHA-256 `d83ee67c0797e9c9f7c7438cae2c5de1de431a657e14c4339ec258e11b3f6d7b`. Adds to 0.1.129 the two freeze fixes (`1f5fe75`). Plugin only: no Mac restart. Not installed or verified on physical glasses.
 
 ## 2026-10-14 — The glasses no longer freeze: two input traps fixed
 
@@ -29,8 +29,8 @@ The wearer asked for the research markdown and stray images to go. Removed: `doc
 
 ## 2026-10-13 — Build JOAT 0.1.129
 
-- Packed from `06e5023` (clean tree) with `scripts/pack.sh`, the maintainer's own manifest and the MacBook-first, Mac Mini-second private WSS candidates. app.json, package.json and package-lock.json all 0.1.129 (last build 0.1.128). `--sdk-ver 0.0.16` (the newest on npm), minimum Even App 2.2.10. Plugin 1236 tests passed, typecheck clean.
-- Canonical `apps/hub-plugin/joat.ehpk`: 178774 bytes, SHA-256 `77a3705ddf5bf739ffea2a765747431dd483a02ccb3dc94d960dc51dbaa0c8db`. Adds to 0.1.128: bounded mic calls and JOAT's heartbeat (`51ceb51`). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+- Packed from `8489e5d` (clean tree) with `scripts/pack.sh`, the maintainer's own manifest and the MacBook-first, Mac Mini-second private WSS candidates. app.json, package.json and package-lock.json all 0.1.129 (last build 0.1.128). `--sdk-ver 0.0.16` (the newest on npm), minimum Even App 2.2.10. Plugin 1236 tests passed, typecheck clean.
+- Canonical `apps/hub-plugin/joat.ehpk`: 178774 bytes, SHA-256 `77a3705ddf5bf739ffea2a765747431dd483a02ccb3dc94d960dc51dbaa0c8db`. Adds to 0.1.128: bounded mic calls and JOAT's heartbeat (`080823d`). Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-13 — A paused note survives a reconnect, a stuck mic call no longer drops the link, and JOAT keeps its own heartbeat
 
@@ -80,7 +80,7 @@ Tests: ages pushed at each minute boundary (30 s, then 60 s, 60 s), nothing push
 
 The wearer: notes "come back with the title 'Note [timestamp] gaps'" and "none of the new notes come back on to the Mac … What did you break?"
 
-**What happened (the database and brain.log, not a guess).** The three notes since 11:44 (13:48, 14:24, 15:22) were open when JOAT restarted: at 14:22:58, 15:15:53 and 15:35:00, each a restart to apply a change. `interrupt_for_shutdown` marked each `interrupted` (`graceful_shutdown_raw_retained`), and nothing ever finished it: no save, so no summary title, no Apple Notes copy, and the list shows any note that is not `saved` as "· gaps". The words and raw audio were all kept (2, 1 and 3 transcript sections). The latency and capitalization change (`a0ec422`) was not involved: no note reached Save after it.
+**What happened (the database and brain.log, not a guess).** The three notes since 11:44 (13:48, 14:24, 15:22) were open when JOAT restarted: at 14:22:58, 15:15:53 and 15:35:00, each a restart to apply a change. `interrupt_for_shutdown` marked each `interrupted` (`graceful_shutdown_raw_retained`), and nothing ever finished it: no save, so no summary title, no Apple Notes copy, and the list shows any note that is not `saved` as "· gaps". The words and raw audio were all kept (2, 1 and 3 transcript sections). The latency and capitalization change (`015bb95`) was not involved: no note reached Save after it.
 
 **Change** (`VoiceNoteCaptureController`, `VoiceNoteStore`, `__main__`):
 - `finish_interrupted()`: at start, before the gateway accepts the glasses, every note a restart cut off (`graceful_shutdown_raw_retained` or `process_restart_raw_retained`, raw kept, at least one frame) goes `interrupted → finalizing` and through the same save as the glasses' Save: leftover audio transcribed, finalized, then the existing `on_saved` hook (summary title, Apple Notes). Save and this share one `_save`; nothing is duplicated. Discarded, failed and empty notes are untouched.
@@ -94,7 +94,7 @@ The wearer, after the "hearing you…" fix: "it is still fucking doing it becaus
 **What happened at 15:35:40 (brain restarted 15:35:27, glasses connected 15:35:36).** The first "utterance" opened 0.27 s after the mic, at `trigger=0.00400`. Whisper returned 5 characters, which were not ignored and reached no reply. That is the one branch that writes no log line: the name alone, which opens the JOAT card ("Yes?") and takes the next sentence without the name for 8 s.
 
 **Why, established step by step.**
-1. *Only one line puts "hearing you…" on the glass* (`VoiceOrchestrator._acknowledge`; nothing in the plugin or JOATShell). The running brain is this checkout (`.venv`, `apps/mac/joat`) with `6437400` in it.
+1. *Only one line puts "hearing you…" on the glass* (`VoiceOrchestrator._acknowledge`; nothing in the plugin or JOATShell). The running brain is this checkout (`.venv`, `apps/mac/joat`) with `e6f724c` in it.
 2. *The speech detector opens on room tone right after every brain start.* `RmsVad.floor` is 0 until 10 batches (~2 s) of history, so the trigger is the bare `speech_rms` minimum, 0.004. G2 room tone is above that. The log shows this after every brain start today, 7 of 7 (07:44, 11:27, 12:06, 13:03, 14:23, 15:17, 15:35): the first utterance opens at 0.004, and Whisper returns 3–8 characters of nothing ("The"), or at 15:35, 5.
 3. *Whisper puts the name into noise because our prompt does.* The conversational bias prompt is `"JOAT. The wearer addresses the assistant as JOAT."`. It opens with the wake word, as a 5-character sentence. `is_prompt_echo` needs 24 characters, so the full 43-character echo is dropped (logged) but "JOAT." passes. **Reproduced on the live model** (private `whisperkit-cli serve` on :50061, same model and flags, the real prompt, the brain's own echo filter and gate): 40 synthetic room-noise clips (2.4 s like turn 1; white noise and low hum at RMS 0.006–0.02) gave the full prompt (13), "The" (20), and **"JOAT"/"JOAT." 7 times, each a wake**. Low hum at RMS 0.02 gave "JOAT" 5 of 5.
 4. *The prompt is the cause, and it is also what makes the name spell right.* The same noise with no prompt came back empty, 15 of 15. But macOS voices saying "JOAT." / "Hey JOAT." / "JOAT, what time is it?" (Samantha, Daniel, Moira; clean and over hum) were recognised 17 of 18 with the prompt and only 7 of 18 without it ("Chode", "Jobe", "Jules"…). Every spoken name still came back as *some* word without the prompt (9 of 9), while noise came back as nothing.
@@ -110,8 +110,8 @@ Outside sources agree. OpenAI's Whisper prompting guide treats the prompt as pri
 
 ## 2026-10-12 — Build JOAT 0.1.128
 
-- Packed from `cb37801` (clean tree) with `scripts/pack.sh`, the maintainer's own manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.128 above the last recorded build (0.1.127); app.json, package.json and package-lock.json all 0.1.128. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1227 tests passed, typecheck clean.
-- Canonical `apps/hub-plugin/joat.ehpk`: 176799 bytes, SHA-256 `41d0c67948a0df734e220ed5b2007309fbdcd55e6f1d9f4e77acd2d8d531450f`. Adds to 0.1.127: a route runs on one-shot phone fixes when the location stream will not start (`72f3904`). The Mac's navigation step logs take effect when JOAT restarts. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+- Packed from `7151db3` (clean tree) with `scripts/pack.sh`, the maintainer's own manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.128 above the last recorded build (0.1.127); app.json, package.json and package-lock.json all 0.1.128. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1227 tests passed, typecheck clean.
+- Canonical `apps/hub-plugin/joat.ehpk`: 176799 bytes, SHA-256 `41d0c67948a0df734e220ed5b2007309fbdcd55e6f1d9f4e77acd2d8d531450f`. Adds to 0.1.127: a route runs on one-shot phone fixes when the location stream will not start (`b0c1844`). The Mac's navigation step logs take effect when JOAT restarts. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-12 — A route starts when the phone's location stream will not
 
@@ -140,8 +140,8 @@ The wearer, after the name-only gate and 0.1.127: "it is still doing the same th
 
 ## 2026-10-12 — Build JOAT 0.1.127
 
-- Packed from `b3a8834` (clean tree) with `scripts/pack.sh`, the maintainer's own manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.127 above the last recorded build (0.1.126); app.json, package.json and package-lock.json all 0.1.127. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1224 tests passed, typecheck clean.
-- Canonical `apps/hub-plugin/joat.ehpk`: 178070 bytes, SHA-256 `ed0132ced81ccdf3f0113b82eb9d25e47feccb0aa0b2394d0592338eb8e7805a`. Adds to 0.1.126: long tap no longer turns the mic on or off, and "long tap: mic" is gone from the footers (`4e6dade`). Simulator: the status card's footer reads "2x tap: menu". Plugin only: no Mac restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+- Packed from `f6364e5` (clean tree) with `scripts/pack.sh`, the maintainer's own manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.127 above the last recorded build (0.1.126); app.json, package.json and package-lock.json all 0.1.127. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1224 tests passed, typecheck clean.
+- Canonical `apps/hub-plugin/joat.ehpk`: 178070 bytes, SHA-256 `ed0132ced81ccdf3f0113b82eb9d25e47feccb0aa0b2394d0592338eb8e7805a`. Adds to 0.1.126: long tap no longer turns the mic on or off, and "long tap: mic" is gone from the footers (`cda2c8f`). Simulator: the status card's footer reads "2x tap: menu". Plugin only: no Mac restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-12 — Long tap no longer turns the mic on or off
 
@@ -184,20 +184,20 @@ The wearer: "it just randomly pops up thinking that I said the word 'The' … on
 
 The wearer: "use the skills to understand how the mics [work] and measure."
 
-- Even Hub's device-features contract: `audioControl(true, Glasses)` opens the G2 four-mic array (after `createStartUpPageContainer`); PCM arrives as `audioEvent` buffers, 16 kHz s16le mono; the plugin batches ~200 ms per `audio` message. It does not say how long `audioControl(true)` takes on the glasses, or whether PCM keeps flowing while nobody speaks — which decides whether the plugin's 1.5 s silent-stream re-arm (`STREAM_STALE_MS`, `b4058c3`) is safe.
-- `joat/ble/mic_meter.py` (new, `e61cfdd`), wired into `HubGatewayTransport`: on every Mac `audio.control open`, `mic open: plugin ack +X ms, first pcm +Y ms (link rtt Z ms)` — ack is the plugin's `device mic=true`, sent once the host call resolved; the WebSocket ping round trip is beside it so the network can be subtracted. While the mic streams, `mic cadence: N messages, P s of pcm in W s (%), longest gap G ms, gaps over 1.5 s: K` 60 s after each open, then every 5 min, and on close/disconnect. Counts and times only; never audio content.
+- Even Hub's device-features contract: `audioControl(true, Glasses)` opens the G2 four-mic array (after `createStartUpPageContainer`); PCM arrives as `audioEvent` buffers, 16 kHz s16le mono; the plugin batches ~200 ms per `audio` message. It does not say how long `audioControl(true)` takes on the glasses, or whether PCM keeps flowing while nobody speaks — which decides whether the plugin's 1.5 s silent-stream re-arm (`STREAM_STALE_MS`, `f005189`) is safe.
+- `joat/ble/mic_meter.py` (new, `40bc048`), wired into `HubGatewayTransport`: on every Mac `audio.control open`, `mic open: plugin ack +X ms, first pcm +Y ms (link rtt Z ms)` — ack is the plugin's `device mic=true`, sent once the host call resolved; the WebSocket ping round trip is beside it so the network can be subtracted. While the mic streams, `mic cadence: N messages, P s of pcm in W s (%), longest gap G ms, gaps over 1.5 s: K` 60 s after each open, then every 5 min, and on close/disconnect. Counts and times only; never audio content.
 - Tests: `tests/unit/test_mic_meter.py` (open timing, a continuous stream at 100 % with no stale gaps, a 4 s host silence counted, the 5-minute cadence, nothing logged without audio); gateway 92 passed; mypy clean. Mac only; running since 13:03:07.
 
 ## 2026-10-12 — Build JOAT 0.1.126
 
-- Packed from `556d21c` (clean tree) with `scripts/pack.sh`, the maintainer's own manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.126 above the last recorded build (0.1.125); app.json, package.json and package-lock.json all 0.1.126. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1224 tests passed, typecheck clean.
-- Canonical `apps/hub-plugin/joat.ehpk`: 178106 bytes, SHA-256 `4ed2b9e5785fa599a5d2bfe66b0788a0d2c2e786bf0dbe75c57a2a3986e928eb`. Adds to 0.1.125 the fixes below (`482e7ac`). Plugin only: no Mac restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+- Packed from `fbc18cf` (clean tree) with `scripts/pack.sh`, the maintainer's own manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.126 above the last recorded build (0.1.125); app.json, package.json and package-lock.json all 0.1.126. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1224 tests passed, typecheck clean.
+- Canonical `apps/hub-plugin/joat.ehpk`: 178106 bytes, SHA-256 `4ed2b9e5785fa599a5d2bfe66b0788a0d2c2e786bf0dbe75c57a2a3986e928eb`. Adds to 0.1.125 the fixes below (`5521339`). Plugin only: no Mac restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-12 — Even's rules applied: cancel works on every card, no card is declined unseen, accented Messages pages keep their last lines, bridge calls have time limits
 
 The wearer: "use [Even's guidelines] to evaluate and improve and fix any buggy process we have without destroying the interface." Every glasses page was checked against the installed SDK 0.0.16, the simulator's measured limits and Even's glasses-ui, handle-input and design guidance. These are the fixes the wearer chose (cards, Messages in accented text, hardening). Nothing on the glass looks different. Each fix reuses what was there; no second copy of a helper.
 
-- **Swipe and 2x tap cancel every card.** Since `601adce` only a Messages draft heard them: the router was handed a function that always answered "no retry", so a calendar or reminder card waited out its 8 s. It now gets the open card's retry, which is undefined for every card but a draft (`EventRouter`, `main.ts`). Simulator: swipe declined in 0.02 s, 2x tap in 0.01 s, tap accepted.
+- **Swipe and 2x tap cancel every card.** Since `b91ed1d` only a Messages draft heard them: the router was handed a function that always answered "no retry", so a calendar or reminder card waited out its 8 s. It now gets the open card's retry, which is undefined for every card but a draft (`EventRouter`, `main.ts`). Simulator: swipe declined in 0.02 s, 2x tap in 0.01 s, tap accepted.
 - **A card is never declined before it shows, and the glass never freezes after one.** Every page change is now recorded as the change in flight (`HudPresenter.pageTransition`, the existing `pageReplacement`), and a card, Back to Home and a handoff wait for it (`settlePageReplacement`) instead of being turned away by the page barrier. Before: a card that landed while Home was redrawing was declined to the Mac unseen, and Back during another change left the old page on the glass. Home's rebuild hands the barrier the display's own guard, not "still Home": a card arriving mid-rebuild had kept the image lane shut for the rest of the session.
 - **Messages pages in accented or non-Latin text keep their last lines.** Pages were counted in code units, but the glasses' cap is 999 bytes, and accented letters, Cyrillic and Greek are 2–3 bytes each. The rebuild cut the page with "…" and the next page started after the lost lines. Every paginator now asks one question, `pageFits` (units and bytes), and an in-place page turn is capped like a rebuild (`FirmwareText`, `upgradeNativeText`). A page turn the glass refuses no longer moves the page count, so a review's last-page tap is never offered for words that were not shown (`scrollTextPage`). Simulator: a Cyrillic thread with a Yoruba message paged 1/2 → 2/2, last line "Вы: Договорились, позвоню в девять." shown.
 - **Time limits on bridge calls.** A rebuild or text update the host has not answered in 5 s fails (`BRIDGE_CALL_TIMEOUT_MS`, Even: "wrap calls in Promise.race with a few-second cap") and the page is no longer trusted, so a hung call cannot hold every later page change. `settleWithin` moved from `HudVisualSurface` to `BridgeClient` so both use the one copy.
@@ -210,8 +210,8 @@ The wearer: "use [Even's guidelines] to evaluate and improve and fix any buggy p
 
 ## 2026-10-12 — Build JOAT 0.1.125
 
-- Packed from `db549fd` (clean tree) with `scripts/pack.sh`, the maintainer's own manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.125 above the last recorded build (0.1.124); app.json, package.json and package-lock.json all 0.1.125. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1203 tests passed, typecheck clean.
-- Canonical `apps/hub-plugin/joat.ehpk`: 176244 bytes, SHA-256 `7a1f7ddc5de150f0ba4d6ac9ef6fd986980e49b7dcbc4847a517ab8853c55da9`. Adds to 0.1.124 the standby takeover and mic re-arm (`b4058c3`). The Mac side of `b4058c3`, the speaker-gate fix (`097e190`) and the send preflight (`652b3ef`) are already running: JOAT restarted 12:06:50, `messages automation granted`. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+- Packed from `709f263` (clean tree) with `scripts/pack.sh`, the maintainer's own manifest and the MacBook-first, Mac Mini-second private WSS candidates. Version guard: 0.1.125 above the last recorded build (0.1.124); app.json, package.json and package-lock.json all 0.1.125. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1203 tests passed, typecheck clean.
+- Canonical `apps/hub-plugin/joat.ehpk`: 176244 bytes, SHA-256 `7a1f7ddc5de150f0ba4d6ac9ef6fd986980e49b7dcbc4847a517ab8853c55da9`. Adds to 0.1.124 the standby takeover and mic re-arm (`f005189`). The Mac side of `f005189`, the speaker-gate fix (`5972696`) and the send preflight (`9f19f21`) are already running: JOAT restarted 12:06:50, `messages automation granted`. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-12 — A reply that cannot be sent fails at once, unsent, instead of sitting on "sending"
 
@@ -220,7 +220,7 @@ The wearer: "i have a message sending but still not sent based on the indicator 
 - **What happened** (11:58): the reply was heard, reviewed and confirmed (11:58:43); `stage=send-failed error=MessageSendError` 15 s later. This was the first send the brain has ever attempted — the log holds no earlier send. Sending is an Apple Event to Messages (`osascript` → `tell application "Messages"`), gated by macOS's **Automation** permission (JOAT may control Messages). The access JOAT already had is Full Disk Access, which reads chat.db. macOS put the Automation consent prompt up on the Mac; `osascript` blocked on it until the 15 s deadline killed it; a killed send is "possibly submitted", so the glasses stayed on ▷.
 - **Fix** (`MessagesAppSender`): a read-only probe, `tell application "Messages" to count accounts` (no recipient, no body), reads the permission. The engine runs it at start in the background with a 3-minute window, while the wearer is likely at the Mac, so the prompt is answered there; the outcome goes to the log and `status.json` (`messages_send`). With `preflight=True` (production), every send probes first with a 3 s limit: denied, pending or no answer is a definite "not sent" (`possible_external_commit=False`) → × on the glasses, at once. A send refused with errAEEventNotPermitted (-1743) is likewise definite. The send-failed log line now carries a content-free `code=` and `possible_commit=`.
 - The wearer's grant: System Settings → Privacy & Security → Automation → JOAT → Messages (one time; JOAT.app is Developer ID–signed, so it holds across rebuilds).
-- Also fixed: `test_message_tools.py::test_controller_review_limit_remains_a_truthful_failed_status`, broken since `10023e4` raised the Messages review limit to 280 — it now drafts 300 characters, the length that is still too long for the box.
+- Also fixed: `test_message_tools.py::test_controller_review_limit_remains_a_truthful_failed_status`, broken since `e675ec2` raised the Messages review limit to 280 — it now drafts 300 characters, the length that is still too long for the box.
 - Tests: the probe's four states, its read-only argv, the preflight failing fast without spawning the send, a granted preflight sending as before, a -1743 refusal as a definite not-sent. Messages suites 236 passed, mypy clean. **Mac only: restart JOAT.**
 
 ## 2026-10-12 — The plugin no longer freezes after a second copy of it takes the glasses; a mic the host stopped is re-armed
@@ -253,9 +253,9 @@ The wearer: "the messaging function for tap to speak still does not work? It sho
 
 ## 2026-10-12 — Build JOAT 0.1.124
 
-- Packed from `d10a3fe` (clean tree) with `scripts/pack.sh`, the maintainer's own manifest and the MacBook-first, Mac Mini-second private WSS candidates (2 validated). Version guard: 0.1.124 above the last recorded build (0.1.123); app.json, package.json and package-lock.json all 0.1.124. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1195 tests passed, typecheck clean.
-- Canonical `apps/hub-plugin/joat.ehpk`: 175753 bytes, SHA-256 `79345e6e4f3c20792e632fc6b7aa4fa43a99b13ce8393e96a7d99b72144f1ac1`. Adds to 0.1.123 the News tab fix below (`70bb24f`). Plugin only — no Mac restart needed for this one. Not uploaded to Even Hub, not installed, not verified on physical glasses.
-- Note: this package is 9 KB smaller than the committed 0.1.123 one although a vite build of `56de7ed` (552.15 kB JS) matches this build (552.25 kB); the 0.1.123 package was packed before its commit and may hold more than that revision.
+- Packed from `2b9571e` (clean tree) with `scripts/pack.sh`, the maintainer's own manifest and the MacBook-first, Mac Mini-second private WSS candidates (2 validated). Version guard: 0.1.124 above the last recorded build (0.1.123); app.json, package.json and package-lock.json all 0.1.124. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1195 tests passed, typecheck clean.
+- Canonical `apps/hub-plugin/joat.ehpk`: 175753 bytes, SHA-256 `79345e6e4f3c20792e632fc6b7aa4fa43a99b13ce8393e96a7d99b72144f1ac1`. Adds to 0.1.123 the News tab fix below (`117c9bc`). Plugin only — no Mac restart needed for this one. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+- Note: this package is 9 KB smaller than the committed 0.1.123 one although a vite build of `ae1a7d8` (552.15 kB JS) matches this build (552.25 kB); the 0.1.123 package was packed before its commit and may hold more than that revision.
 
 ## 2026-10-12 — The News tab opens again: a list row could leave the width cut one byte over the firmware cap
 
@@ -269,7 +269,7 @@ The wearer: "when I click on the news tab, it does not open the news page … th
 
 ## 2026-10-11 — Build JOAT 0.1.123
 
-- Packed from `56de7ed` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.123 above the last recorded build (0.1.122); app.json, package.json and package-lock.json all 0.1.123. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1194 tests passed, typecheck clean. Mac 3557 passed, 1 deselected (the known `test_whisper_cold_start` failure); 1 failed, `test_message_tools.py::test_controller_review_limit_remains_a_truthful_failed_status`, from FEAT-001's `10023e4` (the Messages review limit), not these changes.
+- Packed from `ae1a7d8` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.123 above the last recorded build (0.1.122); app.json, package.json and package-lock.json all 0.1.123. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1194 tests passed, typecheck clean. Mac 3557 passed, 1 deselected (the known `test_whisper_cold_start` failure); 1 failed, `test_message_tools.py::test_controller_review_limit_remains_a_truthful_failed_status`, from FEAT-001's `e675ec2` (the Messages review limit), not these changes.
 - Canonical `apps/hub-plugin/joat.ehpk`: 184915 bytes, SHA-256 `ce84d7695b40f78335725f374cf46743d0a67158df08480af68efd4b2929c642`. Adds to 0.1.122 QuickNotes matched to Even's QuickNote and Conversate, QuickNotes on the overview's rail with Search in the menu, and FEAT-001's long-draft review and scrolling thread. **The Mac side changed too: restart JOAT from this revision** (migration 16 runs on start). Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-11 — QuickNotes is on the overview's rail; Search moves into the menu
@@ -298,7 +298,7 @@ The wearer: "who is them? where did you see this in the Even Realities QuickNote
 
 ## 2026-10-11 — Build JOAT 0.1.122
 
-- Packed from `6dd1eb4` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.122 above the last recorded build (0.1.121); app.json, package.json and package-lock.json all 0.1.122. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1190 tests passed, typecheck clean. Mac 3546 passed, 1 deselected (the known `test_whisper_cold_start` failure).
+- Packed from `761b2a2` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.122 above the last recorded build (0.1.121); app.json, package.json and package-lock.json all 0.1.122. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1190 tests passed, typecheck clean. Mac 3546 passed, 1 deselected (the known `test_whisper_cold_start` failure).
 - Canonical `apps/hub-plugin/joat.ehpk`: 184309 bytes, SHA-256 `3f6e8d526c7e85f5da53c4e060db37dd47e53d43d7bccf40c71c9f163069b33e`. Adds to 0.1.121 QuickNotes as one note (FEAT-002: live words, hold to talk, title and summary, Apple Notes copy) and reply by voice's tap to review / tap to send / 2x tap to retry with ▷ ▶ × in the thread (FEAT-001). **The Mac side changed too: restart JOAT from this revision** (migration 15 runs on start). Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-11 — QuickNotes is one note: words while you talk, hold to talk, a title and summary, and a copy in Apple Notes
@@ -338,7 +338,7 @@ The wearer: "the tap to reply (using my speech) does not work at all; the listen
 
 ## 2026-10-11 — Build JOAT 0.1.121
 
-- Packed from `b1f1c6a` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.121 above the last recorded build (0.1.120); app.json, package.json and package-lock.json all 0.1.121. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1175 tests passed.
+- Packed from `0e722df` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.121 above the last recorded build (0.1.120); app.json, package.json and package-lock.json all 0.1.121. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1175 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 183855 bytes, SHA-256 `7fb61eb5aa04e7f2d080bd36434ad533204c09de93aa2cc0bee9a0d59b62d500`. Adds to 0.1.120 the end of the 15 s link drops (a stuck header or column image switches both to firmware text and frees the lane) and page-part failures in the diagnostics. **The Mac side changed too: restart JOAT from this revision** (diagnostics toggle, backlog freezes, quieter logs, page-part diagnostics). Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-11 — A stuck header or column image no longer drops the Mac link; the log errors, fixed
@@ -369,7 +369,7 @@ The wearer: the logs kept logging with "Record G2 diagnostics" turned off. They 
 
 ## 2026-10-11 — Build JOAT 0.1.120
 
-- Packed from `b26930a` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.120 above the last recorded build (0.1.119); app.json, package.json and package-lock.json all 0.1.120. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1170 tests passed.
+- Packed from `cdb9e0e` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates (2 validated). The version guard confirmed 0.1.120 above the last recorded build (0.1.119); app.json, package.json and package-lock.json all 0.1.120. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1170 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 183458 bytes, SHA-256 `99c6d86276c3efce3a517c88d6b3cccbcf7ddfe1074fc9acdb893622365a61c4`. Adds to 0.1.119 Home's tabs swiping and opening with a notification on Home, the Notifications tab's unread list and the lit tab's underline. Plugin-only on top of 0.1.119 (whose brain restart still applies). Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-11 — Home's tabs swipe and open again, with a notification on Home
@@ -385,7 +385,7 @@ The wearer, on 0.1.119 on the glasses: Home's tabs no longer switched the right 
 
 ## 2026-10-08 — Build JOAT 0.1.119
 
-- Packed from `804f38c` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.119 above the last recorded build (0.1.118); app.json, package.json and package-lock.json all 0.1.119. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1166 tests passed.
+- Packed from `bad0b34` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.119 above the last recorded build (0.1.118); app.json, package.json and package-lock.json all 0.1.119. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1166 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 174041 bytes, SHA-256 `523535bc2900d9ebf993d2b4c00646bf68903e67ef247350eeca380a3919a0a9`. Adds to 0.1.118 the consent card after a spoken Messages reply and the tap-to-speak trace. **The Mac side changed too: restart the brain from this revision**, or the new `prompt_stage` diagnostics are refused and the refusal reasons are not logged. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-08 — A spoken Messages reply reaches its consent card; tap-to-speak is traced on the glasses
@@ -399,7 +399,7 @@ The wearer: "the tap to speak on the brainstorm and message reply do not work". 
 
 ## 2026-10-07 — Build JOAT 0.1.118
 
-- Packed from `7d0c7cb` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.118 above the last recorded build (0.1.117); app.json, package.json and package-lock.json all 0.1.118. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1164 tests passed.
+- Packed from `ebf86e5` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.118 above the last recorded build (0.1.117); app.json, package.json and package-lock.json all 0.1.118. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1164 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 173816 bytes, SHA-256 `5a8321c7e36970393b0321ffea1a7a30337fdc2062e0cfc3fe745c5c96a38857`. Adds to 0.1.117 the gesture-free JOAT box, the one gesture template and messages hanging under the name. Plugin-only on top of 0.1.117 (whose brain restart still applies). Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-07 — No gestures in JOAT's box; one gesture template; messages hang under the name
@@ -414,7 +414,7 @@ The wearer's three points on 0.1.117: the reply card still carried gesture notes
 
 ## 2026-10-07 — Build JOAT 0.1.117
 
-- Packed from `d60a86d` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.117 above the last recorded build (0.1.116); app.json, package.json and package-lock.json all 0.1.117. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1164 tests passed.
+- Packed from `e2e8bca` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.117 above the last recorded build (0.1.116); app.json, package.json and package-lock.json all 0.1.117. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1164 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 172945 bytes, SHA-256 `1a9a20b5e19925fa0bbb9992217190049a92709f06881e13762507d245b84e89`. Adds to 0.1.116 the speaker's name in front of their words in JOAT's box and on the notification card. **The Mac side changed too: restart the brain from this revision**, or a bare "JOAT" still shows "JOAT" above "Yes?". Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-07 — The speaker's name opens their words, on the same row
@@ -430,7 +430,7 @@ The wearer asked why two rows went to one thing: the notification card had the s
 
 ## 2026-10-07 — Build JOAT 0.1.116
 
-- Packed from `44191c6` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.116 above the last recorded build (0.1.115); app.json, package.json and package-lock.json all 0.1.116. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1163 tests passed.
+- Packed from `3375c92` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.116 above the last recorded build (0.1.115); app.json, package.json and package-lock.json all 0.1.116. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1163 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 172969 bytes, SHA-256 `df1bb8ae6294f1985e861554c273878633edd22df3888ae59bbc7daa3e45231d`. Adds to 0.1.115 the notification card and the IMU off at boot. **The Mac side changed too: restart the brain from this revision**, or the card only ever shows the Mac's short line. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-07 — Notifications pop up as Even's card, over every page
@@ -449,7 +449,7 @@ The wearer asked for notifications the way Even shows its own: a card that pops 
 
 ## 2026-10-07 — Build JOAT 0.1.115
 
-- Packed from `aaea0b2` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.115 above the last recorded build (0.1.114); app.json, package.json and package-lock.json all 0.1.115. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1147 tests passed.
+- Packed from `db8f353` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.115 above the last recorded build (0.1.114); app.json, package.json and package-lock.json all 0.1.115. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1147 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 170954 bytes, SHA-256 `234590075706e5bb5bb6935738cd9b6ab06d1e4e994d9f1c1a4502b8a19b2225`. Adds to 0.1.114 JOAT's box over Home as Home is drawn. Plugin-only: no brain restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-07 — JOAT's box floats over Home as Home is drawn
@@ -466,7 +466,7 @@ The wearer reported that JOAT's box still looked like a page of its own: the Hom
 
 ## 2026-10-07 — Build JOAT 0.1.114
 
-- Packed from `d629292` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.114 above the last recorded build (0.1.113); app.json, package.json and package-lock.json all 0.1.114. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1142 tests passed.
+- Packed from `f6f18c3` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.114 above the last recorded build (0.1.113); app.json, package.json and package-lock.json all 0.1.114. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1142 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 170631 bytes, SHA-256 `5509a101283586cce01bba9d51ba8edbc33faed1156d6e8d84a04e29606db3b6`. Adds to 0.1.113 solid image words at 66% and readers as firmware text. Plugin-only: no brain restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-07 — Image words at 66% with every pixel fully lit; readers are firmware text
@@ -483,7 +483,7 @@ The wearer asked for the image fonts at 66%, reported the faded letters on every
 
 ## 2026-10-07 — Build JOAT 0.1.113
 
-- Packed from `53b9050` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.113 above the last recorded build (0.1.112); app.json, package.json and package-lock.json all 0.1.113. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1139 tests passed.
+- Packed from `c7f7ddf` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.113 above the last recorded build (0.1.112); app.json, package.json and package-lock.json all 0.1.113. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1139 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 170101 bytes, SHA-256 `55b7c553c78d0819e3b8a7a420791eba43751f1c1063a7af141db4b56d10ab14`. Adds to 0.1.112 the News article as a firmware text page with 16 px side margins. Plugin-only: no brain restart. The package is now tracked in git (main stopped ignoring `*.ehpk`). Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-07 — A News article is firmware text again, 16 px clear of the sides
@@ -498,7 +498,7 @@ The wearer reported the open article drawn as an image and hard to read while sc
 
 ## 2026-10-06 — Build JOAT 0.1.112
 
-- Packed from `b35a012` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.112 above the last recorded build (0.1.111); app.json, package.json and package-lock.json all 0.1.112. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1138 tests passed.
+- Packed from `3b678f6` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.112 above the last recorded build (0.1.111); app.json, package.json and package-lock.json all 0.1.112. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1138 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 169963 bytes, SHA-256 `5b24290bc191aab2ab9a0180db1e80b3cdeddbe9034980b3252740c35eea4457`. Adds to 0.1.111 the two live-words fixes from the PR #17 review. **The Mac side changed too: restart the brain from this revision.** The package is gitignored (`*.ehpk`); this entry is its record. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-06 — Live words: a cancel waits for the card, and another speaker's words never show
@@ -512,7 +512,7 @@ A review of PR #17 found two defects in the live-transcription path, both confir
 
 ## 2026-10-06 — Build JOAT 0.1.111
 
-- Packed from `bc5e305` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.111 above the last recorded build (0.1.110); app.json, package.json and package-lock.json all 0.1.111. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1137 tests passed.
+- Packed from `b80349d` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.111 above the last recorded build (0.1.110); app.json, package.json and package-lock.json all 0.1.111. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1137 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 169876 bytes, SHA-256 `c5313c7b0fa5a9f2bebc15aa3c3687a56cea7d6ffa6077bb7115ddbd976e7796`. Adds to 0.1.110 Home's label/value grid. Plugin-only since 0.1.109: a brain restarted for 0.1.109 needs no restart. The package is gitignored (`*.ehpk`): it lives only where `npm run pack` ran, and this entry is its record. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-06 — Home's pane is a label/value grid, as weather-even-g2 lays out its stats
@@ -532,7 +532,7 @@ The wearer pointed at weather-even-g2's right panel. Read from its source and ca
 
 ## 2026-10-06 — Build JOAT 0.1.110
 
-- Packed from `34e0b42` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.110 above the last recorded build (0.1.109); app.json, package.json and package-lock.json all 0.1.110. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1137 tests passed.
+- Packed from `a5b764b` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.110 above the last recorded build (0.1.109); app.json, package.json and package-lock.json all 0.1.110. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1137 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 169696 bytes, SHA-256 `8875ab7bd57c4e3fe0095148af4aab5e049c9627671db97831f484ecffb6b1df`. Adds to 0.1.109 Home's column in Even's font and the reader kept at 55% under JOAT's box. Plugin-only since 0.1.109: a brain restarted for 0.1.109 needs no restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-06 — Mixed rendering: Home's column in Even's font; the reader stays 55% under JOAT's box
@@ -560,7 +560,7 @@ Every G2 plugin with other fonts draws that text as images; the fast ones mix th
 
 ## 2026-10-06 — Build JOAT 0.1.109
 
-- Packed from `2a8d724` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.109 above the last recorded build (0.1.108); app.json, package.json and package-lock.json all 0.1.109. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1131 tests passed.
+- Packed from `b33adaa` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.109 above the last recorded build (0.1.108); app.json, package.json and package-lock.json all 0.1.109. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1131 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 168065 bytes, SHA-256 `cf33ba02a80a1f2cacfb777635f2277ab849cc0c6af2081b3bf968b00ae0e304`. Adds to 0.1.108 Even's font at 55% and in the header, one-line list rows, your words in the reply card while you speak, and News taps that open the right story. **The Mac side changed too: restart the brain from this revision** (live words and the News fix are Mac-side). Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-06 — Your words while you reply; News taps open the right story; smaller font, header in Even's font
@@ -598,7 +598,7 @@ The wearer reported five things:
 
 ## 2026-10-06 — Build JOAT 0.1.108
 
-- Packed from `fda926f` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.108 above the last recorded build (0.1.107); app.json, package.json and package-lock.json all 0.1.108. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1127 tests passed.
+- Packed from `a0aa1bf` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.108 above the last recorded build (0.1.107); app.json, package.json and package-lock.json all 0.1.108. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1127 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 167555 bytes, SHA-256 `edbf5464f909a2c30f26ee2c3d13b352b281c6943cccb6278bd9e075de1a95d1`. Adds to 0.1.107 the readers in Even's font at 66% across the whole glass (the atlas adds about 9 KB). Plugin-only. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-06 — Readers in Even's font at 66%, spread across the whole glass
@@ -636,7 +636,7 @@ The wearer: pages look cramped and sparse, and only Planning uses the full 576x2
 
 ## 2026-10-06 — Build JOAT 0.1.107
 
-- Packed from `c10cb86` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.107 above the last recorded build (0.1.106); app.json, package.json and package-lock.json all 0.1.107. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1114 tests passed.
+- Packed from `47f7589` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.107 above the last recorded build (0.1.106); app.json, package.json and package-lock.json all 0.1.107. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1114 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 158434 bytes, SHA-256 `d650af5c7311cbae4c1ba2a18c16e49af7e6579991f8318de6ddbcbe575cc860`. Adds to 0.1.106 the one image header on every page and the working indicator inside JOAT's box. Plugin-only. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-06 — One header on every page; JOAT's working indicator inside its box
@@ -652,7 +652,7 @@ The wearer: "Why are we not using a template for the top bar?… use images… f
 
 ## 2026-10-06 — Build JOAT 0.1.106
 
-- Packed from `ba86a79` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.106 above the last recorded build (0.1.105); app.json, package.json and package-lock.json all 0.1.106. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1107 tests passed.
+- Packed from `4106a3f` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.106 above the last recorded build (0.1.105); app.json, package.json and package-lock.json all 0.1.106. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1107 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 158161 bytes, SHA-256 `582559b8e8433df046a7527b087e78a9417169d949f467240616a45d63a87cbe`. Adds to 0.1.105 the JOAT box that floats over the page it was called on and grows from two rows, with the working indicator on its border. Plugin-only since 0.1.105: a brain restarted for 0.1.105 needs no restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-06 — JOAT's box floats over the page it was called on and grows as Even AI's does
@@ -669,7 +669,7 @@ The wearer: "the JOAT AI interface is supposed to be an overlay box on whichever
 
 ## 2026-10-06 — Build JOAT 0.1.105
 
-- Packed from `3bb653c` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.105 above the last recorded build (0.1.104); app.json, package.json and package-lock.json all 0.1.105. `evenhub` CLI, `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1099 tests passed.
+- Packed from `14a6e64` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.105 above the last recorded build (0.1.104); app.json, package.json and package-lock.json all 0.1.105. `evenhub` CLI, `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1099 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 156924 bytes, SHA-256 `d01c25db1c625f52a6b5f6c9ee7bb5ec777d79f87731431ef8ac27a25448eaf7`. Carries the Messages thread reader with tap-to-reply in JOAT's conversation card, and the conversation card without its scroll column. The Mac side changed too: restart the brain from this revision. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-06 — Messages is one thread you read and tap to reply; no scrollbar boxes on the conversation card
@@ -721,13 +721,13 @@ The wearer asked why a reply to a message still could not be sent.
 
 ## 2026-10-05 — Build JOAT 0.1.104
 
-- Packed from `8c727f3` (GitHub main at PR #13 plus the version bump) with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.104 above the last recorded build (0.1.103); app.json, package.json and package-lock.json all 0.1.104. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1076 tests passed.
+- Packed from `8f52f4a` (GitHub main at PR #13 plus the version bump) with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.104 above the last recorded build (0.1.103); app.json, package.json and package-lock.json all 0.1.104. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1076 tests passed.
 - Canonical `apps/hub-plugin/joat.ehpk`: 164940 bytes, SHA-256 `c2dd1705ecb58ead5c6e4f84024aea8a76d6c6825c84b28491927a64d576c5a6`. Same plugin and Mac code as 0.1.103 (the commits since are merges and the simulator captures); a brain restarted for 0.1.103 needs no restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-05 — Build JOAT 0.1.103 text Home
 
 - Packed from `38b9abb` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.103 above the last recorded build (0.1.102); app.json, package.json and package-lock.json all 0.1.103. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
-- Canonical `apps/hub-plugin/joat.ehpk`: 164939 bytes, SHA-256 `a43cf1ac577838ecd64710ec28853b90cb3c84c63202bbb2f2daf088c63a9e1d`. Home is firmware text again (six text containers, no image tile): one rebuild to enter, then only changed bands as in-place upgrades — a minute tick is one upgrade, a tab swipe two. Carries 0.1.102 and the cloud session's credential-list fix (`693b632`). Plugin 1076 tests, Mac 3105 passed. The Mac side changed in `693b632`, so restart the brain from this revision. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+- Canonical `apps/hub-plugin/joat.ehpk`: 164939 bytes, SHA-256 `a43cf1ac577838ecd64710ec28853b90cb3c84c63202bbb2f2daf088c63a9e1d`. Home is firmware text again (six text containers, no image tile): one rebuild to enter, then only changed bands as in-place upgrades — a minute tick is one upgrade, a tab swipe two. Carries 0.1.102 and the cloud session's credential-list fix (`9e8dc37`). Plugin 1076 tests, Mac 3105 passed. The Mac side changed in `9e8dc37`, so restart the brain from this revision. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-06 — Every CLI launch drops the same credential list
 
@@ -753,7 +753,7 @@ The wearer asked why a reply to a message still could not be sent.
 
 ## 2026-10-06 — Build JOAT 0.1.102 reader-fixes package
 
-- Packed from `c1cf4c7` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.102 above the last recorded build (0.1.101), and app.json, package.json and package-lock.json all say 0.1.102. `evenhub` CLI, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
+- Packed from `a550639` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.102 above the last recorded build (0.1.101), and app.json, package.json and package-lock.json all say 0.1.102. `evenhub` CLI, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
 - Canonical `apps/hub-plugin/joat.ehpk`: 155222 bytes, SHA-256 `91841ecc122392a47d03dc8c83c6152d63eade4334a5c341bce390d667fd4ad3`. Adds to 0.1.101 the minute-aligned home clock and the reader fixes: the spoken-reply check is a text page, every Mac-paged reader pages to its end, and a review sends only from its very last page. Plugin-only changes since 0.1.101, so a brain already restarted for 0.1.101 needs no restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-06 — Readers page to their end, and a review sends only from its last page
@@ -783,7 +783,7 @@ The wearer asked where the plugin re-implements scrolling the firmware already d
 
 ## 2026-10-06 — Build JOAT 0.1.101 terminal-checks package
 
-- Packed from `f014c9f` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.101 above the last recorded build (0.1.100), and the new three-file version check passed (app.json, package.json and package-lock.json all 0.1.101). `evenhub` CLI, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
+- Packed from `3825a48` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.101 above the last recorded build (0.1.100), and the new three-file version check passed (app.json, package.json and package-lock.json all 0.1.101). `evenhub` CLI, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
 - Canonical `apps/hub-plugin/joat.ehpk`: 154724 bytes, SHA-256 `7b07d47831639401e61676fc26021fda321dcdf1c413ac6d7ba9ea1695864076`. Carries the terminal's long-press cancel and the "CHECK WHAT WAS HEARD" page, and drops the self-test's double press. The Mac side changed (phone-control fixes, the terminal check and cancel, the self-test removal), so the brain needs a restart from this revision; brain and plugin should move together, since the cancel and the check are new wire messages. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-06 — Terminal: long press cancels a running job; a spoken reply is checked before it goes
@@ -817,7 +817,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-10-06 — What the merge left behind
 
-- `HudPageBuilder.overviewTextLayout` is gone with its four tests. The 0.1.100 merge dropped the text overview's presenter path and kept the layout with no caller; it stays in history at `e5a5a3b`.
+- `HudPageBuilder.overviewTextLayout` is gone with its four tests. The 0.1.100 merge dropped the text overview's presenter path and kept the layout with no caller; it stays in history at `61e402e`.
 - Six test files still stubbed the presenter's list-cursor calls (`setSelection`, `moveSelection`, `restoreSelection`, `usesCustomListSelection`) that 0.1.99 deleted, and several asserted those stubs were never called — true of any call that no longer exists. The stubs and the vacuous assertions are removed; the menu suites check what the firmware list actually does.
 - `package.json` and `package-lock.json` had said 0.1.90 since 2026-09-13 while ten builds went out, because only `app.json` reaches the package. Both say 0.1.100 now, and `pack.sh` refuses a package whose three numbers differ, naming the `npm version` command that moves them together.
 - `docs/EVEN_RESEARCH_QUESTIONS.md` #3 no longer calls the list cursor "the single blocker" on moving the panel tabs off the image path: they moved in 0.1.99. The question to Even stays open.
@@ -825,12 +825,12 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-10-05 — Build JOAT 0.1.100 merged package
 
-- Packed from `e608c03` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.100 above the last recorded build (0.1.99). Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
+- Packed from `7873ba0` with `scripts/pack.sh`, the maintainer's own manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The version guard confirmed 0.1.100 above the last recorded build (0.1.99). Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.16`, minimum Even App 2.2.10.
 - Canonical `apps/hub-plugin/joat.ehpk`: 163427 bytes, SHA-256 `c4e812cd1c1a82b58bcc453531e68522797c425faa761c865ef0e672f04b7513`. The first package with both lines in it: GitHub main through 0.1.98 and the cloud session's 0.1.99 work (route behind any page, activity chips, raster deletions finished), plus the local line — the phone page's Brainstorm and Accounts tabs beside Places and Connection, subscription account switching on the Mac, the Brainstorm thinking counter, the local command channel and the local Mac fixes. Plugin 1059 tests, Mac 3125 passed. The Mac side changed (accounts, sign-in, Brainstorm control, places), so the brain needs a restart from this revision. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-05 — Build JOAT 0.1.99 three-at-once package
 
-- Rebuilt the existing JOAT package from `dd4a71f` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.99 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Rebuilt the existing JOAT package from `f870700` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.99 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
 - Canonical `apps/hub-plugin/joat.ehpk`: 153816 bytes, SHA-256 `29cac9133909d2e158d51892bd0d6ddc38b946052b6fc6e2252f26fb9096d336`. Carries the route behind any page, the activity chips in every header and spine, the conversation page's header line, and the completed deletion of the raster duplicates and the plugin-owned list cursor. The Mac side changed only in a docstring and its tests; the brain needs no restart beyond the one 0.1.97 asked for. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-05 — Three features at once: a route behind any page, every header says what else is running
@@ -845,7 +845,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-10-05 — Build JOAT 0.1.98 native-only package
 
-- Rebuilt the existing JOAT package from `7101ef6` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.98 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Rebuilt the existing JOAT package from `552ff16` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.98 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
 - Canonical `apps/hub-plugin/joat.ehpk`: 154866 bytes (10.5 KB smaller than 0.1.97, the deleted raster painters), SHA-256 `f2164277fe1b0b23cbacd263b2bec8e1f8b02ea226dd62c675950af287368f56`. Carries the deletion of the raster duplicates, every list as a firmware list but the Planning month, and the pretext-measured native pages; the Mac side changed only in a comment and its tests, so no brain restart is needed beyond the one 0.1.97 asked for. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-05 — The raster duplicates are gone; native text is measured by the firmware's own rule
@@ -859,7 +859,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-10-05 — Build JOAT 0.1.97 navigation-follows package
 
-- Rebuilt the existing JOAT package from `126a2be` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.97 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Rebuilt the existing JOAT package from `36ee9b9` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.97 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
 - Canonical `apps/hub-plugin/joat.ehpk`: 165374 bytes, SHA-256 `dcad799dfa773afc57ce847ca8836666b39614526f48a60080f6862b9a96d156`. Carries the following guidance page, the tile list, the tile-less pane, the fix tolerance, the stream retry and the Places tab; the Mac side (tile prefetch, the `places` uplink, `saved_places`, the Navigation page rows, place resolution) is in the brain and needs a restart. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-05 — Navigation follows the wearer; saved places
@@ -871,7 +871,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-10-05 — Build JOAT 0.1.96 icon-spine package
 
-- Rebuilt the existing JOAT package from `b7ebf83` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.96 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Rebuilt the existing JOAT package from `21811d3` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.96 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
 - Canonical `apps/hub-plugin/joat.ehpk`: 161791 bytes, SHA-256 `fee6635c6f0c058c148a333a5471e31891f60ada84a2b792298c4fa3501f058f`. Carries the 24 px icon spine, the one live header line on every firmware page and the status model; nothing changed on the Mac side. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-05 — A smaller spine with icons, and one live header line on firmware pages
@@ -883,7 +883,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-10-05 — Build JOAT 0.1.95 due-tap package
 
-- Rebuilt the existing JOAT package from `39154dc` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.95 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Rebuilt the existing JOAT package from `7aa4ef6` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.95 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
 - Canonical `apps/hub-plugin/joat.ehpk`: 160152 bytes, SHA-256 `152085e32a7658ac2db43aef7c512298e24125b7f4d6964cd5e3e45d50d6b0a5`. Carries the `reminder_due.complete` tap and the "tap: complete" hint; the Mac side (the gateway binding and the monitor's completion) is in the brain. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-05 — The due page completes by tap
@@ -893,7 +893,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-10-05 — Build JOAT 0.1.94 firmware-modals package
 
-- Rebuilt the existing JOAT package from `ed72d9c` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.94 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Rebuilt the existing JOAT package from `3fe45d1` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. The pack script's version guard confirmed 0.1.94 above the last recorded build. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
 - Canonical `apps/hub-plugin/joat.ehpk`: 160045 bytes, SHA-256 `384aa955acc33f96e766c138beff4e3cd0e108f7303d8f054f03793b1c11810d`. Carries the firmware receipts, outcome strips, productivity pages, pre-route navigation frames and the remaining firmware titles; the Mac side (a reader with a tap action is selectable) is in the brain. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-05 — The modals a tap lands on are firmware pages too
@@ -907,7 +907,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-10-05 — Build JOAT 0.1.93 control-surface package
 
-- Rebuilt the existing JOAT package from `be079a6` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Rebuilt the existing JOAT package from `2e59869` with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
 - Canonical `apps/hub-plugin/joat.ehpk`: 158372 bytes, SHA-256 `f5a83d81dba1440100c000f4be4e1d1691118a8d339260cb12e751eda3d5f5d1`. Carries the `capability` prompt owner kind (a tapped row's question cannot reach an older plugin), the Pomodoro and Search tab copy, and the raster fallbacks without voice instructions. The Mac side (control rows, dictation, the Pomodoro lengths) is in the brain. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-05 — Pages opened by hand are control surfaces
@@ -919,7 +919,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-10-05 — Build JOAT 0.1.92 confirmation-window package
 
-- Rebuilt the existing JOAT package from `b898db1` (version bump on top of the confirmation-window, streamed-frame and green-suite commits) with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Rebuilt the existing JOAT package from `c9db4cd` (version bump on top of the confirmation-window, streamed-frame and green-suite commits) with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
 - Canonical `apps/hub-plugin/joat.ehpk`: 158371 bytes, SHA-256 `1ae1ddd9123822512f4aad67c77aa8366410a3454c5d03184cf59c3af402b784`. Carries the plugin side of the confirmation window (`confirmationDecisionWindowMs`) and the restored right/ring double press for an armed Brainstorm run; the Mac side (20 s envelope, streamed-frame throttle) is in the brain, not the package. Not uploaded to Even Hub, not installed, not verified on physical glasses.
 
 ## 2026-10-05 — Confirmation deadline, streamed-frame throttle, green plugin suite
@@ -931,7 +931,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-10-05 — Build JOAT 0.1.91 firmware-pages package
 
-- Rebuilt the existing JOAT package from merged main (`87a4ea5`, version bump only on top of the firmware-pages merge) with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
+- Rebuilt the existing JOAT package from merged main (`b080f48`, version bump only on top of the firmware-pages merge) with the same `scripts/pack.sh`, the maintainer's same manifest and the reviewed MacBook-first, Mac Mini-second private WSS candidates. Release-candidate validation, the release manifest, TypeScript checking and the production Vite build passed. `evenhub` CLI 0.1.14, `--sdk-ver 0.0.14`, minimum Even App 2.2.9.
 - Canonical `apps/hub-plugin/joat.ehpk`: 158173 bytes, SHA-256 `03b3a6f10b1aaa36e0cdf194cdb5f448ae9ed02391655975a41e95ad19587c91`. Not uploaded to Even Hub, not installed, not verified on physical glasses; the glasses still run 0.1.88.
 
 ## 2026-10-05 — Even Hub skills evaluation and the first dedupe slice
@@ -978,7 +978,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-09-13 — Build JOAT 0.1.90 native conversation update
 
-- Built the existing JOAT package from committed source `a62f19c` in an isolated export. Eight release-candidate and release-manifest checks, TypeScript checking, and the production Vite build passed. The package keeps the maintainer's package ID, minimum Even App 2.2.9, SDK 0.0.14, and the reviewed secure MacBook-first, Mac Mini-second Tailscale candidates.
+- Built the existing JOAT package from committed source `f068ebd` in an isolated export. Eight release-candidate and release-manifest checks, TypeScript checking, and the production Vite build passed. The package keeps the maintainer's package ID, minimum Even App 2.2.9, SDK 0.0.14, and the reviewed secure MacBook-first, Mac Mini-second Tailscale candidates.
 - Canonical `apps/hub-plugin/joat.ehpk`: 154719 bytes, SHA-256 `8dc5dfe8157845b16a795734cfea2dcf886f30dacb3c83c2836ac91864f7b9d1`.
 - Official simulator acceptance was completed separately against the committed implementation: 70-screen OpenClaw/Hermes conversation flow, 48-screen lifecycle, 42-screen Hermes streaming/restart recovery, and 18-frame assistant conversation. The package has not been submitted to Even Hub, installed in Even App, or verified on physical glasses.
 
@@ -999,7 +999,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-09-13 — Build JOAT 0.1.89 for existing Even Hub project
 
-- Built current committed reconnect fix from source `cdde1d1` in an isolated export. Eight release candidate/manifest checks, TypeScript and production Vite build passed. Preserved the maintainer's package ID and secure MacBook-first, Mini-second release candidates; explicit selections remain pinned.
+- Built current committed reconnect fix from source `ccd3185` in an isolated export. Eight release candidate/manifest checks, TypeScript and production Vite build passed. Preserved the maintainer's package ID and secure MacBook-first, Mini-second release candidates; explicit selections remain pinned.
 - Canonical apps/hub-plugin/joat.ehpk: 150738 bytes, SHA-256 `76a1c04d0417fa8a8525aeab6470c6c62486b46c7ee6c55662b357cc9d29701f`. Minimum Even App 2.2.9 and SDK 0.0.14.
 - Portal submission has not been attempted: Computer Use reports the Mac is locked. User authorized adding a build inside the existing JOAT project; no new portal project, public release, installation, pairing or physical connection change.
 
@@ -1075,7 +1075,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 - Show only configured OpenClaw/Hermes agents in Agent Terminal; retain legacy Work/Calendar/session owners internally. Entry always opens the same chooser, including during a request. Use explicit connection states and consistent double-click Back/cancel instructions.
 - Back retires the conversation binding and returns to the chooser; cancelling a question restores its selected conversation. Reject delayed retired-opening frames and handle cycling from an internal legacy session.
-- Independent UI and ownership reviews informed the fixes. The final clean committed-source replay through `859870b` passed both complete official-simulator journeys, cancellation and busy re-entry; all 14 stable frames were visually inspected. Local TLS agent responses and acknowledged synthetic final speech transcripts are explicit fixture boundaries.
+- Independent UI and ownership reviews informed the fixes. The final clean committed-source replay through `f1cf7bf` passed both complete official-simulator journeys, cancellation and busy re-entry; all 14 stable frames were visually inspected. Local TLS agent responses and acknowledged synthetic final speech transcripts are explicit fixture boundaries.
 - TypeScript compilation, 255 scoped UI tests and 248 roster/opening tests passed separately. The runner closed its isolated processes/ports and removed its temporary TLS key. No installed engine, phone/glasses connection, pairing or remote credentials were accessed. See docs/audits/agent-terminal-simulator-flow.md.
 
 ## 2026-09-11 — Notification replacement tap verification
@@ -1088,19 +1088,19 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 - Official simulator ran current source with a temporary in-memory Vite transform that held one real SDK image call before dispatch and shortened the diagnostic reporting timeout to 500 ms. Initial wrapper incorrectly intercepted the display proxy and recursed; that run was rejected, stopped and replaced with a wrapper around the actual SDK method. Neither transform was written to source or package.
 - Corrected run recorded the held write, upload timeout and failed recovery attempts. No SDK rebuild call was dispatched while the write remained held; the previous Home frame remained visible. Releasing the held write allowed subsequent image calls; root visually inspected restored Messages and double-click back to Home. This verifies the controlled timeout ordering, not normal latency or atomic multi-tile presentation.
-- Committed reviewed EventRouter Back/routing hunks as `1621af9`, excluding notification interface/dismissal hunks that still need their targeted visual check. Coordinated that commit with the separate Agent Terminal task after its index was cleared.
+- Committed reviewed EventRouter Back/routing hunks as `4ac6c8f`, excluding notification interface/dismissal hunks that still need their targeted visual check. Coordinated that commit with the separate Agent Terminal task after its index was cleared.
 - Closed this task's simulator and stopped its fixture and temporary Vite server at the end of the check. No new artifact directory or duplicate package was created.
 
 ## 2026-09-11 — Display ownership review corrections
 
-- Committed the shared Back policy, matching conversation hint and explicit Messaging review state as `9253e79`; remaining router/presenter integration is still local.
+- Committed the shared Back policy, matching conversation hint and explicit Messaging review state as `131edd6`; remaining router/presenter integration is still local.
 - Independent review found that a timed-out image upload could outlive its JavaScript paint queue and race recovery's native page rebuild. HudVisualSurface now includes the actual pending SDK write in its idle boundary and suspends new image submissions across page replacement; every HudPresenter native rebuild uses that boundary. An unresolved old write aborts recovery instead of allowing a competing rebuild. Targeted simulator fault-path verification remains pending; atomic four-tile presentation is not claimed.
 - A second review found that logical notification replacement could make a tap dismiss an as-yet-unpainted card. Identified cards now require a completed paint identity before dismissal, and confirmation/snapshot rollbacks invalidate the old paint identity until restoration completes. These race corrections remain local and need runtime verification.
 
 ## 2026-09-11 — Reviewed implementation commits
 
-- Committed notification cleanup thread ownership and bounded deletion as `5fbabb7`.
-- Committed matched Mac/Hub paging and display-context protocol fields plus complete retained voice-note access as `8e25ac2`. The new optional input field is appended to preserve existing constructor argument positions. Current TypeScript compilation and a focused in-memory protocol compatibility check passed; earlier simulator journey evidence remains separate from those diagnostics.
+- Committed notification cleanup thread ownership and bounded deletion as `889887e`.
+- Committed matched Mac/Hub paging and display-context protocol fields plus complete retained voice-note access as `ea010ce`. The new optional input field is appended to preserve existing constructor argument positions. Current TypeScript compilation and a focused in-memory protocol compatibility check passed; earlier simulator journey evidence remains separate from those diagnostics.
 - Shared feature controllers/rendering remain under integration review alongside a separate Agent Terminal task. These commits do not establish a completed release or physical-device acceptance. The canonical package was not rebuilt or uploaded during this step.
 
 ## 2026-09-11 — QuickNote and Messaging connected regression
@@ -1153,7 +1153,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-09-10
 
-- **Released private Hub build 0.1.84 and visually evaluated Navigation, Messages and Planning.** Implementation `daafac8`, package source `ca0c213`; portal submission confirmed after reload. The evaluation reproduced contradictory Navigation states during sequential quadrant updates, documented Planning date-context loss after operations and Messages reading-context/type differences, and retained working menu, paging and fixture action journeys. Obsolete or unrelated captures were rejected; physical-device and real-service behavior remain unverified. No new feature fixes were made. See `docs/audits/2026-09-10-navigation-messages-planning-visual-evaluation.md`.
+- **Released private Hub build 0.1.84 and visually evaluated Navigation, Messages and Planning.** Implementation `37a776d`, package source `9defa67`; portal submission confirmed after reload. The evaluation reproduced contradictory Navigation states during sequential quadrant updates, documented Planning date-context loss after operations and Messages reading-context/type differences, and retained working menu, paging and fixture action journeys. Obsolete or unrelated captures were rejected; physical-device and real-service behavior remain unverified. No new feature fixes were made. See `docs/audits/2026-09-10-navigation-messages-planning-visual-evaluation.md`.
 
 - **Ordinary JOAT answers now remain in one Even-style conversation card.**
   Research was triangulated across the current official Even AI tutorial and
@@ -1665,7 +1665,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
   release and remains uncommitted. No physical G2 run, no upload.
 
 - Replaced the assistant's mind with the wearer's own subscriptions, and
-  removed the metered-API path added earlier the same day in `d7b2ace`.
+  removed the metered-API path added earlier the same day in `4bae347`.
   `claude -p` on the Max plan and `codex exec` on the ChatGPT plan now fill
   the seat, spawned through the same `SubprocessAgent` the Brainstorm seats
   use, with `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
@@ -2172,7 +2172,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 - Released the next canonical private Even Hub artifact under the existing
   the maintainer's own project as `v0.1.26`, rather than attempting to upload
   a changed artifact under the already-existing `v0.1.25` version. The fresh
-  package was built from clean `d1c1185`, is 72,653 bytes, and has SHA-256
+  package was built from clean `0c989a4`, is 72,653 bytes, and has SHA-256
   `09cd82bf131ed4b2fa00e2336f7b4abd8ed15b9ac8979d5b7c0971a45ff231e3`.
   The full Hub suite (389 tests), Gate 0 protocol/trace checks (32 tests),
   typecheck, production build, and private-stage package build passed.
