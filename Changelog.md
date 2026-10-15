@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-15 — Build JOAT 0.1.132
+
+- Packed from `8c08fbf` (clean tree) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.132 above the last recorded build; app.json, package.json and package-lock.json all 0.1.132. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1265 tests passed, typecheck clean.
+- `apps/hub-plugin/joat.ehpk`: 178658 bytes, SHA-256 `08a5acbc76c75c9275228da21383cbf02f53b87c65cf0c22ae126baea34a84ca`. Adds to 0.1.131 the one-write opening of a News article (`68feb2e`). The news half (readable gate, feed health, the 409-source catalog, `791ba18`) is Mac side: takes effect when JOAT restarts. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-15 — News: articles open without a blink, and only stories read in full are listed
 
 The wearer: "When I click on an article and it opens, it is blink - All of them", and "if a feed is not available, why is being used for the news? Can we make sure that the news sources are free and have the full article available" — technology, business, industrial and systems engineering research, and Nigeria (politics, business, technology).
