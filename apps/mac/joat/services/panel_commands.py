@@ -79,7 +79,7 @@ class NewsCommands:
             await self._panels.activate("news")
             return self._news.spoken_headlines()
         if _NEWS_REFRESH.fullmatch(normalized):
-            count = await self._news.refresh_once()
+            count = await self._news.refresh_once(force=True)
             await self._panels.activate("news")
             if count == 0:
                 return "I couldn't get any headlines right now."
@@ -89,11 +89,6 @@ class NewsCommands:
                 return (
                     f"The feeds didn't answer, so these are the {count} headlines from "
                     f"earlier. {self._news.spoken_headlines(3)}"
-                )
-            if self._news.partial:
-                return (
-                    f"Some feeds didn't answer. {count} headlines from the rest. "
-                    f"{self._news.spoken_headlines(3)}"
                 )
             return f"News updated: {count} headlines. {self._news.spoken_headlines(3)}"
         match = _NEWS_READ_NTH.fullmatch(normalized)

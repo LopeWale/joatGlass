@@ -49,7 +49,7 @@ async def run(port: int, auto: str | None, out: Path, swipes: int) -> None:
     log.info("fetching the wearer's feeds (%s)…", ", ".join(news.config.categories))
     await news.refresh_once()
     snapshot = news.snapshot()
-    log.info("news rows=%d empty=%r last_error=%r partial=%r", len(snapshot.rows), snapshot.empty, news.last_error, news.partial)
+    log.info("news rows=%d empty=%r last_error=%r benched=%r", len(snapshot.rows), snapshot.empty, news.last_error, news.benched_feeds)
     for i, row in enumerate(snapshot.rows):
         log.info("  row %2d (%3d chars): %s", i, len(row), row)
 

@@ -75,7 +75,7 @@ def news_service(tmp_path, titles: list[str]) -> NewsService:
     config.write_text('{"categories": [], "customFeeds": ["https://x/feed"]}')
     return NewsService(
         config, fetch_feed=fetch,
-        fetch_article=lambda url: ("T", "Article body. " * 50), clock=lambda: NOW,
+        fetch_article=lambda url: ("T", "Article body. " * 80), clock=lambda: NOW,
     )
 
 

@@ -2285,13 +2285,14 @@ async def main() -> None:
         }
 
     async def local_news_refresh() -> CommandResult:
-        changed = await news.refresh_changed()
+        # The wearer asked: feeds sitting out a pass get another try too.
+        changed = await news.refresh_changed(force=True)
         if changed:
             # Publish through the existing engine owner, never an uplink frame.
             await panels.publish("news")
         if news.last_error is not None:
             return CommandResult("failed", "unavailable")
-        return CommandResult("succeeded", "partial" if news.partial else "completed")
+        return CommandResult("succeeded", "completed")
 
     async def local_service_retry() -> CommandResult:
         state = local_capabilities()["service.retry"]

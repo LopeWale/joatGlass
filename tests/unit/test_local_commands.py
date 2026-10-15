@@ -438,7 +438,8 @@ async def test_news_cancelled_fetch_never_commits_and_background_refresh_seriali
                          source="fixture", category=category, published_at=100,
                          guid=str(index))]
 
-    service = NewsService(config_path=config, fetch_feed=fetch, clock=lambda: 100)
+    service = NewsService(config_path=config, fetch_feed=fetch, clock=lambda: 100,
+                          fetch_article=lambda url: ("T", "Article body. " * 80))
     tasks = []
     try:
         first = asyncio.create_task(service.refresh_changed())

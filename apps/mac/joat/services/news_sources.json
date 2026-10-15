@@ -1,72 +1,2554 @@
 {
-  "_about": "The News tab's free sources: one list for the engine (news.py) and the Mac app's News page (bundled by project.yml). Every feed is the publisher's own key-free RSS, links straight to the publisher's article page, and two current articles from each were fetched and read end to end through JOAT's extractor on 2026-10-14. Sources marked default are on until the wearer changes them. Left out on purpose: Google News (its links need JavaScript to reach the article), PBS NewsHour (its pages extract as one run-on block), News 9 (its article pages extract as a video hub, not the story), Reuters and AP (no working feeds), hard paywalls.",
-  "defaultCategories": ["top", "technology", "world"],
+  "_about": "The News tab's free sources: one list for the engine (news.py) and the Mac app's News page (bundled by project.yml). Every feed is the publisher's own key-free RSS and links straight to the publisher's article page. On 2026-10-15 each was checked live: the feed answered with at least three stories, its newest under two weeks old, and at least four of five current stories were fetched through JOAT's own extractor with its honest user agent and read in full (120+ words, no paywall wording). news.py applies the same test to every story before listing it, and rests a feed that keeps failing, so a source whose pages later change stops being listed by itself. Sources marked default are on until the wearer changes the subject's sources. Left out on purpose: Google News (its links need JavaScript to reach the article), PBS NewsHour (its pages extract as one run-on block), News 9 (its article pages extract as a video hub, not the story), Reuters and AP (no working feeds), metered and hard paywalls (New Scientist, MIT Technology Review, Nature, The Hindu, Globe and Mail, Irish Times, LA Times, Straits Times, Business Insider, Quartz, Sifted, Fortune, MIT Sloan Management Review), CNN (its feed is http only), and feeds that did not read in full at least four times in five: Al Jazeera, NPR World and National, CBS World, BBC Health, KOCO, the Guardian science feed, and the Phys.org family (it refuses automated readers).",
+  "defaultCategories": [
+    "top",
+    "technology",
+    "world"
+  ],
   "categories": [
-    {"id": "top", "label": "Top stories", "sources": [
-      {"id": "npr-news", "name": "NPR", "url": "https://feeds.npr.org/1001/rss.xml", "default": true},
-      {"id": "guardian-us", "name": "Guardian", "url": "https://www.theguardian.com/us/rss", "default": true},
-      {"id": "bbc-news", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/rss.xml", "default": true},
-      {"id": "cbs-news", "name": "CBS News", "url": "https://www.cbsnews.com/latest/rss/main", "default": false},
-      {"id": "nbc-news", "name": "NBC News", "url": "https://feeds.nbcnews.com/nbcnews/public/news", "default": false}
-    ]},
-    {"id": "world", "label": "World", "sources": [
-      {"id": "bbc-world", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/world/rss.xml", "default": true},
-      {"id": "guardian-world", "name": "Guardian", "url": "https://www.theguardian.com/world/rss", "default": true},
-      {"id": "aljazeera", "name": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml", "default": true},
-      {"id": "dw", "name": "DW", "url": "https://rss.dw.com/rdf/rss-en-all", "default": false},
-      {"id": "npr-world", "name": "NPR", "url": "https://feeds.npr.org/1004/rss.xml", "default": false},
-      {"id": "cbs-world", "name": "CBS News", "url": "https://www.cbsnews.com/latest/rss/world", "default": false}
-    ]},
-    {"id": "us", "label": "US", "sources": [
-      {"id": "npr-national", "name": "NPR", "url": "https://feeds.npr.org/1003/rss.xml", "default": true},
-      {"id": "abc-us", "name": "ABC News", "url": "https://feeds.abcnews.com/abcnews/usheadlines", "default": true},
-      {"id": "cbs-us", "name": "CBS News", "url": "https://www.cbsnews.com/latest/rss/us", "default": true},
-      {"id": "guardian-us-news", "name": "Guardian", "url": "https://www.theguardian.com/us-news/rss", "default": false},
-      {"id": "bbc-us", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml", "default": false}
-    ]},
-    {"id": "business", "label": "Business", "sources": [
-      {"id": "npr-business", "name": "NPR", "url": "https://feeds.npr.org/1006/rss.xml", "default": true},
-      {"id": "guardian-business", "name": "Guardian", "url": "https://www.theguardian.com/us/business/rss", "default": true},
-      {"id": "bbc-business", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/business/rss.xml", "default": true},
-      {"id": "abc-money", "name": "ABC News", "url": "https://feeds.abcnews.com/abcnews/moneyheadlines", "default": false}
-    ]},
-    {"id": "technology", "label": "Technology", "sources": [
-      {"id": "ars-technica", "name": "Ars Technica", "url": "https://feeds.arstechnica.com/arstechnica/index", "default": true},
-      {"id": "engadget", "name": "Engadget", "url": "https://www.engadget.com/rss.xml", "default": true},
-      {"id": "guardian-tech", "name": "Guardian", "url": "https://www.theguardian.com/us/technology/rss", "default": true},
-      {"id": "bbc-tech", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/technology/rss.xml", "default": false},
-      {"id": "npr-tech", "name": "NPR", "url": "https://feeds.npr.org/1019/rss.xml", "default": false}
-    ]},
-    {"id": "science", "label": "Science", "sources": [
-      {"id": "phys-org", "name": "Phys.org", "url": "https://phys.org/rss-feed/", "default": true},
-      {"id": "sciencedaily", "name": "ScienceDaily", "url": "https://www.sciencedaily.com/rss/top/science.xml", "default": true},
-      {"id": "live-science", "name": "Live Science", "url": "https://www.livescience.com/feeds/all", "default": true},
-      {"id": "npr-science", "name": "NPR", "url": "https://feeds.npr.org/1007/rss.xml", "default": false},
-      {"id": "guardian-science", "name": "Guardian", "url": "https://www.theguardian.com/science/rss", "default": false}
-    ]},
-    {"id": "health", "label": "Health", "sources": [
-      {"id": "kff-health", "name": "KFF Health News", "url": "https://kffhealthnews.org/feed/", "default": true},
-      {"id": "npr-health", "name": "NPR", "url": "https://feeds.npr.org/1128/rss.xml", "default": true},
-      {"id": "bbc-health", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/health/rss.xml", "default": true},
-      {"id": "sciencedaily-health", "name": "ScienceDaily", "url": "https://www.sciencedaily.com/rss/health_medicine.xml", "default": false}
-    ]},
-    {"id": "sports", "label": "Sports", "sources": [
-      {"id": "espn", "name": "ESPN", "url": "https://www.espn.com/espn/rss/news", "default": true},
-      {"id": "cbs-sports", "name": "CBS Sports", "url": "https://www.cbssports.com/rss/headlines/", "default": false},
-      {"id": "guardian-sport", "name": "Guardian", "url": "https://www.theguardian.com/us/sport/rss", "default": true},
-      {"id": "npr-sports", "name": "NPR", "url": "https://feeds.npr.org/1055/rss.xml", "default": false}
-    ]},
-    {"id": "entertainment", "label": "Entertainment", "sources": [
-      {"id": "variety", "name": "Variety", "url": "https://variety.com/feed/", "default": true},
-      {"id": "deadline", "name": "Deadline", "url": "https://deadline.com/feed/", "default": true},
-      {"id": "hollywood-reporter", "name": "Hollywood Reporter", "url": "https://www.hollywoodreporter.com/feed/", "default": true},
-      {"id": "guardian-culture", "name": "Guardian", "url": "https://www.theguardian.com/us/culture/rss", "default": false},
-      {"id": "bbc-entertainment", "name": "BBC", "url": "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml", "default": false}
-    ]},
-    {"id": "oklahoma", "label": "Oklahoma (local)", "sources": [
-      {"id": "koco", "name": "KOCO 5", "url": "https://www.koco.com/topstories-rss", "default": true},
-      {"id": "oklahoma-watch", "name": "Oklahoma Watch", "url": "https://oklahomawatch.org/feed/", "default": true},
-      {"id": "free-press-okc", "name": "Free Press OKC", "url": "https://freepressokc.com/feed/", "default": false}
-    ]}
+    {
+      "id": "top",
+      "label": "Top stories",
+      "sources": [
+        {
+          "id": "npr-news",
+          "name": "NPR",
+          "url": "https://feeds.npr.org/1001/rss.xml",
+          "default": true
+        },
+        {
+          "id": "guardian-us",
+          "name": "Guardian",
+          "url": "https://www.theguardian.com/us/rss",
+          "default": true
+        },
+        {
+          "id": "bbc-news",
+          "name": "BBC",
+          "url": "https://feeds.bbci.co.uk/news/rss.xml",
+          "default": true
+        },
+        {
+          "id": "top-abc-au",
+          "name": "ABC Australia",
+          "url": "https://www.abc.net.au/news/feed/2942460/rss.xml",
+          "default": false
+        },
+        {
+          "id": "top-axios",
+          "name": "Axios",
+          "url": "https://api.axios.com/feed/",
+          "default": false
+        },
+        {
+          "id": "top-cbc",
+          "name": "CBC",
+          "url": "https://www.cbc.ca/webfeed/rss/rss-topstories",
+          "default": false
+        },
+        {
+          "id": "cbs-news",
+          "name": "CBS News",
+          "url": "https://www.cbsnews.com/latest/rss/main",
+          "default": false
+        },
+        {
+          "id": "top-cna",
+          "name": "CNA",
+          "url": "https://www.channelnewsasia.com/rssfeeds/8395986",
+          "default": false
+        },
+        {
+          "id": "top-fox",
+          "name": "Fox News",
+          "url": "https://moxie.foxnews.com/google-publisher/latest.xml",
+          "default": false
+        },
+        {
+          "id": "top-guardian-uk",
+          "name": "Guardian UK",
+          "url": "https://www.theguardian.com/uk/rss",
+          "default": false
+        },
+        {
+          "id": "nbc-news",
+          "name": "NBC News",
+          "url": "https://feeds.nbcnews.com/nbcnews/public/news",
+          "default": false
+        },
+        {
+          "id": "top-nypost",
+          "name": "New York Post",
+          "url": "https://nypost.com/feed/",
+          "default": false
+        },
+        {
+          "id": "top-newsweek",
+          "name": "Newsweek",
+          "url": "https://www.newsweek.com/rss",
+          "default": false
+        },
+        {
+          "id": "top-ap-npr",
+          "name": "NPR Politics",
+          "url": "https://feeds.npr.org/1014/rss.xml",
+          "default": false
+        },
+        {
+          "id": "top-propublica",
+          "name": "ProPublica",
+          "url": "https://feeds.propublica.org/propublica/main",
+          "default": false
+        },
+        {
+          "id": "top-slate",
+          "name": "Slate",
+          "url": "https://slate.com/feeds/all.rss",
+          "default": false
+        },
+        {
+          "id": "top-conv-us",
+          "name": "The Conversation US",
+          "url": "https://theconversation.com/us/articles.atom",
+          "default": false
+        },
+        {
+          "id": "top-hill",
+          "name": "The Hill",
+          "url": "https://thehill.com/feed/",
+          "default": false
+        },
+        {
+          "id": "top-intercept",
+          "name": "The Intercept",
+          "url": "https://theintercept.com/feed/?rss",
+          "default": false
+        },
+        {
+          "id": "top-toi",
+          "name": "Times of India",
+          "url": "https://timesofindia.indiatimes.com/rssfeedstopstories.cms",
+          "default": false
+        },
+        {
+          "id": "top-vox",
+          "name": "Vox",
+          "url": "https://www.vox.com/rss/index.xml",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "nigeria-politics",
+      "label": "Nigeria politics",
+      "sources": [
+        {
+          "id": "ngp-premiumtimes",
+          "name": "Premium Times News",
+          "url": "https://www.premiumtimesng.com/news/feed",
+          "default": true
+        },
+        {
+          "id": "ngp-punch",
+          "name": "Punch",
+          "url": "https://punchng.com/topics/politics/feed/",
+          "default": true
+        },
+        {
+          "id": "ngp-channels",
+          "name": "Channels TV",
+          "url": "https://www.channelstv.com/feed/",
+          "default": true
+        },
+        {
+          "id": "ngp-dailytrust",
+          "name": "Daily Trust",
+          "url": "https://dailytrust.com/feed/",
+          "default": true
+        },
+        {
+          "id": "ngp-peoplesgazette",
+          "name": "Peoples Gazette",
+          "url": "https://gazettengr.com/feed/",
+          "default": true
+        },
+        {
+          "id": "ngp-allafrica",
+          "name": "AllAfrica Nigeria",
+          "url": "https://allafrica.com/tools/headlines/rdf/nigeria/headlines.rdf",
+          "default": false
+        },
+        {
+          "id": "ngp-blueprint",
+          "name": "Blueprint",
+          "url": "https://blueprint.ng/feed/",
+          "default": false
+        },
+        {
+          "id": "ngp-businessday-pol",
+          "name": "BusinessDay News",
+          "url": "https://businessday.ng/category/news/feed/",
+          "default": false
+        },
+        {
+          "id": "ngp-dailypost",
+          "name": "Daily Post Politics",
+          "url": "https://dailypost.ng/politics/feed/",
+          "default": false
+        },
+        {
+          "id": "ngp-icir",
+          "name": "ICIR",
+          "url": "https://www.icirnigeria.org/feed/",
+          "default": false
+        },
+        {
+          "id": "ngp-leadership",
+          "name": "Leadership",
+          "url": "https://leadership.ng/category/politics/feed/",
+          "default": false
+        },
+        {
+          "id": "ngp-legit",
+          "name": "Legit.ng",
+          "url": "https://www.legit.ng/rss/all.rss",
+          "default": false
+        },
+        {
+          "id": "ngp-newtelegraph",
+          "name": "New Telegraph",
+          "url": "https://newtelegraphng.com/category/politics/feed/",
+          "default": false
+        },
+        {
+          "id": "ngp-observer",
+          "name": "Nigerian Observer",
+          "url": "https://nigerianobservernews.com/feed/",
+          "default": false
+        },
+        {
+          "id": "ngp-primetime",
+          "name": "Prime Time Reporters",
+          "url": "https://primetimereporters.com/feed/",
+          "default": false
+        },
+        {
+          "id": "ngp-pulse",
+          "name": "Pulse Nigeria",
+          "url": "https://www.pulse.ng/rss-articles.xml",
+          "default": false
+        },
+        {
+          "id": "ngp-sahara",
+          "name": "Sahara Reporters",
+          "url": "https://saharareporters.com/rss.xml",
+          "default": false
+        },
+        {
+          "id": "ngp-conv-africa",
+          "name": "The Conversation Africa",
+          "url": "https://theconversation.com/africa/articles.atom",
+          "default": false
+        },
+        {
+          "id": "ngp-dailysun",
+          "name": "The Sun Nigeria",
+          "url": "https://thesun.ng/feed/",
+          "default": false
+        },
+        {
+          "id": "ngp-thewhistler",
+          "name": "The Whistler",
+          "url": "https://thewhistler.ng/feed/",
+          "default": false
+        },
+        {
+          "id": "ngp-thisday",
+          "name": "ThisDay Politics",
+          "url": "https://www.thisdaylive.com/index.php/category/politics/feed/",
+          "default": false
+        },
+        {
+          "id": "ngp-tribune",
+          "name": "Tribune Politics",
+          "url": "https://tribuneonlineng.com/category/politics/feed/",
+          "default": false
+        },
+        {
+          "id": "ngp-vanguard",
+          "name": "Vanguard Politics",
+          "url": "https://www.vanguardngr.com/category/politics/feed/",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "nigeria-business",
+      "label": "Nigeria business",
+      "sources": [
+        {
+          "id": "ngb-nairametrics",
+          "name": "Nairametrics",
+          "url": "https://nairametrics.com/feed/",
+          "default": true
+        },
+        {
+          "id": "ngb-businessday",
+          "name": "BusinessDay",
+          "url": "https://businessday.ng/feed/",
+          "default": true
+        },
+        {
+          "id": "ngb-premiumtimes",
+          "name": "Premium Times Business",
+          "url": "https://www.premiumtimesng.com/business/feed",
+          "default": true
+        },
+        {
+          "id": "ngb-tribune",
+          "name": "Tribune Business",
+          "url": "https://tribuneonlineng.com/category/business/feed/",
+          "default": true
+        },
+        {
+          "id": "ngb-bizwatch",
+          "name": "Bizwatch Nigeria",
+          "url": "https://www.bizwatchnigeria.ng/feed/",
+          "default": true
+        },
+        {
+          "id": "ngb-african-business",
+          "name": "African Business",
+          "url": "https://african.business/feed",
+          "default": false
+        },
+        {
+          "id": "r-afdb",
+          "name": "African Development Bank",
+          "url": "https://www.afdb.org/en/news-and-events/rss",
+          "default": false
+        },
+        {
+          "id": "ngb-arise",
+          "name": "Arise News",
+          "url": "https://www.arise.tv/feed/",
+          "default": false
+        },
+        {
+          "id": "ngb-businesspost",
+          "name": "Business Post Nigeria",
+          "url": "https://businesspost.ng/feed/",
+          "default": false
+        },
+        {
+          "id": "ngb-dailypost",
+          "name": "Daily Post Business",
+          "url": "https://dailypost.ng/business/feed/",
+          "default": false
+        },
+        {
+          "id": "ngb-economicconfidential",
+          "name": "Economic Confidential",
+          "url": "https://economicconfidential.com/feed/",
+          "default": false
+        },
+        {
+          "id": "ngb-hwmia",
+          "name": "How we made it in Africa",
+          "url": "https://www.howwemadeitinafrica.com/feed/",
+          "default": false
+        },
+        {
+          "id": "ngb-investorsking",
+          "name": "Investors King",
+          "url": "https://investorsking.com/feed/",
+          "default": false
+        },
+        {
+          "id": "ngb-legit",
+          "name": "Legit Business",
+          "url": "https://www.legit.ng/rss/business-economy.rss",
+          "default": false
+        },
+        {
+          "id": "ngb-newtelegraph",
+          "name": "New Telegraph Business",
+          "url": "https://newtelegraphng.com/category/business/feed/",
+          "default": false
+        },
+        {
+          "id": "ngb-shipsports",
+          "name": "Ships and Ports",
+          "url": "https://shipsandports.com.ng/feed/",
+          "default": false
+        },
+        {
+          "id": "ngb-tekedia",
+          "name": "Tekedia",
+          "url": "https://www.tekedia.com/feed/",
+          "default": false
+        },
+        {
+          "id": "ngb-thisday",
+          "name": "ThisDay Business",
+          "url": "https://www.thisdaylive.com/index.php/category/business/feed/",
+          "default": false
+        },
+        {
+          "id": "ngb-vanguard",
+          "name": "Vanguard Business",
+          "url": "https://www.vanguardngr.com/category/business/feed/",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "nigeria-tech",
+      "label": "Nigeria tech",
+      "sources": [
+        {
+          "id": "ngt-techcabal",
+          "name": "TechCabal",
+          "url": "https://techcabal.com/feed/",
+          "default": true
+        },
+        {
+          "id": "ngt-technext",
+          "name": "Technext",
+          "url": "https://technext24.com/feed/",
+          "default": true
+        },
+        {
+          "id": "ngt-legit",
+          "name": "Legit Tech",
+          "url": "https://www.legit.ng/rss/technology.rss",
+          "default": true
+        },
+        {
+          "id": "ngt-businessday",
+          "name": "BusinessDay Technology",
+          "url": "https://businessday.ng/category/technology/feed/",
+          "default": true
+        },
+        {
+          "id": "ngt-techeconomy",
+          "name": "TechEconomy",
+          "url": "https://techeconomy.ng/feed.xml",
+          "default": true
+        },
+        {
+          "id": "ngt-benjamindada",
+          "name": "Benjamin Dada",
+          "url": "https://benjamindada.com/feed/",
+          "default": false
+        },
+        {
+          "id": "ngt-businesspost-tech",
+          "name": "Business Post Tech",
+          "url": "https://businesspost.ng/category/technology/feed/",
+          "default": false
+        },
+        {
+          "id": "ngt-fintechnews",
+          "name": "Fintech News Africa",
+          "url": "https://fintechnews.africa/feed/",
+          "default": false
+        },
+        {
+          "id": "ngt-restofworld",
+          "name": "Rest of World",
+          "url": "https://restofworld.org/feed/",
+          "default": false
+        },
+        {
+          "id": "ngt-techinafrica",
+          "name": "Tech in Africa",
+          "url": "https://www.techinafrica.com/feed/",
+          "default": false
+        },
+        {
+          "id": "ngt-techcentral",
+          "name": "TechCentral (SA)",
+          "url": "https://techcentral.co.za/feed/",
+          "default": false
+        },
+        {
+          "id": "ngt-techmoran",
+          "name": "TechMoran",
+          "url": "https://techmoran.com/feed/",
+          "default": false
+        },
+        {
+          "id": "ngt-techtrendske",
+          "name": "TechTrends Kenya",
+          "url": "https://techtrendske.co.ke/feed/",
+          "default": false
+        },
+        {
+          "id": "ngt-tribune",
+          "name": "Tribune Technology",
+          "url": "https://tribuneonlineng.com/category/technology/feed/",
+          "default": false
+        },
+        {
+          "id": "ngt-vanguard",
+          "name": "Vanguard Technology",
+          "url": "https://www.vanguardngr.com/category/technology/feed/",
+          "default": false
+        },
+        {
+          "id": "ngt-ventureburn",
+          "name": "Ventureburn",
+          "url": "https://ventureburn.com/feed/",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "world",
+      "label": "World",
+      "sources": [
+        {
+          "id": "bbc-world",
+          "name": "BBC",
+          "url": "https://feeds.bbci.co.uk/news/world/rss.xml",
+          "default": true
+        },
+        {
+          "id": "guardian-world",
+          "name": "Guardian",
+          "url": "https://www.theguardian.com/world/rss",
+          "default": true
+        },
+        {
+          "id": "dw",
+          "name": "DW",
+          "url": "https://rss.dw.com/rdf/rss-en-all",
+          "default": true
+        },
+        {
+          "id": "world-abc-au",
+          "name": "ABC Australia World",
+          "url": "https://www.abc.net.au/news/feed/45910/rss.xml",
+          "default": false
+        },
+        {
+          "id": "world-abc",
+          "name": "ABC News",
+          "url": "https://feeds.abcnews.com/abcnews/internationalheadlines",
+          "default": false
+        },
+        {
+          "id": "world-africanews",
+          "name": "Africanews",
+          "url": "https://www.africanews.com/feed/rss",
+          "default": false
+        },
+        {
+          "id": "world-allafrica",
+          "name": "AllAfrica",
+          "url": "https://allafrica.com/tools/headlines/rdf/latest/headlines.rdf",
+          "default": false
+        },
+        {
+          "id": "world-bbc-africa",
+          "name": "BBC Africa",
+          "url": "https://feeds.bbci.co.uk/news/world/africa/rss.xml",
+          "default": false
+        },
+        {
+          "id": "world-bbc-asia",
+          "name": "BBC Asia",
+          "url": "https://feeds.bbci.co.uk/news/world/asia/rss.xml",
+          "default": false
+        },
+        {
+          "id": "world-bbc-europe",
+          "name": "BBC Europe",
+          "url": "https://feeds.bbci.co.uk/news/world/europe/rss.xml",
+          "default": false
+        },
+        {
+          "id": "world-bbc-latam",
+          "name": "BBC Latin America",
+          "url": "https://feeds.bbci.co.uk/news/world/latin_america/rss.xml",
+          "default": false
+        },
+        {
+          "id": "world-bbc-me",
+          "name": "BBC Middle East",
+          "url": "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml",
+          "default": false
+        },
+        {
+          "id": "world-cbc-world",
+          "name": "CBC World",
+          "url": "https://www.cbc.ca/webfeed/rss/rss-world",
+          "default": false
+        },
+        {
+          "id": "world-dawn",
+          "name": "Dawn",
+          "url": "https://www.dawn.com/feeds/home",
+          "default": false
+        },
+        {
+          "id": "world-globalvoices",
+          "name": "Global Voices",
+          "url": "https://globalvoices.org/feed/",
+          "default": false
+        },
+        {
+          "id": "world-guardian-africa",
+          "name": "Guardian Africa",
+          "url": "https://www.theguardian.com/world/africa/rss",
+          "default": false
+        },
+        {
+          "id": "world-guardian-americas",
+          "name": "Guardian Americas",
+          "url": "https://www.theguardian.com/world/americas/rss",
+          "default": false
+        },
+        {
+          "id": "world-guardian-asia",
+          "name": "Guardian Asia",
+          "url": "https://www.theguardian.com/world/asia/rss",
+          "default": false
+        },
+        {
+          "id": "world-guardian-europe",
+          "name": "Guardian Europe",
+          "url": "https://www.theguardian.com/world/europe-news/rss",
+          "default": false
+        },
+        {
+          "id": "world-guardian-me",
+          "name": "Guardian Middle East",
+          "url": "https://www.theguardian.com/world/middleeast/rss",
+          "default": false
+        },
+        {
+          "id": "world-koreaherald",
+          "name": "Korea Herald",
+          "url": "https://www.koreaherald.com/rss/kh_World",
+          "default": false
+        },
+        {
+          "id": "world-rappler",
+          "name": "Rappler",
+          "url": "https://www.rappler.com/feed/",
+          "default": false
+        },
+        {
+          "id": "world-rfi",
+          "name": "RFI",
+          "url": "https://www.rfi.fr/en/rss",
+          "default": false
+        },
+        {
+          "id": "world-thediplomat",
+          "name": "The Diplomat",
+          "url": "https://thediplomat.com/feed/",
+          "default": false
+        },
+        {
+          "id": "world-toi",
+          "name": "Times of India World",
+          "url": "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms",
+          "default": false
+        },
+        {
+          "id": "world-toi-israel",
+          "name": "Times of Israel",
+          "url": "https://www.timesofisrael.com/feed/",
+          "default": false
+        },
+        {
+          "id": "world-un",
+          "name": "UN News",
+          "url": "https://news.un.org/feed/subscribe/en/news/all/rss.xml",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "us",
+      "label": "US",
+      "sources": [
+        {
+          "id": "abc-us",
+          "name": "ABC News",
+          "url": "https://feeds.abcnews.com/abcnews/usheadlines",
+          "default": true
+        },
+        {
+          "id": "cbs-us",
+          "name": "CBS News",
+          "url": "https://www.cbsnews.com/latest/rss/us",
+          "default": true
+        },
+        {
+          "id": "guardian-us-news",
+          "name": "Guardian",
+          "url": "https://www.theguardian.com/us-news/rss",
+          "default": true
+        },
+        {
+          "id": "bbc-us",
+          "name": "BBC",
+          "url": "https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml",
+          "default": false
+        },
+        {
+          "id": "us-calmatters",
+          "name": "CalMatters",
+          "url": "https://calmatters.org/feed/",
+          "default": false
+        },
+        {
+          "id": "us-chalkbeat",
+          "name": "Chalkbeat",
+          "url": "https://www.chalkbeat.org/arc/outboundfeeds/rss/",
+          "default": false
+        },
+        {
+          "id": "us-fox",
+          "name": "Fox News US",
+          "url": "https://moxie.foxnews.com/google-publisher/us.xml",
+          "default": false
+        },
+        {
+          "id": "us-nbc",
+          "name": "NBC News",
+          "url": "https://feeds.nbcnews.com/nbcnews/public/us-news",
+          "default": false
+        },
+        {
+          "id": "us-nypost",
+          "name": "NY Post US",
+          "url": "https://nypost.com/news/feed/",
+          "default": false
+        },
+        {
+          "id": "us-stateline",
+          "name": "Stateline",
+          "url": "https://stateline.org/feed/",
+          "default": false
+        },
+        {
+          "id": "us-texastribune",
+          "name": "Texas Tribune",
+          "url": "https://www.texastribune.org/feeds/main/",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "business",
+      "label": "Business",
+      "sources": [
+        {
+          "id": "npr-business",
+          "name": "NPR",
+          "url": "https://feeds.npr.org/1006/rss.xml",
+          "default": true
+        },
+        {
+          "id": "guardian-business",
+          "name": "Guardian",
+          "url": "https://www.theguardian.com/us/business/rss",
+          "default": true
+        },
+        {
+          "id": "bbc-business",
+          "name": "BBC",
+          "url": "https://feeds.bbci.co.uk/news/business/rss.xml",
+          "default": true
+        },
+        {
+          "id": "abc-money",
+          "name": "ABC News",
+          "url": "https://feeds.abcnews.com/abcnews/moneyheadlines",
+          "default": false
+        },
+        {
+          "id": "b-cbc-business",
+          "name": "CBC Business",
+          "url": "https://www.cbc.ca/webfeed/rss/rss-business",
+          "default": false
+        },
+        {
+          "id": "b-cnbc",
+          "name": "CNBC Business",
+          "url": "https://www.cnbc.com/id/10001147/device/rss/rss.html",
+          "default": false
+        },
+        {
+          "id": "b-cnbc-econ",
+          "name": "CNBC Economy",
+          "url": "https://www.cnbc.com/id/20910258/device/rss/rss.html",
+          "default": false
+        },
+        {
+          "id": "b-cnbc-finance",
+          "name": "CNBC Finance",
+          "url": "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+          "default": false
+        },
+        {
+          "id": "b-cnbc-top",
+          "name": "CNBC Top News",
+          "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+          "default": false
+        },
+        {
+          "id": "b-crunchbase",
+          "name": "Crunchbase News",
+          "url": "https://news.crunchbase.com/feed/",
+          "default": false
+        },
+        {
+          "id": "b-dw-business",
+          "name": "DW Business",
+          "url": "https://rss.dw.com/rdf/rss-en-bus",
+          "default": false
+        },
+        {
+          "id": "b-economictimes",
+          "name": "Economic Times",
+          "url": "https://economictimes.indiatimes.com/rssfeedsdefault.cms",
+          "default": false
+        },
+        {
+          "id": "b-entrepreneur",
+          "name": "Entrepreneur",
+          "url": "https://www.entrepreneur.com/latest.rss",
+          "default": false
+        },
+        {
+          "id": "b-eu-startups",
+          "name": "EU-Startups",
+          "url": "https://www.eu-startups.com/feed/",
+          "default": false
+        },
+        {
+          "id": "b-euronews-biz",
+          "name": "Euronews Business",
+          "url": "https://www.euronews.com/rss?level=theme&name=business",
+          "default": false
+        },
+        {
+          "id": "b-guardian-business",
+          "name": "Guardian Business",
+          "url": "https://www.theguardian.com/uk/business/rss",
+          "default": false
+        },
+        {
+          "id": "b-inc42",
+          "name": "Inc42",
+          "url": "https://inc42.com/feed/",
+          "default": false
+        },
+        {
+          "id": "b-kellogg",
+          "name": "Kellogg Insight",
+          "url": "https://insight.kellogg.northwestern.edu/feed/rss",
+          "default": false
+        },
+        {
+          "id": "b-livemint",
+          "name": "Mint",
+          "url": "https://www.livemint.com/rss/news",
+          "default": false
+        },
+        {
+          "id": "b-motleyfool",
+          "name": "Motley Fool",
+          "url": "https://www.fool.com/feeds/index.aspx",
+          "default": false
+        },
+        {
+          "id": "b-npr-economy",
+          "name": "NPR Economy",
+          "url": "https://feeds.npr.org/1017/rss.xml",
+          "default": false
+        },
+        {
+          "id": "b-smallbiztrends",
+          "name": "Small Business Trends",
+          "url": "https://smallbiztrends.com/feed",
+          "default": false
+        },
+        {
+          "id": "b-conv-business",
+          "name": "The Conversation Business",
+          "url": "https://theconversation.com/us/business/articles.atom",
+          "default": false
+        },
+        {
+          "id": "b-voxeu",
+          "name": "VoxEU",
+          "url": "https://cepr.org/rss/vox-content",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "technology",
+      "label": "Technology",
+      "sources": [
+        {
+          "id": "ars-technica",
+          "name": "Ars Technica",
+          "url": "https://feeds.arstechnica.com/arstechnica/index",
+          "default": true
+        },
+        {
+          "id": "engadget",
+          "name": "Engadget",
+          "url": "https://www.engadget.com/rss.xml",
+          "default": true
+        },
+        {
+          "id": "guardian-tech",
+          "name": "Guardian",
+          "url": "https://www.theguardian.com/us/technology/rss",
+          "default": true
+        },
+        {
+          "id": "t-9to5google",
+          "name": "9to5Google",
+          "url": "https://9to5google.com/feed/",
+          "default": false
+        },
+        {
+          "id": "t-9to5mac",
+          "name": "9to5Mac",
+          "url": "https://9to5mac.com/feed/",
+          "default": false
+        },
+        {
+          "id": "t-androidauthority",
+          "name": "Android Authority",
+          "url": "https://www.androidauthority.com/feed/",
+          "default": false
+        },
+        {
+          "id": "t-androidcentral",
+          "name": "Android Central",
+          "url": "https://www.androidcentral.com/feed",
+          "default": false
+        },
+        {
+          "id": "t-androidpolice",
+          "name": "Android Police",
+          "url": "https://www.androidpolice.com/feed/",
+          "default": false
+        },
+        {
+          "id": "t-appleinsider",
+          "name": "AppleInsider",
+          "url": "https://appleinsider.com/rss/news/",
+          "default": false
+        },
+        {
+          "id": "t-aws",
+          "name": "AWS News Blog",
+          "url": "https://aws.amazon.com/blogs/aws/feed/",
+          "default": false
+        },
+        {
+          "id": "bbc-tech",
+          "name": "BBC",
+          "url": "https://feeds.bbci.co.uk/news/technology/rss.xml",
+          "default": false
+        },
+        {
+          "id": "t-bleeping",
+          "name": "BleepingComputer",
+          "url": "https://www.bleepingcomputer.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-ciodive",
+          "name": "CIO Dive",
+          "url": "https://www.ciodive.com/feeds/news/",
+          "default": false
+        },
+        {
+          "id": "t-cloudflare",
+          "name": "Cloudflare Blog",
+          "url": "https://blog.cloudflare.com/rss/",
+          "default": false
+        },
+        {
+          "id": "b-cnbc-tech",
+          "name": "CNBC Technology",
+          "url": "https://www.cnbc.com/id/19854910/device/rss/rss.html",
+          "default": false
+        },
+        {
+          "id": "e-cybersecdive",
+          "name": "Cybersecurity Dive",
+          "url": "https://www.cybersecuritydive.com/feeds/news/",
+          "default": false
+        },
+        {
+          "id": "t-darkreading",
+          "name": "Dark Reading",
+          "url": "https://www.darkreading.com/rss.xml",
+          "default": false
+        },
+        {
+          "id": "t-gizmodo",
+          "name": "Gizmodo",
+          "url": "https://gizmodo.com/rss",
+          "default": false
+        },
+        {
+          "id": "t-google-ai",
+          "name": "Google AI",
+          "url": "https://blog.google/technology/ai/rss/",
+          "default": false
+        },
+        {
+          "id": "t-deepmind",
+          "name": "Google DeepMind",
+          "url": "https://deepmind.google/blog/rss.xml",
+          "default": false
+        },
+        {
+          "id": "t-hn-best",
+          "name": "Hacker News (best)",
+          "url": "https://hnrss.org/best",
+          "default": false
+        },
+        {
+          "id": "t-infoq",
+          "name": "InfoQ",
+          "url": "https://feed.infoq.com/",
+          "default": false
+        },
+        {
+          "id": "t-krebs",
+          "name": "Krebs on Security",
+          "url": "https://krebsonsecurity.com/feed/",
+          "default": false
+        },
+        {
+          "id": "t-macrumors",
+          "name": "MacRumors",
+          "url": "https://feeds.macrumors.com/MacRumors-All",
+          "default": false
+        },
+        {
+          "id": "t-fowler",
+          "name": "Martin Fowler",
+          "url": "https://martinfowler.com/feed.atom",
+          "default": false
+        },
+        {
+          "id": "t-mashable",
+          "name": "Mashable",
+          "url": "https://mashable.com/feeds/rss/all",
+          "default": false
+        },
+        {
+          "id": "t-meta-eng",
+          "name": "Meta Engineering",
+          "url": "https://engineering.fb.com/feed/",
+          "default": false
+        },
+        {
+          "id": "t-msr",
+          "name": "Microsoft Research",
+          "url": "https://www.microsoft.com/en-us/research/feed/",
+          "default": false
+        },
+        {
+          "id": "npr-tech",
+          "name": "NPR",
+          "url": "https://feeds.npr.org/1019/rss.xml",
+          "default": false
+        },
+        {
+          "id": "t-nvidia-blog",
+          "name": "NVIDIA Blog",
+          "url": "https://blogs.nvidia.com/feed/",
+          "default": false
+        },
+        {
+          "id": "t-openai",
+          "name": "OpenAI",
+          "url": "https://openai.com/news/rss.xml",
+          "default": false
+        },
+        {
+          "id": "t-pcmag",
+          "name": "PCMag",
+          "url": "https://www.pcmag.com/feeds/rss/latest",
+          "default": false
+        },
+        {
+          "id": "t-phoronix",
+          "name": "Phoronix",
+          "url": "https://www.phoronix.com/rss.php",
+          "default": false
+        },
+        {
+          "id": "t-securityweek",
+          "name": "SecurityWeek",
+          "url": "https://www.securityweek.com/feed/",
+          "default": false
+        },
+        {
+          "id": "t-siliconangle",
+          "name": "SiliconANGLE",
+          "url": "https://siliconangle.com/feed/",
+          "default": false
+        },
+        {
+          "id": "t-simonw",
+          "name": "Simon Willison",
+          "url": "https://simonwillison.net/atom/everything/",
+          "default": false
+        },
+        {
+          "id": "t-slashgear",
+          "name": "SlashGear",
+          "url": "https://www.slashgear.com/feed/",
+          "default": false
+        },
+        {
+          "id": "t-stackoverflow",
+          "name": "Stack Overflow Blog",
+          "url": "https://stackoverflow.blog/feed/",
+          "default": false
+        },
+        {
+          "id": "t-techdirt",
+          "name": "Techdirt",
+          "url": "https://www.techdirt.com/feed/",
+          "default": false
+        },
+        {
+          "id": "t-techradar",
+          "name": "TechRadar",
+          "url": "https://www.techradar.com/rss",
+          "default": false
+        },
+        {
+          "id": "t-changelog",
+          "name": "The Changelog",
+          "url": "https://changelog.com/feed",
+          "default": false
+        },
+        {
+          "id": "t-thehackernews",
+          "name": "The Hacker News",
+          "url": "https://feeds.feedburner.com/TheHackersNews",
+          "default": false
+        },
+        {
+          "id": "t-themarkup",
+          "name": "The Markup",
+          "url": "https://themarkup.org/feeds/rss.xml",
+          "default": false
+        },
+        {
+          "id": "t-thenewstack",
+          "name": "The New Stack",
+          "url": "https://thenewstack.io/feed/",
+          "default": false
+        },
+        {
+          "id": "t-theverge",
+          "name": "The Verge",
+          "url": "https://www.theverge.com/rss/index.xml",
+          "default": false
+        },
+        {
+          "id": "t-tomshardware",
+          "name": "Tom's Hardware",
+          "url": "https://www.tomshardware.com/feeds/all",
+          "default": false
+        },
+        {
+          "id": "t-xda",
+          "name": "XDA Developers",
+          "url": "https://www.xda-developers.com/feed/",
+          "default": false
+        },
+        {
+          "id": "t-zdnet",
+          "name": "ZDNet",
+          "url": "https://www.zdnet.com/news/rss.xml",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "engineering",
+      "label": "Engineering & industry",
+      "sources": [
+        {
+          "id": "e-engineering",
+          "name": "Engineering.com",
+          "url": "https://www.engineering.com/feed/",
+          "default": true
+        },
+        {
+          "id": "e-interesting",
+          "name": "Interesting Engineering",
+          "url": "https://interestingengineering.com/feed",
+          "default": true
+        },
+        {
+          "id": "e-mfgdive",
+          "name": "Manufacturing Dive",
+          "url": "https://www.manufacturingdive.com/feeds/news/",
+          "default": true
+        },
+        {
+          "id": "e-scdive",
+          "name": "Supply Chain Dive",
+          "url": "https://www.supplychaindive.com/feeds/news/",
+          "default": true
+        },
+        {
+          "id": "e-newatlas",
+          "name": "New Atlas",
+          "url": "https://newatlas.com/index.rss",
+          "default": true
+        },
+        {
+          "id": "e-industryweek",
+          "name": "IndustryWeek",
+          "url": "https://www.industryweek.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D",
+          "default": true
+        },
+        {
+          "id": "e-3dprint",
+          "name": "3DPrint.com",
+          "url": "https://3dprint.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-aerospace-america",
+          "name": "Aerospace America",
+          "url": "https://aerospaceamerica.aiaa.org/feed/",
+          "default": false
+        },
+        {
+          "id": "e-aerospacetestingint",
+          "name": "Aerospace Testing",
+          "url": "https://www.aerospacetestinginternational.com/feed",
+          "default": false
+        },
+        {
+          "id": "e-automationworld",
+          "name": "Automation World",
+          "url": "https://www.automationworld.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D",
+          "default": false
+        },
+        {
+          "id": "e-azom",
+          "name": "AZoM",
+          "url": "https://www.azom.com/syndication.axd?format=rss",
+          "default": false
+        },
+        {
+          "id": "e-azorobotics",
+          "name": "AZoRobotics",
+          "url": "https://www.azorobotics.com/syndication.axd?format=rss",
+          "default": false
+        },
+        {
+          "id": "e-azosensors",
+          "name": "AZoSensors",
+          "url": "https://www.azosensors.com/syndication.axd?format=rss",
+          "default": false
+        },
+        {
+          "id": "e-cleantechnica",
+          "name": "CleanTechnica",
+          "url": "https://cleantechnica.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-constructiondive",
+          "name": "Construction Dive",
+          "url": "https://www.constructiondive.com/feeds/news/",
+          "default": false
+        },
+        {
+          "id": "e-controlglobal",
+          "name": "Control Global",
+          "url": "https://www.controlglobal.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D",
+          "default": false
+        },
+        {
+          "id": "e-dcvelocity",
+          "name": "DC Velocity",
+          "url": "https://www.dcvelocity.com/rss/articles",
+          "default": false
+        },
+        {
+          "id": "e-electrek",
+          "name": "Electrek",
+          "url": "https://electrek.co/feed/",
+          "default": false
+        },
+        {
+          "id": "e-electronicdesign",
+          "name": "Electronic Design",
+          "url": "https://www.electronicdesign.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D",
+          "default": false
+        },
+        {
+          "id": "e-electronicsweekly",
+          "name": "Electronics Weekly",
+          "url": "https://www.electronicsweekly.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-engineerlive",
+          "name": "Engineer Live",
+          "url": "https://www.engineerlive.com/rss.xml",
+          "default": false
+        },
+        {
+          "id": "e-freightwaves",
+          "name": "FreightWaves",
+          "url": "https://www.freightwaves.com/news/feed",
+          "default": false
+        },
+        {
+          "id": "e-gcaptain",
+          "name": "gCaptain",
+          "url": "https://gcaptain.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-hackaday",
+          "name": "Hackaday",
+          "url": "https://hackaday.com/blog/feed/",
+          "default": false
+        },
+        {
+          "id": "e-ieee-aerospace",
+          "name": "IEEE Spectrum Aerospace",
+          "url": "https://spectrum.ieee.org/feeds/topic/aerospace.rss",
+          "default": false
+        },
+        {
+          "id": "e-ieee-computing",
+          "name": "IEEE Spectrum Computing",
+          "url": "https://spectrum.ieee.org/feeds/topic/computing.rss",
+          "default": false
+        },
+        {
+          "id": "e-ieee-energy",
+          "name": "IEEE Spectrum Energy",
+          "url": "https://spectrum.ieee.org/feeds/topic/energy.rss",
+          "default": false
+        },
+        {
+          "id": "e-ieee-robotics",
+          "name": "IEEE Spectrum Robotics",
+          "url": "https://spectrum.ieee.org/feeds/topic/robotics.rss",
+          "default": false
+        },
+        {
+          "id": "e-iiot-world",
+          "name": "IIoT World",
+          "url": "https://www.iiot-world.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-industrialcyber",
+          "name": "Industrial Cyber",
+          "url": "https://industrialcyber.co/feed/",
+          "default": false
+        },
+        {
+          "id": "e-innovationnewsnetwork",
+          "name": "Innovation News Network",
+          "url": "https://www.innovationnewsnetwork.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-iot-analytics",
+          "name": "IoT Analytics",
+          "url": "https://iot-analytics.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-lean",
+          "name": "Lean Enterprise Institute",
+          "url": "https://www.lean.org/feed/",
+          "default": false
+        },
+        {
+          "id": "e-logviewpoints",
+          "name": "Logistics Viewpoints",
+          "url": "https://logisticsviewpoints.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-machinedesign",
+          "name": "Machine Design",
+          "url": "https://www.machinedesign.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D",
+          "default": false
+        },
+        {
+          "id": "e-mhl",
+          "name": "Material Handling & Logistics",
+          "url": "https://www.mhlnews.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D",
+          "default": false
+        },
+        {
+          "id": "e-mit-chem",
+          "name": "MIT Chemical Engineering",
+          "url": "https://news.mit.edu/rss/topic/chemical-engineering",
+          "default": false
+        },
+        {
+          "id": "e-mit-data",
+          "name": "MIT Data",
+          "url": "https://news.mit.edu/rss/topic/data",
+          "default": false
+        },
+        {
+          "id": "e-mit-energy",
+          "name": "MIT Energy",
+          "url": "https://news.mit.edu/rss/topic/energy",
+          "default": false
+        },
+        {
+          "id": "e-mit-industry",
+          "name": "MIT Industry",
+          "url": "https://news.mit.edu/rss/topic/industry",
+          "default": false
+        },
+        {
+          "id": "e-mit-mfg",
+          "name": "MIT Manufacturing",
+          "url": "https://news.mit.edu/rss/topic/manufacturing",
+          "default": false
+        },
+        {
+          "id": "e-mit-mech",
+          "name": "MIT Mechanical Engineering",
+          "url": "https://news.mit.edu/rss/topic/mechanical-engineering",
+          "default": false
+        },
+        {
+          "id": "e-mit-supply",
+          "name": "MIT Supply Chains",
+          "url": "https://news.mit.edu/rss/topic/supply-chains",
+          "default": false
+        },
+        {
+          "id": "e-nasa-tech",
+          "name": "NASA Technology",
+          "url": "https://www.nasa.gov/technology/feed/",
+          "default": false
+        },
+        {
+          "id": "e-newcivil",
+          "name": "New Civil Engineer",
+          "url": "https://www.newcivilengineer.com/rss/",
+          "default": false
+        },
+        {
+          "id": "e-nist",
+          "name": "NIST News",
+          "url": "https://www.nist.gov/news-events/news/rss.xml",
+          "default": false
+        },
+        {
+          "id": "e-ornl",
+          "name": "Oak Ridge National Lab",
+          "url": "https://www.ornl.gov/news/feed/",
+          "default": false
+        },
+        {
+          "id": "e-offshore-eng",
+          "name": "Offshore Engineer",
+          "url": "https://www.oedigital.com/news/latest?format=feed",
+          "default": false
+        },
+        {
+          "id": "e-oilprice",
+          "name": "OilPrice",
+          "url": "https://oilprice.com/rss/main",
+          "default": false
+        },
+        {
+          "id": "e-packagingdigest",
+          "name": "Packaging Digest",
+          "url": "https://www.packagingdigest.com/rss.xml",
+          "default": false
+        },
+        {
+          "id": "e-plantengineering",
+          "name": "Plant Engineering",
+          "url": "https://www.plantengineering.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-plantservices",
+          "name": "Plant Services",
+          "url": "https://www.plantservices.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D",
+          "default": false
+        },
+        {
+          "id": "e-powermag",
+          "name": "POWER Magazine",
+          "url": "https://www.powermag.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-processing",
+          "name": "Processing Magazine",
+          "url": "https://www.processingmagazine.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D",
+          "default": false
+        },
+        {
+          "id": "e-pv-magazine",
+          "name": "pv magazine",
+          "url": "https://www.pv-magazine.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-qualitydigest",
+          "name": "Quality Digest",
+          "url": "https://www.qualitydigest.com/rss.xml",
+          "default": false
+        },
+        {
+          "id": "e-renewableenergyworld",
+          "name": "Renewable Energy World",
+          "url": "https://www.renewableenergyworld.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-robohub",
+          "name": "Robohub",
+          "url": "https://robohub.org/feed/",
+          "default": false
+        },
+        {
+          "id": "e-sandia",
+          "name": "Sandia Labs",
+          "url": "https://newsreleases.sandia.gov/feed/",
+          "default": false
+        },
+        {
+          "id": "e-sciencedaily-eng",
+          "name": "ScienceDaily Engineering",
+          "url": "https://www.sciencedaily.com/rss/matter_energy/engineering.xml",
+          "default": false
+        },
+        {
+          "id": "e-sciencedaily-robotics",
+          "name": "ScienceDaily Robotics",
+          "url": "https://www.sciencedaily.com/rss/computers_math/robotics.xml",
+          "default": false
+        },
+        {
+          "id": "e-aviationweek",
+          "name": "Simple Flying",
+          "url": "https://simpleflying.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-smartindustry",
+          "name": "Smart Industry",
+          "url": "https://www.smartindustry.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D",
+          "default": false
+        },
+        {
+          "id": "e-scmr",
+          "name": "Supply Chain Management Review",
+          "url": "https://feeds.feedburner.com/scmr/latest",
+          "default": false
+        },
+        {
+          "id": "e-supplychainmovement",
+          "name": "Supply Chain Movement",
+          "url": "https://supplychainmovement.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-supplychainquarterly",
+          "name": "Supply Chain Quarterly",
+          "url": "https://www.supplychainquarterly.com/feeds/feed.rss",
+          "default": false
+        },
+        {
+          "id": "e-scbrain",
+          "name": "SupplyChainBrain",
+          "url": "https://www.supplychainbrain.com/rss/articles",
+          "default": false
+        },
+        {
+          "id": "e-techbriefs",
+          "name": "Tech Briefs",
+          "url": "https://www.techbriefs.com/index.php?component=com_ntb_tags&view=topic&topic_cluster=0&topic_tag=0&nav_cluster=61&nav_tag=0&format=feed&type=rss&limit=20",
+          "default": false
+        },
+        {
+          "id": "e-robotreport",
+          "name": "The Robot Report",
+          "url": "https://www.therobotreport.com/feed/",
+          "default": false
+        },
+        {
+          "id": "e-utilitydive",
+          "name": "Utility Dive",
+          "url": "https://www.utilitydive.com/feeds/news/",
+          "default": false
+        },
+        {
+          "id": "e-wastedive",
+          "name": "Waste Dive",
+          "url": "https://www.wastedive.com/feeds/news/",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "research",
+      "label": "Research",
+      "sources": [
+        {
+          "id": "r-mit-all",
+          "name": "MIT News",
+          "url": "https://news.mit.edu/rss/feed",
+          "default": true
+        },
+        {
+          "id": "r-ieee-spectrum",
+          "name": "IEEE Spectrum",
+          "url": "https://spectrum.ieee.org/feeds/feed.rss",
+          "default": true
+        },
+        {
+          "id": "r-sciencedaily",
+          "name": "ScienceDaily",
+          "url": "https://www.sciencedaily.com/rss/all.xml",
+          "default": true
+        },
+        {
+          "id": "r-quanta",
+          "name": "Quanta Magazine",
+          "url": "https://www.quantamagazine.org/feed/",
+          "default": true
+        },
+        {
+          "id": "r-conv-us-tech",
+          "name": "The Conversation Tech",
+          "url": "https://theconversation.com/us/technology/articles.atom",
+          "default": true
+        },
+        {
+          "id": "r-aws-ml",
+          "name": "AWS ML Blog",
+          "url": "https://aws.amazon.com/blogs/machine-learning/feed/",
+          "default": false
+        },
+        {
+          "id": "r-berkeley-eecs",
+          "name": "Berkeley EECS",
+          "url": "https://eecs.berkeley.edu/news/feed",
+          "default": false
+        },
+        {
+          "id": "r-lbl",
+          "name": "Berkeley Lab",
+          "url": "https://newscenter.lbl.gov/feed/",
+          "default": false
+        },
+        {
+          "id": "r-berkeley",
+          "name": "Berkeley News",
+          "url": "https://news.berkeley.edu/feed/",
+          "default": false
+        },
+        {
+          "id": "r-caltech",
+          "name": "Caltech",
+          "url": "https://www.caltech.edu/about/news/rss",
+          "default": false
+        },
+        {
+          "id": "r-cambridge",
+          "name": "Cambridge",
+          "url": "https://www.cam.ac.uk/news/feed",
+          "default": false
+        },
+        {
+          "id": "r-epfl",
+          "name": "EPFL",
+          "url": "https://actu.epfl.ch/feeds/rss/mediacom/en/",
+          "default": false
+        },
+        {
+          "id": "r-esa",
+          "name": "ESA",
+          "url": "https://www.esa.int/rssfeed/Our_Activities/Space_Engineering_Technology",
+          "default": false
+        },
+        {
+          "id": "r-gatech",
+          "name": "Georgia Tech",
+          "url": "https://news.gatech.edu/rss/all",
+          "default": false
+        },
+        {
+          "id": "r-google-research",
+          "name": "Google Research",
+          "url": "https://research.google/blog/rss/",
+          "default": false
+        },
+        {
+          "id": "r-harvard-gazette",
+          "name": "Harvard Gazette",
+          "url": "https://news.harvard.edu/gazette/feed/",
+          "default": false
+        },
+        {
+          "id": "r-ibm-research",
+          "name": "IBM Research",
+          "url": "https://research.ibm.com/rss",
+          "default": false
+        },
+        {
+          "id": "r-importai",
+          "name": "Import AI",
+          "url": "https://importai.substack.com/feed",
+          "default": false
+        },
+        {
+          "id": "r-interconnects",
+          "name": "Interconnects",
+          "url": "https://www.interconnects.ai/feed",
+          "default": false
+        },
+        {
+          "id": "r-latent",
+          "name": "Latent Space",
+          "url": "https://www.latent.space/feed",
+          "default": false
+        },
+        {
+          "id": "r-mit-ai",
+          "name": "MIT AI",
+          "url": "https://news.mit.edu/rss/topic/artificial-intelligence2",
+          "default": false
+        },
+        {
+          "id": "r-nvidia-research",
+          "name": "NVIDIA Developer Blog",
+          "url": "https://developer.nvidia.com/blog/feed/",
+          "default": false
+        },
+        {
+          "id": "r-oreilly",
+          "name": "O'Reilly Radar",
+          "url": "https://www.oreilly.com/radar/feed/",
+          "default": false
+        },
+        {
+          "id": "r-owid",
+          "name": "Our World in Data",
+          "url": "https://ourworldindata.org/atom.xml",
+          "default": false
+        },
+        {
+          "id": "r-pennstate",
+          "name": "Penn State",
+          "url": "https://www.psu.edu/news/rss/rss.xml",
+          "default": false
+        },
+        {
+          "id": "r-princeton",
+          "name": "Princeton",
+          "url": "https://www.princeton.edu/feed",
+          "default": false
+        },
+        {
+          "id": "r-purdue",
+          "name": "Purdue Engineering",
+          "url": "https://engineering.purdue.edu/Engr/AboutUs/News/feed/",
+          "default": false
+        },
+        {
+          "id": "r-sd-computers",
+          "name": "ScienceDaily Computers",
+          "url": "https://www.sciencedaily.com/rss/computers_math.xml",
+          "default": false
+        },
+        {
+          "id": "r-stanford",
+          "name": "Stanford News",
+          "url": "https://news.stanford.edu/feed/",
+          "default": false
+        },
+        {
+          "id": "r-conv-global",
+          "name": "The Conversation Global",
+          "url": "https://theconversation.com/global/articles.atom",
+          "default": false
+        },
+        {
+          "id": "r-conv-us-science",
+          "name": "The Conversation Science",
+          "url": "https://theconversation.com/us/topics/science-and-technology-1/articles.atom",
+          "default": false
+        },
+        {
+          "id": "r-ucla",
+          "name": "UCLA Newsroom",
+          "url": "https://newsroom.ucla.edu/rss.xml",
+          "default": false
+        },
+        {
+          "id": "r-undark",
+          "name": "Undark",
+          "url": "https://undark.org/feed/",
+          "default": false
+        },
+        {
+          "id": "r-utaustin",
+          "name": "UT Austin",
+          "url": "https://news.utexas.edu/feed/",
+          "default": false
+        },
+        {
+          "id": "r-washington",
+          "name": "UW News",
+          "url": "https://www.washington.edu/news/feed/",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "science",
+      "label": "Science",
+      "sources": [
+        {
+          "id": "sciencedaily",
+          "name": "ScienceDaily",
+          "url": "https://www.sciencedaily.com/rss/top/science.xml",
+          "default": true
+        },
+        {
+          "id": "live-science",
+          "name": "Live Science",
+          "url": "https://www.livescience.com/feeds/all",
+          "default": true
+        },
+        {
+          "id": "npr-science",
+          "name": "NPR",
+          "url": "https://feeds.npr.org/1007/rss.xml",
+          "default": true
+        },
+        {
+          "id": "sci-aeon",
+          "name": "Aeon",
+          "url": "https://aeon.co/feed.rss",
+          "default": false
+        },
+        {
+          "id": "sci-ars",
+          "name": "Ars Technica Science",
+          "url": "https://feeds.arstechnica.com/arstechnica/science",
+          "default": false
+        },
+        {
+          "id": "sci-astronomy",
+          "name": "Astronomy",
+          "url": "https://www.astronomy.com/feed/",
+          "default": false
+        },
+        {
+          "id": "sci-bbc-science",
+          "name": "BBC Science",
+          "url": "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
+          "default": false
+        },
+        {
+          "id": "sci-carbonbrief",
+          "name": "Carbon Brief",
+          "url": "https://www.carbonbrief.org/feed/",
+          "default": false
+        },
+        {
+          "id": "sci-earthsky",
+          "name": "EarthSky",
+          "url": "https://earthsky.org/feed/",
+          "default": false
+        },
+        {
+          "id": "sci-eos",
+          "name": "Eos",
+          "url": "https://eos.org/feed",
+          "default": false
+        },
+        {
+          "id": "sci-futurism",
+          "name": "Futurism",
+          "url": "https://futurism.com/feed",
+          "default": false
+        },
+        {
+          "id": "sci-grist",
+          "name": "Grist",
+          "url": "https://grist.org/feed/",
+          "default": false
+        },
+        {
+          "id": "sci-guardian-env",
+          "name": "Guardian Environment",
+          "url": "https://www.theguardian.com/environment/rss",
+          "default": false
+        },
+        {
+          "id": "sci-inside-climate",
+          "name": "Inside Climate News",
+          "url": "https://insideclimatenews.org/feed/",
+          "default": false
+        },
+        {
+          "id": "sci-mongabay",
+          "name": "Mongabay",
+          "url": "https://news.mongabay.com/feed/",
+          "default": false
+        },
+        {
+          "id": "sci-nasa",
+          "name": "NASA",
+          "url": "https://www.nasa.gov/feed/",
+          "default": false
+        },
+        {
+          "id": "sci-nautilus",
+          "name": "Nautilus",
+          "url": "https://nautil.us/feed/",
+          "default": false
+        },
+        {
+          "id": "sci-planetary",
+          "name": "Planetary Society",
+          "url": "https://www.planetary.org/rss/articles",
+          "default": false
+        },
+        {
+          "id": "sci-popsci",
+          "name": "Popular Science",
+          "url": "https://www.popsci.com/feed/",
+          "default": false
+        },
+        {
+          "id": "sci-quantamag-physics",
+          "name": "Quanta Physics",
+          "url": "https://www.quantamagazine.org/physics/feed/",
+          "default": false
+        },
+        {
+          "id": "sci-sciencenews",
+          "name": "Science News",
+          "url": "https://www.sciencenews.org/feed",
+          "default": false
+        },
+        {
+          "id": "e-sciencealert",
+          "name": "ScienceAlert",
+          "url": "https://www.sciencealert.com/feed",
+          "default": false
+        },
+        {
+          "id": "sci-smithsonian",
+          "name": "Smithsonian",
+          "url": "https://www.smithsonianmag.com/rss/latest_articles/",
+          "default": false
+        },
+        {
+          "id": "sci-space",
+          "name": "Space.com",
+          "url": "https://www.space.com/feeds/all",
+          "default": false
+        },
+        {
+          "id": "sci-spaceflightnow",
+          "name": "Spaceflight Now",
+          "url": "https://spaceflightnow.com/feed/",
+          "default": false
+        },
+        {
+          "id": "r-verge-science",
+          "name": "The Verge Science",
+          "url": "https://www.theverge.com/rss/science/index.xml",
+          "default": false
+        },
+        {
+          "id": "sci-universetoday",
+          "name": "Universe Today",
+          "url": "https://www.universetoday.com/feed/",
+          "default": false
+        },
+        {
+          "id": "sci-yale360",
+          "name": "Yale E360",
+          "url": "https://e360.yale.edu/feed.xml",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "health",
+      "label": "Health",
+      "sources": [
+        {
+          "id": "kff-health",
+          "name": "KFF Health News",
+          "url": "https://kffhealthnews.org/feed/",
+          "default": true
+        },
+        {
+          "id": "npr-health",
+          "name": "NPR",
+          "url": "https://feeds.npr.org/1128/rss.xml",
+          "default": true
+        },
+        {
+          "id": "sciencedaily-health",
+          "name": "ScienceDaily",
+          "url": "https://www.sciencedaily.com/rss/health_medicine.xml",
+          "default": true
+        },
+        {
+          "id": "h-everyday",
+          "name": "Everyday Health",
+          "url": "https://feeds.everydayhealth.com/google-discover.xml",
+          "default": false
+        },
+        {
+          "id": "h-fierce",
+          "name": "Fierce Healthcare",
+          "url": "https://www.fiercehealthcare.com/rss/xml",
+          "default": false
+        },
+        {
+          "id": "h-guardian",
+          "name": "Guardian",
+          "url": "https://www.theguardian.com/society/health/rss",
+          "default": false
+        },
+        {
+          "id": "h-healthcaredive",
+          "name": "Healthcare Dive",
+          "url": "https://www.healthcaredive.com/feeds/news/",
+          "default": false
+        },
+        {
+          "id": "h-healthline",
+          "name": "Healthline",
+          "url": "https://www.healthline.com/rss/health-news",
+          "default": false
+        },
+        {
+          "id": "h-nigeriahealthwatch",
+          "name": "Nigeria Health Watch",
+          "url": "https://articles.nigeriahealthwatch.com/feed/",
+          "default": false
+        },
+        {
+          "id": "h-premium-health",
+          "name": "Premium Times Health",
+          "url": "https://www.premiumtimesng.com/health/feed",
+          "default": false
+        },
+        {
+          "id": "h-conv",
+          "name": "The Conversation Health",
+          "url": "https://theconversation.com/us/health/articles.atom",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "sports",
+      "label": "Sports",
+      "sources": [
+        {
+          "id": "espn",
+          "name": "ESPN",
+          "url": "https://www.espn.com/espn/rss/news",
+          "default": true
+        },
+        {
+          "id": "guardian-sport",
+          "name": "Guardian",
+          "url": "https://www.theguardian.com/us/sport/rss",
+          "default": true
+        },
+        {
+          "id": "s-bbc-athletics",
+          "name": "BBC Athletics",
+          "url": "https://feeds.bbci.co.uk/sport/athletics/rss.xml",
+          "default": false
+        },
+        {
+          "id": "s-bbc-football",
+          "name": "BBC Football",
+          "url": "https://feeds.bbci.co.uk/sport/football/rss.xml",
+          "default": false
+        },
+        {
+          "id": "s-bbc-f1",
+          "name": "BBC Formula 1",
+          "url": "https://feeds.bbci.co.uk/sport/formula1/rss.xml",
+          "default": false
+        },
+        {
+          "id": "s-bbc",
+          "name": "BBC Sport",
+          "url": "https://feeds.bbci.co.uk/sport/rss.xml",
+          "default": false
+        },
+        {
+          "id": "s-bbc-tennis",
+          "name": "BBC Tennis",
+          "url": "https://feeds.bbci.co.uk/sport/tennis/rss.xml",
+          "default": false
+        },
+        {
+          "id": "s-cbs-nba",
+          "name": "CBS NBA",
+          "url": "https://www.cbssports.com/rss/headlines/nba/",
+          "default": false
+        },
+        {
+          "id": "s-cbs-soccer",
+          "name": "CBS Soccer",
+          "url": "https://www.cbssports.com/rss/headlines/soccer/",
+          "default": false
+        },
+        {
+          "id": "cbs-sports",
+          "name": "CBS Sports",
+          "url": "https://www.cbssports.com/rss/headlines/",
+          "default": false
+        },
+        {
+          "id": "s-completesports",
+          "name": "Complete Sports Nigeria",
+          "url": "https://www.completesportsnigeria.com/feed/",
+          "default": false
+        },
+        {
+          "id": "s-cyclingnews",
+          "name": "Cyclingnews",
+          "url": "https://www.cyclingnews.com/feeds/all",
+          "default": false
+        },
+        {
+          "id": "s-espn-nba",
+          "name": "ESPN NBA",
+          "url": "https://www.espn.com/espn/rss/nba/news",
+          "default": false
+        },
+        {
+          "id": "s-espn-nfl",
+          "name": "ESPN NFL",
+          "url": "https://www.espn.com/espn/rss/nfl/news",
+          "default": false
+        },
+        {
+          "id": "s-espn-soccer",
+          "name": "ESPN Soccer",
+          "url": "https://www.espn.com/espn/rss/soccer/news",
+          "default": false
+        },
+        {
+          "id": "s-fox",
+          "name": "Fox Sports",
+          "url": "https://www.foxsports.com/feedout/syndicatedContent?categoryId=0",
+          "default": false
+        },
+        {
+          "id": "s-legit",
+          "name": "Legit Sports",
+          "url": "https://www.legit.ng/rss/sports.rss",
+          "default": false
+        },
+        {
+          "id": "npr-sports",
+          "name": "NPR",
+          "url": "https://feeds.npr.org/1055/rss.xml",
+          "default": false
+        },
+        {
+          "id": "s-premiumtimes",
+          "name": "Premium Times Sports",
+          "url": "https://www.premiumtimesng.com/sports/feed",
+          "default": false
+        },
+        {
+          "id": "s-skysports",
+          "name": "Sky Sports",
+          "url": "https://www.skysports.com/rss/12040",
+          "default": false
+        },
+        {
+          "id": "s-soccernet",
+          "name": "Soccernet Nigeria",
+          "url": "https://soccernet.ng/feed",
+          "default": false
+        },
+        {
+          "id": "s-sportingnews",
+          "name": "Sporting News",
+          "url": "https://www.sportingnews.com/us/rss",
+          "default": false
+        },
+        {
+          "id": "s-tribune",
+          "name": "Tribune Sports",
+          "url": "https://tribuneonlineng.com/category/sports/feed/",
+          "default": false
+        },
+        {
+          "id": "s-vanguard",
+          "name": "Vanguard Sports",
+          "url": "https://www.vanguardngr.com/category/sports/feed/",
+          "default": false
+        },
+        {
+          "id": "s-yahoo",
+          "name": "Yahoo Sports",
+          "url": "https://sports.yahoo.com/rss/",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "entertainment",
+      "label": "Entertainment",
+      "sources": [
+        {
+          "id": "variety",
+          "name": "Variety",
+          "url": "https://variety.com/feed/",
+          "default": true
+        },
+        {
+          "id": "deadline",
+          "name": "Deadline",
+          "url": "https://deadline.com/feed/",
+          "default": true
+        },
+        {
+          "id": "hollywood-reporter",
+          "name": "Hollywood Reporter",
+          "url": "https://www.hollywoodreporter.com/feed/",
+          "default": true
+        },
+        {
+          "id": "en-slashfilm",
+          "name": "/Film",
+          "url": "https://www.slashfilm.com/feed/",
+          "default": false
+        },
+        {
+          "id": "en-avclub",
+          "name": "AV Club",
+          "url": "https://www.avclub.com/rss",
+          "default": false
+        },
+        {
+          "id": "bbc-entertainment",
+          "name": "BBC",
+          "url": "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml",
+          "default": false
+        },
+        {
+          "id": "en-bellanaija",
+          "name": "BellaNaija",
+          "url": "https://www.bellanaija.com/feed/",
+          "default": false
+        },
+        {
+          "id": "en-billboard",
+          "name": "Billboard",
+          "url": "https://www.billboard.com/feed/",
+          "default": false
+        },
+        {
+          "id": "en-collider",
+          "name": "Collider",
+          "url": "https://collider.com/feed/",
+          "default": false
+        },
+        {
+          "id": "en-consequence",
+          "name": "Consequence",
+          "url": "https://consequence.net/feed/",
+          "default": false
+        },
+        {
+          "id": "en-deadline-tv",
+          "name": "Deadline TV",
+          "url": "https://deadline.com/v/tv/feed/",
+          "default": false
+        },
+        {
+          "id": "en-eurogamer",
+          "name": "Eurogamer",
+          "url": "https://www.eurogamer.net/feed",
+          "default": false
+        },
+        {
+          "id": "en-gameinformer",
+          "name": "Game Informer",
+          "url": "https://www.gameinformer.com/rss.xml",
+          "default": false
+        },
+        {
+          "id": "en-gamespot",
+          "name": "GameSpot",
+          "url": "https://www.gamespot.com/feeds/mashup/",
+          "default": false
+        },
+        {
+          "id": "en-gamesradar",
+          "name": "GamesRadar",
+          "url": "https://www.gamesradar.com/rss/",
+          "default": false
+        },
+        {
+          "id": "guardian-culture",
+          "name": "Guardian",
+          "url": "https://www.theguardian.com/us/culture/rss",
+          "default": false
+        },
+        {
+          "id": "en-guardian-film",
+          "name": "Guardian Film",
+          "url": "https://www.theguardian.com/film/rss",
+          "default": false
+        },
+        {
+          "id": "en-guardian-games",
+          "name": "Guardian Games",
+          "url": "https://www.theguardian.com/games/rss",
+          "default": false
+        },
+        {
+          "id": "en-guardian-music",
+          "name": "Guardian Music",
+          "url": "https://www.theguardian.com/music/rss",
+          "default": false
+        },
+        {
+          "id": "en-guardian-tv",
+          "name": "Guardian TV",
+          "url": "https://www.theguardian.com/tv-and-radio/rss",
+          "default": false
+        },
+        {
+          "id": "en-ign",
+          "name": "IGN",
+          "url": "https://feeds.feedburner.com/ign/all",
+          "default": false
+        },
+        {
+          "id": "en-ign-movies",
+          "name": "IGN Movies",
+          "url": "https://feeds.feedburner.com/ign/movies-all",
+          "default": false
+        },
+        {
+          "id": "en-indiewire",
+          "name": "IndieWire",
+          "url": "https://www.indiewire.com/feed/",
+          "default": false
+        },
+        {
+          "id": "en-kotaku",
+          "name": "Kotaku",
+          "url": "https://kotaku.com/rss",
+          "default": false
+        },
+        {
+          "id": "en-legit",
+          "name": "Legit Entertainment",
+          "url": "https://www.legit.ng/rss/entertainment.rss",
+          "default": false
+        },
+        {
+          "id": "en-nme",
+          "name": "NME",
+          "url": "https://www.nme.com/feed",
+          "default": false
+        },
+        {
+          "id": "en-notjustok",
+          "name": "NotJustOK",
+          "url": "https://notjustok.com/feed/",
+          "default": false
+        },
+        {
+          "id": "en-npr-arts",
+          "name": "NPR Arts",
+          "url": "https://feeds.npr.org/1008/rss.xml",
+          "default": false
+        },
+        {
+          "id": "en-npr-music",
+          "name": "NPR Music",
+          "url": "https://feeds.npr.org/1039/rss.xml",
+          "default": false
+        },
+        {
+          "id": "en-pitchfork",
+          "name": "Pitchfork",
+          "url": "https://pitchfork.com/feed/feed-news/rss",
+          "default": false
+        },
+        {
+          "id": "en-polygon",
+          "name": "Polygon",
+          "url": "https://www.polygon.com/rss/index.xml",
+          "default": false
+        },
+        {
+          "id": "en-rps",
+          "name": "Rock Paper Shotgun",
+          "url": "https://www.rockpapershotgun.com/feed",
+          "default": false
+        },
+        {
+          "id": "en-rollingstone",
+          "name": "Rolling Stone",
+          "url": "https://www.rollingstone.com/feed/",
+          "default": false
+        },
+        {
+          "id": "en-screenrant",
+          "name": "Screen Rant",
+          "url": "https://screenrant.com/feed/",
+          "default": false
+        },
+        {
+          "id": "en-stereogum",
+          "name": "Stereogum",
+          "url": "https://www.stereogum.com/feed/",
+          "default": false
+        },
+        {
+          "id": "en-theplaylist",
+          "name": "The Playlist",
+          "url": "https://theplaylist.net/feed/",
+          "default": false
+        },
+        {
+          "id": "en-theverge-ent",
+          "name": "The Verge Entertainment",
+          "url": "https://www.theverge.com/rss/entertainment/index.xml",
+          "default": false
+        },
+        {
+          "id": "en-tvline",
+          "name": "TVLine",
+          "url": "https://tvline.com/feed/",
+          "default": false
+        },
+        {
+          "id": "en-vanguard-ent",
+          "name": "Vanguard Entertainment",
+          "url": "https://www.vanguardngr.com/category/entertainment/feed/",
+          "default": false
+        }
+      ]
+    },
+    {
+      "id": "oklahoma",
+      "label": "Oklahoma (local)",
+      "sources": [
+        {
+          "id": "oklahoma-watch",
+          "name": "Oklahoma Watch",
+          "url": "https://oklahomawatch.org/feed/",
+          "default": true
+        },
+        {
+          "id": "ok-voice",
+          "name": "Oklahoma Voice",
+          "url": "https://oklahomavoice.com/feed/",
+          "default": true
+        },
+        {
+          "id": "free-press-okc",
+          "name": "Free Press OKC",
+          "url": "https://freepressokc.com/feed/",
+          "default": true
+        },
+        {
+          "id": "ok-journalrecord",
+          "name": "Journal Record",
+          "url": "https://journalrecord.com/feed/",
+          "default": false
+        },
+        {
+          "id": "ok-kjrh",
+          "name": "KJRH",
+          "url": "https://www.kjrh.com/news.rss",
+          "default": false
+        },
+        {
+          "id": "ok-kten",
+          "name": "KTEN",
+          "url": "https://www.kten.com/search/?f=rss&t=article&c=news&l=50&s=start_time&sd=desc",
+          "default": false
+        },
+        {
+          "id": "ok-nondoc",
+          "name": "NonDoc",
+          "url": "https://nondoc.com/feed/",
+          "default": false
+        },
+        {
+          "id": "ok-gazette",
+          "name": "Oklahoma Gazette",
+          "url": "https://www.okgazette.com/feed/",
+          "default": false
+        },
+        {
+          "id": "ok-okpolicy",
+          "name": "Oklahoma Policy Institute",
+          "url": "https://okpolicy.org/feed/",
+          "default": false
+        },
+        {
+          "id": "ok-ou-daily",
+          "name": "OU Daily",
+          "url": "https://www.oudaily.com/search/?f=rss&t=article&l=25",
+          "default": false
+        },
+        {
+          "id": "ok-tulsaflyer",
+          "name": "Tulsa Flyer",
+          "url": "https://tulsaflyer.org/feed/",
+          "default": false
+        }
+      ]
+    }
   ]
 }

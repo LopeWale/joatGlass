@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import urllib.error
 
 import pytest
 
@@ -17,6 +18,12 @@ from joat.services.news import (
 )
 
 NOW = 1_800_000_000.0
+#: A story as long as the gate wants (300 words); the tidy step leaves it be.
+ARTICLE = ("The council met on Tuesday and voted to widen the bridge. " * 30).strip()
+
+
+def full_story(url: str) -> tuple[str, str]:
+    return "A story", ARTICLE
 #: The technology and sports defaults (news_sources.json), in catalog order.
 TECH = tuple(s.url for s in CATALOG["technology"] if s.default)
 SPORT = tuple(s.url for s in CATALOG["sports"] if s.default)
@@ -109,14 +116,14 @@ class TestCatalog:
 
     async def test_rows_name_the_catalog_publisher_not_the_feed_title(self, tmp_path: Path) -> None:
         path = tmp_path / "news.json"
-        path.write_text(json.dumps({"categories": ["world"], "sources": ["cbs-world"]}))
+        path.write_text(json.dumps({"categories": ["top"], "sources": ["cbs-news"]}))
 
         def fake_feed(url: str, category: str) -> list[Headline]:
-            # CBS titles this feed "World"; the row must say "CBS News".
+            # The feed calls itself "World"; the row must say "CBS News".
             return [Headline(title="A story", link="https://cbs.example/1", source="World",
                              category=category, published_at=NOW, guid="1")]
 
-        service = NewsService(path, fetch_feed=fake_feed, clock=lambda: NOW)
+        service = NewsService(path, fetch_feed=fake_feed, fetch_article=full_story, clock=lambda: NOW)
         await service.refresh_once()
         assert [h.source for h in service.headlines] == ["CBS News"]
 
@@ -157,13 +164,13 @@ async def test_the_feeds_wording_of_the_headline_is_not_the_first_paragraph(tmp_
 
     service = NewsService(
         tmp_path / "news.json", fetch_feed=fake_feed, clock=lambda: NOW,
-        fetch_article=lambda url: ("Starlink: Musk points at the US government", f"{feed_title}\n\nThe story."),
+        fetch_article=lambda url: ("Starlink: Musk points at the US government", f"{feed_title}\n\n{ARTICLE}"),
     )
     await service.refresh_once()
     reader = await service.open(0)
     assert reader is not None
     assert reader.headline == "Starlink: Musk points at the US government"
-    assert "".join(reader.pages).strip() == "The story."
+    assert "".join(reader.pages).strip() == ARTICLE
 
 
 class TestRows:
@@ -203,7 +210,7 @@ def headline(title: str, *, source: str = "BBC", age: float = 60.0, link: str | 
 
 class TestService:
     async def test_refresh_merges_feeds_newest_first_and_dedupes_the_same_story(self, tmp_path: Path) -> None:
-        bbc, npr, google = TECH
+        bbc, npr, google = TECH[:3]
         svc = service(tmp_path, {
             bbc: [headline("Apple raises prices", age=600)],
             npr: [headline("Rover lands on Mars", source="NPR", age=60)],
@@ -217,24 +224,23 @@ class TestService:
         assert svc.fetched_at == NOW
 
     async def test_one_dead_feed_does_not_empty_the_tab(self, tmp_path: Path) -> None:
-        bbc, _npr, _google = TECH
+        bbc, _npr, _google = TECH[:3]
         svc = service(tmp_path, {bbc: [headline("Only story")]})
         assert await svc.refresh_once() == 1
         # A partial pass keeps the surviving feed's rows AND says so on the
         # first row (the audit's N1: nonempty snapshots hid the failure).
-        assert svc.snapshot().rows == (
-            "[!] Some feeds unavailable · partial list", f"[1m] Only story · {TECH_NAME}",
-        )
-        assert svc.partial is True and svc.last_error is None
-        # A tap counts that row; opening counts headlines.
-        assert svc.status_rows == 1
+        # The feeds that answered are the list; a dead one is not a warning
+        # row (2026-10-15: the wearer asked why an unavailable feed was used).
+        assert svc.snapshot().rows == (f"[1m] Only story · {TECH_NAME}",)
+        assert svc.last_error is None
+        assert svc.status_rows == 0
 
     async def test_a_dead_feed_is_logged_by_host_and_status(self, tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
         # "category=custom (HTTPError)" was logged ~1,900 times without
         # saying which of four custom feeds was dead.
         import urllib.error
 
-        bbc, _npr, _google = TECH
+        bbc, _npr, _google = TECH[:3]
 
         def fetch(url: str, category: str) -> list[Headline]:
             if url == bbc:
@@ -252,7 +258,7 @@ class TestService:
         assert all("/" not in line.split("host=", 1)[1].split(" ", 1)[0] for line in lines)
 
     async def test_all_feeds_dead_keeps_yesterdays_headlines(self, tmp_path: Path) -> None:
-        bbc, _npr, _google = TECH
+        bbc, _npr, _google = TECH[:3]
         svc = service(tmp_path, {bbc: [headline("Kept")]})
         await svc.refresh_once()
         fetched_at = svc.fetched_at
@@ -272,7 +278,7 @@ class TestService:
         assert svc.snapshot().empty == "Feeds unavailable — hold to retry."
 
     async def test_opening_a_headline_reads_the_article_into_pages(self, tmp_path: Path) -> None:
-        bbc, _npr, _google = TECH
+        bbc, _npr, _google = TECH[:3]
         svc = service(tmp_path, {bbc: [headline("Apple raises prices", age=120)]})
         await svc.refresh_once()
         reader = await svc.open(0)
@@ -284,22 +290,23 @@ class TestService:
         assert len(reader.pages) > 1
         assert await svc.open(3) is None
 
-    async def test_an_unreadable_article_still_opens_with_its_headline(self, tmp_path: Path) -> None:
-        bbc, _npr, _google = TECH
-        svc = service(tmp_path, {bbc: [headline("Paywalled")]})
+    async def test_a_story_whose_read_was_lost_still_opens_with_its_headline(self, tmp_path: Path) -> None:
+        bbc, _npr, _google = TECH[:3]
+        svc = service(tmp_path, {bbc: [headline("Lost read")]})
         await svc.refresh_once()
+        svc._articles.clear()
         svc._fetch_article = lambda url: (_ for _ in ()).throw(OSError())  # type: ignore[assignment]
         reader = await svc.open(0)
         assert reader is not None
-        assert reader.headline == "Paywalled"
+        assert reader.headline == "Lost read"
         assert reader.pages[0].startswith("The article text could not be read")
 
     @pytest.mark.parametrize("body", [
-        "  First  paragraph\r\n\r\n" + "界" * 440 + "\r\n  LATER MARKER  ",
-        "🙂" * 320 + "  LATER MARKER\n",
+        ARTICLE + "\n\n  First  paragraph\r\n\r\n" + "界" * 440 + "\r\n  LATER MARKER  ",
+        ARTICLE + "\n\n" + "🙂" * 320 + "  LATER MARKER\n",
     ])
     async def test_article_reader_retains_exact_fetched_text(self, tmp_path: Path, body: str) -> None:
-        bbc, _npr, _google = TECH
+        bbc, _npr, _google = TECH[:3]
         svc = service(tmp_path, {bbc: [headline("Unicode article")]})
         svc._fetch_article = lambda url: ("Unicode article", body)  # type: ignore[assignment]
         await svc.refresh_once()
@@ -324,30 +331,11 @@ class TestService:
         assert [h.title for h in svc.headlines] == ["Sport"]
 
     async def test_spoken_headlines_come_from_the_cache_numbered(self, tmp_path: Path) -> None:
-        bbc, _npr, _google = TECH
+        bbc, _npr, _google = TECH[:3]
         svc = service(tmp_path, {bbc: [headline("One"), headline("Two", age=120)]})
         assert svc.spoken_headlines() == "I don't have any headlines yet."
         await svc.refresh_once()
         assert svc.spoken_headlines() == f"Here are the headlines. 1. One from {TECH_NAME}. 2. Two from {TECH_NAME}."
-
-
-def test_summary_text_decodes_entities_and_breaks_related_coverage_rows() -> None:
-    """A Google News summary is an <ol> of related coverage joined by
-    &nbsp;&nbsp; — it must reach the glass as decoded rows, never as a
-    run-on line with literal entities (observed on the simulator)."""
-    from joat.services.news import _summary_text
-
-    html = (
-        '<ol><li><a href="x">Trump tells U.N. he could &#8216;annihilate&#8217; Iran</a>'
-        "&nbsp;&nbsp;<font color=\"#6f6f6f\">NBC News</font></li>"
-        '<li><a href="y">Live updates: Trump speaks at UNGA</a>&nbsp;&nbsp;<font>CNN</font></li></ol>'
-    )
-    assert _summary_text(html) == (
-        "Trump tells U.N. he could ‘annihilate’ Iran NBC News\n"
-        "Live updates: Trump speaks at UNGA CNN"
-    )
-    assert "&nbsp;" not in _summary_text(html)
-    assert _summary_text("<p>One &amp; two</p>") == "One & two"
 
 
 class TestTidyArticle:
@@ -497,6 +485,81 @@ class TestTidyArticle:
             "Catch these stories and more on the latest episode."
         )
 
+    def test_invisible_characters_never_reach_the_glasses(self, monkeypatch) -> None:
+        # Peoples Gazette seeds its headlines with zero-width characters.
+        from joat.services.news import tidy_article, tidy_title
+
+        noisy = "Gov. Fintiri \u200b\u200c\u2060\u200d\u200bsuggests solutions\u00ad now"
+        assert tidy_title(noisy) == "Gov. Fintiri suggests solutions now"
+        assert tidy_article(
+            "Para\u200bgraph one.\n\nPlease email us at [email protected].\n\nThanks for reading the story."
+        ) == "Paragraph one.\n\nPlease email us at (email hidden).\n\nThanks for reading the story."
+        # A contact line that closes a release is not the story.
+        assert tidy_article("Paragraph one.\n\nAmba Mpoke-Bigg; email: [email protected]") == "Paragraph one."
+        feed = (b'<?xml version="1.0"?><rss version="2.0"><channel><title>Gazette</title>'
+                b"<item><title>Gov. Fintiri \xe2\x80\x8b\xe2\x80\x8csuggests solutions</title>"
+                b"<link>https://gazette.example/1</link></item></channel></rss>")
+        monkeypatch.setattr("joat.services.news._get", lambda url, accept: feed)
+        assert [h.title for h in fetch_feed("https://gazette.example/rss", "x", now=NOW)] == [
+            "Gov. Fintiri suggests solutions"
+        ]
+
+    def test_bylines_kickers_and_related_story_blocks_are_not_the_story(self) -> None:
+        # Nigerian and African publishers' pages, 2026-10-15.
+        from joat.services.news import tidy_article
+
+        raw = "\n".join([
+            "Economy",
+            "By Emmanuella Opara | October 14th 2026",
+            "Nigeria's headline inflation fell to 14.63 per cent in September from 15.39 per cent a month earlier.",
+            "Also read: CBN holds interest rate at 26.5% as inflation eases",
+            "Food inflation stood at 19.59 per cent, the statistics bureau said on Thursday.",
+            "Discover more from Premium Times Nigeria",
+            "Source: Legit.ng",
+        ])
+        assert tidy_article(raw) == (
+            "Nigeria's headline inflation fell to 14.63 per cent in September from 15.39 per cent a month earlier."
+            "\n\nFood inflation stood at 19.59 per cent, the statistics bureau said on Thursday."
+        )
+        sidebar = "\n".join([
+            "From Isaac Anumihe, Abuja",
+            "The governor urged border agencies to share intelligence and to fund joint patrols this year.",
+            "(NAN)",
+            "More from Peoples Gazette",
+            "Independence: NBA urges Nigerians to expect better future",
+            "Politics",
+        ])
+        assert tidy_article(sidebar) == (
+            "The governor urged border agencies to share intelligence and to fund joint patrols this year."
+            "\n\n(NAN)"
+        )
+        # A short opening sentence is a story, not a kicker.
+        assert tidy_article("It rained.\n\nThe council met on Tuesday and voted to widen the bridge.") == (
+            "It rained.\n\nThe council met on Tuesday and voted to widen the bridge."
+        )
+
+    def test_the_end_matter_of_trade_and_tech_publishers_closes_the_story(self) -> None:
+        # Technology, business, engineering and research pages, 2026-10-15.
+        from joat.services.news import tidy_article
+
+        story = [
+            "Dive Brief:",
+            "The company has invested $500,000 in a workforce nonprofit's first technician training program.",
+            "It is scheduled to launch in the Milwaukee area next year, the company said on Wednesday.",
+            "- How to Build EV Motors Without Rare Earth Elements ›",
+            "Reviewers were split on whether the new design would hold up under heavy daily use.",
+        ]
+        kept = "\n\n".join([story[1], story[2], story[4]])
+        for tail in (
+            ["About the Author", "Jill Jusko", "Leaders relevant to this article:"],
+            ["© 2026 Bloomberg L.P.", "RELATED CONTENT", "Timely, incisive articles delivered to your inbox."],
+            ["hotaru251 good news for AMD!Reply", "A later comment that is never the story."],
+            ["Filed Under: competition, satellite", "Companies: at&t, spacex"],
+            ["FTC: We use income earning auto affiliate links. More."],
+        ):
+            assert tidy_article("\n".join([*story, *tail])) == kept, tail
+        assert tidy_article("Table of Contents\nfrom the this-is-not-going dept\n" + story[2]) == story[2]
+
     def test_the_title_loses_only_the_publishers_own_name(self) -> None:
         from joat.services.news import tidy_title
 
@@ -506,3 +569,240 @@ class TestTidyArticle:
         )
         # A dash that is part of the headline stays.
         assert tidy_title("Rates hold - for now", "Example") == "Rates hold - for now"
+
+
+class TestReadableGate:
+    """2026-10-15: "if a feed is not available, why is it used for the news?"
+    A headline is listed only after its article was read in full."""
+
+    def test_the_gate_wants_a_whole_story_and_no_paywall_wording(self) -> None:
+        from joat.services.news import is_readable
+
+        assert is_readable(ARTICLE)
+        assert not is_readable("Short stub. " * 20)  # 40 words
+        assert not is_readable(ARTICLE + "\n\nSubscribe to continue reading this article.")
+        # A long story that merely mentions subscribing mid-way is still a story.
+        assert is_readable(f"{ARTICLE}\n\nHe said readers should subscribe to continue reading.\n\n{ARTICLE * 2}")
+        # Text without spaces is sized by characters.
+        assert is_readable("界" * 900)
+        assert not is_readable("界" * 300)
+
+    async def test_stubs_walls_and_unreadable_pages_are_not_listed(self, tmp_path: Path) -> None:
+        bbc, _npr, _google = TECH[:3]
+        pages = {
+            "https://x/Whole": ("Whole", ARTICLE),
+            "https://x/Stub": ("Stub", "Watch the video. " * 10),
+            "https://x/Wall": ("Wall", ARTICLE[:600] + "\n\nSubscribe to continue reading."),
+        }
+
+        def fetch_article(url: str) -> tuple[str, str]:
+            if url in pages:
+                return pages[url]
+            raise OSError("blocked")
+
+        svc = service(tmp_path, {bbc: [
+            headline("Whole", age=10, link="https://x/Whole"),
+            headline("Stub", age=20, link="https://x/Stub"),
+            headline("Wall", age=30, link="https://x/Wall"),
+            headline("Blocked", age=40, link="https://x/Blocked"),
+        ]})
+        svc._fetch_article = fetch_article  # type: ignore[assignment]
+        assert await svc.refresh_once() == 1
+        assert [h.title for h in svc.headlines] == ["Whole"]
+
+    async def test_a_feed_with_nothing_readable_says_so_not_unavailable(self, tmp_path: Path) -> None:
+        bbc, _npr, _google = TECH[:3]
+        svc = service(tmp_path, {bbc: [headline("Paywalled")]})
+        svc._fetch_article = lambda url: ("Paywalled", "Subscribers only.")  # type: ignore[assignment]
+        assert await svc.refresh_once() == 0
+        assert svc.last_error is None
+        assert svc.snapshot().empty == "No stories readable in full right now — hold to retry."
+
+    async def test_a_listed_story_opens_from_what_the_pass_read(self, tmp_path: Path) -> None:
+        bbc, _npr, _google = TECH[:3]
+        svc = service(tmp_path, {bbc: [headline("Apple raises prices")]})
+        calls: list[str] = []
+
+        def fetch_article(url: str) -> tuple[str, str]:
+            calls.append(url)
+            return "Apple raises prices", ARTICLE
+
+        svc._fetch_article = fetch_article  # type: ignore[assignment]
+        await svc.refresh_once()
+        assert len(calls) == 1
+        reader = await svc.open(0)
+        assert reader is not None and "".join(reader.pages).strip() == ARTICLE
+        # Opening costs nothing, and the next pass does not read it again.
+        await svc.refresh_once()
+        assert len(calls) == 1
+
+    async def test_a_story_that_cannot_be_read_is_not_asked_again_at_once(self, tmp_path: Path) -> None:
+        bbc, _npr, _google = TECH[:3]
+        svc = service(tmp_path, {bbc: [headline("Stub")]})
+        calls: list[str] = []
+
+        def fetch_article(url: str) -> tuple[str, str]:
+            calls.append(url)
+            return "Stub", "Watch the video."
+
+        svc._fetch_article = fetch_article  # type: ignore[assignment]
+        await svc.refresh_once()
+        await svc.refresh_once()
+        assert len(calls) == 1
+
+    async def test_a_slow_network_is_not_a_verdict_on_the_page(self, tmp_path: Path) -> None:
+        bbc, _npr, _google = TECH[:3]
+        svc = service(tmp_path, {bbc: [headline("Flaky")]})
+        outcomes = [TimeoutError("slow"), ("Flaky", ARTICLE)]
+
+        def fetch_article(url: str) -> tuple[str, str]:
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        svc._fetch_article = fetch_article  # type: ignore[assignment]
+        assert await svc.refresh_once() == 0
+        assert await svc.refresh_once() == 1  # not remembered as unreadable
+
+    async def test_the_clock_stops_new_reads_and_keeps_the_list_the_wearer_has(self, tmp_path: Path) -> None:
+        bbc, _npr, _google = TECH[:3]
+        svc = service(tmp_path, {bbc: [headline("Kept")]})
+        await svc.refresh_once()
+        assert [h.title for h in svc.headlines] == ["Kept"]
+        svc._articles.clear()
+        svc._verify_deadline_s = 0.0
+        calls: list[str] = []
+        svc._fetch_article = lambda url: calls.append(url) or ("Kept", ARTICLE)  # type: ignore[assignment,func-returns-value]
+        await svc.refresh_once()
+        # Out of time before any read: nothing fetched, nothing replaced.
+        assert calls == []
+        assert [h.title for h in svc.headlines] == ["Kept"]
+        assert svc._incomplete is True
+
+
+def subjects_service(tmp_path: Path, feeds: dict[str, list[Headline]], categories: list[str], **kwargs) -> NewsService:
+    def fetch(url: str, category: str) -> list[Headline]:
+        if url not in feeds:
+            raise OSError("down")
+        return [Headline(
+            title=h.title, link=h.link, source=h.source, category=category,
+            published_at=h.published_at, guid=h.guid,
+        ) for h in feeds[url]]
+
+    (tmp_path / "news.json").write_text(json.dumps({"categories": categories}))
+    return NewsService(tmp_path / "news.json", fetch_feed=fetch, fetch_article=full_story, clock=lambda: NOW, **kwargs)
+
+
+class TestBalance:
+    async def test_the_list_is_shared_evenly_across_subjects_newest_first(self, tmp_path: Path) -> None:
+        tech, sport = TECH[0], SPORT[0]
+        svc = subjects_service(tmp_path, {
+            tech: [headline(f"Tech {n}", age=100 + n) for n in range(15)],
+            sport: [headline(f"Sport {n}", age=1 + n) for n in range(15)],
+        }, ["technology", "sports"], max_headlines=10)
+        assert await svc.refresh_once() == 10
+        titles = [h.title for h in svc.headlines]
+        assert sorted(title.split()[0] for title in titles) == ["Sport"] * 5 + ["Tech"] * 5
+        # Sport is all newer than Tech, so it leads; within a subject, newest first.
+        assert titles[:5] == [f"Sport {n}" for n in range(5)]
+        assert titles[5:] == [f"Tech {n}" for n in range(5)]
+
+    async def test_a_subject_with_few_stories_gives_its_places_to_the_rest(self, tmp_path: Path) -> None:
+        tech, sport = TECH[0], SPORT[0]
+        svc = subjects_service(tmp_path, {
+            tech: [headline("Tech 0", age=500), headline("Tech 1", age=600)],
+            sport: [headline(f"Sport {n}", age=1 + n) for n in range(20)],
+        }, ["technology", "sports"], max_headlines=10)
+        assert await svc.refresh_once() == 10
+        titles = [h.title for h in svc.headlines]
+        assert sum(title.startswith("Tech") for title in titles) == 2
+        assert sum(title.startswith("Sport") for title in titles) == 8
+
+    async def test_one_chatty_feed_does_not_fill_a_subject(self, tmp_path: Path) -> None:
+        a, b = (s.url for s in CATALOG["technology"][:2])
+        config = {"categories": ["technology"], "sources": [s.id for s in CATALOG["technology"][:2]]}
+        (tmp_path / "news.json").write_text(json.dumps(config))
+
+        def fetch(url: str, category: str) -> list[Headline]:
+            if url == a:
+                return [headline(f"A {n}", age=1 + n) for n in range(30)]
+            return [headline(f"B {n}", age=500 + n) for n in range(30)]
+
+        svc = NewsService(tmp_path / "news.json", fetch_feed=fetch, fetch_article=full_story,
+                          clock=lambda: NOW, max_headlines=9)
+        await svc.refresh_once()
+        titles = [h.title for h in svc.headlines]
+        assert len(titles) == 9
+        # Three each from one feed's newest would have been all A; the cap
+        # (a third of the share, at least two) leaves room for the other.
+        assert sum(title.startswith("B") for title in titles) >= 3
+
+
+class TestFeedHealth:
+    async def test_a_feed_that_keeps_failing_sits_out_then_returns_when_asked(self, tmp_path: Path) -> None:
+        bbc, npr, _google = TECH[:3]
+        calls: list[str] = []
+        state = {"npr": "down"}
+
+        def fetch(url: str, category: str) -> list[Headline]:
+            calls.append(url)
+            if url == bbc:
+                return [headline("Story")]
+            if url == npr and state["npr"] == "up":
+                return [headline("Second", source="NPR")]
+            raise OSError("down")
+
+        svc = service(tmp_path, {})
+        svc._fetch_feed = fetch  # type: ignore[assignment]
+        for _ in range(3):
+            await svc.refresh_once()
+        assert npr in [url for url, _why in svc.benched_feeds]
+        calls.clear()
+        await svc.refresh_once()
+        assert npr not in calls and bbc in calls
+        # The wearer asked: try everything again.
+        state["npr"] = "up"
+        await svc.refresh_once(force=True)
+        assert npr in calls
+        assert "Second" in [h.title for h in svc.headlines]
+        assert npr not in [url for url, _why in svc.benched_feeds]
+
+    async def test_every_feed_failing_at_once_is_the_network_not_the_feeds(self, tmp_path: Path) -> None:
+        bbc, _npr, _google = TECH[:3]
+        svc = service(tmp_path, {bbc: [headline("Kept")]})
+        await svc.refresh_once()
+        svc._fetch_feed = lambda url, category: (_ for _ in ()).throw(OSError())  # type: ignore[assignment]
+        for _ in range(5):
+            await svc.refresh_once()
+        assert svc.benched_feeds == ()
+        assert [h.title for h in svc.headlines] == ["Kept"]
+
+    async def test_a_feed_whose_stories_never_read_is_benched_for_a_day(self, tmp_path: Path) -> None:
+        bbc, npr, _google = TECH[:3]
+        feed_calls: list[str] = []
+
+        def fetch(url: str, category: str) -> list[Headline]:
+            feed_calls.append(url)
+            if url == bbc:
+                return [headline(f"Good {n}", age=100 + n, link=f"https://good/{n}") for n in range(3)]
+            if url == npr:
+                return [headline(f"Walled {n}", source="NPR", age=1 + n, link=f"https://walled/{n}") for n in range(12)]
+            raise OSError("down")
+
+        def fetch_article(url: str) -> tuple[str, str]:
+            if url.startswith("https://walled"):
+                raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)  # type: ignore[arg-type]
+            return "Good", ARTICLE
+
+        svc = service(tmp_path, {})
+        svc._fetch_feed = fetch  # type: ignore[assignment]
+        svc._fetch_article = fetch_article  # type: ignore[assignment]
+        await svc.refresh_once()
+        assert {h.title for h in svc.headlines} == {"Good 0", "Good 1", "Good 2"}
+        assert (npr, "its stories cannot be read in full") in svc.benched_feeds
+        # Benched, it is not even polled on the next pass.
+        feed_calls.clear()
+        await svc.refresh_once()
+        assert npr not in feed_calls and bbc in feed_calls
+        assert {h.title for h in svc.headlines} == {"Good 0", "Good 1", "Good 2"}
