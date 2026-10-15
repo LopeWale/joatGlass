@@ -740,16 +740,21 @@ export class HudPageBuilder {
   textPageLayout(
     body: string,
     chrome: { status?: string; hint?: string } = {},
-    options: { inset?: boolean; menuLead?: readonly MenuLeadItem[] } = {},
+    options: { inset?: boolean; menuLead?: readonly MenuLeadItem[]; scrollLines?: number } = {},
   ): RebuildPageContainer {
     if (!options.inset) return this.assistantAnswerLayout(body, chrome);
     const side = { x: READER_TEXT_PAGE.x, width: READER_TEXT_PAGE.width };
+    // A scroll box (ScrollBox) is exactly `scrollLines` whole lines tall, so
+    // the firmware's scroll ends on a whole line.
+    const height = options.scrollLines !== undefined
+      ? Math.min(ASSISTANT_ANSWER_PAGE.bodyHeight, options.scrollLines * FIRMWARE_LINE + 2 * REGION_PAD)
+      : ASSISTANT_ANSWER_PAGE.bodyHeight;
     return new RebuildPageContainer({
       containerTotalNum: 3,
       ...this.menuConfig(options.menuLead),
       textObject: [
         this.statusBar(chrome.status ?? ''),
-        this.main(ASSISTANT_ANSWER_PAGE.bodyHeight, 1, 4, (body || ' ').slice(0, 1000), side),
+        this.main(height, 1, 4, (body || ' ').slice(0, 1000), side),
         this.region(
           ContainerId.Hint, 'hint', 253, 35, 3, 1,
           pxTruncate((chrome.hint ?? 'tap: dismiss').slice(0, 96), READER_TEXT_PAGE.textWidth),

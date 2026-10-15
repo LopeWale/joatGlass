@@ -3,7 +3,8 @@ import { utf8ByteLength, type RebuildPageContainer, type TextContainerUpgrade } 
 import { TEXT_CONTAINER_MAX_BYTES } from './FirmwareLimits';
 import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder, PROMPT_QUESTION_HINT, READER_TEXT_PAGE } from './HudPageBuilder';
-import { HudPresenter, PHANTOM_SCROLL_MS, READER_SCROLL_LINES, setNativeOverviewForTest } from './HudPresenter';
+import { HudPresenter, SCROLL_BOX_LINES, setNativeOverviewForTest } from './HudPresenter';
+import { SCROLL_BOX_MAX_BYTES } from './ScrollBox';
 import { firmwareLineCount, paginateHanging, paginateMeasured } from './FirmwareText';
 import { getTextWidth } from '@evenrealities/pretext';
 import { ContainerId } from './types';
@@ -305,86 +306,133 @@ function readThrough(screens: readonly (readonly string[])[]): string[] {
 }
 
 /**
- * A News article reads as one continuous document (the wearer, 2026-10-14:
- * "a single continuous flow that I could scroll as I'm reading"). Each swipe
- * slides a seven-line window down the whole text by three lines, in place
- * (Even's community readers move 1-3 lines a swipe; NOSnieuws_G2 moves 3).
+ * A News article is read in the glasses' own scroll box (ScrollBox): the
+ * firmware scrolls it a line a swipe with no round trip, and only a
+ * stretch's edge reaches the plugin, which writes the next stretch one
+ * line below the top line on screen (hardware, 2026-10-14: every
+ * textContainerUpgrade replaces the whole text and opens it at the top).
  */
-describe('HudPresenter News article as one continuous document', () => {
+describe('HudPresenter News article in the glasses\' scroll box', () => {
   const ARTICLE = { title: 'NEWS · ARTICLE', hint: 'left x2: back', selectable: false, nativeTextPage: true };
-  const paragraphs = Array.from({ length: 14 }, (_, index) => (
+  const paragraphs = Array.from({ length: 30 }, (_, index) => (
     `Paragraph ${index + 1} of the article runs long enough to wrap across several lines of the reader page, the way prose does.`
   ));
   // The article template (PanelPublisher): headline, source and age, a
   // blank line, then the paragraphs a blank line apart.
   const rows = readerRows([], `Rates hold\nFixture Wire · 12m\n\n${paragraphs.join('\n\n')}`);
+  const mains = (r: ReturnType<typeof rig>) => r.upgrades.filter((u) => u.containerName === 'main');
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-  /** A clock the test moves past the phantom-scroll window by hand. */
-  function clock() {
-    let now = 1_000_000;
-    const spy = vi.spyOn(Date, 'now').mockImplementation(() => now);
-    return { pass: () => { now += PHANTOM_SCROLL_MS + 1; }, restore: () => spy.mockRestore() };
-  }
-
-  it('slides three lines a swipe, keeps every screen full, and opens no screen on a gap', async () => {
-    const time = clock();
-    try {
-      const r = rig();
-      expect(await r.hud.showList(rows, ARTICLE)).toBe(true);
-      const capacity = READER_TEXT_PAGE.lineCapacity;
-      const screens = [text(r.rebuilds[r.rebuilds.length - 1], 'main') ?? ''];
-      expect(text(r.rebuilds[r.rebuilds.length - 1], 'hint')).toMatch(/^1\/\d+ · swipe: more · 2x tap: back$/u);
-      time.pass();
-      while (r.hud.scrollTextPage('down')) {
-        await vi.waitFor(() => expect(r.upgrades.filter((u) => u.containerName === 'main')).toHaveLength(screens.length));
-        const mains = r.upgrades.filter((u) => u.containerName === 'main');
-        screens.push(mains[mains.length - 1]?.content ?? '');
-        time.pass();
-      }
-      expect(screens.length).toBeGreaterThan(10);
-      for (const [index, screen] of screens.entries()) {
-        const lines = screen.split('\n');
-        // Full screens all the way to the end, and never more than the
-        // container shows, so the firmware has nothing to scroll inside one.
-        expect(lines).toHaveLength(capacity);
-        for (const line of lines) expect(firmwareLineCount(line, READER_TEXT_PAGE.textWidth)).toBeLessThanOrEqual(1);
-        // Paragraphs a single blank line apart, never two.
-        expect(lines.some((line, at) => line === '' && lines[at + 1] === '')).toBe(false);
-        if (index === 0) continue;
-        expect(lines[0]).not.toBe('');
-        // The window slid: what the last screen showed below its third
-        // line is still on screen (one line more when a gap is skipped).
-        const previous = screens[index - 1]!.split('\n');
-        const shift = previous.findIndex((_, at) => at > 0 && previous.slice(at).every((line, j) => lines[j] === line));
-        expect(shift).toBeGreaterThan(0);
-        expect(shift).toBeLessThanOrEqual(READER_SCROLL_LINES + 1);
-      }
-      // Every word of the article, in order, once the overlaps are dropped.
-      const words = (value: string) => value.split(/\s+/u).filter(Boolean);
-      const shown = screens.map((screen) => screen.split('\n'));
-      expect(words(readThrough(shown).join(' '))).toEqual(words(readerParagraphs(rows).join(' ')));
-      // No request ever left for the Mac: the whole article is here.
-      expect(r.rebuilds).toHaveLength(1);
-    } finally {
-      time.restore();
+  it('opens as a box of whole lines and fills it with the first stretch in place', async () => {
+    const r = rig();
+    expect(await r.hud.showList(rows, ARTICLE)).toBe(true);
+    const page = r.rebuilds[r.rebuilds.length - 1];
+    const main = page?.textObject?.find((box) => box.containerName === 'main');
+    // Seven whole firmware lines inside the padding: the scroll ends on a line.
+    expect(main?.height).toBe(SCROLL_BOX_LINES * 27 + 2 * (main?.paddingLength ?? 0));
+    expect(main?.isEventCapture).toBe(1);
+    expect(utf8ByteLength(main?.content ?? '')).toBeLessThanOrEqual(TEXT_CONTAINER_MAX_BYTES);
+    expect(main?.content?.startsWith('Rates hold\nFixture Wire · 12m\n\nParagraph 1 ')).toBe(true);
+    expect(text(page, 'hint')).toBe('swipe: scroll · 2x tap: back');
+    // The rebuild's 999 bytes, then the whole stretch from the same line.
+    await vi.waitFor(() => expect(mains(r)).toHaveLength(1));
+    const stretch = mains(r)[0]!.content ?? '';
+    expect(utf8ByteLength(stretch)).toBeGreaterThan(TEXT_CONTAINER_MAX_BYTES);
+    expect(utf8ByteLength(stretch)).toBeLessThanOrEqual(SCROLL_BOX_MAX_BYTES);
+    expect(stretch.startsWith(main?.content ?? '')).toBe(true);
+    for (const line of stretch.split('\n')) {
+      expect(firmwareLineCount(line, READER_TEXT_PAGE.textWidth - 10)).toBeLessThanOrEqual(1);
     }
+    expect(r.rebuilds).toHaveLength(1);
   });
 
-  it('ignores the scroll the glass fires while it re-lays a screen out', async () => {
-    const time = clock();
-    try {
-      const r = rig();
-      expect(await r.hud.showList(rows, ARTICLE)).toBe(true);
-      // Within 80 ms of the write: consumed, and the window stays put.
-      expect(r.hud.scrollTextPage('down')).toBe(true);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(r.upgrades.filter((u) => u.containerName === 'main')).toHaveLength(0);
-      time.pass();
-      expect(r.hud.scrollTextPage('down')).toBe(true);
-      await vi.waitFor(() => expect(r.upgrades.filter((u) => u.containerName === 'main')).toHaveLength(1));
-    } finally {
-      time.restore();
+  it('carries on a line below the last screen at each edge, every word once, and stops at the end', async () => {
+    const r = rig();
+    await r.hud.showList(rows, ARTICLE);
+    await vi.waitFor(() => expect(mains(r)).toHaveLength(1));
+    const stretches = [mains(r)[0]!.content ?? ''];
+    while (r.hud.scrollTextPage('down')) {
+      await settle();
+      const written = mains(r);
+      if (written.length === stretches.length) break; // the end: nothing written
+      stretches.push(written[written.length - 1]!.content ?? '');
     }
+    expect(stretches.length).toBeGreaterThan(2);
+    for (const [index, stretch] of stretches.entries()) {
+      const lines = stretch.split('\n');
+      expect(lines.length).toBeGreaterThanOrEqual(SCROLL_BOX_LINES);
+      if (index === 0) continue;
+      // The new stretch opens on the old one's last screen moved up a line
+      // (or two, past the blank between paragraphs).
+      const previous = stretches[index - 1]!.split('\n');
+      const lastScreen = previous.slice(previous.length - SCROLL_BOX_LINES);
+      const shift = lastScreen.findIndex((_, at) => at > 0 && lastScreen.slice(at).every((line, j) => lines[j] === line));
+      expect([1, 2]).toContain(shift);
+      expect(lines[0]).not.toBe('');
+    }
+    const words = (value: string) => value.split(/\s+/u).filter(Boolean);
+    expect(words(readThrough(stretches.map((stretch) => stretch.split('\n'))).join(' ')))
+      .toEqual(words(readerParagraphs(rows).join(' ')));
+    // At the article's end a swipe writes nothing, and the menu asks no Mac.
+    const before = mains(r).length;
+    expect(r.hud.scrollTextPage('down')).toBe(true);
+    await settle();
+    expect(mains(r)).toHaveLength(before);
+    expect(r.rebuilds).toHaveLength(1);
+  });
+
+  it('goes back a screen at a stretch\'s top, and stays put at the article\'s start', async () => {
+    const r = rig();
+    await r.hud.showList(rows, ARTICLE);
+    await vi.waitFor(() => expect(mains(r)).toHaveLength(1));
+    expect(r.hud.scrollTextPage('up')).toBe(true);
+    await settle();
+    expect(mains(r)).toHaveLength(1);
+    r.hud.scrollTextPage('down');
+    await vi.waitFor(() => expect(mains(r)).toHaveLength(2));
+    await settle();
+    const second = (mains(r)[1]!.content ?? '').split('\n');
+    r.hud.scrollTextPage('up');
+    await vi.waitFor(() => expect(mains(r)).toHaveLength(3));
+    const back = (mains(r)[2]!.content ?? '').split('\n');
+    // A screen above: the old top line is now the last line of the screen.
+    expect(back[SCROLL_BOX_LINES - 1] === second[0] || back[SCROLL_BOX_LINES] === second[0]).toBe(true);
+  });
+
+  it('answers the swipe that asked while a stretch is being written', async () => {
+    // The glass holds the next stretch's write until released.
+    let hold = false;
+    let release: (() => void) | undefined;
+    const r = rig(() => (hold
+      ? new Promise<boolean>((resolve) => { release = () => resolve(true); }) as unknown as boolean
+      : true));
+    await r.hud.showList(rows, ARTICLE);
+    await vi.waitFor(() => expect(mains(r)).toHaveLength(1));
+    await settle();
+    hold = true;
+    expect(r.hud.scrollTextPage('down')).toBe(true);
+    expect(r.hud.scrollTextPage('down')).toBe(true);
+    expect(r.hud.scrollTextPage('down')).toBe(true);
+    await settle();
+    expect(mains(r)).toHaveLength(2);
+    hold = false;
+    release?.();
+    await settle();
+    r.hud.scrollTextPage('down');
+    await vi.waitFor(() => expect(mains(r)).toHaveLength(3));
+  });
+
+  it('cuts every stretch to the rebuild size when the glasses refuse a bigger one', async () => {
+    // The simulator holds 999 bytes a text container.
+    const r = rig((update) => utf8ByteLength(update.content ?? '') <= TEXT_CONTAINER_MAX_BYTES);
+    await r.hud.showList(rows, ARTICLE);
+    await vi.waitFor(() => expect(mains(r)).toHaveLength(1));
+    await settle();
+    r.hud.scrollTextPage('down');
+    await vi.waitFor(() => expect(mains(r).length).toBeGreaterThanOrEqual(2));
+    await settle();
+    const last = mains(r)[mains(r).length - 1]!;
+    expect(utf8ByteLength(last.content ?? '')).toBeLessThanOrEqual(TEXT_CONTAINER_MAX_BYTES);
   });
 });
 

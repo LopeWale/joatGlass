@@ -3,7 +3,7 @@ import type { RebuildPageContainer } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
 import { measureTextWrap } from '@evenrealities/pretext';
 import { HudPageBuilder, READER_TEXT_PAGE } from './HudPageBuilder';
-import { HudPresenter, PHANTOM_SCROLL_MS, setEvenFontPagesForTest, setNativeOverviewForTest } from './HudPresenter';
+import { HudPresenter, setEvenFontPagesForTest, setNativeOverviewForTest } from './HudPresenter';
 import { readerRows } from './EvenFont';
 import type { HudVisualFrame } from './HudVisualSurface';
 import { ContainerId } from './types';
@@ -108,7 +108,7 @@ describe('HudPresenter Even-font reader page', () => {
     expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
   });
 
-  it('keeps a News article a firmware text page that pages in place', async () => {
+  it('keeps a News article a firmware text page the glasses scroll themselves', async () => {
     const r = rig();
     // The article template (PanelPublisher): headline, source and age, a
     // blank line, then the story.
@@ -124,26 +124,26 @@ describe('HudPresenter Even-font reader page', () => {
     expect(page?.textObject?.some((text) => text.content?.includes('Sentence 1 '))).toBe(true);
     expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
     // No glyph within 16 px of a side: the body and hint start 16 px in
-    // (container x + its 4 px padding) and every page fits its lines there.
+    // (container x + its 4 px padding).
     for (const name of ['main', 'hint']) {
       const box = page?.textObject?.find((text) => text.containerName === name);
       expect((box?.xPosition ?? 0) + (box?.paddingLength ?? 0)).toBe(16);
       expect((box?.xPosition ?? 0) + (box?.width ?? 0) - (box?.paddingLength ?? 0)).toBe(576 - 16);
     }
+    // Every line is set short of the firmware's scrollbar, so the glass
+    // never wraps one again.
     const body = page?.textObject?.find((text) => text.containerName === 'main')?.content ?? '';
-    expect(measureTextWrap(body, READER_TEXT_PAGE.textWidth).lineCount)
-      .toBeLessThanOrEqual(READER_TEXT_PAGE.lineCapacity);
-    // A swipe pages the firmware text in place: an upgrade, no rebuild.
-    // (Past the 80 ms in which a scroll is the glass re-laying the page out.)
-    const rebuilds = r.rebuilds.length;
-    const later = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + PHANTOM_SCROLL_MS + 1);
-    try {
-      expect(r.hud.scrollTextPage('down')).toBe(true);
-      await vi.waitFor(() => expect(r.operations).toContain('upgrade'));
-    } finally {
-      later.mockRestore();
+    for (const line of body.split('\n')) {
+      expect(measureTextWrap(line, READER_TEXT_PAGE.textWidth - 10).lineCount).toBeLessThanOrEqual(1);
     }
-    expect(r.rebuilds).toHaveLength(rebuilds);
+    // The whole article fits one stretch: at its end a swipe writes nothing
+    // and rebuilds nothing; the glasses scroll it.
+    // (The rebuild holds 999 bytes; the rest of the stretch follows in place.)
+    await vi.waitFor(() => expect(r.operations.filter((op) => op === 'upgrade')).toHaveLength(1));
+    const writes = r.operations.length;
+    expect(r.hud.scrollTextPage('down')).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(r.operations).toHaveLength(writes);
     expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
   });
 

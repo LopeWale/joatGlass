@@ -18,7 +18,8 @@ import {
   validAssistantConversationSnapshot,
   type ConversationExitResult,
 } from './AssistantConversationSurface';
-import { paginateContinuous, paginateFromEnd, paginateHanging, paginateMeasured } from './FirmwareText';
+import { layoutLines, paginateFromEnd, paginateHanging, paginateMeasured } from './FirmwareText';
+import { ScrollBox } from './ScrollBox';
 import { OVERLAY_GAP, cardTop, overlayConversation } from './ConversationOverlay';
 import { paginateEven, readerParagraphs, type EvenReaderLine } from './EvenFont';
 import { hasImageHeader, withImageHeader } from './HeaderImage';
@@ -252,22 +253,18 @@ let evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '0') =
  * stroke at full brightness, where the 55% image's thin strokes look faded
  * (the wearer, 2026-10-07). */
 const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', QUICKNOTES_NOTE_TITLE]);
-/** A News article or a search result is one continuous document: the Mac
- * sends it whole and each swipe moves a window over it
- * (paginateContinuous), instead of seven-line pages cut from ten-row
- * sections that each ended half empty and cost a swipe and a round trip
- * to cross (the wearer, 2026-10-14). */
-const CONTINUOUS_READERS = new Set(['NEWS · ARTICLE', 'SEARCH · RESULT']);
-function readsContinuously(title: string): boolean {
-  return CONTINUOUS_READERS.has(title.trim().toUpperCase());
+/** Long text the glasses scroll themselves (ScrollBox): the Mac sends it
+ * whole, and it reads as one scroll, a line a swipe, with no round trip
+ * until a stretch's edge (the wearer's ruling after the hardware test,
+ * 2026-10-14). Messages and QuickNotes are meant to join. */
+const SCROLL_BOX_READERS = new Set(['NEWS · ARTICLE', 'SEARCH · RESULT']);
+function scrollsInBox(title: string): boolean {
+  return SCROLL_BOX_READERS.has(title.trim().toUpperCase());
 }
-/** Lines a swipe moves a continuous reader: the 1-3 a swipe Even's
- * community readers settled on for scrolling text (NOSnieuws_G2 moves 3),
- * so the text slides rather than turns a page. */
-export const READER_SCROLL_LINES = 3;
-/** How long after a text page is written its scroll events are the
- * glass re-laying it out, not the wearer (even-toolkit's 80 ms). */
-export const PHANTOM_SCROLL_MS = 80;
+/** Whole lines a scroll box shows. Its height is exactly these lines, so
+ * the firmware's last scroll lands on the last line and the next swipe is
+ * the edge, not a nudge that only realigns a part line. */
+export const SCROLL_BOX_LINES = 7;
 /** Text pages laid out as speakers' turns ("Them: …" with its wrapped rows
  * under the words): a Messages thread. */
 function speakerPaged(title: string): boolean {
@@ -362,8 +359,11 @@ interface NativeTextPageState {
   /** Present when the page is set in Even's font on an image page
    * (EvenFont.ts) rather than as a firmware text page. */
   lines?: EvenReaderLine[][];
-  /** When the glass last accepted this page's words (Date.now()). */
-  writtenAt?: number;
+  /** The document the glasses scroll themselves (ScrollBox); `page` is
+   * then the first line of the stretch in the box. */
+  box?: ScrollBox;
+  /** A stretch is being written: the glass answers the swipe that asked. */
+  boxBusy?: boolean;
 }
 
 /** The swipe promises a Mac reader writes for its own pages, formatted. */
@@ -401,6 +401,12 @@ function sameGeometry(left: RebuildPageContainer, right: RebuildPageContainer): 
 function liveNoteHint(_page: number, count: number, macHint: string): string {
   if (count <= 1) return GesturePolicy.formatHint(macHint);
   return GesturePolicy.formatHint(`${macHint} · swipe: page`);
+}
+
+/** A scroll box's footer: the glasses scroll it, so there is no page to
+ * count, only the swipe and the Mac's own gestures. */
+function scrollBoxHint(macHint: string): string {
+  return GesturePolicy.formatHint(macHint.trim() ? `swipe: scroll · ${macHint}` : 'swipe: scroll');
 }
 
 function textPageHint(page: number, count: number, macHint: string, review = false): string {
@@ -1741,12 +1747,13 @@ export class HudPresenter {
 
   private upgradeNativeText(
     containerID: number, containerName: string, content: string, previous = '',
+    maxBytes = TEXT_CONTAINER_MAX_BYTES,
   ): Promise<boolean> {
     // Every page's gestures in the one template (GesturePolicy.formatHint).
     // The glasses hold an update to the same byte cap as a rebuild, and
     // refuse one over it whole: the page would stay as it was.
     const hint = containerID === ContainerId.Hint;
-    const replacement = fitUtf8((hint ? GesturePolicy.formatHint(content) : content) || ' ', TEXT_CONTAINER_MAX_BYTES);
+    const replacement = fitUtf8((hint ? GesturePolicy.formatHint(content) : content) || ' ', maxBytes);
     const before = hint ? Math.max(previous.length, GesturePolicy.formatHint(previous).length) : previous.length;
     return this.client.require().textContainerUpgrade(new TextContainerUpgrade({
       containerID,
@@ -2221,35 +2228,40 @@ export class HudPresenter {
     // after the sender's name (the wearer's ruling, 2026-10-07).
     const paginate = speakerPaged(surface.options.title) ? paginateHanging : paginateMeasured;
     const scrolls = scrollsOnGlass(surface.options.title);
-    const pages = readsContinuously(surface.options.title)
-      ? paginateContinuous(
-        readerParagraphs(surface.items).join('\n'),
-        READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity, undefined, READER_SCROLL_LINES,
+    const text = readerParagraphs(surface.items).join('\n');
+    // Long text the glasses scroll: the stretch that holds the line the
+    // wearer was on (a page reopened), else the document's start.
+    const box = scrollsInBox(surface.options.title)
+      ? new ScrollBox(
+        layoutLines(text, READER_TEXT_PAGE.textWidth - SCROLLBAR_INSET_PX), SCROLL_BOX_LINES, undefined,
+        this.nativeTextPage?.source === source ? this.nativeTextPage.page : 0,
       )
-      : paginate(
-        readerParagraphs(surface.items).join('\n'),
-        scrolls ? READER_TEXT_PAGE.textWidth - SCROLLBAR_INSET_PX : READER_TEXT_PAGE.textWidth,
-        scrolls ? SCROLLING_PAGE_MAX_LINES : READER_TEXT_PAGE.lineCapacity,
-        scrolls ? SCROLLING_PAGE_MAX_UNITS : undefined,
-      );
+      : undefined;
+    const pages = box ? [box.head(TEXT_CONTAINER_MAX_BYTES)] : paginate(
+      text,
+      scrolls ? READER_TEXT_PAGE.textWidth - SCROLLBAR_INSET_PX : READER_TEXT_PAGE.textWidth,
+      scrolls ? SCROLLING_PAGE_MAX_LINES : READER_TEXT_PAGE.lineCapacity,
+      scrolls ? SCROLLING_PAGE_MAX_UNITS : undefined,
+    );
     // An open QuickNote pages from its newest words, and its glasses menu
     // leads with Undo last input (Even's QuickNote menu).
     const note = isQuickNotesNote(surface.options.title);
     const shown = note
-      ? paginateFromEnd(
-        readerParagraphs(surface.items).join('\n'), READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity,
-      )
+      ? paginateFromEnd(text, READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity)
       : pages;
-    const page = this.nativeTextPage?.source === source
-      ? Math.min(this.nativeTextPage.page, shown.length - 1)
-      : surface.options.nativeTextPageFromEnd ? shown.length - 1 : 0;
-    const body = shown[page] ?? ' ';
-    const hint = note
-      ? liveNoteHint(page, shown.length, surface.options.hint)
-      : textPageHint(page, shown.length, surface.options.hint, surface.options.reviewTapOnLastPage);
+    const page = box ? box.position
+      : this.nativeTextPage?.source === source
+        ? Math.min(this.nativeTextPage.page, shown.length - 1)
+        : surface.options.nativeTextPageFromEnd ? shown.length - 1 : 0;
+    const body = (box ? shown[0] : shown[page]) ?? ' ';
+    const hint = box ? scrollBoxHint(surface.options.hint)
+      : note
+        ? liveNoteHint(page, shown.length, surface.options.hint)
+        : textPageHint(page, shown.length, surface.options.hint, surface.options.reviewTapOnLastPage);
     const ok = await this.replaceNativePage(
       this.layouts.textPageLayout(body, { status: this.nativeHeader(surface.options.title), hint }, {
         inset: true, ...(note ? { menuLead: QUICKNOTES_NOTE_MENU } : {}),
+        ...(box ? { scrollLines: SCROLL_BOX_LINES } : {}),
       }),
       'text-page-native',
     );
@@ -2274,9 +2286,39 @@ export class HudPresenter {
       this.streams.set(ContainerId.StatusBar, liveStatus.text);
       if (liveStatus.brightness !== undefined) this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
     }
-    this.nativeTextPage = { source, pages: shown, page, body, hint, writtenAt: Date.now() };
+    const state: NativeTextPageState = { source, pages: shown, page, body, hint, ...(box ? { box } : {}) };
+    this.nativeTextPage = state;
     this.recordPageTransition(from, 'list', 'show_list', 'success');
+    // A rebuild holds 999 bytes; the whole stretch follows in place, below
+    // the same first line, so the view the wearer has does not move.
+    if (box) void this.writeScrollBox(state, body);
     return true;
+  }
+
+  /** Put the box's current stretch on the glass in place of `previous`.
+   * A stretch the glasses refuse at full size (the simulator holds 999
+   * bytes) is cut to the rebuild size from then on. False when the glass
+   * kept `previous`. */
+  private async writeScrollBox(state: NativeTextPageState, previous: string): Promise<boolean> {
+    const box = state.box;
+    if (!box) return false;
+    state.boxBusy = true;
+    try {
+      let text = box.text();
+      if (text === previous) return true;
+      let shown = await this.upgradeNativeText(ContainerId.Main, 'main', text, previous, box.bytes)
+        .catch(() => false);
+      if (!shown && this.nativeTextPage === state && box.bytes > TEXT_CONTAINER_MAX_BYTES) {
+        box.limit(TEXT_CONTAINER_MAX_BYTES);
+        text = box.text();
+        shown = text === previous || await this.upgradeNativeText(ContainerId.Main, 'main', text, previous)
+          .catch(() => false);
+      }
+      if (this.nativeTextPage === state && shown) state.body = text;
+      return shown;
+    } finally {
+      if (this.nativeTextPage === state) state.boxBusy = false;
+    }
   }
 
   /** An open QuickNote's live page, newer words in place (FEAT-002): two
@@ -2321,6 +2363,7 @@ export class HudPresenter {
   isTextPageAtEnd(): boolean {
     const state = this.nativeTextPage;
     if (!state || (this.pageOwner !== 'text-page-native' && !this.evenFontPageOnGlass())) return true;
+    if (state.box) return state.box.atEnd;
     return state.page >= state.pages.length - 1;
   }
 
@@ -2333,12 +2376,23 @@ export class HudPresenter {
       : this.surface.kind === 'productivity' ? productivityActionHint(this.surface.productivity) : undefined;
     const evenFont = this.evenFontPageOnGlass();
     if (!state || (this.pageOwner !== 'text-page-native' && !evenFont) || macHint === undefined) return false;
-    // G2 re-layout fires a scroll event of its own just after a text page
-    // is written (even-toolkit ignores scrolls for 80 ms after any text
-    // update; epub-reader-g2 pins a "phantom SCROLL" after a rebuild). On
-    // a continuous reader that would move the text a step nobody swiped.
-    if (this.surface.kind === 'list' && readsContinuously(this.surface.options.title)
-      && Date.now() - (state.writtenAt ?? 0) < PHANTOM_SCROLL_MS) return true;
+    if (state.box) {
+      // The glasses scroll inside the box themselves; this is its edge. The
+      // next stretch carries on a line below (or a screen above), and the
+      // document's own ends stay where they are.
+      if (state.boxBusy) return true;
+      const box = state.box;
+      const before = { page: state.page, body: state.body };
+      if (!(direction === 'down' ? box.down() : box.up())) return true;
+      state.page = box.position;
+      void this.writeScrollBox(state, before.body).then((shown) => {
+        if (!shown && this.nativeTextPage === state) {
+          box.moveTo(before.page);
+          Object.assign(state, before);
+        }
+      });
+      return true;
+    }
     const page = direction === 'down' ? state.page + 1 : state.page - 1;
     if (page < 0 || page >= state.pages.length) return false;
     if (evenFont) {
@@ -2361,7 +2415,6 @@ export class HudPresenter {
       const shown = await this.upgradeNativeText(ContainerId.Main, 'main', state.body, previous.body)
         .catch(() => false);
       if (this.nativeTextPage !== state) return;
-      state.writtenAt = Date.now();
       if (!shown) {
         // The glass kept the page it had, so the page count stays with it:
         // the next swipe turns from there, and a review's last-page tap is

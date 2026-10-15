@@ -183,57 +183,11 @@ function explicitLines(text: string, innerWidth: number, keepGaps = false): stri
   return lines;
 }
 
-/**
- * Long text read as ONE continuous document (a News article), the way a
- * PDF reader's single-page continuous view reads: the words are laid out
- * once into explicit lines, and each screen is a window of `maxLines` of
- * them. A swipe moves the window down `advance` lines (at most all but
- * one), so the lines just read stay on top and the eye carries straight
- * on. Nothing is cut into sections: no screen ends half empty mid-article,
- * and the last screen ends on the last line, as full as every other.
- * Paragraph breaks are kept as one empty line, and a screen never opens
- * on one.
- *
- * The SDK has no scroll position and no smooth scroll (Even's own
- * text-heavy template: "On G2 you can't scroll. You turn pages."). A
- * window of lines moved in place with `textContainerUpgrade` is the
- * closest thing to a scroll it allows, the technique Even's community
- * readers use (1-3 lines a swipe). A screen never holds more than
- * `maxLines` lines, so its text container never overflows: the firmware
- * has nothing to scroll inside it, and every swipe reaches the plugin,
- * which moves the window.
- */
-export function paginateContinuous(
-  text: string,
-  innerWidth: number,
-  maxLines: number,
-  maxUnits = NATIVE_PAGE_MAX_UNITS,
-  advance = Math.max(1, maxLines - 1),
-): string[] {
-  const lines = explicitLines(text, innerWidth, true);
-  if (lines.length === 0) return [' '];
-  const capacity = Math.max(1, maxLines);
-  const step = Math.max(1, Math.min(capacity - 1, advance));
-  // The lines from `start` that fit one container (count and byte cap).
-  const span = (start: number): number => {
-    let count = Math.min(capacity, lines.length - start);
-    while (count > 1 && !pageFits(lines.slice(start, start + count).join(NEWLINE), maxUnits)) count -= 1;
-    return count;
-  };
-  const pages: string[] = [];
-  let start = 0;
-  for (;;) {
-    const count = span(start);
-    pages.push(lines.slice(start, start + count).join(NEWLINE));
-    if (start + count >= lines.length) break;
-    // Down `step` lines, never past this screen's last line; the final
-    // screen is pulled up to end on the article's last line instead of
-    // running short, and no screen opens on a paragraph gap.
-    let next = Math.max(start + 1, Math.min(start + Math.min(step, Math.max(1, count - 1)), lines.length - capacity));
-    while (lines[next] === '' && next < lines.length - 1) next += 1;
-    start = next;
-  }
-  return pages;
+/** A document laid out once into the explicit lines the glasses will
+ * show (ScrollBox): paragraphs wrapped to `innerWidth`, one empty line
+ * between paragraphs. */
+export function layoutLines(text: string, innerWidth: number): string[] {
+  return explicitLines(text, innerWidth, true);
 }
 
 /**
