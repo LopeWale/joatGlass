@@ -5,11 +5,12 @@
  * on the outer-left edge of the pane, swipe to move between them, click to
  * drill in. Which tab is active is purely local state: the Mac never learns
  * it, and a swipe never costs a round trip. What the Mac owns is the CONTENT
- * behind news, pomodoro and quicknotes (and Search, which the menu opens),
- * pushed as `hud.panel` and cached here so a swipe onto a tab paints from
- * memory. A tap on QuickNotes opens QuickNotes itself. Notifications, the first tab, has
- * no cache of its own: it is the overview's Main/Context/Tray streams, the
- * resting screen JOAT already drew.
+ * behind planner, news, pomodoro and quicknotes (and Search, which the menu
+ * opens), pushed as `hud.panel` and cached here so a swipe onto a tab paints
+ * from memory. A tap on QuickNotes opens QuickNotes itself; a tap on the
+ * Planner (the open reminders, the first tab) opens Planning. Notifications
+ * was the first tab until 2026-10-15; it is now the menu's first row on the
+ * overview, so every tab has a cache.
  *
  * Every push carries a `revision`. A row tap echoes it (`panelRequestId`),
  * so a tap that lands after a refresh is refused by the Mac rather than
@@ -45,8 +46,8 @@ export interface PanelContent {
 export interface PanelRailVisual {
   /** A rail tab, or Search's own page (opened from the menu). */
   activeTab: PanelTab | PanelContentTab;
-  /** The active tab's cached content; absent for Notifications, or before
-   * the Mac has pushed anything for that tab. */
+  /** The active tab's cached content; absent before the Mac has pushed
+   * anything for that tab. */
   content?: PanelContent;
 }
 
@@ -54,15 +55,16 @@ export interface PanelRailVisual {
  * with a `hud.list` whose title extends this ("NEWS · ARTICLE"), which is
  * how CapabilityMenu's existing two-deep Back knows the parent. */
 export const PANEL_TAB_TITLES: Readonly<Record<PanelTab | PanelContentTab, string>> = {
-  notifications: 'NOTIFICATIONS',
+  planner: 'PLANNER',
   news: 'NEWS',
   pomodoro: 'POMODORO',
   quicknotes: 'QUICKNOTES',
   search: 'SEARCH',
 };
 
-/** The tabs that expand into a panel page of their own. QuickNotes does not:
- * its tap opens the QuickNotes capability, whose pages it owns. */
+/** The tabs that expand into a panel page of their own. QuickNotes and the
+ * Planner do not: their taps open the QuickNotes and Planning capabilities,
+ * whose pages those own. */
 const PAGE_TABS = ['news', 'pomodoro', 'search'] as const;
 export type PanelPageTab = (typeof PAGE_TABS)[number];
 
@@ -145,7 +147,7 @@ export function freshnessLabel(receivedAtMs: number, nowMs: number): string {
 }
 
 export class PanelRail {
-  private activeTab: PanelTab = 'notifications';
+  private activeTab: PanelTab = 'planner';
   private readonly contents = new Map<PanelContentTab, PanelContent>();
 
   active(): PanelTab {
@@ -171,7 +173,7 @@ export class PanelRail {
 
   /** The resting screen's default. A fresh brain connection lands here. */
   reset(): void {
-    this.activeTab = 'notifications';
+    this.activeTab = 'planner';
   }
 
   content(tab: PanelContentTab): PanelContent | undefined {
@@ -206,7 +208,7 @@ export class PanelRail {
   /** The rail as it looks with `tab` highlighted — an expanded page keeps
    * its own tab lit whatever the overview's active tab is. */
   visualFor(tab: PanelTab | PanelContentTab): PanelRailVisual {
-    const content = tab === 'notifications' ? undefined : this.contents.get(tab);
+    const content = this.contents.get(tab);
     return content ? { activeTab: tab, content: cloneContent(content) } : { activeTab: tab };
   }
 

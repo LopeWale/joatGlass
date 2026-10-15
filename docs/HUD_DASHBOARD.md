@@ -15,8 +15,10 @@ official Even Hub simulator captures.
 
 ### The right pane is a rail of tabs (2026-09-02)
 
-The overview's right pane carries a vertical rail — notifications, news,
-pomodoro, search — on its outer-left edge (`PANEL_RAIL` in
+The overview's right pane carries a vertical rail — planner, news,
+pomodoro, quicknotes — on its outer-left edge (the first tab was
+Notifications and the last Search until 2026-10-11 / 2026-10-15; see
+"Planner" below) (`PANEL_RAIL` in
 `HudCanvasRenderer.ts`: icons at x=290, one slot per tab at y=70/118/166/214,
 the pane's hairline at x=308.5, content from x=318). Everything a tab
 change can alter lives east of the tile seam at x=288, so a swipe uploads
@@ -34,11 +36,22 @@ Which tab is up is plugin state (`PanelRail.ts`); the Mac never learns it.
 What the Mac owns is pushed as `hud.panel` — one message per tab, up to 20
 rows in the dense-row grammar, a revision, and for the timer its phase and
 end instant — cached by the plugin so a swipe never round-trips. A row tap
-that echoes an older revision is refused. Notifications is not a push: it
-is the overview's own Main/Context/Tray streams, and its tap still asks the
-Mac for the `NOTIFICATIONS` page. Mac side: `services/panels.py` publishes
-and answers taps; `news.py`, `pomodoro.py`, `search.py` are the providers;
-`panel_commands.py` is the voice; the Mac app writes `news.json`.
+that echoes an older revision is refused. Mac side: `services/panels.py`
+publishes and answers taps; `planner_panel.py`, `news.py`, `pomodoro.py`,
+`search.py`, `quicknotes_panel.py` are the providers; `panel_commands.py` is
+the voice; the Mac app writes `news.json`.
+
+**Planner (2026-10-15).** The first tab is the open Reminders, overdue first
+(7 days back, 6 ahead, eight rows, "+N more" past that), each row led by
+`[Late]`, a time, `[Today]`, `[Tmrw]` or a weekday in the label column. A tap
+opens Planning. It is read from EventKit every minute and pushed only when a
+row would read differently; QuickNotes' "create reminders" nudges it at once.
+Planning's own day page shows a reminder only on its due day, so a missed one
+would vanish there; this tab keeps it until it is done. **Notifications left
+the rail**: it is the first row of the menu while the overview is up, and
+opens as the tab did (the newest unread card over the page). JOAT's own
+streams (a reply, a link state) still head the pane over the first tab until
+the wearer swipes.
 
 ### Current visual container map
 

@@ -199,12 +199,14 @@ const BROWSER_VISUAL_PREVIEW = import.meta.env.DEV
  * normal authenticated Mac link alive and merely opens the same sidebar a
  * left-temple double press would open. It lets the official simulator prove
  * a live capability request even though it hardcodes right-temple input. */
-const LIVE_MENU_ACCEPTANCE = ((): CapabilityName | undefined => {
+const LIVE_MENU_ACCEPTANCE = ((): CapabilityName | 'Notifications' | undefined => {
   if (!import.meta.env.DEV) return undefined;
   const requested = new URLSearchParams(window.location.search).get('joatTestOpenMenu');
   // `1` keeps the historical Planning entry; a capability name opens that
   // row, so an acceptance run can start on Messages without a sidebar.
   if (requested === '1') return 'Planning';
+  // The overview's first menu row (NOTIFICATIONS_MENU_ID): not a capability.
+  if (requested === 'Notifications') return 'Notifications';
   return CAPABILITIES.find((name) => name === requested);
 })();
 
@@ -848,7 +850,7 @@ async function boot(): Promise<void> {
         // a voice-initiated open expands the tab; a push for a tab whose
         // page is already on the glass repaints that page in place.
         await awaitCurrent(hud.acceptPanel(msg));
-        if (msg.activate && msg.tab !== 'quicknotes') {
+        if (msg.activate && msg.tab !== 'quicknotes' && msg.tab !== 'planner') {
           brainstorm.clear();
           await awaitCurrent(menu.openPanelTab(msg.tab, 0, false));
         } else {
@@ -1205,7 +1207,9 @@ async function boot(): Promise<void> {
   // strips this bounded acceptance-only delay from a package.
   if (LIVE_MENU_ACCEPTANCE) {
     await new Promise<void>((resolve) => setTimeout(resolve, 750));
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf(LIVE_MENU_ACCEPTANCE));
+    // The same method EventRouter calls for the overview's first menu row.
+    if (LIVE_MENU_ACCEPTANCE === 'Notifications') await menu.openNotificationsFromMenu();
+    else await menu.openFromContextualMenu(CAPABILITIES.indexOf(LIVE_MENU_ACCEPTANCE));
     console.info(`[joat] live menu acceptance opened=${menu.isOpen()}`);
   }
 
@@ -1451,6 +1455,7 @@ async function renderVisualState(
     if (state.endsWith('-expanded') || state === 'panel-article') {
       // Through the REAL drill-in, so simulator gestures drive the page.
       if (tab === 'quicknotes') await menu.openQuickNotes();
+      else if (tab === 'planner') await menu.openPlanning();
       else await menu.openPanelTab(tab);
       if (state === 'panel-article') {
         const article = panelArticleFixture();

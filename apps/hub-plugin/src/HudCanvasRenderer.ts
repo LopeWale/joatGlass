@@ -421,6 +421,7 @@ export type HudIconName =
   | 'notifications'
   | 'calendar'
   | 'tasks'
+  | 'planner'
   | 'more'
   | 'quicknotes'
   | 'brainstorm'
@@ -445,6 +446,8 @@ const ICON_SOURCES: Readonly<Record<HudIconName, string>> = {
   notifications: bellSvg,
   calendar: calendarSvg,
   tasks: taskSvg,
+  // The overview's first tab: the open reminders, so the checkbox.
+  planner: taskSvg,
   more: moreSvg,
   quicknotes: quickNoteSvg,
   brainstorm: scalesSvg,
@@ -1404,11 +1407,14 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const paneX = layout.paneX;
     const paneWidth = layout.paneWidth;
 
-    // The tab rail, and the tab it has selected. Notifications IS the
-    // resting pane below; the other three draw their cached push instead.
+    // The tab rail, and the tab it has selected. Every tab draws its cached
+    // push, except that JOAT's own streams (a reply, a link state) take the
+    // first tab's pane while they have something to say — the way the text
+    // overview pins them until the wearer swipes.
     if (frame.rail) {
       this.drawTabRail(context, frame.rail.activeTab, icons);
-      if (frame.rail.activeTab !== 'notifications') {
+      const streams = overview.kind === 'content' ? Boolean(overview.main) : overview.title !== 'Ready';
+      if (frame.rail.activeTab !== 'planner' || !streams) {
         this.drawPanelPane(context, frame.rail, icons);
         context.fillStyle = gray(QUIET);
         context.font = TYPE.hint;
@@ -1554,7 +1560,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const rail = PANEL_RAIL;
     const x = rail.x;
     const iconFor: Record<PanelTab, HTMLImageElement> = {
-      notifications: icons.notifications,
+      planner: icons.planner,
       news: icons.news,
       pomodoro: icons.pomodoro,
       quicknotes: icons.quicknotes,
@@ -1636,11 +1642,15 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       return;
     }
 
-    if (rail.activeTab === 'search' || rail.activeTab === 'quicknotes') {
+    if (rail.activeTab === 'search' || rail.activeTab === 'quicknotes' || rail.activeTab === 'planner') {
+      const planner = rail.activeTab === 'planner';
       const notes = rail.activeTab === 'quicknotes';
-      label(notes ? 'QUICKNOTES' : 'SEARCH');
+      label(planner ? 'PLANNER' : notes ? 'QUICKNOTES' : 'SEARCH');
       if (!content || (!content.headline && content.rows.length === 0)) {
-        quiet([content?.empty ?? (notes ? 'No notes yet.' : 'Say “JOAT, look up …”')], layout.mainTopBaselineY);
+        quiet([
+          content?.empty
+            ?? (planner ? 'Waiting for JOAT on your Mac…' : notes ? 'No notes yet.' : 'Say “JOAT, look up …”'),
+        ], layout.mainTopBaselineY);
         return;
       }
       let y = layout.mainTopBaselineY;
@@ -1654,7 +1664,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         const parts = parseHudListItem(row);
         context.fillStyle = gray(SUPPORT);
         context.font = TYPE.body;
-        const lines = this.drawWrappedText(context, parts.primary || row, paneX, y, paneWidth, LEAD.tight, 2, 'leading');
+        // A reminder's "[Late]" / "[09:00]" is the point of the row.
+        const shown = parts.primary || row;
+        const lines = this.drawWrappedText(
+          context, planner && parts.age ? `${parts.age} · ${shown}` : shown,
+          paneX, y, paneWidth, LEAD.tight, 2, 'leading',
+        );
         y += lines * 16;
         if (parts.secondary) {
           context.fillStyle = gray(CHROME);

@@ -299,6 +299,68 @@ async def _load_native_planning_once(
     )
 
 
+async def load_native_reminders(
+    client: NativePlanningClient,
+    *,
+    first_day: date,
+    last_day: date,
+    zone: tzinfo,
+) -> tuple[PlanningEntry, ...]:
+    """Open, dated reminders due from ``first_day`` through ``last_day``.
+
+    The overview's Planner tab is a to-do glance, not a calendar page: it
+    wants what is still open, so a reminder that was due yesterday stays in
+    view until it is done (a Planning day page shows it only on its own day).
+    Only Reminders access is needed, so a Mac that never granted Calendar
+    still gets its tasks. Earliest first; undated reminders are omitted for
+    the same reason ``project_planning`` omits them.
+    """
+
+    for _ in range(2):
+        try:
+            return await _load_native_reminders_once(
+                client, first_day=first_day, last_day=last_day, zone=zone,
+            )
+        except _PlanningSnapshotChanged:
+            continue
+    raise NativeBridgeProtocolError(
+        "EventKit changed while loading reminders; retry the list"
+    )
+
+
+async def _load_native_reminders_once(
+    client: NativePlanningClient,
+    *,
+    first_day: date,
+    last_day: date,
+    zone: tzinfo,
+) -> tuple[PlanningEntry, ...]:
+    status = await client.call("authorization.status")
+    snapshot = _planning_snapshot_identity(status)
+    authorization = getattr(status, "authorization", None)
+    if not _has_full_access(getattr(authorization, "reminders", None)):
+        raise PlanningAuthorizationError("Reminders full access is required")
+    containers = await client.call("reminders.listContainers")
+    _require_planning_snapshot(containers, snapshot)
+    start_at = datetime.combine(first_day, time.min, tzinfo=zone)
+    end_at = datetime.combine(last_day + timedelta(days=1), time.min, tzinfo=zone)
+    response = await client.call("reminders.query", {
+        "calendar_identifiers": _container_identifiers(getattr(containers, "result", None)),
+        "include_completed": False,
+        "limit": 500,
+        "due_start_unix_ms": int(start_at.timestamp() * 1_000),
+        "due_end_unix_ms": int(end_at.timestamp() * 1_000),
+    })
+    _require_planning_snapshot(response, snapshot)
+    entries = [
+        entry
+        for item in _dictionary_items(getattr(response, "result", None))
+        if (entry := _reminder_entry(item, zone)) is not None
+        and first_day <= entry.sort_at.date() <= last_day
+    ]
+    return tuple(sorted(entries, key=_entry_sort_key))
+
+
 def _planning_snapshot_identity(response: object) -> tuple[str, int]:
     instance = getattr(response, "store_instance_id", None)
     generation = getattr(response, "store_generation", None)

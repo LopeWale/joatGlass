@@ -6,7 +6,7 @@ import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
 import type { ImuMonitor } from './ImuMonitor';
 import { CapabilityMenu } from './CapabilityMenu';
-import { QUICKNOTES_UNDO_MENU_ID } from './types';
+import { NOTIFICATIONS_MENU_ID, QUICKNOTES_UNDO_MENU_ID } from './types';
 import { Settings } from './Settings';
 import type { HudPresenter } from './HudPresenter';
 import { CAPABILITY_MENU_ID_BASE, type UplinkMessage } from './types';
@@ -54,6 +54,7 @@ function make(
     // exactly when the overview click-to-notifications drill-in must NOT fire.
     isOpen: vi.fn(() => menuConsumesLists),
     openNotifications: vi.fn(async () => {}),
+    openNotificationsFromMenu: vi.fn(async () => {}),
     openActiveTab: vi.fn(async () => {}),
     // The overview's tab rail: a resting swipe is consumed only when the
     // menu is closed, and long-press-release refreshes only inside an
@@ -1144,6 +1145,14 @@ describe('EventRouter — long tap never touches the mic (2026-10-12)', () => {
     const r = make();
     r.fire({ menuItemClickEvent: { itemID: 5 } });
     expect(r.menu.openPlanning).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens Notifications from the overview menu's first row, and does not relay it to the Mac", () => {
+    const r = make();
+    r.fire({ menuItemClickEvent: { itemID: NOTIFICATIONS_MENU_ID } });
+    expect(r.menu.openNotificationsFromMenu).toHaveBeenCalledTimes(1);
+    expect(r.menu.openFromContextualMenu).not.toHaveBeenCalled();
+    expect(r.sent).toEqual([]);
   });
 
   it('classifies the delivered gesture without forwarding source or content', () => {

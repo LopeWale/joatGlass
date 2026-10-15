@@ -169,7 +169,7 @@ twice.
 ### The right pane is a rail of tabs
 
 Between the clock and the pane's hairline stands a vertical rail of four
-icons — notifications, news, pomodoro, search — the platform dashboard's
+icons — planner, news, pomodoro, quicknotes — the platform dashboard's
 own idiom, drawn in JOAT's: tabs OUTSIDE the pane so the content keeps its
 width, the lit tab attached to the hairline by a short bracket. A swipe on
 the resting overview moves along the rail; a tap expands the lit tab
@@ -177,7 +177,9 @@ full-width, with the rail moved to the left margin so the wearer still
 sees where they are; inside, swipe scrolls rows, tap opens one, left
 double steps back one level. Long press refreshes ONLY at the top of an
 expanded NEWS or SEARCH tab — the two whose rows come from a feed that can
-have moved. The one other page where it is not the microphone is a
+have moved. (The first tab is the Planner, the open reminders, whose tap
+opens Planning; Notifications is the first row of the menu while the
+overview is up, 2026-10-15.) The one other page where it is not the microphone is a
 RUNNING Agent Terminal job: there long press cancels the job (the
 wearer's choice, 2026-10-06; "terminal cancel" still works spoken), and
 the footer says "long-press: cancel". Everywhere else it stays the

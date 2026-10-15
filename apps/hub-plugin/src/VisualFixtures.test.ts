@@ -134,15 +134,20 @@ describe('panel visual fixtures', () => {
   it('shape every row the way the Mac producers do, within the wire caps', async () => {
     const { PANEL_VISUAL_STATES, isPanelVisualState, panelArticleFixture, panelVisualPushes, panelVisualTab } = await import('./VisualFixtures');
     const pushes = panelVisualPushes(1_000_000);
-    expect(pushes.map((push) => push.tab)).toEqual(['news', 'pomodoro', 'search']);
+    expect(pushes.map((push) => push.tab)).toEqual(['planner', 'news', 'pomodoro', 'search']);
     for (const push of pushes) {
       expect(push.rows.length).toBeLessThanOrEqual(20);
       for (const row of push.rows) expect(row.length).toBeLessThanOrEqual(64);
     }
-    const news = pushes[0]!;
+    // The Planner's rows are what `planner_rows` writes: "[Late] …",
+    // "[09:00] …", "[Today] …", "[Tmrw] …", "[Fri] …", and a closing "+N more".
+    const planner = pushes[0]!;
+    expect(planner.rows).toHaveLength(8); // the pane's eight lines, all used
+    for (const row of planner.rows) expect(row).toMatch(/^(\[(Late|Today|Tmrw|\d\d:\d\d|[A-Z][a-z]{2})\] .+|\+\d+ more)$/);
+    const news = pushes[1]!;
     expect(news.rows.length).toBeGreaterThan(10); // the expanded page must scroll
     for (const row of news.rows) expect(row).toMatch(/^\[\d+[mh]\] .+ · .+$/);
-    const pomodoro = pushes[1]!.pomodoro!;
+    const pomodoro = pushes[2]!.pomodoro!;
     expect(pomodoro.endsAtUnixMs).toBe(1_000_000 + pomodoro.remainingMs);
     expect(pomodoro.remainingMs).toBeLessThanOrEqual(pomodoro.lengthMs);
     // The article arrives whole: no list rows, the text in `body`, and a
@@ -158,6 +163,7 @@ describe('panel visual fixtures', () => {
     expect(PANEL_VISUAL_STATES.every(isPanelVisualState)).toBe(true);
     expect(isPanelVisualState('overview')).toBe(false);
     expect(panelVisualTab('panel-search-expanded')).toBe('search');
+    expect(panelVisualTab('panel-planner')).toBe('planner');
     expect(panelVisualTab('panel-article')).toBe('news');
   });
 

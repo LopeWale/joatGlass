@@ -1857,11 +1857,10 @@ export class HudPresenter {
       void this.paintNotificationCard();
       return;
     }
-    // Home's Notifications tab lists the unread cards: keep it current. A
-    // repaint that changes nothing sends nothing (paintOverviewAsText).
-    if (!shown && nativeOverviewEnabled && this.rail.active() === 'notifications') {
-      void this.repaintRestingPane();
-    }
+    // Home no longer lists the unread cards: Notifications is the menu's
+    // first row on the overview (2026-10-15), so the resting pane has nothing
+    // to keep current here. The unread count in Home's info column arrives as
+    // an ambient push.
   }
 
   /** Unread cards, newest first, that the wearer has not marked read here. */

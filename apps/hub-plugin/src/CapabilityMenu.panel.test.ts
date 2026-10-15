@@ -14,7 +14,7 @@ import { CAPABILITIES, type PanelTab } from './types';
  * refreshes only at the top of an expanded tab.
  */
 
-function rig(activeTab: PanelTab = 'notifications') {
+function rig(activeTab: PanelTab = 'planner') {
   const rail = new PanelRail();
   rail.setActive(activeTab);
   const lists: Array<{ items: string[]; options?: Record<string, unknown> }> = [];
@@ -106,20 +106,33 @@ describe('CapabilityMenu — the overview tab rail', () => {
     expect(steps).toEqual([-1, 1]);
   });
 
-  it('a click on Notifications with unread opens the newest card, not the list', async () => {
+  it("the menu's Notifications row, with unread, opens the newest card over the page, not the list", async () => {
     const { menu, hud, lists, requests } = rig();
     hud.unread = [{ id: 'a'.repeat(32) }];
-    await menu.openActiveTab();
+    await menu.openNotificationsFromMenu();
     expect(hud.browseNotifications).toHaveBeenCalledTimes(1);
     expect(lists).toHaveLength(0);
     expect(requests()).toEqual([]);
   });
 
-  it('a click on Notifications still asks the Mac; on News it expands the cache', async () => {
-    const { menu, rail, lists, sent, requests } = rig();
-    await menu.openActiveTab();
+  it("the menu's Notifications row, with nothing unread, asks the Mac for the list as the tab did", async () => {
+    const { menu, hud, lists, sent } = rig();
+    await menu.openNotificationsFromMenu();
+    expect(hud.browseNotifications).not.toHaveBeenCalled();
     expect(lists[0]?.options?.title).toBe('NOTIFICATIONS');
     expect(sent.some((m) => (m.event as { containerName?: string }).containerName === 'capmenu')).toBe(true);
+  });
+
+  it("a click on the Planner tab opens Planning; on News it expands the cache", async () => {
+    const { menu, rail, lists, sent, requests, hud } = rig();
+    await menu.openActiveTab();
+    // Planning, from the Mac — not Notifications, which left the rail.
+    expect(hud.browseNotifications).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(sent.some((m) => {
+      const event = (m as { event?: { containerName?: string; selectedName?: string } }).event;
+      return event?.containerName === 'capmenu' && event.selectedName === 'Planning';
+    })).toBe(true));
+    expect(lists.some((list) => list.options?.title === 'NOTIFICATIONS')).toBe(false);
 
     rail.accept(newsPush(3, ['[2m] Rates hold · BBC', '[5m] Rover lands · NPR']));
     rail.setActive('news');

@@ -204,7 +204,8 @@ export interface OverviewTextOptions {
  * the same priorities (resolveHudOverview): a link state first, then a
  * reply or a calendar line (until the wearer swipes), then the lit tab's
  * card. A notification never heads the pane: its card over the page showed
- * it, and the Notifications tab lists it while it is unread.
+ * it, and the menu's first row on the overview opens it (the Notifications
+ * tab left the rail for the Planner, 2026-10-15).
  */
 export function composeOverviewText(
   frame: Extract<HudVisualFrame, { kind: 'overview' }>,
@@ -240,6 +241,15 @@ export function composeOverviewText(
           ...(content.headline ? [['', content.headline] as PaneRow] : []),
           ...content.rows.map(listRow),
         ];
+      case 'planner':
+        // The open reminders, earliest first: the Mac writes "[Late] …",
+        // "[09:00] …", "[Tmrw] …" and the word lands in the label column.
+        // A tap opens Planning, which has the days and the calendar.
+        if (!content) return [['', 'Waiting for JOAT on your Mac…']];
+        if (content.rows.length === 0) {
+          return [['', content.empty ?? 'Nothing due this week.'], ['', 'tap: open planning']];
+        }
+        return content.rows.map(listRow);
       case 'quicknotes':
         // Even's QuickNote widget: the newest notes, age in the label
         // column; a tap opens QuickNotes ("+ Create new note" leads there).
@@ -247,8 +257,9 @@ export function composeOverviewText(
         if (content.rows.length === 0) return [['', content.empty ?? 'No notes yet.'], ['', 'tap: open']];
         return content.rows.map(listRow);
       default:
-        // Notifications: the unread cards, newest first, the app in the
-        // label column; a tap opens the newest as its card.
+        // No rail on this frame: the unread cards, newest first, the app
+        // in the label column, as the overview listed them before the
+        // Planner took the first tab.
         if (unreadCards.length > 0) {
           return [
             ...unreadCards.slice(0, PANE_LINES - 1).map((card): PaneRow => {

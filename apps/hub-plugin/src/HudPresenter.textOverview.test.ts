@@ -175,15 +175,39 @@ describe('Home as firmware text', () => {
     expect(h.hud.activeTab()).toBe('news');
   });
 
-  it('the Notifications tab lists the unread cards, newest first, the app in the label column', async () => {
+  it('the first tab is the Planner: the open reminders, the time or day in the label column', async () => {
+    const h = harness();
+    await h.hud.setStatusModel(status('9:41'));
+    // Before the Mac has pushed anything the tab says so, rather than going blank.
+    expect(pane(h).split('\n')[0]).toBe('Waiting for JOAT on your Mac…');
+    await h.hud.acceptPanel({
+      kind: 'hud.panel', tab: 'planner', revision: 1,
+      rows: ['[Late] Send the Q3 invoice', '[09:00] Call the bank', '[Tmrw] Run the alarm history script', '+2 more'],
+    });
+    expect(h.hud.activeTab()).toBe('planner');
+    expect(pane(h).split('\n').slice(0, 4)).toEqual([
+      'Send the Q3 invoice', 'Call the bank', 'Run the alarm history script', '+2 more',
+    ]);
+    expect(pane(h, 'pane-l').split('\n').slice(0, 3)).toEqual(['Late', '09:00', 'Tmrw']);
+    // An empty list says what it means and how to open Planning.
+    await h.hud.acceptPanel({
+      kind: 'hud.panel', tab: 'planner', revision: 2, rows: [], empty: 'Nothing due this week.',
+    });
+    expect(pane(h).split('\n').slice(0, 2)).toEqual(['Nothing due this week.', 'tap: open planning']);
+  });
+
+  it('unread notifications no longer list on the overview: they live in the menu now', async () => {
     const h = harness();
     h.hud.acceptNotifications([
       { id: 'a'.repeat(32), app: 'Messages', sender: 'Fixture One', body: 'First unread\nbody', at: 2, urgent: false },
       { id: 'b'.repeat(32), app: 'Mail', sender: 'Fixture Two', body: 'Second unread body', at: 1, urgent: false },
     ]);
     await h.hud.setStatusModel(status('9:41'));
-    expect(pane(h).split('\n').slice(0, 3)).toEqual(['Fixture One: First unread body', 'Fixture Two: Second unread body', 'tap: read']);
-    expect(pane(h, 'pane-l').split('\n').slice(0, 2)).toEqual(['Messages', 'Mail']);
+    expect(pane(h)).not.toContain('Fixture One');
+    expect(pane(h)).not.toContain('tap: read');
+    // The unread count still shows in Home's info column, from the ambient push.
+    await h.hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
+    expect(h.shown('info')).toContain('2 unread');
   });
 
   it('a reply heads the pane until the wearer swipes; then the pane follows the rail', async () => {

@@ -600,7 +600,7 @@ describe('the compact JOAT banner uses the existing canvas font', () => {
 
 describe('the resting overview wears one footer on every tab', () => {
   // The footer is centred on the tile seam, so a footer that differed
-  // between the notifications tab and the other three made a swipe repaint
+  // between the first tab and the others made a swipe repaint
   // the bottom-left tile too: three image writes where the rail and the
   // pane need two.
   function overviewFooter(rail: boolean): string {
@@ -630,14 +630,14 @@ describe('the resting overview wears one footer on every tab', () => {
       context: '',
       tray: '',
       hint: 'tap: open · swipe: tabs · “JOAT …”',
-      ...(rail ? { rail: { activeTab: 'notifications' } } : {}),
+      ...(rail ? { rail: { activeTab: 'planner' } } : {}),
     }, {});
     const footer = texts[texts.length - 1];
     if (footer === undefined) throw new Error('no footer drawn');
     return footer;
   }
 
-  it('draws the shared rail hint on the notifications tab, not the chrome hint', () => {
+  it("draws the shared rail hint over JOAT's own streams on the first (Planner) tab, not the chrome hint", () => {
     expect(overviewFooter(true)).toBe(HudCanvas.PANEL_OVERVIEW_HINT);
   });
 

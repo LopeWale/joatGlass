@@ -830,21 +830,30 @@ export const QUICKNOTES_NOTE_TITLE = 'QUICKNOTES · NEW NOTE';
  * QuickNote menu). Id 6: 1-5 are retired controls, 10+ the capabilities. */
 export const QUICKNOTES_UNDO_MENU_ID = 6;
 export const QUICKNOTES_UNDO_MENU_LABEL = 'Undo last input';
+/** "Notifications" as the FIRST row of the glasses' menu while the overview
+ * is up (the wearer, 2026-10-15: "remove the notification from the overview
+ * and put it on the menu as the first option while on the overview"). It
+ * left the overview's rail for the Planner. Id 7: 1-5 are retired controls,
+ * 6 is the QuickNote undo, 10+ the capabilities. */
+export const NOTIFICATIONS_MENU_ID = 7;
+export const NOTIFICATIONS_MENU_LABEL = 'Notifications';
 
 /**
  * The overview's right panel is a vertical rail of tabs. Order is the rail
- * order, top to bottom; Notifications is first because it is what the
- * resting screen shows, and the tab every reopen lands on. These are NOT
+ * order, top to bottom; the Planner (the open reminders) is first because it
+ * is what the resting screen shows, and the tab every reopen lands on.
+ * Notifications was first until 2026-10-15: it is now the first row of the
+ * menu while the overview is up (NOTIFICATIONS_MENU_ID). These are NOT
  * sidebar capabilities: the rail is reached by swiping on the overview.
  * Mac counterpart: PANEL_TABS in apps/mac/joat/core/protocol.py.
  */
-export const PANEL_TABS = ['notifications', 'news', 'pomodoro', 'quicknotes'] as const;
+export const PANEL_TABS = ['planner', 'news', 'pomodoro', 'quicknotes'] as const;
 export type PanelTab = (typeof PANEL_TABS)[number];
 /** The tabs whose content the Mac pushes as `hud.panel`: the rail's, and
  * Search, whose page the menu opens. QuickNotes replaced Search on the rail
  * (the wearer, 2026-10-11: "so now the overview has a way to quickly get to
  * the quicknote"). Mac counterpart: PANEL_TABS in core/protocol.py. */
-export const PANEL_CONTENT_TABS = ['news', 'pomodoro', 'quicknotes', 'search'] as const;
+export const PANEL_CONTENT_TABS = ['planner', 'news', 'pomodoro', 'quicknotes', 'search'] as const;
 export type PanelContentTab = (typeof PANEL_CONTENT_TABS)[number];
 
 export type PomodoroPhase = 'idle' | 'focus' | 'break' | 'long_break';

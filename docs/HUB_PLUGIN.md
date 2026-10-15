@@ -92,7 +92,13 @@ menu, measured". A double-press on EITHER temple, or on the ring, is BACK
 (a no-op on the overview; `GesturePolicy` gives every source the same
 meaning because the simulator's generic double-click is right-sourced and
 kept opening the exit confirmation), and a left SINGLE press on the
-resting overview drills into the notifications tray. The exit dialog is
+resting overview drills into the lit tab (the Planner opens Planning).
+**Notifications is the menu's first row while the overview is up**
+(`NOTIFICATIONS_MENU_ID` = 7, a page `menuLead` that only
+`overviewTextLayout` carries, 2026-10-15): it opens exactly as the
+overview's old Notifications tab did, the newest unread card over the
+page, else the list. The row is gone from every other page's menu, and a
+pixel-overview fallback (`VITE_NATIVE_OVERVIEW=0`) does not carry it. The exit dialog is
 reachable only through the Mac's `shutdown` downlink. On a live Brainstorm
 the double press CANCELS the session; the firmware menu remains reachable
 mid-session for everything else. No press is named by source any more: the

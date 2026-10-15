@@ -1561,10 +1561,12 @@ class TestHudPanelWire:
     def test_panel_tabs_match_the_plugin_content_tabs(self) -> None:
         from joat.core.protocol import PANEL_TABS
 
-        # PANEL_CONTENT_TABS in types.ts: the rail's news, pomodoro and
-        # quicknotes (QuickNotes replaced Search on the rail, 2026-10-11), and
-        # Search, whose page the menu opens. Notifications is never pushed.
-        assert set(PANEL_TABS) == {"news", "pomodoro", "search", "quicknotes"}
+        # PANEL_CONTENT_TABS in types.ts: the rail's planner, news, pomodoro
+        # and quicknotes (the Planner replaced Notifications as the first tab,
+        # 2026-10-15; QuickNotes replaced Search on the rail, 2026-10-11), and
+        # Search, whose page the menu opens. Notifications is never pushed:
+        # it is the overview menu's first row now, not a tab.
+        assert set(PANEL_TABS) == {"planner", "news", "pomodoro", "search", "quicknotes"}
 
     def test_hud_panel_wire_shape_and_caps(self) -> None:
         from joat.core.protocol import HudPanel

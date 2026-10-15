@@ -3,7 +3,9 @@ import { utf8ByteLength, validateEvenHubPageContainer } from '@evenrealities/eve
 import { LIST_ROW_MAX_UTF8_BYTES, clampUtf8Bytes, fitHeader, fitListRow, HudPageBuilder } from './HudPageBuilder';
 import { measureTextWrap } from '@evenrealities/pretext';
 import { firmwareLineCount } from './FirmwareText';
-import { CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId } from './types';
+import {
+  CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId, NOTIFICATIONS_MENU_ID, NOTIFICATIONS_MENU_LABEL,
+} from './types';
 
 type Page = {
   containerTotalNum?: number;
@@ -179,6 +181,48 @@ describe('HudPageBuilder invariants', () => {
     expect(expected).toHaveLength(CAPABILITIES.length - 1);
     expect(visual.menuObject?.menuItems).toEqual(expected);
     expect((builder.visualLayout() as Page).menuObject?.menuItems).toEqual(expected);
+  });
+
+  it("puts Notifications first in the menu on the overview, and only there", () => {
+    const capabilityRows = CAPABILITIES.map((name, index) => ({
+      itemID: CAPABILITY_MENU_ID_BASE + index,
+      itemName: name,
+    })).filter(({ itemName }) => itemName !== 'Settings');
+    const overview = builder.overviewTextLayout({
+      header: '9:41 · JOAT',
+      info: ['Tue, Oct 6'],
+      tabs: [
+        { label: 'PLANNER', active: true },
+        { label: 'NEWS', active: false },
+        { label: 'POMODORO', active: false },
+        { label: 'QUICKNOTES', active: false },
+      ],
+      paneLabels: [''],
+      pane: ['Nothing due this week.'],
+      paneBrightness: 4,
+      hint: 'tap: open',
+    }) as Page;
+    expect(overview.menuObject?.menuItems).toEqual([
+      { itemID: NOTIFICATIONS_MENU_ID, itemName: NOTIFICATIONS_MENU_LABEL },
+      ...capabilityRows,
+    ]);
+    expect(NOTIFICATIONS_MENU_LABEL).toBe('Notifications');
+    // Within the firmware's ten entries, and clear of every other id.
+    expect(overview.menuObject?.menuItems?.length).toBeLessThanOrEqual(10);
+    expect(NOTIFICATIONS_MENU_ID).toBeLessThan(CAPABILITY_MENU_ID_BASE);
+    expect([1, 2, 3, 4, 5, 6]).not.toContain(NOTIFICATIONS_MENU_ID);
+    // Every other page's menu is the capabilities alone: leaving the
+    // overview takes the row away.
+    for (const page of [
+      builder.defaultLayout(), builder.visualLayout(), builder.listLayout(['a', 'b']),
+      builder.confirmationLayout('Send reply?'),
+    ] as Page[]) {
+      expect(page.menuObject?.menuItems).toEqual(capabilityRows);
+    }
+    // A host without the contextual menu has none on the overview either.
+    expect((builder.withContextualMenu(false).overviewTextLayout({
+      header: '', info: [], tabs: [], paneLabels: [], pane: [], paneBrightness: 4, hint: '',
+    }) as Page).menuObject).toBeUndefined();
   });
 
   it('still routes a retired id from a host showing a cached menu', () => {

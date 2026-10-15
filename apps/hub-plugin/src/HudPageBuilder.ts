@@ -21,6 +21,8 @@ import {
   CAPABILITIES,
   CAPABILITY_MENU_ID_BASE,
   ContainerId,
+  NOTIFICATIONS_MENU_ID,
+  NOTIFICATIONS_MENU_LABEL,
   VisualContainerName,
   type ConfirmationPurpose,
   HomePaneLabelId,
@@ -145,6 +147,13 @@ export interface MenuLeadItem {
   id: number;
   name: string;
 }
+
+/** The overview's own menu row: Notifications first, as the wearer asked
+ * (2026-10-15). It is carried by the overview page alone, so it is on the
+ * menu "while on the overview" and gone from every other page's menu. */
+const OVERVIEW_MENU_LEAD: readonly MenuLeadItem[] = [
+  { id: NOTIFICATIONS_MENU_ID, name: NOTIFICATIONS_MENU_LABEL },
+];
 
 /** A reader's firmware text page (a News article): the answer page's
  * lines, inset so no glyph is drawn within 16 px of either side, the edge
@@ -394,7 +403,7 @@ export class HudPageBuilder {
     });
     return new RebuildPageContainer({
       containerTotalNum: 7,
-      ...this.menuConfig(),
+      ...this.menuConfig(OVERVIEW_MENU_LEAD),
       textObject: [
         text(ContainerId.StatusBar, 'status', g.header, 1, 2, fitBand([view.header], g.header)),
         text(ContainerId.Context, 'info', g.info, 2, 3, fitBand(view.info, g.info)),

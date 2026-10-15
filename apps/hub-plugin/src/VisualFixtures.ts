@@ -483,10 +483,11 @@ export async function runVisualConfirmationFixture(
 
 /** Development-only lenses for the panel tabs: each resting tab, each
  * expanded tab, and an opened article. Every string here is shaped by the
- * REAL producer — `Headline.row`, `SearchResult.row`, `HudPanelPomodoro`
- * and `PanelPublisher._send_reader` in apps/mac/joat/services — so the
+ * REAL producer — `Headline.row`, `SearchResult.row`, `HudPanelPomodoro`,
+ * `planner_rows` and `PanelPublisher._send_reader` in apps/mac/joat/services — so the
  * simulator proves a screen the Mac actually sends, not an invented one. */
 export const PANEL_VISUAL_STATES = [
+  'panel-planner',
   'panel-news',
   'panel-pomodoro',
   'panel-search',
@@ -503,6 +504,7 @@ export function isPanelVisualState(value: string | null): value is PanelVisualSt
 }
 
 export function panelVisualTab(state: PanelVisualState): PanelContentTab {
+  if (state.startsWith('panel-planner')) return 'planner';
   if (state.startsWith('panel-pomodoro')) return 'pomodoro';
   if (state.startsWith('panel-search')) return 'search';
   return 'news';
@@ -514,6 +516,23 @@ export function panelVisualTab(state: PanelVisualState): PanelContentTab {
 export function panelVisualPushes(nowMs = Date.now()): HudPanelMessage[] {
   const focusLeftMs = 14 * 60_000 + 37_000;
   return [
+    {
+      // `planner_rows`: "[word] text", the word being Late, a time, Today,
+      // Tmrw or a weekday; more than eight ends in "+N more".
+      kind: 'hud.panel',
+      tab: 'planner',
+      revision: 1,
+      rows: [
+        '[Late] Send the Q3 invoice',
+        '[09:00] Call the bank',
+        '[Today] Back up the tag provider tags',
+        '[14:30] Review the dashboard screenshots',
+        '[Tmrw] Run the alarm history script',
+        '[Fri] Renew the domain',
+        '[Sat] Sort out the input text',
+        '+3 more',
+      ],
+    },
     {
       kind: 'hud.panel',
       tab: 'news',

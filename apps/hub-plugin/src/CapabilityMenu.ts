@@ -1559,20 +1559,33 @@ export class CapabilityMenu {
    * A single click on the resting overview opens the tray it is already
    * showing.
    *
-   * Notifications is deliberately not a menu row: the dashboard shows the
-   * cards themselves, so a row that opens a page to re-read the home screen
-   * costs a page and a round trip for nothing. This is the drill-in for what
-   * is already on the glass — the same gesture the wearer knows from the
-   * platform's own readers.
+   * Notifications was the overview's first tab and not a menu row (the
+   * dashboard showed the cards themselves). The wearer moved it, 2026-10-15:
+   * "put it on the menu as the first option while on the overview". It is
+   * now the first row of the menu on the overview (openNotificationsFromMenu)
+   * and opens exactly as the tab did.
    */
   async openNotifications(selectedIndex = 0): Promise<void> {
     await this.openCapability('Notifications', CAPABILITIES.length, undefined, undefined, selectedIndex);
   }
 
+  /** The menu's first row on the overview. The unread cards themselves,
+   * newest first, over the page they were opened from, as Even's menu opens
+   * them: a tap reads one and shows the next. The list page remains for
+   * when nothing is unread (and for "show notifications"). This is what a
+   * tap on the overview's Notifications tab did before 2026-10-15, moved
+   * and otherwise unchanged. */
+  async openNotificationsFromMenu(): Promise<void> {
+    // A wearer's choice, as every menu row is: an older queued prelude is stale.
+    this.terminalPreludeRevision += 1;
+    if (this.hud.unreadNotifications().length > 0 && await this.hud.browseNotifications()) return;
+    await this.openNotifications();
+  }
+
   /** A click on the resting overview opens whichever tab the rail has
-   * selected. Notifications still asks the Mac; the other three expand
-   * from the content the Mac last pushed, so the page paints once, with
-   * no "Loading…" frame in between. */
+   * selected. The Planner opens Planning and QuickNotes opens QuickNotes;
+   * the other two expand from the content the Mac last pushed, so the page
+   * paints once, with no "Loading…" frame in between. */
   async openActiveTab(): Promise<void> {
     const tab = this.hud.activeTab();
     if (tab === 'quicknotes') {
@@ -1580,12 +1593,11 @@ export class CapabilityMenu {
       await this.openQuickNotes();
       return;
     }
-    if (tab === 'notifications') {
-      // The unread cards themselves, newest first, as Even's menu opens
-      // them: a tap reads one and shows the next. The list page remains for
-      // when nothing is unread (and for "show notifications").
-      if (this.hud.unreadNotifications().length > 0 && await this.hud.browseNotifications()) return;
-      await this.openNotifications();
+    if (tab === 'planner') {
+      // The tab lists the open reminders; Planning has the days and the
+      // calendar they sit in (the same page the menu's Planning row opens).
+      this.terminalPreludeRevision += 1;
+      await this.openPlanning();
       return;
     }
     await this.openPanelTab(tab);

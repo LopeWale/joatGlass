@@ -139,6 +139,7 @@ from .services.local_commands import (
 )
 from .services.panel_commands import NewsCommands, PomodoroCommands, SearchCommands
 from .services.panels import PanelPublisher
+from .services.planner_panel import PlannerPanel
 from .services.quicknotes_panel import QuickNotesPanel
 from .services.pomodoro import PomodoroService
 from .services.search import SearchService
@@ -451,16 +452,25 @@ async def main() -> None:
     )
     # QuickNotes is a rail tab (the newest notes; a tap opens QuickNotes).
     quicknotes_panel = QuickNotesPanel(VoiceNoteStore(durable_store), NoteStore(durable_store))
-    panels = PanelPublisher(
-        transport,
-        {"news": news, "pomodoro": pomodoro, "search": search, "quicknotes": quicknotes_panel},
-    )
-    imessage = IMessageStore()
-
     # Where the WEARER is. The phone supplies an IANA name on hello and with
     # every position fix; until one arrives this reads as the Mac's own zone,
     # which is what every time string used unconditionally before.
     wearer_zone = WearerZone(system_home_zone)
+    # The Planner leads the rail (it replaced Notifications there, which is
+    # now the menu's first row on the overview): the open Reminders, which
+    # is where a saved QuickNote's to-dos land.
+    planner_panel = PlannerPanel(personal_data, wearer_zone.current)
+    panels = PanelPublisher(
+        transport,
+        {
+            "planner": planner_panel,
+            "news": news,
+            "pomodoro": pomodoro,
+            "search": search,
+            "quicknotes": quicknotes_panel,
+        },
+    )
+    imessage = IMessageStore()
 
     def wearer_coords() -> tuple[float, float] | None:
         """Return a connected phone's fresh fix without exposing it to the model."""
@@ -1985,6 +1995,13 @@ async def main() -> None:
     transport.on_disconnect(farewell)
     transport.on_device(on_device)
 
+    async def create_note_reminders(capture_id: str) -> str:
+        receipt = await note_insight_commands.create_reminders_for(capture_id)
+        # The overview's Planner tab lists these: read the Reminders again
+        # now rather than at the next minute's check.
+        planner_panel.nudge()
+        return receipt
+
     # One chat.db reader serves BOTH the notification channel and the
     # capability menu's Messages view.
     # Glasses gestures in, drawn views out: the capability menu (Messages /
@@ -2000,7 +2017,7 @@ async def main() -> None:
         notes=note_store,
         voice_notes=voice_note_store,
         voice_capture=voice_capture,
-        note_reminders=note_insight_commands.create_reminders_for,
+        note_reminders=create_note_reminders,
         actions=action_journal,
         # Opening the sidebar row shows the wearer's actual work sessions,
         # not a readiness card. Only configured lanes reach this: with no
@@ -2206,6 +2223,12 @@ async def main() -> None:
     quicknotes_ages_task = asyncio.get_running_loop().create_task(
         quicknotes_panel.run(on_changed=lambda: panels.publish("quicknotes")),
     )
+    # The Planner tab reads the open Reminders from EventKit every minute and
+    # is pushed whenever a row would read differently (a new reminder, one
+    # completed, a day turning "Tmrw" into "Today").
+    planner_task = asyncio.get_running_loop().create_task(
+        planner_panel.run(on_changed=lambda: panels.publish("planner")),
+    )
 
     # NOT started: macOS already owns calendar alerting. An event carries its
     # own EKAlarm(s) (EKCalendarItem.alarms, with relativeOffset/absoluteDate),
@@ -2377,6 +2400,7 @@ async def main() -> None:
         news.stop()
         news_task.cancel()
         quicknotes_ages_task.cancel()
+        planner_task.cancel()
         # Stop timer callbacks and drain publications before their owners
         # close. Preserve the saved deadline for the next engine start.
         await pomodoro.aclose()
