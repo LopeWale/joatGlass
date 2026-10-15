@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-15 — Build JOAT 0.1.131
+
+- Packed from `396a72d` (clean tree) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.131 above the last recorded build; app.json, package.json and package-lock.json all 0.1.131. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1264 tests passed, typecheck clean.
+- `apps/hub-plugin/joat.ehpk`: 178636 bytes, SHA-256 `b3b426e5a57d8aa7ef7e76b793ed3d5e0458d95541423f87575e4004b35b0d58`. Adds to 0.1.130 the glasses' own scroll box for News and Search (`73fcd12`) and for Messages and QuickNotes (`650360f`). The Messages and QuickNotes half needs the Mac side too: takes effect when JOAT restarts. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-15 — Messages and QuickNotes scroll like a News article
 
 The wearer: "do the same to the message and quicknote (reading notes)" — the scrolling from hardware test 1/4, "the only thing i scrolled that works like i want".
