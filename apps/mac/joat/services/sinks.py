@@ -64,10 +64,20 @@ class HudSink:
         *,
         open_terminal: Callable[[], Awaitable[bool]] | None = None,
         brainstorm_view_current: Callable[[], bool] | None = None,
+        show_turn: Callable[[str, str, Callable[[], object]], Awaitable[bool]] | None = None,
+        hide_turn: Callable[[], None] | None = None,
     ) -> None:
         self._hud = hud
         self._open_terminal = open_terminal
         self._brainstorm_view_current = brainstorm_view_current
+        #: Put one finished turn in front of the wearer WHOLE, in the
+        #: glasses' scroll reader, with a tap that gives the room its next
+        #: move. True when it was shown. `hide_turn` retires that reader.
+        self._show_turn = show_turn
+        self._hide_turn = hide_turn
+        self._reader_up = False
+        #: The turn the room is stopped on, until it moves on.
+        self._floor: tuple[str, str, Callable[[], object]] | None = None
         self._topic = ""
         self._speakers: list[str] = []
         self._speaker = ""
@@ -223,6 +233,13 @@ class HudSink:
             # Computation and history continue after navigation. Neither
             # streamed tokens nor the final verdict may reclaim that view.
             return
+        if self._reader_up:
+            # The wearer was reading a finished turn and the room has moved
+            # on (their question, a "continue", a tap): take the page back.
+            self._reader_up = False
+            if self._hide_turn is not None:
+                self._hide_turn()
+            await self._hud.begin_brainstorm()
         await self._hud.show_brainstorm(BrainstormHudView(
             state=state,
             topic=self._topic,
@@ -244,7 +261,23 @@ class HudSink:
         Optional by design: discovered with getattr, so a terminal or a
         snapshot sink never has to implement a HUD concern.
         """
-        self._progress = f"round {round_no}/{max_rounds} · {calls} calls"
+        # max_rounds 0 = a room the wearer leads, which has no fixed count.
+        self._progress = (
+            f"round {round_no}/{max_rounds} · {calls} calls" if max_rounds > 0
+            else f"round {round_no} · {calls} calls"
+        )
+
+    async def floor(self, label: str, text: str, release: Callable[[], object]) -> None:
+        """The room has stopped on the wearer: show them this turn, in full.
+
+        Optional by design, like progress(): discovered with getattr. The
+        live page keeps one gist line per finished turn as a scoreboard;
+        reading what was actually said happens here.
+        """
+        self._floor = (label, text, release)
+        if self._show_turn is None or self._handed_to_terminal or not self._view_is_current():
+            return
+        self._reader_up = await self._show_turn(label, text, release)
 
     async def open(self, topic: str, speakers: list[str]) -> None:
         self._handoff_epoch += 1
@@ -285,6 +318,7 @@ class HudSink:
     # would be the native version (recorded in the Changelog, 2026-10-05).
 
     async def turn(self, label: str) -> None:
+        self._floor = None
         self._retire_live_turn()
         self._placeholder = ""
         self._speaker = label
@@ -323,6 +357,7 @@ class HudSink:
         # The last live turn is the SYNTHESIS — the thing the wearer sat
         # through the session for. Every other turn collapses; this one
         # stays whole.
+        self._floor = None
         self._retire_live_turn(collapse=False)
         self._placeholder = ""
         self._speaker = ""
@@ -366,6 +401,13 @@ class HudSink:
         self._handoff_epoch += 1
         epoch = self._handoff_epoch
         self._handed_to_terminal = False
+        if self._floor is not None and self._show_turn is not None:
+            # Stopped on the wearer: coming back means the turn they were
+            # reading, not the scoreboard.
+            label, text, release = self._floor
+            self._reader_up = await self._show_turn(label, text, release)
+            if self._reader_up:
+                return
         await self._hud.begin_brainstorm()
         if epoch == self._handoff_epoch and self._view_is_current():
             await self._paint(self._state)
@@ -425,6 +467,17 @@ class Broadcast:
 
     async def close(self, verdict: str) -> None:
         await self._each("close", verdict)
+
+    async def floor(self, label: str, text: str, release: Callable[[], object]) -> None:
+        for sink in self._sinks:
+            callback = getattr(sink, "floor", None)
+            if callback is None:
+                continue
+            try:
+                await callback(label, text, release)
+            except Exception:
+                # A dead surface must not stop the room waiting for the wearer.
+                pass
 
     async def _each(self, method: str, *args: object) -> None:
         for sink in self._sinks:

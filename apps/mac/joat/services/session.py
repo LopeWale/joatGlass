@@ -38,6 +38,46 @@ MAX_BRAINSTORM_TOPIC_CHARS = 4096
 MAX_NAVIGATION_DESTINATION_CHARS = 200
 
 
+#: What the wearer can say to a room that has stopped on them, as WHOLE
+#: utterances (a sentence that merely contains "next" is a remark). Compared
+#: after the wake word, apostrophes and punctuation are gone.
+_FLOOR_CONTINUE = frozenset({
+    "continue", "go on", "go ahead", "keep going", "carry on", "next",
+    "next one", "proceed", "yes", "yeah", "ok", "okay", "sure", "and then",
+    "then what", "what next", "please continue", "continue please",
+    "go on please",
+})
+_FLOOR_WRAP = frozenset({
+    "wrap up", "wrap it up", "wrap this up", "lets wrap up", "lets wrap it up",
+    "sum up", "sum it up", "summarize", "summarise", "summarize it",
+    "summarise it", "synthesize", "synthesise", "conclude", "finish up",
+    "summary", "give me the summary", "give me a summary",
+})
+_FLOOR_AUTO = frozenset({
+    "let them run", "let them go", "let them continue", "let them keep going",
+    "let them finish", "let it run", "let it go", "run it", "go automatic",
+    "run automatic", "automatic", "auto",
+})
+
+
+def parse_floor_command(text: str) -> str | None:
+    """"continue" | "wrap" | "auto" for a spoken command to a waiting room."""
+    said = " ".join(
+        re.sub(r"[^a-z0-9 ]+", " ", text.lower().replace("’", "").replace("'", "")).split()
+    )
+    for wake in ("hey joat", "joat"):
+        if said.startswith(wake + " "):
+            said = said[len(wake):].strip()
+            break
+    if said in _FLOOR_CONTINUE:
+        return "continue"
+    if said in _FLOOR_WRAP:
+        return "wrap"
+    if said in _FLOOR_AUTO:
+        return "auto"
+    return None
+
+
 class BrainstormStartResult(StrEnum):
     """Admission result, distinct from whether a transcript was consumed."""
 
@@ -746,6 +786,15 @@ class SessionManager:
             # reorder the round table, and must never become a follow-up
             # the collaborators answer.
             steer = text if addressed is _UNSET_ADDRESSED else addressed
+            # A led room that has stopped on the wearer is waiting for THEM:
+            # whatever they say is for the room, with no "JOAT" in front. A
+            # single stray word that is not a command ("you", "thanks" from a
+            # hallucinated silence) is not a move, so it is ignored.
+            waiting = bool(getattr(self._active, "awaiting_wearer", False))
+            if waiting and not steer:
+                spoken = text.strip()
+                if len(spoken.split()) >= 2 or parse_floor_command(spoken) is not None:
+                    steer = spoken
             if steer:
                 # A NEW TOPIC is not a remark. "brainstorm <something else>"
                 # spoken during a live session was swallowed whole: it became
@@ -763,6 +812,11 @@ class SessionManager:
                     asyncio.get_running_loop().create_task(
                         self._ask_before_replacing(self._pending_topic)
                     )
+                    return True
+            if waiting and steer:
+                command = parse_floor_command(steer)
+                if command is not None:
+                    self._active.floor_command(command)  # type: ignore[attr-defined]
                     return True
             if not steer:
                 log.info(
@@ -1898,8 +1952,16 @@ class DebateSession(Session):
         session_id: str = "",
         parent_id: str = "",
         root_id: str = "",
+        led: bool = False,
     ) -> None:
         self._topic = topic
+        #: True = the WEARER leads: the room stops after every seat's turn
+        #: and waits, nothing is scored or concluded for them, and a summary
+        #: comes only when they ask. False = the old autonomous loop
+        #: (independent turns, a judge's agreement score, an automatic
+        #: synthesis), which is also what "let them run" switches to.
+        self._led = led
+        self._floor: asyncio.Future[str] | None = None
         # Durable identity, born WITH the conversation
         # (docs/SESSION_MODEL.md:30-32). Minted here when not carried in,
         # so a fresh session, a branch (child id + parent lineage), and a
@@ -1955,10 +2017,98 @@ class DebateSession(Session):
 
     def cancel(self) -> None:
         self._cancelled = True
+        self.release_floor("cancel")
+
+    #: A led room that hears nothing for this long saves itself and closes,
+    #: instead of holding two subscriptions' seats and the wearer's voice
+    #: forever. "continue <title>" opens it again.
+    FLOOR_IDLE_SECONDS = 900.0
+    #: Safety ceiling on rounds in a led room (a round is one turn per seat).
+    LED_MAX_ROUNDS = 12
+
+    @property
+    def led(self) -> bool:
+        return self._led
+
+    @property
+    def awaiting_wearer(self) -> bool:
+        """True while the room is stopped on the wearer."""
+        return self._floor is not None and not self._floor.done()
+
+    def release_floor(self, ruling: str = "continue") -> bool:
+        """Give the wearer's answer to the room that is waiting on them."""
+        floor = self._floor
+        if floor is None or floor.done():
+            return False
+        floor.set_result(ruling)
+        return True
+
+    def floor_command(self, command: str) -> None:
+        """A spoken "continue", "wrap up" or "let them run"."""
+        if command == "auto":
+            self._led = False
+            log.info("wearer let the room run")
+            self.release_floor("continue")
+        elif command == "wrap":
+            log.info("wearer asked to wrap up")
+            self.release_floor("wrap")
+        else:
+            self.release_floor("continue")
+
+    async def _hand_floor(self, speaker: Participant, said: str, round_no: int) -> str:
+        """Stop after a seat's turn until the wearer decides what happens next.
+
+        Returns "continue", "wrap" or "away". The turn is put in front of the
+        wearer WHOLE (the sink's floor hook; a reader the glasses scroll), not
+        reduced to its gist: the point of leading a brainstorm is reading what
+        was said. Their answer arrives through release_floor — a tap on the
+        reader, "continue", a question of their own, a nomination.
+        """
+        loop = asyncio.get_running_loop()
+        floor: asyncio.Future[str] = loop.create_future()
+        self._floor = floor
+        label = speaker.label if round_no == 1 else f"{speaker.label} — round {round_no}"
+        hook = getattr(self._sink, "floor", None)
+        if hook is not None:
+            try:
+                await hook(label, turn_reader_text(said, self._verify_note(label)), self.release_floor)
+            except Exception:
+                log.warning("turn reader not shown", exc_info=True)
+        waited_from = time.monotonic()
+        try:
+            return await asyncio.wait_for(asyncio.shield(floor), self.FLOOR_IDLE_SECONDS)
+        except TimeoutError:
+            return "away"
+        finally:
+            if self._floor is floor:
+                self._floor = None
+            # Time spent reading is not time the debate took: keep it out of
+            # the phase the wearer would otherwise be blamed for in the log.
+            if self._phase_started is not None:
+                self._phase_started += time.monotonic() - waited_from
+
+    def _verify_note(self, label: str) -> str:
+        """The verifier's last word on this seat's turn, for its reader."""
+        for entry in reversed(self._verify_summary):
+            head, _, outcome = entry.partition(": ")
+            if head == label or head.startswith(f"{label} — repair"):
+                return outcome
+        return ""
+
+    def _release_if_waiting(self, ruling: str = "continue") -> None:
+        self.release_floor(ruling)
 
     WEARER_LABEL = "YOU"
 
     def consume_transcript(self, text: str) -> bool:
+        consumed = self._consume_transcript(text)
+        if consumed:
+            # A led room is stopped on the wearer; what they just said is
+            # their move, and the next seat answers it.
+            self._release_if_waiting("continue")
+        return consumed
+
+    def _consume_transcript(self, text: str) -> bool:
         """The wearer adds a thought mid-session — the YOU turn.
 
         docs/BRAINSTORM.md lists YOU alongside CODEX / CLAUDE / VERIFY /
@@ -2089,6 +2239,7 @@ class DebateSession(Session):
         if mode is not None:
             self._next_mode = mode
             log.info("wearer routed %s: %s", seat.name, mode)
+        self._release_if_waiting("continue")
         return seat.name
 
     async def handle_brainstorm_action(self, action: BrainstormAction) -> bool:
@@ -2126,16 +2277,23 @@ class DebateSession(Session):
             await self._finish("blocked · collaborator disconnected; open Hermes to retry")
 
     async def _run(self) -> None:
-        """The starter design, fully visible: independent reviews →
-        cross-review → meta-review → synthesis.
+        """The room, in one of two modes.
 
-        A ROUND is one turn for every seat. Round 1 is INDEPENDENT — each
-        seat answers blind, because two views with no cross-contamination
-        are worth more than one view plus an echo. From round 2 the seats
-        cross-review each other. After each round the judge's meta-review
-        scores agreement, and the loop CONVERGES at ≥ threshold with no
-        blocking issues — otherwise the room goes around again, capped at
-        max_rounds — after which JOAT streams the verified synthesis.
+        LED (the default for a wearer's Brainstorm): a ROUND is one turn per
+        seat, and after EVERY turn the room stops and waits for the wearer.
+        Nothing is scored and nothing is concluded for them: they read the
+        turn, then ask something, name a seat, say "continue", or say "wrap
+        up" for the verified synthesis.
+
+        AUTONOMOUS (led=False, or "let them run"): the starter design, fully
+        visible: independent reviews, cross-review, meta-review, synthesis.
+        Round 1 is INDEPENDENT — each seat answers blind, because two views
+        with no cross-contamination are worth more than one view plus an
+        echo. From round 2 the seats cross-review each other. After each
+        round the judge's meta-review scores agreement, and the loop
+        CONVERGES at >= threshold with no blocking issues — otherwise the
+        room goes around again, capped at max_rounds — after which JOAT
+        streams the verified synthesis.
         """
         self._set_phase("opening")
         adopt = getattr(self._sink, "adopt_identity", None)
@@ -2143,22 +2301,38 @@ class DebateSession(Session):
             adopt(self.session_id, self.parent_id, self.root_id)
         await self._sink.open(self._topic, self._table.names)
         outcome = "no judge — one round"
-        for round_no in range(1, self._max_rounds + 1):
-            self._set_phase("independent" if round_no == 1 else "cross_review")
+        ruling = "continue"
+        round_no = 0
+        while True:
+            round_no += 1
+            # The cap follows the mode as it stands at the top of the round:
+            # "let them run" hands a led room back to the autonomous cap.
+            limit = self.LED_MAX_ROUNDS if self._led else self._max_rounds
+            if round_no > limit:
+                outcome = f"round limit ({limit}) reached"
+                break
+            self._set_phase(
+                "independent" if round_no == 1 and not self._led else "cross_review"
+            )
             # One turn from every seated collaborator — the wearer's round
             # invariant. The snapshot makes mid-round redirects reorder the
             # seats still owing a turn instead of recounting them.
             self._table.start_round()
             await self._report_progress(round_no)
-            # Round 1 only: every seat is independent, so start them all
-            # now and show them in order. Measured, both real binaries:
-            # ~7.3s of spawn-and-auth before a token, then 12-40s of
-            # generation. Serial, that is paid once per seat; concurrent,
-            # the round costs about its slowest seat. The wearer still
-            # watches one turn at a time — only the waiting is shared.
+            # Round 1 of an autonomous room only: every seat is independent,
+            # so start them all now and show them in order. Measured, both
+            # real binaries: ~7.3s of spawn-and-auth before a token, then
+            # 12-40s of generation. Serial, that is paid once per seat;
+            # concurrent, the round costs about its slowest seat. The wearer
+            # still watches one turn at a time — only the waiting is shared.
+            # A led room never prefetches: the wearer may ask something
+            # between two seats, and a seat started before the question
+            # would answer without it.
             self._prefetch = (
-                self._prefetch_round_one() if round_no == 1 else {}
+                self._prefetch_round_one()
+                if round_no == 1 and not self._led else {}
             )
+            ruling = "continue"
             for _ in range(len(self._table)):
                 speaker = self._table.next_speaker()
                 said = await self._verified_turn(speaker, round_no)
@@ -2174,6 +2348,19 @@ class DebateSession(Session):
                     log.warning("%s could not take its turn", speaker.name)
                 elif said:
                     self._transcript.append((speaker.label, said))
+                    if self._led:
+                        ruling = await self._hand_floor(speaker, said, round_no)
+                        if self._cancelled:
+                            await self._finish("cancelled")
+                            return
+                        if ruling in ("wrap", "away"):
+                            break
+            if ruling == "wrap":
+                outcome = "wrapped up on your call"
+                break
+            if ruling == "away":
+                outcome = "you stepped away; the room is saved"
+                break
             # A debate needs at least two positions in the room. One voice
             # plus a stack trace is a monologue, and scoring it would report
             # convergence with nobody to converge with.
@@ -2192,6 +2379,9 @@ class DebateSession(Session):
                     + remedy
                 )
                 return
+            if self._led:
+                # The wearer, not a score, decides when it is done.
+                continue
             if self._judge is None:
                 break
             self._set_phase("meta_review")
@@ -2224,8 +2414,11 @@ class DebateSession(Session):
             if round_no == self._max_rounds:
                 outcome = f"no convergence after {round_no} round(s) (last {agreement:.2f})"
                 break
+        # A wearer who asks to wrap up gets a summary of whatever the room
+        # has said, even one seat's view; the autonomous room needs two.
+        needed = 1 if ruling == "wrap" else 2
         if (self._judge is not None and not self._cancelled
-                and len(self._transcript) >= 2):
+                and ruling != "away" and len(self._transcript) >= needed):
             self._set_phase("synthesis")
             await self._synthesis_turn(outcome)
         await self._finish(f"done — {outcome}")
@@ -2256,7 +2449,9 @@ class DebateSession(Session):
         if callback is None:
             return
         try:
-            await callback(round_no, self._max_rounds, self._calls)
+            # 0 = no fixed count: a led room runs as long as the wearer
+            # keeps going, so "round 2/2" would be a promise it does not make.
+            await callback(round_no, 0 if self._led else self._max_rounds, self._calls)
         except Exception:
             log.warning("progress not painted", exc_info=True)
 
@@ -2410,10 +2605,14 @@ class DebateSession(Session):
         # the reason the wearer said "continue" rather than starting fresh,
         # and independence means not seeing the other seats' answers to THIS
         # question — not amnesia about the one before it.
+        # A LED room has no blinders: the wearer is hosting a conversation,
+        # so each seat hears everything said before it, including the seat
+        # that spoke a moment ago ("what does Claude make of that?").
         prior = (
             [*self._prior,
              *[t for t in self._transcript if t[0] == self.WEARER_LABEL]]
-            if round_no == 1 else [*self._prior, *self._transcript]
+            if round_no == 1 and not self._led
+            else [*self._prior, *self._transcript]
         )
         # A routed mode applies to the NEXT turn only, then the room
         # returns to ordinary cross-review — the wearer steered one relay,
@@ -2573,6 +2772,33 @@ class DebateSession(Session):
     def phase_timings(self) -> dict[str, float]:
         """Seconds spent per phase, for a diagnostic or a receipt."""
         return dict(self._phase_seconds)
+
+
+_SOURCES_BLOCK = re.compile(r"\n?[ \t]*SOURCES:[ \t]*\n.*\Z", re.DOTALL)
+_GIST_LABEL = re.compile(r"^\s*GIST:\s*", re.IGNORECASE)
+
+
+def turn_reader_text(said: str, verification: str = "") -> str:
+    """One finished turn as the wearer reads it on the glasses.
+
+    The whole answer, in the order it was written: the speaker's own
+    one-line gist as its opening line (without its "GIST:" label), then the
+    argument. A SOURCES block is long URLs and verbatim quotes that cannot be
+    read on a 576-pixel lens, so it becomes one line saying how many were
+    cited and whether the verifier held them up.
+    """
+    text = said.strip()
+    cited = len(parse_citations(text))
+    text = _SOURCES_BLOCK.sub("", text).strip()
+    text = _GIST_LABEL.sub("", text, count=1)
+    if cited:
+        if verification.startswith("sources check out"):
+            text += f"\n\nSources: {cited} cited, and they check out."
+        elif verification.startswith("sources don't hold up"):
+            text += f"\n\nSources: {cited} cited, and they don't hold up."
+        else:
+            text += f"\n\nSources: {cited} cited."
+    return text
 
 
 def seat_participants(

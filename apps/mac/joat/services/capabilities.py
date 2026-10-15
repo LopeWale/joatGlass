@@ -310,7 +310,9 @@ class _NoteReaderState:
     text: str = ""
 
 
-_SCROLLING_READER_TITLES = frozenset({"QUICKNOTES · NOTE", "QUICKNOTES · DETAIL"})
+_SCROLLING_READER_TITLES = frozenset({
+    "QUICKNOTES · NOTE", "QUICKNOTES · DETAIL", "BRAINSTORM · TURN",
+})
 """Readers sent whole and read in the glasses' own scroll box (the Hub's
 ScrollBox): the glasses scroll them a line a swipe, so the Mac pages
 nothing (the wearer's ruling, 2026-10-15)."""
@@ -1192,6 +1194,46 @@ class CapabilityRouter:
             self._request_context.reset(token)
             if reader is not None and self._note_reader is reader:
                 self._note_reader = None
+
+    #: What a finished Brainstorm turn's reader promises. Anything the
+    #: wearer says is also their move; the hint names the two ways in.
+    BRAINSTORM_TURN_HINT = "tap: continue · speak: ask"
+
+    async def show_brainstorm_turn(
+        self, label: str, text: str, release: Callable[[], object],
+    ) -> bool:
+        """Read one finished Brainstorm turn in full; a tap gives the room its next move.
+
+        The room is stopped on the wearer, so this is a reader, not a status
+        frame: the whole turn, scrolled by the glasses, under the speaker's
+        name. True when it was put up.
+        """
+        if not self.brainstorm_view_current:
+            return False
+        request_id = (self._active_request_id if self._active_capability == "BRAINSTORM"
+                      and self._active_request_id else voice_request_id())
+        self._active_capability = "BRAINSTORM"
+        self._active_request_id = request_id
+
+        async def go() -> None:
+            self.hide_brainstorm_turn()
+            release()
+
+        token = self._request_context.set(request_id)
+        try:
+            await self._open_note_reader(
+                "BRAINSTORM · TURN", label, text, "brainstorm-turn",
+                capability="BRAINSTORM", on_tap=go, tap_hint=self.BRAINSTORM_TURN_HINT,
+            )
+        finally:
+            self._request_context.reset(token)
+        return True
+
+    def hide_brainstorm_turn(self) -> None:
+        """The room has moved on: a tap on its page is no longer a "continue"."""
+        reader = self._note_reader
+        if reader is not None and reader.title == "BRAINSTORM · TURN":
+            self._note_reader = None
 
     async def open_terminal_from_brainstorm(self) -> bool:
         """Use the same picker and lane preparation as an ordinary Terminal open."""

@@ -1048,12 +1048,15 @@ async def main() -> None:
                     hud,
                     open_terminal=lambda: capabilities.open_terminal_from_brainstorm(),
                     brainstorm_view_current=lambda: capabilities.brainstorm_view_current,
+                    show_turn=capabilities.show_brainstorm_turn,
+                    hide_turn=capabilities.hide_brainstorm_turn,
                 ),
                            TerminalSink(), debate_state]),
                 worker,
                 gate=gate,
                 on_phase=publish_brainstorm_phase,
                 prior=prior,
+                led=True,
             )
         return session
 
@@ -1073,10 +1076,13 @@ async def main() -> None:
                 hud,
                 open_terminal=lambda: capabilities.open_terminal_from_brainstorm(),
                 brainstorm_view_current=lambda: capabilities.brainstorm_view_current,
+                show_turn=capabilities.show_brainstorm_turn,
+                hide_turn=capabilities.hide_brainstorm_turn,
             ), TerminalSink(), debate_state]),
             worker,
             gate=gate,
             on_phase=publish_brainstorm_phase,
+            led=True,
         )
 
     def make_navigation(text: str) -> Session | None:

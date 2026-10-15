@@ -252,14 +252,17 @@ let evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '0') =
  * the firmware text pages in place (one upgrade per swipe) and draws every
  * stroke at full brightness, where the 55% image's thin strokes look faded
  * (the wearer, 2026-10-07). */
-const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', QUICKNOTES_NOTE_TITLE]);
+const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', QUICKNOTES_NOTE_TITLE, 'BRAINSTORM · TURN']);
 /** Long text the glasses scroll themselves (ScrollBox): the Mac sends it
  * whole, and it reads as one scroll, a line a swipe, with no round trip
  * until a stretch's edge (the wearer's ruling after the hardware test,
  * 2026-10-14): a News article, a Search result, a Messages conversation
- * and a saved QuickNote (its note page and its exact text). */
+ * and a saved QuickNote (its note page and its exact text), and one
+ * finished Brainstorm turn, which the room waits on the wearer to read
+ * (2026-10-15). */
 const SCROLL_BOX_READERS = new Set([
   'NEWS · ARTICLE', 'SEARCH · RESULT', 'MESSAGES · CONVERSATION', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
+  'BRAINSTORM · TURN',
 ]);
 function scrollsInBox(title: string): boolean {
   return SCROLL_BOX_READERS.has(title.trim().toUpperCase());

@@ -191,6 +191,30 @@ describe('Brainstorm surface ownership', () => {
     expect(menu.mayPresentBrainstorm(explicitReplay)).toBe(true);
   });
 
+  it('a Brainstorm turn reader takes the page from the room, so its tap is "continue" and not "show terminal"', async () => {
+    // The room waits on the wearer after every turn and shows it whole. While
+    // the reader was up the room's controller still owned the page: a tap was
+    // sent as `show_terminal` and Back as `cancel` (simulator, 2026-10-15).
+    const { menu, sent } = rig();
+    menu.claimBrainstormVisit(menu.captureBrainstormVisit());
+    const controller = new BrainstormController({ sendBrainstorm: () => true });
+    controller.present({ screen: 'brainstorm', state: 'running', topic: '', collaborators: [], activity: '' });
+    menu.onSurfaceDeparture = () => controller.clear();
+    expect(controller.isActive()).toBe(true);
+
+    expect(await menu.presentList(
+      'BRAINSTORM · TURN', ['CODEX (proposer)', '', 'Heat pumps win.'], 'voice-turn-1', true,
+      'tap: continue · speak: ask · left x2: back',
+    )).toBe(true);
+    expect(controller.isActive()).toBe(false);
+
+    sent.length = 0;
+    expect(menu.handleClick()).toBe(true);
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'capdata', selectedName: 'BRAINSTORM', selectedIndex: 0, requestId: 'voice-turn-1',
+    });
+  });
+
   it('does not retire Brainstorm for a rejected stale list', async () => {
     const { menu } = rig();
     const visit = menu.captureBrainstormVisit();

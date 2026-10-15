@@ -33,9 +33,47 @@ inside this JOAT-owned conversation; neither is the interface or session owner.
 - Neither Codex nor Claude is permanently first. The wearer may direct either
   one to speak next; otherwise the session continues its recorded turn policy.
 
+## The wearer leads (2026-10-15)
+
+The wearer: "what is the point of a brainstorm if I cannot lead and see the
+full responses so I can participate". Before this the room ran its own loop
+to its own verdict in about 80 seconds, showed each finished turn as one gist
+line, and dropped anything said without "JOAT" in front. A Brainstorm is now
+**led by the wearer**; the autonomous loop below is what "let them run" asks
+for, not the default.
+
+- **The room stops after every turn.** The speaker's whole turn is put up as
+  a reader (`BRAINSTORM · TURN`: the speaker's name, a blank line, the words;
+  the GIST label is dropped and a SOURCES block becomes one line, "Sources: 2
+  cited, and they check out."). The glasses scroll it themselves, a line a
+  swipe, like a News article. The room goes on only when the wearer does.
+- **Anything the wearer says then counts, with no "JOAT".** A question or
+  remark becomes a `YOU` turn the next seat answers; "Claude, respond" or
+  "tear that apart" points at a seat; "continue", "go on", "next" (or a tap on
+  the reader) give the floor to whoever is next. One stray word that is not a
+  command ("you", from a hallucinated silence) is not a move.
+- **JOAT does not judge or summarise unasked.** No agreement score, no
+  convergence, no synthesis, until the wearer says "wrap up" (or "summarise",
+  "conclude"), which asks for the verified synthesis once. "Let them run"
+  hands the room back to the autonomous loop and its judge.
+- **Nobody is blind.** In a led room every seat, round 1 included, sees what
+  was said before it (the independent first round is the autonomous loop's).
+  A led room runs up to 12 turns a seat.
+- **Back leaves the room waiting.** Two taps go Home; the room is kept, and
+  opening Brainstorm again shows the turn it stopped on. Speech is only the
+  wearer's while Brainstorm is the page they are on, so talking to someone
+  else on Home spends nothing. "Stop" (or "cancel") still ends it. A room
+  nobody comes back to closes itself after 15 minutes, saved.
+
+Spoken words are `parse_floor_command` in `services/session.py`; the stop is
+`DebateSession._hand_floor`. The room page is still there between turns: the
+next seat's frame takes the page back (`hud.rebuild` `brainstorm`) and shows
+"round N · M calls" (a led room has no maximum to count to).
+
 ## Round structure
 
-A round is one turn from every seated collaborator — an invariant, not a
+This section describes the autonomous loop ("let them run"). A round is one
+turn from every seated collaborator — an invariant, not a
 default: a mid-round voice redirect reorders the seats still owing a turn and
 can never make one speak twice. The starter design runs:
 
@@ -66,9 +104,11 @@ A nomination may carry the question it is asking — "ask Codex if that's
 true" hands over the floor AND records the question, so the seat is
 prompted with it rather than answering something nobody asked.
 
-While a session runs, only the cancel words are heard without the wake word.
-Steering requires the wearer to address JOAT, so an overheard sentence can
-neither reorder the round table nor reach a collaborator.
+While a seat is speaking, only the cancel words are heard without the wake
+word: steering requires the wearer to address JOAT, so an overheard sentence
+can neither reorder the round table nor reach a collaborator. While the room
+is stopped on the wearer, and Brainstorm is their current page, what they say
+is theirs (see "The wearer leads").
 
 ## Conversation behavior
 
@@ -119,11 +159,14 @@ renderer measures each row with the canvas and wraps on the measurement
 screenful. A test re-derives that equality from the renderer so the two
 cannot drift apart.
 
-Those rows hold about one 120-word turn, so a FINISHED turn collapses to
-the one-line `GIST:` its speaker is instructed to open with, and only the
-live turn keeps its prose. The synthesis is never collapsed. Without that
-the glass showed a single turn and the wearer could not follow who had
-said what — which is the whole point of watching.
+Those rows hold about one 120-word turn, so on the room page a FINISHED turn
+collapses to the one-line `GIST:` its speaker is instructed to open with,
+and only the live turn keeps its prose. The synthesis is never collapsed.
+That one line is a scoreboard of who has said what, **not** the way to read
+a turn: the whole turn is read in the `BRAINSTORM · TURN` reader the room
+stops on after each seat (see "The wearer leads"). It was the only way to
+read a turn until 2026-10-15, which is what the wearer meant by "every
+response gets cut off to one line".
 
 The speaker tag is drawn dim and the words bright. One brightness for
 everything made a screen of discussion a flat wall with no way in, on the
