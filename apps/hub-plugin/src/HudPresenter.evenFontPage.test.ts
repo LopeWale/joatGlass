@@ -153,10 +153,19 @@ describe('HudPresenter Even-font reader page', () => {
     for (const line of body.split('\n')) {
       expect(measureTextWrap(line, READER_TEXT_PAGE.textWidth - 10).lineCount).toBeLessThanOrEqual(1);
     }
-    // The whole article fits one stretch: at its end a swipe writes nothing
-    // and rebuilds nothing, and is the menu's (an article has nothing more).
-    // (The rebuild holds 999 bytes; the rest of the stretch follows in place.)
+    // Opening is one write, the page's rebuild (999 bytes). The full-size
+    // stretch is not drawn over it a moment later: that second write
+    // redrew the same text and blinked every article as it opened
+    // (2026-10-15).
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(r.operations.filter((op) => op === 'upgrade')).toHaveLength(0);
+    // The article is a little longer than that: the first bottom-edge swipe
+    // writes the rest as the next stretch, one line below the top line.
+    expect(r.hud.scrollTextPage('down')).toBe(true);
     await vi.waitFor(() => expect(r.operations.filter((op) => op === 'upgrade')).toHaveLength(1));
+    // All of it fits that stretch: at its end a swipe writes nothing and
+    // rebuilds nothing, and is the menu's (an article has nothing more).
+    await new Promise((resolve) => setTimeout(resolve, 20));
     const writes = r.operations.length;
     expect(r.hud.scrollTextPage('down')).toBe(false);
     await new Promise((resolve) => setTimeout(resolve, 0));

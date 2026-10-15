@@ -106,6 +106,28 @@ describe('ScrollBox', () => {
     expect(early.resume(grown)).toBe(0);
   });
 
+  it('opens within the bytes a page rebuild may carry, so opening needs no second write', () => {
+    const lines = document(120);
+    const box = new ScrollBox(lines, VISIBLE);
+    // The whole stretch is bigger than a rebuild's 999 bytes.
+    expect(utf8ByteLength(box.text())).toBeGreaterThan(999);
+    box.openWithin(999);
+    const opening = box.text();
+    expect(utf8ByteLength(opening)).toBeLessThanOrEqual(999);
+    expect(box.head(999)).toBe(opening);
+    expect(opening.split('\n').length).toBeGreaterThanOrEqual(VISIBLE);
+    expect(opening.startsWith(lines[0]!)).toBe(true);
+    expect(box.position).toBe(0);
+    // The wearer's first screen of scrolling still reaches the larger stretches.
+    expect(box.down()).toBe(true);
+    expect(box.position).toBeGreaterThan(0);
+    // A limit larger than the box's own changes nothing.
+    const roomy = new ScrollBox(lines, VISIBLE);
+    const whole = roomy.text();
+    roomy.openWithin(SCROLL_BOX_MAX_BYTES * 4);
+    expect(roomy.text()).toBe(whole);
+  });
+
   it('shows a short document whole, with nothing beyond it', () => {
     const box = new ScrollBox(['Two short words.'], VISIBLE);
     expect(box.text()).toBe('Two short words.');

@@ -2248,7 +2248,10 @@ export class HudPresenter {
       this.nativeTextPage?.box?.resume(boxLines)
         ?? (this.nativeTextPage?.source === source ? this.nativeTextPage.page : 0),
     ) : undefined;
-    const pages = box ? [box.head(TEXT_CONTAINER_MAX_BYTES)] : paginate(
+    // The page opens on what its rebuild carries (999 bytes): one write to
+    // the glasses, not a rebuild and then a second write redrawing it.
+    box?.openWithin(TEXT_CONTAINER_MAX_BYTES);
+    const pages = box ? [box.text()] : paginate(
       text,
       scrolls ? READER_TEXT_PAGE.textWidth - SCROLLBAR_INSET_PX : READER_TEXT_PAGE.textWidth,
       scrolls ? SCROLLING_PAGE_MAX_LINES : READER_TEXT_PAGE.lineCapacity,
@@ -2300,9 +2303,8 @@ export class HudPresenter {
     const state: NativeTextPageState = { source, pages: shown, page, body, hint, ...(box ? { box } : {}) };
     this.nativeTextPage = state;
     this.recordPageTransition(from, 'list', 'show_list', 'success');
-    // A rebuild holds 999 bytes; the whole stretch follows in place, below
-    // the same first line, so the view the wearer has does not move.
-    if (box) void this.writeScrollBox(state, body);
+    // Nothing more is written until the wearer reaches the stretch's
+    // bottom edge: the next full-size stretch is written then (scrollTextPage).
     return true;
   }
 

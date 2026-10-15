@@ -72,10 +72,22 @@ export class ScrollBox {
     return this.lines.slice(this.start, this.end).join(NEWLINE) || ' ';
   }
 
-  /** The stretch cut to `maxBytes`: the page's first write (a rebuild
-   * holds 999 bytes), which the whole stretch then replaces. */
+  /** The stretch cut to `maxBytes`: what a page's rebuild can hold (999
+   * bytes). */
   head(maxBytes: number): string {
     return this.lines.slice(this.start, this.fit(this.start, maxBytes)).join(NEWLINE) || ' ';
+  }
+
+  /**
+   * The stretch the page opens on is the one its rebuild carries: cut to
+   * `maxBytes` this once, so the glasses are written to once when a story
+   * opens. Every later stretch is full size. A full-size first stretch
+   * went in as a second write straight after the rebuild, which redraws
+   * the text the glasses were just showing (the wearer reported that every
+   * article blinks as it opens, 2026-10-15).
+   */
+  openWithin(maxBytes: number): void {
+    this.end = this.fit(this.start, Math.min(maxBytes, this.maxBytes));
   }
 
   /** The glasses refused a stretch this big (the simulator holds 999
