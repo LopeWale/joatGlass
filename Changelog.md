@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-15 — Build JOAT 0.1.134
+
+- Packed from `cd86662` (clean tree) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.134 above the last recorded build; app.json, package.json and package-lock.json all 0.1.134. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1270 tests passed, typecheck clean.
+- `apps/hub-plugin/joat.ehpk`: 178817 bytes, SHA-256 `874ac4c55b6abcf9dec8d675633b256fa23569c53e657c85dcf5a88698ffad2f`. Adds to 0.1.133 the PLANNER first tab and the Notifications menu row (`61fb08e`). The reminders on the tab are read Mac side: takes effect when JOAT restarts. A build of the same tree to a scratch folder carries the Planner strings and none of the DEV `?joatTestOpenMenu=` hook; the `.ehpk` itself is an opaque container and was not unpacked. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-15 — Overview: the Planner is the first tab, and Notifications moves to the menu
 
 The wearer: "remove the notification from the overview and put it on the menu as the first option while on the overview, let's put the planner's reminder … The notification should still work the same if i open the menu and click it, it should display over the existing page. Do not change anything about the notification please just move it like I said."
