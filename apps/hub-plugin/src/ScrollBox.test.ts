@@ -84,6 +84,28 @@ describe('ScrollBox', () => {
     expect(new ScrollBox(lines, VISIBLE, SCROLL_BOX_MAX_BYTES, 10_000).position).toBe(lines.length - 1);
   });
 
+  it('resumes a document grown longer a line below the last screen, and anything else afresh', () => {
+    const lines = document(60);
+    const box = new ScrollBox(lines, VISIBLE);
+    while (box.down());
+    expect(box.atEnd).toBe(true);
+    const lastScreenTop = lines.length - VISIBLE;
+    // Older messages loaded below: carry on a line below the last screen
+    // (two, past the blank between paragraphs).
+    const grown = [...lines, 'Older message one.', 'Older message two.'];
+    const resumed = box.resume(grown) ?? -1;
+    expect([1, 2]).toContain(resumed - lastScreenTop);
+    expect(grown[resumed]).not.toBe('');
+    // The same document reopens where it was.
+    expect(box.resume(lines)).toBe(box.position);
+    // Another document (a reply at the top, a shorter text) is not resumed.
+    expect(box.resume(['You: On my way', ...lines])).toBeUndefined();
+    expect(box.resume(lines.slice(0, 10))).toBeUndefined();
+    // Grown while the wearer is mid-document: the same stretch.
+    const early = new ScrollBox(lines, VISIBLE);
+    expect(early.resume(grown)).toBe(0);
+  });
+
   it('shows a short document whole, with nothing beyond it', () => {
     const box = new ScrollBox(['Two short words.'], VISIBLE);
     expect(box.text()).toBe('Two short words.');

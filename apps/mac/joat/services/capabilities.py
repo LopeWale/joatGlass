@@ -306,7 +306,14 @@ class _NoteReaderState:
     capability: str = "QUICKNOTES"
     on_tap: Callable[[], Awaitable[None]] | None = None
     tap_hint: str | None = None
+    #: The exact text, for a reader the glasses scroll whole.
+    text: str = ""
 
+
+_SCROLLING_READER_TITLES = frozenset({"QUICKNOTES · NOTE", "QUICKNOTES · DETAIL"})
+"""Readers sent whole and read in the glasses' own scroll box (the Hub's
+ScrollBox): the glasses scroll them a line a swipe, so the Mac pages
+nothing (the wearer's ruling, 2026-10-15)."""
 
 _LAST_PAGE_TAP_TITLES = frozenset({"MESSAGES · REVIEW", "AGENT TERMINAL · CHECK"})
 """Readers that are a review: the tap that sends is offered only on the last
@@ -328,6 +335,9 @@ class _MessageHistoryState:
     trace_id: str
     pages: tuple[tuple[str, ...], ...] = ()
     index: int = 0
+    #: Every message read in so far, newest first: the document the
+    #: glasses scroll.
+    text: str = ""
 
 
 def _age(unix: float) -> str:
@@ -1381,14 +1391,17 @@ class CapabilityRouter:
 
     @staticmethod
     def _paginate_thread(state: _MessageHistoryState) -> None:
-        text = "\n".join(
+        """The thread as one document the glasses scroll (the Hub's
+        ScrollBox): one page holds it all, so a swipe past its end is always
+        the one that reads older messages in from chat.db."""
+        state.text = "\n".join(
             CapabilityRouter._message_thread_line(
                 state.thread, entry, newest_own=(index == 0 and entry.from_me),
             )
             for index, entry in enumerate(state.entries)
         ) or "No messages in this conversation yet."
-        state.pages = paginate_reader_text(text)
-        state.index = min(state.index, len(state.pages) - 1)
+        state.pages = (tuple(state.text.split("\n")),)
+        state.index = 0
 
     async def _reply_from_thread(self, request_id: str | None) -> None:
         """A tap on the conversation replies to it: the one thing a tap does.
@@ -1582,25 +1595,20 @@ class CapabilityRouter:
             state.thread.reply_target is not None and self._replies is not None
             and self._message_ui is not None
         )
-        total = len(state.pages)
-        hint = []
-        if state.index > 0:
-            hint.append("up previous")
-        if state.index + 1 < total or state.has_older:
-            hint.append("down more")
-        hint.append("tap: reply" if can_reply else "read-only")
-        hint.append(BACK_HINT)
+        hint = ["tap: reply" if can_reply else "read-only", BACK_HINT]
         label = f"{state.thread.sender} (group)" if state.thread.is_group else state.thread.sender
-        more = "+" if state.has_older else ""
         await self._send_list(HudList(
-            items=[f"{state.index + 1}/{total}{more} · {label}"[:64], *state.pages[state.index]],
+            # The reader template: who, a blank line, then every message read
+            # in so far, newest first, scrolled by the glasses themselves.
+            items=[],
+            body=f"{label}\n\n{state.text}",
             title="MESSAGES · CONVERSATION",
             context_label=state.thread.sender,
             hint=" · ".join(hint),
             selectable=can_reply,
-            # One page more than read so far while chat.db has older
-            # messages: the swipe past the last page asks for them.
-            reader_page=(state.trace_id, state.index, total + (1 if state.has_older else 0)),
+            # A page more while chat.db has older messages: the swipe past
+            # the thread's end asks for them.
+            reader_page=(state.trace_id, 0, 2 if state.has_older else 1),
         ))
 
     async def _show_messages_read_failure(self, error: BaseException) -> None:
@@ -2754,7 +2762,7 @@ class CapabilityRouter:
     ) -> None:
         self._note_reader = _NoteReaderState(
             title, label, paginate_reader_text(text), trace_id,
-            capability=capability, on_tap=on_tap, tap_hint=tap_hint,
+            capability=capability, on_tap=on_tap, tap_hint=tap_hint, text=text,
         )
         await self._show_note_reader()
 
@@ -2771,6 +2779,18 @@ class CapabilityRouter:
     async def _show_note_reader(self) -> None:
         reader = self._note_reader
         if reader is None:
+            return
+        if reader.title in _SCROLLING_READER_TITLES:
+            # The reader template, sent whole: its label (when it has one), a
+            # blank line, then the text, scrolled by the glasses themselves.
+            await self._send_list(HudList(
+                items=[],
+                body=f"{reader.label}\n\n{reader.text}" if reader.label else reader.text,
+                title=reader.title,
+                hint=" · ".join([*([reader.tap_hint] if reader.tap_hint else []), BACK_HINT]),
+                selectable=bool(reader.tap_hint),
+                reader_page=(reader.trace_id, 0, 1),
+            ))
             return
         hint = []
         if reader.index > 0:
@@ -2797,6 +2817,8 @@ class CapabilityRouter:
         try:
             if self._note_reader is not reader or event.request_id != self._active_request_id:
                 return
+            if reader.title in _SCROLLING_READER_TITLES:
+                return  # sent whole: the glasses scroll it
             delta = -1 if event.event_type == EventType.SCROLL_TOP else (
                 1 if event.event_type == EventType.SCROLL_BOTTOM else 0
             )
@@ -2881,7 +2903,9 @@ class CapabilityRouter:
         meta = f"{sections} transcript section{'s' if sections != 1 else ''}"
         if note.gap_count:
             meta += f" · {note.gap_count} gap{'s' if note.gap_count != 1 else ''}"
-        rows: list[str] = [title, meta]
+        # The reader template: the note's title, what it is, a blank line,
+        # then each section a blank line apart.
+        rows: list[str] = [title, f"Recording · {meta}", ""]
         insights = store.insights(note.capture_id)
         latest = store.recent_retained(1)
         is_latest = bool(latest) and latest[0].capture_id == note.capture_id
@@ -2893,16 +2917,16 @@ class CapabilityRouter:
             rows.append("OVERVIEW")
             rows.append(insights.summary)
             if insights.key_points:
-                rows.append("KEY POINTS")
+                rows.extend(["", "KEY POINTS"])
                 rows.extend(f"– {point}" for point in insights.key_points)
             if insights.todos:
-                rows.append("NEXT STEPS")
+                rows.extend(["", "NEXT STEPS"])
                 # □ reads as an unchecked box: these are the actionable rows,
                 # and a tap on this page makes them reminders.
                 rows.extend(f"□ {todo}" for todo in insights.todos)
         if is_latest:
-            rows.append("Say: ask the last note …")
-        rows.append("TRANSCRIPT")
+            rows.extend(["", "Say: ask the last note …"])
+        rows.extend(["", "TRANSCRIPT"])
         segments = store.segments(note.capture_id)
         rows.extend(
             segment.text if segment.kind == "transcript" else "[recording gap]"
@@ -2923,7 +2947,7 @@ class CapabilityRouter:
 
             on_tap, tap_hint = add_reminders, "tap: reminders"
         await self._open_note_reader(
-            "QUICKNOTES · NOTE", "Recording", "\n".join(rows), trace_id,
+            "QUICKNOTES · NOTE", "", "\n".join(rows), trace_id,
             on_tap=on_tap, tap_hint=tap_hint,
         )
 

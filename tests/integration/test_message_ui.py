@@ -25,6 +25,12 @@ from joat.services.prompted_input import UtteranceProvenance
 from joat.services.prompted_speech import PromptedSpeechRuntime
 
 
+def thread_lines(frame: Any) -> list[str]:
+    """A conversation reader's message lines, newest first (its body: who,
+    a blank line, then one message a line)."""
+    return (frame.body or '').split('\n')[2:]
+
+
 async def until(predicate: Any) -> None:
     async with asyncio.timeout(0.5):
         while not predicate():
@@ -383,11 +389,12 @@ async def test_a_sent_reply_reports_its_body_and_shows_on_the_thread(
         assert rig.sent_bodies == [body]
         assert rig.submitted == [('synthetic-contact', body)]
         # The thread first shows the message going out (▷), then sent (▶).
-        await until(lambda: [m for m in rig.transport.sent
-                             if getattr(m, 'title', None) == 'MESSAGES · CONVERSATION'][-1].items[1]
-                    .endswith('▶\n'))
+        await until(lambda: thread_lines([m for m in rig.transport.sent
+                                          if getattr(m, 'title', None) == 'MESSAGES · CONVERSATION'][-1])[0]
+                    .endswith('▶'))
         frame = [m for m in rig.transport.sent if getattr(m, 'title', None) == 'MESSAGES · CONVERSATION'][-1]
-        assert frame.items == ['1/1 · Sam', f'You: {body} ▶\n', 'Sam: Are you coming?']  # ▶: sent
+        assert frame.items == []
+        assert frame.body == f'Sam\n\nYou: {body} ▶\nSam: Are you coming?'  # ▶: sent
         assert frame.reader_page == ('selection-message', 0, 1)
         assert frame.request_id == 'request-messages'
     finally:
@@ -775,11 +782,12 @@ async def test_a_confirmed_message_shows_on_the_thread_going_out_then_sent(
         rig.confirm_release.set()
         await until(lambda: rig.sent_bodies)
         assert rig.status_bodies[0] == ('On my way', 'sending')
-        rows = [frame.items[1] for frame in rig.thread_frames() if frame.items[1].startswith('You: ')]
-        assert rows[0] == 'You: On my way ▷\n'
-        await until(lambda: rig.thread_frames()[-1].items[1] == 'You: On my way ▶\n')
+        rows = [thread_lines(frame)[0] for frame in rig.thread_frames()
+                if thread_lines(frame)[0].startswith('You: ')]
+        assert rows[0] == 'You: On my way ▷'
+        await until(lambda: thread_lines(rig.thread_frames()[-1])[0] == 'You: On my way ▶')
         # One own row, not a ▷ row and a ▶ row.
-        assert rig.thread_frames()[-1].items == ['1/1 · Sam', 'You: On my way ▶\n', 'Sam: Are you coming?']
+        assert thread_lines(rig.thread_frames()[-1]) == ['You: On my way ▶', 'Sam: Are you coming?']
         assert not any(getattr(m, 'state', None) in {'sent', 'failed'} and 'sent' in getattr(m, 'text', '').lower()
                        and getattr(m, 'title', None) for m in rig.transport.sent)
     finally:
@@ -808,8 +816,8 @@ async def test_a_refused_send_marks_the_row_failed_on_the_thread() -> None:
         await until(lambda: rig.confirmations)
         rig.confirm_release.set()
         await until(lambda: ('On my way', 'failed') in rig.status_bodies)
-        await until(lambda: rig.thread_frames()[-1].items[1] == 'You: On my way ×\n')
+        await until(lambda: thread_lines(rig.thread_frames()[-1])[0] == 'You: On my way ×')
         assert rig.sent_bodies == []
-        assert rig.thread_frames()[-1].items == ['1/1 · Sam', 'You: On my way ×\n', 'Sam: Are you coming?']
+        assert thread_lines(rig.thread_frames()[-1]) == ['You: On my way ×', 'Sam: Are you coming?']
     finally:
         await rig.close()

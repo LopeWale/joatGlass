@@ -7,6 +7,7 @@ import {
   type PanelContentTab,
 } from './types';
 import type { HudPanelMessage } from './PanelRail';
+import { readerRows } from './EvenFont';
 import type {
   HudFramePainter,
   HudFrameRenderer,
@@ -266,47 +267,49 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
         '[3h] Dele · Attachment',
       ],
     },
-    // The thread as one reader, newest first; a tap replies.
-    // Mirrors capabilities._show_message_history_page.
+    // The thread as one reader, newest first; a tap replies. Sent whole in
+    // the reader template (who, a blank line, a message a line) for the
+    // glasses to scroll. Mirrors capabilities._show_message_history_page.
     'messages-conversation': {
       title: 'MESSAGES · CONVERSATION',
-      hint: 'down more · tap: reply · 2x tap: back',
+      hint: 'tap: reply · 2x tap: back',
       selectable: true,
-      items: [
-        '1/1+ · Adele',
+      items: readerRows([], [
+        'Adele', '',
         'Adele: You are a lifesaver. See you at 4:30.',
         'You: Both palettes are in the file.',
         'Adele: Perfect. Dele wants the dark variants too.',
         'You: Exporting them now, give me ten minutes.',
         'Adele: Can you send the latest mockups before the review?',
-      ],
+      ].join('\n')),
     },
-    // A full thread page as the Mac sends it: paginate_reader_text's
-    // lossless 62-column slices, a link cut mid-token included.
+    // A thread long enough for several stretches of the scroll box, a long
+    // link included.
     'messages-conversation-long': {
       title: 'MESSAGES · CONVERSATION',
-      hint: 'down more · tap: reply · 2x tap: back',
+      hint: 'tap: reply · 2x tap: back',
       selectable: true,
-      items: [
-        '1/2 · Adele',
-        'Adele: Can you send the latest mockups before the review? I ',
-        'want to walk Marcus through the onboarding flow first.\n',
-        'You: Exporting them now, give me ten minutes. The dark ',
-        'variants are still rendering.\n',
-        'Adele: Perfect. Dele wants the dark variants too, and the ',
-        'empty states for the inbox screen.\n',
-        'You: Both palettes are in the file. Link: ',
-        'https://www.figma.com/design/k3J9xQ2/joat-hud-review?node-id=1',
-        '204-5521&t=Ab12\n',
-        'Adele: You are a lifesaver. See you at 4:30 in the big room, ',
-        "I'll bring coffee.\n",
-        'You: Thanks! Running two minutes late, start without me if ',
-        'Marcus is already there.\n',
-        "Adele: No rush. We're still waiting on the projector anyway.\n",
-        'Adele: Also, can you remind me which build has the new ',
-        'header? The one with the battery icon on the right.\n',
+      items: readerRows([], [
+        'Adele', '',
         'You: 0.1.107 — the image header is on every page now.',
-      ],
+        'Adele: Also, can you remind me which build has the new header? The one with the battery icon on the right.',
+        "Adele: No rush. We're still waiting on the projector anyway.",
+        'You: Thanks! Running two minutes late, start without me if Marcus is already there.',
+        "Adele: You are a lifesaver. See you at 4:30 in the big room, I'll bring coffee.",
+        'You: Both palettes are in the file. Link: https://www.figma.com/design/k3J9xQ2/joat-hud-review?node-id=1204-5521&t=Ab12',
+        'Adele: Perfect. Dele wants the dark variants too, and the empty states for the inbox screen.',
+        'You: Exporting them now, give me ten minutes. The dark variants are still rendering.',
+        'Adele: Can you send the latest mockups before the review? I want to walk Marcus through the onboarding flow first.',
+        'You: Morning! The review moved to 4:30, so there is time for one more pass on the inbox.',
+        'Adele: Great. Did legal sign off on the new consent copy, or is that still waiting on Thursday?',
+        'You: Still waiting. I will chase it after lunch and send you whatever they say.',
+        'Adele: Thanks. And can you bring the printed flows? Marcus prefers paper for the first walk-through.',
+        'You: Will do, two copies of each flow, the onboarding one in colour.',
+        'Adele: Last thing: the empty state illustrations, are those final or placeholders?',
+        'You: Placeholders. The final set lands Monday from the illustrator.',
+        'Adele: Perfect, that works for the review. See you later.',
+        'You: See you at 4:30.',
+      ].join('\n')),
     },
     'messages-compose': {
       title: 'MESSAGES · COMPOSE',
@@ -379,24 +382,31 @@ export function visualListFixture(state: ProductivityVisualState): VisualListFix
         '[1d] Idea: quiet morning briefing mode',
       ],
     },
-    // A recording's summary page (capabilities._show_voice_note_detail).
+    // A recording's note page (capabilities._show_voice_note_detail), sent
+    // whole in the reader template for the glasses to scroll: its title,
+    // what it is, a blank line, then each section a blank line apart.
     'quicknote-detail': {
       title: 'QUICKNOTES · NOTE',
-      hint: 'say: ask the last note … · 2x tap: back',
-      selectable: false,
-      items: [
-        'Client standup',
-        '2 transcript sections',
-        'SUMMARY',
-        'The team agreed to ship the beta on Friday. QA owns',
-        'the final pass; Dele drafts the release notes tonight.',
-        'KEY POINTS',
+      hint: 'tap: reminders · 2x tap: back',
+      selectable: true,
+      items: readerRows([], [
+        'Client standup', 'Recording · 2 transcript sections', '',
+        'OVERVIEW',
+        'The team agreed to ship the beta on Friday. QA owns the final pass; Dele drafts the release notes tonight.',
+        '', 'KEY POINTS',
         '– Ship the beta on Friday',
         '– QA signs off Thursday',
-        'TODOS',
+        '', 'NEXT STEPS',
         '□ Email release notes to the team',
         '□ Book the retro room',
-      ],
+        '', 'Say: ask the last note …',
+        '', 'TRANSCRIPT',
+        'Morning everyone. Quick one today, the beta is the only thing on the list.',
+        'QA finished the regression pass last night; two minor issues, both fixed this morning.',
+        'So the plan is Friday. QA owns the final pass on Thursday, and Dele drafts the release notes tonight.',
+        'Someone needs to book the retro room for next week, and the release notes go to the whole team.',
+        'Anything else? No? Then that is it, thanks all.',
+      ].join('\n')),
     },
     // Live capture owns the page; the exclusive microphone belongs to the
     // recording, so these tappable rows are the wearer's only controls.

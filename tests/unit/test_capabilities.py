@@ -193,7 +193,7 @@ class HistoryMessages(FakeMessages):
 
 
 class LongHistoryMessages(FakeMessages):
-    """One conversation with a text long enough to require reader paging."""
+    """One conversation with a text long enough to scroll."""
 
     body = "Opening words " + "continue through the full message " * 18
 
@@ -316,7 +316,7 @@ class OlderHistoryMessages(FakeMessages):
         del thread, limit
         self.page_calls.append(before_row_id)
         if before_row_id is None:
-            # Ten one-row messages: exactly one ten-row reader page.
+            # Ten messages, with older ones waiting in chat.db.
             return MessageHistoryPage(entries=tuple(
                 MessageEntry(f"Newest {row}", float(row), row % 2 == 0, row_id=row)
                 for row in range(30, 20, -1)
@@ -329,7 +329,7 @@ class OlderHistoryMessages(FakeMessages):
 
 
 class SentReplyMessages(FakeMessages):
-    """A two-page thread; chat.db records the wearer's reply only later."""
+    """A long thread; chat.db records the wearer's reply only later."""
 
     def __init__(self, *, records_after: int | None) -> None:
         super().__init__([("Dele", "Preview", time.time())])
@@ -426,50 +426,30 @@ async def wait_until(predicate, *, timeout_s: float = 2.0) -> None:  # type: ign
         await asyncio.sleep(0.001)
 
 
-async def collect_note_reader(router, transport, *, request_id, trace_id):  # type: ignore[no-untyped-def]
-    """Read actual serialized pages, replaying each page gesture once."""
-    pages = []
-    for expected_index in range(100):
-        frame = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        wire = frame.to_wire()
-        assert wire["items"] == frame.items, "reader data was truncated on the wire"
-        assert frame.request_id == request_id
-        assert frame.selectable is False
-        assert 1 < len(frame.items) <= 11
-        assert all(sum(
-            8 if char == "\t" else 2
-            if ord(char) > 0xFFFF or unicodedata.east_asian_width(char) in "WF" else 1
-            for char in row.rstrip("\r\n")
-        ) <= 62 for row in frame.items[1:])
-        assert all(len(row.encode("utf-16-le")) // 2 <= 64 for row in wire["items"])
-        assert all(len(row.rstrip("\r\n")) <= 31 for row in frame.items[1:]
-                   if row.rstrip("\r\n") and set(row.rstrip("\r\n")) == {"漢"})
-        counter = re.match(r"^(\d+)/(\d+) · ", frame.items[0])
-        assert counter is not None, "reader must identify its actual page"
-        index, total = int(counter[1]) - 1, int(counter[2])
-        assert index == expected_index and total > index
-        hint = wire.get("hint", "")
-        assert ("up previous" in hint) == (index > 0)
-        assert ("down more" in hint) == (index + 1 < total)
-        assert "left x2: back" in hint
-        pages.append(wire)
-        if index + 1 == total:
-            return pages
-        before = len(transport.sent)
-        event = InputEvent(
+async def scrolled_note_reader(router, transport, *, request_id, trace_id):  # type: ignore[no-untyped-def]
+    """A QuickNotes reader as the glasses scroll it: one frame carrying the
+    exact text whole, no page beyond it, and page gestures that repaint
+    nothing (the glasses' own scroll box moves through it)."""
+    frame = [m for m in transport.sent if isinstance(m, HudList)][-1]
+    wire = frame.to_wire()
+    assert frame.items == [] and wire["items"] == []
+    assert frame.body is not None
+    assert wire["body"] == frame.body, "reader text was truncated on the wire"
+    assert frame.request_id == request_id
+    assert wire["readerPage"] == {"id": trace_id, "index": 0, "count": 1}
+    hint = wire.get("hint", "")
+    assert "up previous" not in hint and "down more" not in hint
+    assert "left x2: back" in hint
+    before = len(transport.sent)
+    for event_type in (EventType.SCROLL_BOTTOM, EventType.SCROLL_TOP):
+        router.on_input(InputEvent(
             container_name="cappage", selected_name="QUICKNOTES",
-            selected_index=index, event_type=EventType.SCROLL_BOTTOM,
+            selected_index=0, event_type=event_type,
             request_id=request_id, trace_id=trace_id,
-        )
-        router.on_input(event)
-        router.on_input(event)
-        await wait_until(lambda: len(transport.sent) > before)
-        await asyncio.sleep(0)
-        assert len(transport.sent) == before + 1, "duplicate gesture skipped a page"
-        router.on_input(event)  # A delayed duplicate still names the old page.
-        await asyncio.sleep(0)
-        assert len(transport.sent) == before + 1, "delayed duplicate skipped a page"
-    raise AssertionError("reader did not finish")
+        ))
+    await asyncio.sleep(0.01)
+    assert len(transport.sent) == before, "a scrolled reader is never repaged"
+    return wire["body"]
 
 
 def message_row_index(transport: FakeTransport, label: str) -> int:
@@ -1191,9 +1171,10 @@ class TestCapabilityViews:
         )]
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.title == "MESSAGES · CONVERSATION"
-        # The page carries the conversation only: no spoken-grammar rows,
+        # The reader carries the conversation only: no spoken-grammar rows,
         # and no tap-to-reply either, since no message UI can take the tap.
-        assert detail.items == ["1/1 · Adaeze", "Adaeze: Call me"]
+        assert detail.items == []
+        assert detail.body == "Adaeze\n\nAdaeze: Call me"
         assert detail.hint == "read-only · left x2: back"
         assert detail.selectable is False
         assert detail.page_controls is None
@@ -1219,13 +1200,10 @@ class TestCapabilityViews:
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.title == "MESSAGES · CONVERSATION"
         assert detail.request_id == "messages-context"
-        # Newest first, one whole message per logical line.
-        assert detail.items == [
-            "1/1 · Dele",
-            "Dele: Great\n",
-            "You: On my way\n",
-            "Dele: Are you coming?",
-        ]
+        # The reader template, sent whole for the glasses to scroll: who, a
+        # blank line, then newest first, one whole message per line.
+        assert detail.items == []
+        assert detail.body == "Dele\n\nDele: Great\nYou: On my way\nDele: Are you coming?"
         assert detail.hint == "read-only · left x2: back"
         assert detail.reader_page == ("hud-context", 0, 1)
 
@@ -1256,16 +1234,12 @@ class TestCapabilityViews:
         assert message_ui.retired == 1  # opening Messages resets any old visit
         assert message_ui.calls == ["conversation_ready"]
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert detail.items == [
-            "1/1 · Dele",
-            "Dele: Great\n",
-            "You: On my way\n",
-            "Dele: Are you coming?",
-        ]
+        assert detail.items == []
+        assert detail.body == "Dele\n\nDele: Great\nYou: On my way\nDele: Are you coming?"
         assert detail.hint == "tap: reply · left x2: back"
         assert detail.selectable is True
         assert detail.page_controls is None
-        assert not any("Reply" in row for row in detail.items)
+        assert "Reply" not in detail.body
 
         # A stale request cannot reply.
         router.on_input(InputEvent(
@@ -1353,13 +1327,14 @@ class TestCapabilityViews:
         ))
         await wait_until(lambda: bool(conversation_frames(transport)))
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert detail.items == ["1/1 · Dele", "Dele: Great"]
+        assert detail.items == []
+        assert detail.body == "Dele\n\nDele: Great"
         assert detail.hint == "read-only · left x2: back"
         assert detail.selectable is False
         assert "conversation_ready" not in message_ui.calls
         assert router._message_selection_active is False
 
-    async def test_a_long_message_reads_whole_across_thread_pages(
+    async def test_a_long_message_is_sent_whole_for_the_glasses_to_scroll(
         self, tmp_path,
     ) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
@@ -1376,41 +1351,24 @@ class TestCapabilityViews:
             request_id="messages-full-reader",
         ))
         await wait_until(lambda: bool(conversation_frames(transport)))
-        first_page = conversation_frames(transport)[-1]
-        assert first_page.items[0] == "1/2 · Dele"
-        assert len(first_page.items) == 11
-        assert all(len(line) <= 62 for line in first_page.items[1:])
-        assert first_page.items[1].startswith("● Dele: Opening words")
-        assert first_page.hint == "down more · read-only · left x2: back"
-        assert first_page.selectable is False
-        assert first_page.reader_page == ("hud-reader-conversation", 0, 2)
+        reader = conversation_frames(transport)[-1]
+        # The whole thread in one frame: the glasses scroll it a line a swipe.
+        assert reader.items == []
+        assert reader.body == "Dele\n\n● Dele: " + messages.body
+        assert reader.hint == "read-only · left x2: back"
+        assert reader.selectable is False
+        assert reader.reader_page == ("hud-reader-conversation", 0, 1)
         assert len(replies.selected) == 1
 
-        # The page gesture is bound to the reader's own trace.
-        router.on_input(page_event(EventType.SCROLL_BOTTOM, "hud-other", "messages-full-reader"))
+        # A swipe past the end, from any trace, with nothing older in chat.db:
+        # nothing is read or painted.
+        await asyncio.sleep(0)
+        for trace in ("hud-other", "hud-reader-conversation"):
+            for event_type in (EventType.SCROLL_BOTTOM, EventType.SCROLL_TOP):
+                router.on_input(page_event(event_type, trace, "messages-full-reader"))
         await asyncio.sleep(0.01)
         assert len(conversation_frames(transport)) == 1
-
-        router.on_input(page_event(
-            EventType.SCROLL_BOTTOM, "hud-reader-conversation", "messages-full-reader",
-        ))
-        await wait_until(lambda: len(conversation_frames(transport)) == 2)
-        second_page = conversation_frames(transport)[-1]
-        assert second_page.items[0] == "2/2 · Dele"
-        assert second_page.hint == "up previous · read-only · left x2: back"
-        assert second_page.reader_page == ("hud-reader-conversation", 1, 2)
-        assert "".join([*first_page.items[1:], *second_page.items[1:]]) == (
-            "● Dele: " + messages.body
-        )
         assert len(replies.selected) == 1
-
-        # Past the last page with nothing older: nothing is read or painted.
-        await asyncio.sleep(0)
-        router.on_input(page_event(
-            EventType.SCROLL_BOTTOM, "hud-reader-conversation", "messages-full-reader",
-        ))
-        await asyncio.sleep(0.01)
-        assert len(conversation_frames(transport)) == 2
 
         router.on_input(InputEvent(
             container_name="capability-lifecycle",
@@ -1432,9 +1390,9 @@ class TestCapabilityViews:
         pytest.param("😀" * 320 + "FINAL", id="emoji-exceeds-ten-old-rows"),
         pytest.param("  Opening\r\n\r\n" + "Keep  every\tspace.\r\n" * 35 + "FINAL\n  ",
                      id="exact-whitespace"),
-        pytest.param("é 👩‍💻 " * 100 + "FINAL", id="combining-and-joined-emoji"),
+        pytest.param("é 👩‍💻 " * 100 + "FINAL", id="combining-and-joined-emoji"),
     ])
-    async def test_thread_reader_preserves_exact_serialized_pages_and_back(
+    async def test_thread_reader_sends_the_exact_thread_whole_and_back(
         self, tmp_path, body: str,
     ) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
@@ -1446,53 +1404,35 @@ class TestCapabilityViews:
         await router.open("Messages", request_id=request_id)
         await router._select_capability_row("MESSAGES", 1, "select-thread", request_id)
 
-        pages = []
-        for expected in range(100):
-            frame = [item for item in transport.sent if isinstance(item, HudList)][-1]
-            wire = frame.to_wire()
-            assert frame.title == "MESSAGES · CONVERSATION"
-            assert frame.request_id == request_id
-            assert wire["items"] == frame.items, "body cannot be shortened during serialization"
-            assert 2 <= len(frame.items) <= 11
-            assert all(len(row.encode("utf-16-le")) // 2 <= 64 for row in frame.items)
-            assert all(sum(
-                8 if char == "\t" else 2
-                if ord(char) > 0xFFFF or unicodedata.east_asian_width(char) in "WF" else 1
-                for char in row.rstrip("\r\n")
-            ) <= 62 for row in frame.items[1:])
-            counter = re.match(r"^(\d+)/(\d+) · Dele$", frame.items[0])
-            assert counter is not None, "reader pages must identify their page first"
-            index, total = int(counter[1]) - 1, int(counter[2])
-            assert index == expected
-            assert wire["readerPage"] == {"id": "select-thread", "index": index, "count": total}
-            assert ("down more" in (frame.hint or "")) == (index + 1 < total)
-            assert ("up previous" in (frame.hint or "")) == (index > 0)
-            pages.append(wire)
-            if index + 1 == total:
-                break
-            await router._page_message_history(EventType.SCROLL_BOTTOM, "select-thread", request_id)
-        else:
-            pytest.fail("thread reader did not expose its final page")
-
-        assert len(pages) > 1
-        assert "".join(row for page in pages for row in page["items"][1:]) == "● Dele: " + body
-        assert "FINAL" in "".join(pages[-1]["items"][1:])
+        frame = [item for item in transport.sent if isinstance(item, HudList)][-1]
+        wire = frame.to_wire()
+        assert frame.title == "MESSAGES · CONVERSATION"
+        assert frame.request_id == request_id
+        assert wire["items"] == frame.items == []
+        assert wire["body"] == frame.body, "body cannot be shortened during serialization"
+        assert wire["body"] == "Dele\n\n● Dele: " + body
+        assert wire["readerPage"] == {"id": "select-thread", "index": 0, "count": 1}
+        assert "down more" not in (frame.hint or "")
+        assert "up previous" not in (frame.hint or "")
         assert messages.body == body
         assert len(replies.selected) == 1
 
+        # Page gestures, stale, forged or current, never repage it.
         before = len(transport.sent)
-        await router._page_message_history(EventType.SCROLL_TOP, "select-thread", "old-request")
+        for trace, request in (
+            ("select-thread", "old-request"),
+            ("forged-trace", request_id),
+            ("select-thread", request_id),
+        ):
+            for event_type in (EventType.SCROLL_BOTTOM, EventType.SCROLL_TOP):
+                await router._page_message_history(event_type, trace, request)
         assert len(transport.sent) == before
-        await router._page_message_history(EventType.SCROLL_TOP, "forged-trace", request_id)
-        assert len(transport.sent) == before
-        await router._page_message_history(EventType.SCROLL_TOP, "select-thread", request_id)
-        assert transport.sent[-1].to_wire() == pages[-2]
         router.on_input(InputEvent(container_name="capability-lifecycle",
             selected_name="messages-conversation", request_id=request_id))
         assert router._message_history is not None
         assert len(replies.selected) == 1
 
-    async def test_thread_reader_keeps_counter_visible_before_a_long_sender(
+    async def test_thread_reader_keeps_a_long_sender_whole(
         self, tmp_path,
     ) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path, replies=FakeReplies())
@@ -1503,12 +1443,11 @@ class TestCapabilityViews:
         await router._select_capability_row("MESSAGES", 1, "select-thread", "long-sender")
         frame = [item for item in transport.sent if isinstance(item, HudList)][-1]
         wire = frame.to_wire()
-        assert wire["items"][0].startswith("1/1 · 😀")
-        assert len(wire["items"][0].encode("utf-16-le")) // 2 <= 64
-        # The header is cut on whole code points, never mid-surrogate.
-        wire["items"][0].encode("utf-8")
-        assert wire["items"][1:] == frame.items[1:]
-        assert "".join(wire["items"][1:]) == "● " + "😀" * 50 + ": Exact body."
+        # No 64-unit row to fit any more: the glasses wrap the sender line.
+        assert wire["body"] == "😀" * 50 + "\n\n● " + "😀" * 50 + ": Exact body."
+        # Whole code points on the wire, never a lone surrogate.
+        wire["body"].encode("utf-8")
+        wire["contextLabel"].encode("utf-8")
 
     async def test_conversation_lines_show_message_metadata_and_older_history_on_the_page(
         self, tmp_path,
@@ -1529,14 +1468,13 @@ class TestCapabilityViews:
         await wait_until(lambda: bool(conversation_frames(transport)))
 
         latest = conversation_frames(transport)[-1]
-        assert latest.items == [
-            "1/1+ · Dele",
-            "● Dele: [attachment]\n",
-            "You: On my way\n",
-            "Dele: Are you coming?",
-        ]
-        # chat.db has older messages: the reader promises one more page.
-        assert latest.hint == "down more · read-only · left x2: back"
+        assert latest.items == []
+        assert latest.body == (
+            "Dele\n\n● Dele: [attachment]\nYou: On my way\nDele: Are you coming?"
+        )
+        # chat.db has older messages: the reader promises one more page, so
+        # the swipe past the thread's end asks the Mac for them.
+        assert latest.hint == "read-only · left x2: back"
         assert latest.reader_page == ("hud-history", 0, 2)
         assert latest.page_controls is None
         await asyncio.sleep(0)
@@ -1552,16 +1490,11 @@ class TestCapabilityViews:
         router.on_input(page_event(EventType.SCROLL_BOTTOM, "hud-history", "messages-history"))
         await wait_until(lambda: len(conversation_frames(transport)) == 2)
         assert messages.page_calls == [None, 10]
-        # The older message fits the same page: it is repainted with it, and
-        # without the promise of more.
+        # The older message joins the end of the thread, which the glasses
+        # resume a line below where the wearer was; no more is promised.
         current = conversation_frames(transport)[-1]
-        assert current.items == [
-            "1/1 · Dele",
-            "● Dele: [attachment]\n",
-            "You: On my way\n",
-            "Dele: Are you coming?\n",
-            "Dele: Earlier",
-        ]
+        assert current.items == []
+        assert current.body == latest.body + "\nDele: Earlier"
         assert current.hint == "read-only · left x2: back"
         assert current.reader_page == ("hud-history", 0, 1)
         await asyncio.sleep(0)
@@ -1571,7 +1504,7 @@ class TestCapabilityViews:
         assert messages.page_calls == [None, 10]
         assert len(conversation_frames(transport)) == 2
 
-    async def test_a_swipe_past_the_last_page_reads_older_messages_into_the_next_page(
+    async def test_a_swipe_past_the_thread_end_reads_older_messages_onto_it(
         self, tmp_path,
     ) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
@@ -1582,34 +1515,32 @@ class TestCapabilityViews:
         await router._select_capability_row("MESSAGES", 1, "hud-older", "messages-older")
 
         first = conversation_frames(transport)[-1]
-        assert first.items[0] == "1/1+ · Dele"
-        assert first.items[1] == "You: Newest 30 ▶\n"  # the newest own row carries its one-glyph state
-        assert first.items[-1] == "Dele: Newest 21"
-        assert len(first.items) == 11
+        lines = (first.body or "").split("\n")
+        assert lines[:3] == ["Dele", "", "You: Newest 30 ▶"]  # the newest own row carries its one-glyph state
+        assert lines[-1] == "Dele: Newest 21"
+        assert len(lines) == 12
         assert first.reader_page == ("hud-older", 0, 2)
-        assert "down more" in (first.hint or "")
+        assert "down more" not in (first.hint or "")
         assert messages.page_calls == [None]
 
         router.on_input(page_event(EventType.SCROLL_BOTTOM, "hud-older", "messages-older"))
         await wait_until(lambda: len(conversation_frames(transport)) == 2)
-        # Older rows are read from before the oldest row already shown.
+        # Older rows are read from before the oldest row already shown, and
+        # join the thread's end: the glasses carry on scrolling into them.
         assert messages.page_calls == [None, 21]
         second = conversation_frames(transport)[-1]
-        assert second.items == [
-            "2/2 · Dele",
-            "Dele: Older 20\n",
-            "Dele: Older 19\n",
-            "Dele: Older 18",
-        ]
-        assert second.hint == "up previous · read-only · left x2: back"
-        assert second.reader_page == ("hud-older", 1, 2)
+        assert second.body == (
+            first.body + "\nDele: Older 20\nDele: Older 19\nDele: Older 18"
+        )
+        assert second.hint == "read-only · left x2: back"
+        assert second.reader_page == ("hud-older", 0, 1)
         assert len(replies.selected) == 1
         await asyncio.sleep(0)
 
-        # Back up to the newest page without another read.
+        # Up is the glasses' own scroll: no read, no repaint.
         router.on_input(page_event(EventType.SCROLL_TOP, "hud-older", "messages-older"))
-        await wait_until(lambda: len(conversation_frames(transport)) == 3)
-        assert conversation_frames(transport)[-1].items[:2] == ["1/2 · Dele", "You: Newest 30 ▶\n"]
+        await asyncio.sleep(0.01)
+        assert len(conversation_frames(transport)) == 2
         assert messages.page_calls == [None, 21]
 
     async def test_a_sent_reply_shows_as_the_newest_message_once_chat_db_has_it(
@@ -1622,18 +1553,18 @@ class TestCapabilityViews:
         router._messages = messages  # type: ignore[assignment]
         await router.open("Messages", request_id="messages-sent")
         await router._select_capability_row("MESSAGES", 1, "hud-sent", "messages-sent")
-        await router._page_message_history(EventType.SCROLL_BOTTOM, "hud-sent", "messages-sent")
-        assert conversation_frames(transport)[-1].items[0] == "2/2 · Dele"
+        assert (conversation_frames(transport)[-1].body or "").startswith("Dele\n\nDele: word word")
 
         await router.show_sent_reply("On my way!")
         # The first post-send read missed the row; the wait found it.
         assert messages.reads == 3
         frame = conversation_frames(transport)[-1]
         assert frame.request_id == "messages-sent"
-        assert frame.items[0] == "1/2 · Dele"
-        assert frame.items[1] == "You: On my way! ▶\n"
-        assert frame.reader_page == ("hud-sent", 0, 2)
-        assert frame.hint == "down more · tap: reply · left x2: back"
+        # A new document: the glasses open it at its top, on the reply.
+        assert (frame.body or "").startswith("Dele\n\nYou: On my way! ▶\nDele: word word")
+        assert (frame.body or "").endswith("END")
+        assert frame.reader_page == ("hud-sent", 0, 1)
+        assert frame.hint == "tap: reply · left x2: back"
         state = router._message_history
         assert state is not None and state.entries[0].row_id == 6
         assert [entry.from_me for entry in state.entries] == [True, False]
@@ -1650,16 +1581,15 @@ class TestCapabilityViews:
         router._messages = messages  # type: ignore[assignment]
         await router.open("Messages", request_id="messages-fallback")
         await router._select_capability_row("MESSAGES", 1, "hud-fallback", "messages-fallback")
-        await router._page_message_history(EventType.SCROLL_BOTTOM, "hud-fallback", "messages-fallback")
 
         await router.show_sent_reply("  Running late  ")
         assert messages.reads > 1
         frame = conversation_frames(transport)[-1]
         assert frame.request_id == "messages-fallback"
-        assert frame.items[0] == "1/2 · Dele"
-        assert frame.items[1] == "You:   Running late   ▶\n"
-        assert frame.items[2].startswith("Dele: word word")
-        assert frame.reader_page == ("hud-fallback", 0, 2)
+        assert (frame.body or "").startswith(
+            "Dele\n\nYou:   Running late   ▶\nDele: word word"
+        )
+        assert frame.reader_page == ("hud-fallback", 0, 1)
         state = router._message_history
         assert state is not None
         assert state.entries[0].from_me is True and state.entries[0].text == "  Running late  "
@@ -1965,7 +1895,8 @@ class TestCapabilityViews:
         assert replies.selected == []
         frame = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert frame.selectable is False
-        assert frame.items == ["1/1 · Project team (group)", "Participant: Ship it"]
+        assert frame.items == []
+        assert frame.body == "Project team (group)\n\nParticipant: Ship it"
         assert frame.hint == "read-only · left x2: back"
         assert "say reply" not in frame.hint
         assert "conversation_ready" not in message_ui.calls
@@ -1998,7 +1929,8 @@ class TestCapabilityViews:
         assert frame.hint == "tap: reply · left x2: back"
         assert "read-only" not in frame.hint
         assert frame.selectable is True
-        assert frame.items == ["1/1 · Project team (group)", "Participant: Ship it"]
+        assert frame.items == []
+        assert frame.body == "Project team (group)\n\nParticipant: Ship it"
         assert frame.reader_page == ("group-guid", 0, 1)
 
         # A tap replies to the whole group: the target never crosses the
@@ -2335,8 +2267,8 @@ class TestCapabilityViews:
         await asyncio.sleep(0)
         note_detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert note_detail.title == "QUICKNOTES · DETAIL"
-        assert note_detail.items[0] == "1/1 · Exact text"
-        assert "".join(note_detail.to_wire()["items"][1:]) == "Ask Adaeze about the design review"
+        assert note_detail.items == []
+        assert note_detail.to_wire()["body"] == "Exact text\n\nAsk Adaeze about the design review"
 
         await router.open("Activity")
         action_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
@@ -2357,22 +2289,20 @@ class TestCapabilityViews:
         assert detail.text.startswith("Calendar create · Drafted · ref ")
         store.close()
 
-    @pytest.mark.parametrize(("body", "first_row"), [
-        pytest.param("A" * 62 + "Z" * 8 + "\r\n", "A" * 62, id="long-word"),
-        pytest.param("word " * 30, "word " * 12, id="whole-words"),
-        pytest.param("漢" * 31 + "字" * 4 + "\r\n", "漢" * 31, id="wide-cjk"),
-        pytest.param("😀" * 31 + "🙂" * 4 + "\r\n", "😀" * 31, id="surrogate-pairs"),
-        pytest.param("C" * 62 + "\r\n", "C" * 62 + "\r\n", id="crlf-reservation"),
-        pytest.param("A" * 61 + "e\u0301" + "Z" * 5 + "\r\n", "A" * 61,
-                     id="combining-boundary"),
-        pytest.param("A" * 59 + "👩\u200d💻" + "Z" * 5 + "\r\n", "A" * 59,
-                     id="joined-emoji-boundary"),
-        pytest.param("\t" * 10 + "FINAL", "\t" * 7, id="conservative-tabs"),
+    @pytest.mark.parametrize("body", [
+        pytest.param("A" * 62 + "Z" * 8 + "\r\n", id="long-word"),
+        pytest.param("word " * 30, id="whole-words"),
+        pytest.param("漢" * 31 + "字" * 4 + "\r\n", id="wide-cjk"),
+        pytest.param("😀" * 31 + "🙂" * 4 + "\r\n", id="surrogate-pairs"),
+        pytest.param("C" * 62 + "\r\n", id="crlf"),
+        pytest.param("A" * 61 + "e\u0301" + "Z" * 5 + "\r\n", id="combining-boundary"),
+        pytest.param("A" * 59 + "👩\u200d💻" + "Z" * 5 + "\r\n", id="joined-emoji-boundary"),
+        pytest.param("\t" * 10 + "FINAL", id="tabs"),
     ])
-    async def test_quicknote_reader_uses_expanded_width_without_wire_loss(
-        self, tmp_path, body: str, first_row: str,
+    async def test_quicknote_reader_sends_hard_text_whole_without_wire_loss(
+        self, tmp_path, body: str,
     ) -> None:  # type: ignore[no-untyped-def]
-        """The 548px reader uses up to 62 mono columns without SDK clipping."""
+        """The glasses wrap and scroll the note; the Mac sends it untouched."""
         with DurableStore(tmp_path / "wide-note.sqlite3") as durable:
             notes = NoteStore(durable)
             notes.create(note_id="wide", idempotency_key="wide", text=body,
@@ -2382,15 +2312,11 @@ class TestCapabilityViews:
             await router._select_capability_row(
                 "QUICKNOTES", 1, "reader-wide", "wide-note-reader",
             )
-            pages = await collect_note_reader(
+            text = await scrolled_note_reader(
                 router, transport, request_id="wide-note-reader", trace_id="reader-wide",
             )
-            rows = [row for page in pages for row in page["items"][1:]]
-            assert rows[0] == first_row, "reader still leaves the available width unused"
-            assert "".join(rows) == body
+            assert text == "Exact text\n\n" + body
             assert notes.get("wide").text == body
-            assert all(not row.startswith(("\u0301", "\u200d")) for row in rows)
-            assert all(not row.endswith("\u200d") for row in rows)
 
     async def test_quicknote_reader_preserves_full_exact_wire_text_and_back_selection(
         self, tmp_path,
@@ -2409,37 +2335,30 @@ class TestCapabilityViews:
             router, transport, _ = make_router(tmp_path, notes=notes)
             await router.open("QuickNotes", request_id="note-reader")
             await router._select_capability_row("QUICKNOTES", 2, "reader-long", "note-reader")
-            pages = await collect_note_reader(router, transport, request_id="note-reader", trace_id="reader-long")
-            assert len(pages) > 2
-            assert "".join(row for page in pages for row in page["items"][1:]) == body
+            text = await scrolled_note_reader(
+                router, transport, request_id="note-reader", trace_id="reader-long",
+            )
+            assert text == "Exact text\n\n" + body
             assert notes.get("long").text == body
 
+            # A stale request's page gesture paints nothing either.
             before = len(transport.sent)
             router.on_input(InputEvent(container_name="cappage", selected_name="QUICKNOTES",
-                selected_index=len(pages) - 1, event_type=EventType.SCROLL_TOP,
+                selected_index=0, event_type=EventType.SCROLL_TOP,
                 request_id="old-request", trace_id="reader-long"))
             await asyncio.sleep(0)
             assert len(transport.sent) == before
-            router.on_input(InputEvent(container_name="cappage", selected_name="QUICKNOTES",
-                selected_index=len(pages) - 1, event_type=EventType.SCROLL_TOP,
-                request_id="note-reader", trace_id="reader-long"))
-            await wait_until(lambda: len(transport.sent) > before)
-            assert transport.sent[-1].to_wire() == pages[-2]
 
-            before = len(transport.sent)
-            router.on_input(InputEvent(container_name="cappage", selected_name="QUICKNOTES",
-                selected_index=len(pages) - 2, event_type=EventType.SCROLL_TOP,
-                request_id="note-reader", trace_id="reader-long"))
             router.on_input(InputEvent(container_name="capability-lifecycle",
                 selected_name="quicknotes-list", request_id="note-reader"))
             await asyncio.sleep(0)
-            assert len(transport.sent) == before, "Back must retire an already queued page"
             await router._select_capability_row("QUICKNOTES", 1, "reader-second", "note-reader")
-            second = [m for m in transport.sent if isinstance(m, HudList)][-1].to_wire()
-            assert "".join(second["items"][1:]).startswith("Second note")
-            assert "down more" in second["hint"]
+            second = await scrolled_note_reader(
+                router, transport, request_id="note-reader", trace_id="reader-second",
+            )
+            assert second == "Exact text\n\n" + second_body
             before = len(transport.sent)
-            # An old reader's page zero cannot advance a newly opened note.
+            # An old reader's gesture cannot touch a newly opened note.
             router.on_input(InputEvent(container_name="cappage", selected_name="QUICKNOTES",
                 selected_index=0, event_type=EventType.SCROLL_BOTTOM,
                 request_id="note-reader", trace_id="reader-long"))
@@ -2472,13 +2391,15 @@ class TestCapabilityViews:
             router, transport, _ = make_router(tmp_path, voice_notes=notes)
             await router.open("QuickNotes", request_id="recording-reader")
             await router._select_capability_row("QUICKNOTES", 1, "reader-recording", "recording-reader")
-            pages = await collect_note_reader(router, transport, request_id="recording-reader", trace_id="reader-recording")
-            body = "".join(row for page in pages for row in page["items"][1:])
+            body = await scrolled_note_reader(
+                router, transport, request_id="recording-reader", trace_id="reader-recording",
+            )
+            assert body.startswith("Synthetic recording\nRecording · ")
             assert first in body and last in body
             assert body.index(first) < body.index(last)
             assert "[recording gap]" in body
             assert ("Summary only." in body) == with_summary
-            assert "FINAL-RECORDING-MARKER" in "".join(pages[-1]["items"][1:])
+            assert body.endswith("FINAL-RECORDING-MARKER")
 
     async def test_quicknotes_unifies_recordings_and_text_notes(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         store = DurableStore(tmp_path / "durable.sqlite3")
@@ -2523,11 +2444,12 @@ class TestCapabilityViews:
         await asyncio.sleep(0)
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.title == "QUICKNOTES · NOTE"
-        recording_pages = await collect_note_reader(router, transport, request_id=None, trace_id="hud")
-        recording_text = "".join(row for page in recording_pages for row in page["items"][1:])
-        assert recording_text.startswith("Standup notes\n")
-        assert "OVERVIEW\nThe team agreed to ship Friday." in recording_text
-        assert "KEY POINTS" in recording_text and "NEXT STEPS" in recording_text
+        recording_text = await scrolled_note_reader(router, transport, request_id=None, trace_id="hud")
+        # The reader template: title, what it is, a blank line, then each
+        # section a blank line apart.
+        assert recording_text.startswith("Standup notes\nRecording · ")
+        assert "\n\nOVERVIEW\nThe team agreed to ship Friday." in recording_text
+        assert "\n\nKEY POINTS\n" in recording_text and "\n\nNEXT STEPS\n" in recording_text
         # Q&A remains discoverable in the body; the footer owns page/Back gestures.
         assert "ask the last note" in recording_text
         assert "TRANSCRIPT\nWe agreed to ship Friday." in recording_text
@@ -2542,8 +2464,8 @@ class TestCapabilityViews:
         await asyncio.sleep(0)
         text_detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert text_detail.title == "QUICKNOTES · DETAIL"
-        assert text_detail.items[0] == "1/1 · Exact text"
-        assert "".join(text_detail.to_wire()["items"][1:]) == "Ask Adaeze about the design review"
+        assert text_detail.items == []
+        assert text_detail.to_wire()["body"] == "Exact text\n\nAsk Adaeze about the design review"
 
     async def test_an_open_note_owns_the_quicknotes_page_as_its_live_words(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         """FEAT-002: the open note is Even's "New note" page — plain words (no

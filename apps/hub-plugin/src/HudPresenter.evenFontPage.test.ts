@@ -48,13 +48,15 @@ function rig(canPaintReader = true) {
   return { hud, operations, rebuilds, frames };
 }
 
-/** Enough of a thread for two Even-font pages. */
+/** Enough of a Mac-paged Messages reader (the review of a reply) for
+ * two Even-font pages. A conversation is not one: the glasses scroll it
+ * themselves (ScrollBox), so it stays firmware text. */
 const THREAD = [
   '1/1 · Adele',
   ...Array.from({ length: 14 }, (_, index) => `${index % 2 ? 'You' : 'Adele'}: Message ${index + 1} about the review and the mockups.\n`),
 ];
 const OPTIONS = {
-  title: 'MESSAGES · CONVERSATION', hint: 'down more · tap: reply · 2x tap: back',
+  title: 'MESSAGES · REVIEW', hint: 'down more · tap: reply · 2x tap: back',
   selectable: true, nativeTextPage: true,
 };
 
@@ -65,7 +67,7 @@ function lastReader(frames: HudVisualFrame[]): Extract<HudVisualFrame, { kind: '
 }
 
 describe('HudPresenter Even-font reader page', () => {
-  it('opens the thread as the four-tile image page, set in Even font', async () => {
+  it('opens the reader as the four-tile image page, set in Even font', async () => {
     const r = rig();
     // From the Messages list, a firmware list, as the wearer gets there.
     await r.hud.showList(['[2m] Adele · Can you send…'], { title: 'MESSAGES', hint: 'tap: open', selectable: true });
@@ -74,7 +76,7 @@ describe('HudPresenter Even-font reader page', () => {
     expect(page?.imageObject).toHaveLength(4);
     expect(page?.textObject?.[0]?.isEventCapture).toBe(1);
     const frame = lastReader(r.frames);
-    expect(frame.title).toBe('MESSAGES · CONVERSATION');
+    expect(frame.title).toBe('MESSAGES · REVIEW');
     expect(frame.lines[0]?.text).toBe('1/1 · Adele');
     expect(frame.lines.find((line) => line.text.startsWith('Adele:'))?.speaker).toBe('Adele:'.length);
     expect(frame.hint.startsWith('1/2 · ')).toBe(true);
@@ -94,7 +96,7 @@ describe('HudPresenter Even-font reader page', () => {
     expect(second.hint.startsWith('2/2 · ')).toBe(true);
     expect(second.lines[0]?.text).not.toBe('1/1 · Adele');
     expect(r.hud.isTextPageAtEnd()).toBe(true);
-    // Past the last local page the menu asks the Mac for older messages.
+    // Past the last local page the menu asks the Mac for its next page.
     expect(r.hud.scrollTextPage('down')).toBe(false);
     // Paging never rebuilds the page: only changed tiles are painted.
     expect(r.rebuilds).toHaveLength(rebuilds);
@@ -105,6 +107,21 @@ describe('HudPresenter Even-font reader page', () => {
     await r.hud.showList(THREAD, OPTIONS);
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(page?.imageObject ?? []).toHaveLength(0);
+    expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
+  });
+
+  it('keeps a Messages conversation a firmware text page the glasses scroll themselves', async () => {
+    const r = rig();
+    const thread = readerRows([], [
+      'Adele', '',
+      ...Array.from({ length: 14 }, (_, index) => `${index % 2 ? 'You' : 'Adele'}: Message ${index + 1} about the review.`),
+    ].join('\n'));
+    expect(await r.hud.showList(thread, {
+      title: 'MESSAGES · CONVERSATION', hint: 'tap: reply · left x2: back', selectable: true, nativeTextPage: true,
+    })).toBe(true);
+    const page = r.rebuilds[r.rebuilds.length - 1];
+    expect(page?.imageObject?.some((image) => image.containerID === ContainerId.Image) ?? false).toBe(false);
+    expect(page?.textObject?.some((text) => text.content?.includes('Adele: Message 1 '))).toBe(true);
     expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
   });
 
@@ -137,11 +154,11 @@ describe('HudPresenter Even-font reader page', () => {
       expect(measureTextWrap(line, READER_TEXT_PAGE.textWidth - 10).lineCount).toBeLessThanOrEqual(1);
     }
     // The whole article fits one stretch: at its end a swipe writes nothing
-    // and rebuilds nothing; the glasses scroll it.
+    // and rebuilds nothing, and is the menu's (an article has nothing more).
     // (The rebuild holds 999 bytes; the rest of the stretch follows in place.)
     await vi.waitFor(() => expect(r.operations.filter((op) => op === 'upgrade')).toHaveLength(1));
     const writes = r.operations.length;
-    expect(r.hud.scrollTextPage('down')).toBe(true);
+    expect(r.hud.scrollTextPage('down')).toBe(false);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(r.operations).toHaveLength(writes);
     expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);

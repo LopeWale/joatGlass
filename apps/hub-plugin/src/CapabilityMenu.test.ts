@@ -9,6 +9,7 @@ import { HudPresenter } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
 import type { BridgeClient } from './BridgeClient';
 import type { HudVisualFrame } from './HudVisualSurface';
+import { readerRows } from './EvenFont';
 import type { MacLink } from './MacLink';
 import { CAPABILITIES, type ProductivityHudModel } from './types';
 
@@ -1195,6 +1196,28 @@ describe('CapabilityMenu', () => {
     await menu.toggle();
     expect(lists[lists.length - 1]).toEqual(picker);
     expect(visibleSelection()).toBe(0);
+  });
+
+  it.each(['QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL'])('asks the Mac nothing at the edges of a %s sent whole', async (title) => {
+    // Sent whole (2026-10-15): the glasses scroll it in their own box, and
+    // past its ends there is no page to ask for.
+    const { menu, hud, sent } = rig();
+    hud.scrollTextPage = vi.fn(() => false);
+    await menu.openQuickNotes();
+    const requestId = latestRequestId(sent);
+    await menu.presentList('QUICKNOTES', ['Standup notes'], requestId, true);
+    menu.handleList(click(0));
+    const traceId = (sent[sent.length - 1]!.event as { traceId: string }).traceId;
+    expect(await menu.presentList(
+      title, readerRows([], 'Standup notes\nRecording · 2 transcript sections\n\nTRANSCRIPT\nWords.'),
+      requestId, false, 'left x2: back', undefined, undefined, undefined, undefined, undefined,
+      { id: traceId, index: 0, count: 1 },
+    )).toBe(true);
+    const before = sent.length;
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
+    expect(menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);
+    expect(hud.scrollTextPage).toHaveBeenCalledWith('down');
+    expect(sent).toHaveLength(before);
   });
 
   it('asks the Mac for a thread page only where its reader has one', async () => {

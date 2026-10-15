@@ -62,10 +62,13 @@ describe('visual fixtures', () => {
     expect(visualListFixture('calendar-detail').title).toBe('CALENDAR · DETAIL');
     expect(visualListFixture('task-detail').title).toBe('TASKS · DETAIL');
     expect(visualListFixture('quicknote-detail').title).toBe('QUICKNOTES · NOTE');
-    // A recording's summary page carries the distilled sections in order.
-    expect(visualListFixture('quicknote-detail').items).toContain('SUMMARY');
-    expect(visualListFixture('quicknote-detail').items).toContain('KEY POINTS');
-    expect(visualListFixture('quicknote-detail').items).toContain('TODOS');
+    // A recording's note page is one document, its sections in order.
+    const note = visualListFixture('quicknote-detail').items.join('\n');
+    const order = ['\n\nOVERVIEW\n', '\n\nKEY POINTS\n', '\n\nNEXT STEPS\n', '\n\nTRANSCRIPT\n'];
+    expect(order.map((section) => note.indexOf(section))).toEqual(
+      order.map((section) => note.indexOf(section)).sort((a, b) => a - b),
+    );
+    expect(order.every((section) => note.includes(section))).toBe(true);
     // The live recorder owns the QuickNotes page with tap-only controls.
     expect(visualListFixture('quicknote-recording')).toMatchObject({
       title: 'QUICKNOTES · RECORDING',

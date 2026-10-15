@@ -373,9 +373,10 @@ describe('HudPresenter News article in the glasses\' scroll box', () => {
     const words = (value: string) => value.split(/\s+/u).filter(Boolean);
     expect(words(readThrough(stretches.map((stretch) => stretch.split('\n'))).join(' ')))
       .toEqual(words(readerParagraphs(rows).join(' ')));
-    // At the article's end a swipe writes nothing, and the menu asks no Mac.
+    // At the article's end a swipe writes nothing and is left to the menu
+    // (an article's one Mac page has nothing after it).
     const before = mains(r).length;
-    expect(r.hud.scrollTextPage('down')).toBe(true);
+    expect(r.hud.scrollTextPage('down')).toBe(false);
     await settle();
     expect(mains(r)).toHaveLength(before);
     expect(r.rebuilds).toHaveLength(1);
@@ -385,7 +386,7 @@ describe('HudPresenter News article in the glasses\' scroll box', () => {
     const r = rig();
     await r.hud.showList(rows, ARTICLE);
     await vi.waitFor(() => expect(mains(r)).toHaveLength(1));
-    expect(r.hud.scrollTextPage('up')).toBe(true);
+    expect(r.hud.scrollTextPage('up')).toBe(false);
     await settle();
     expect(mains(r)).toHaveLength(1);
     r.hud.scrollTextPage('down');
@@ -433,6 +434,99 @@ describe('HudPresenter News article in the glasses\' scroll box', () => {
     await settle();
     const last = mains(r)[mains(r).length - 1]!;
     expect(utf8ByteLength(last.content ?? '')).toBeLessThanOrEqual(TEXT_CONTAINER_MAX_BYTES);
+  });
+});
+
+/**
+ * A Messages conversation and a saved QuickNote read in the same scroll box
+ * as an article (the wearer's ruling, 2026-10-15): the Mac sends each whole,
+ * in the reader template (who or what, a blank line, then the text).
+ */
+describe('HudPresenter Messages and QuickNotes in the glasses\' scroll box', () => {
+  const THREAD = { title: 'MESSAGES · CONVERSATION', hint: 'tap: reply · left x2: back', selectable: true, nativeTextPage: true };
+  const message = (index: number) => (
+    `${index % 2 ? 'You' : 'Dele'}: Message ${index} runs long enough to wrap onto a second line of the reader, as messages do.`
+  );
+  const messages = (count: number) => Array.from({ length: count }, (_, index) => message(count - index)).join('\n');
+  const thread = (count: number) => readerRows([], `Dele\n\n${messages(count)}`);
+  const mains = (r: ReturnType<typeof rig>) => r.upgrades.filter((u) => u.containerName === 'main');
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it('scrolls a conversation, each message\'s words hanging under its first row\'s', async () => {
+    const r = rig();
+    expect(await r.hud.showList(thread(4), THREAD)).toBe(true);
+    const page = r.rebuilds[r.rebuilds.length - 1];
+    const main = page?.textObject?.find((box) => box.containerName === 'main');
+    expect(main?.height).toBe(SCROLL_BOX_LINES * 27 + 2 * (main?.paddingLength ?? 0));
+    expect(text(page, 'hint')).toBe('tap: reply · swipe: scroll · 2x tap: back');
+    const lines = (main?.content ?? '').split('\n');
+    expect(lines.slice(0, 2)).toEqual(['Dele', '']);
+    const first = lines.findIndex((line) => line.startsWith('Dele: Message 4 '));
+    expect(first).toBe(2);
+    // The wrapped row starts under the words, not under the name.
+    const pad = lines[first + 1]!;
+    expect(pad.startsWith(' ')).toBe(true);
+    expect(getTextWidth(pad.slice(0, pad.length - pad.trimStart().length)))
+      .toBeGreaterThanOrEqual(getTextWidth('Dele:'));
+  });
+
+  it('carries on into older messages a line below where the wearer stopped', async () => {
+    const r = rig();
+    await r.hud.showList(thread(20), THREAD);
+    await vi.waitFor(() => expect(mains(r)).toHaveLength(1));
+    await settle();
+    while (r.hud.scrollTextPage('down')) {
+      await settle();
+    }
+    await settle();
+    // At the thread's end the swipe is the menu's: it asks the Mac for
+    // older messages, which arrive as the same thread grown longer.
+    expect(r.hud.isTextPageAtEnd()).toBe(true);
+    const shown = (mains(r)[mains(r).length - 1]!.content ?? '').split('\n');
+    const lastScreen = shown.slice(shown.length - SCROLL_BOX_LINES);
+    const grown = readerRows([], `Dele\n\n${messages(20)}\n${[0, -1, -2].map(message).join('\n')}`);
+    expect(await r.hud.showList(grown, THREAD)).toBe(true);
+    const reopened = (text(r.rebuilds[r.rebuilds.length - 1], 'main') ?? '').split('\n');
+    // Not back at the top: the last screen moved up a line, then the older
+    // messages below it.
+    expect(reopened[0]).not.toBe('Dele');
+    expect(reopened.slice(0, SCROLL_BOX_LINES - 1)).toEqual(lastScreen.slice(1));
+    expect(reopened.some((line) => line.startsWith('Dele: Message 0 '))).toBe(true);
+  });
+
+  it('opens a thread that changed at its top (a sent reply) at the top', async () => {
+    const r = rig();
+    await r.hud.showList(thread(20), THREAD);
+    await vi.waitFor(() => expect(mains(r)).toHaveLength(1));
+    await settle();
+    r.hud.scrollTextPage('down');
+    await vi.waitFor(() => expect(mains(r)).toHaveLength(2));
+    await settle();
+    const replied = readerRows([], `Dele\n\nYou: On my way ▶\n${messages(20)}`);
+    expect(await r.hud.showList(replied, THREAD)).toBe(true);
+    expect(text(r.rebuilds[r.rebuilds.length - 1], 'main')?.startsWith('Dele\n\nYou: On my way ▶')).toBe(true);
+  });
+
+  it('scrolls a saved QuickNote and its exact text the same way', async () => {
+    for (const title of ['QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL']) {
+      const r = rig();
+      const note = readerRows([], [
+        'Standup notes', 'Recording · 2 transcript sections', '',
+        'OVERVIEW', 'The team agreed to ship Friday.', '',
+        'TRANSCRIPT', ...Array.from({ length: 80 }, (_, index) => `Transcript sentence ${index + 1} of the standup.`),
+      ].join('\n'));
+      expect(await r.hud.showList(note, { title, hint: 'left x2: back', selectable: false, nativeTextPage: true })).toBe(true);
+      const page = r.rebuilds[r.rebuilds.length - 1];
+      const main = page?.textObject?.find((box) => box.containerName === 'main');
+      expect(main?.height).toBe(SCROLL_BOX_LINES * 27 + 2 * (main?.paddingLength ?? 0));
+      expect(main?.content).toMatch(/^Standup notes\nRecording · 2 transcript sections\n\nOVERVIEW\n/u);
+      expect(text(page, 'hint')).toBe('swipe: scroll · 2x tap: back');
+      await vi.waitFor(() => expect(mains(r)).toHaveLength(1));
+      await settle();
+      expect(r.hud.scrollTextPage('down')).toBe(true);
+      await vi.waitFor(() => expect(mains(r)).toHaveLength(2));
+      expect(r.rebuilds).toHaveLength(1);
+    }
   });
 });
 

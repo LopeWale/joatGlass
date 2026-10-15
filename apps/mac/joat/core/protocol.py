@@ -70,8 +70,10 @@ def utf16_slice(text: str, units: int) -> str:
 
 
 #: The longest reader text one `hud.list` carries whole (`HudList.body`):
-#: about eight thousand words, far past any article the reader opens.
-READER_BODY_MAX_UNITS = 48_000
+#: about eighty thousand words, so a QuickNotes recording's transcript
+#: (an hour of speech is near sixty thousand characters) arrives whole for
+#: the glasses to scroll, as does any article.
+READER_BODY_MAX_UNITS = 480_000
 
 
 class ContainerId(IntEnum):
@@ -951,10 +953,11 @@ class HudList:
     # events; a tap on one of these rows is the page request. Mirror:
     # `pageControls` in apps/hub-plugin/src/types.ts.
     page_controls: tuple[int | None, int | None] | None = None
-    # A reader's whole text (a News article: its metadata line, then the
-    # article), after any rows in `items`. It is no list row, so the list
-    # caps below do not apply: the plugin lays it out as one continuous
-    # document. Mirror: `body` in apps/hub-plugin/src/types.ts.
+    # A reader's whole text (a News article, a Messages conversation, a
+    # saved QuickNote: the reader template), after any rows in `items`. It
+    # is no list row, so the list caps below do not apply: the plugin lays
+    # it out as one document the glasses scroll. Mirror: `body` in
+    # apps/hub-plugin/src/types.ts.
     body: str | None = None
 
     def to_wire(self) -> dict[str, Any]:

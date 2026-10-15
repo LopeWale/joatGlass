@@ -281,6 +281,23 @@ export function hangingLines(paragraph: string, width: number): string[] {
   return rows.map((row, index) => (index === 0 ? `${label}${gap}${row}` : `${pad}${row}`));
 }
 
+/** A conversation laid out once into the explicit lines the glasses show
+ * (ScrollBox): each "Name: words" paragraph with its words hanging under
+ * the first row's (hangingLines), any other paragraph wrapped whole, and a
+ * blank paragraph kept as one empty line. */
+export function layoutHanging(text: string, innerWidth: number): string[] {
+  const lines: string[] = [];
+  for (const paragraph of text.replace(/\r\n?/gu, NEWLINE).split(NEWLINE)) {
+    if (paragraph.trim().length === 0) {
+      if (lines.length > 0 && lines[lines.length - 1] !== '') lines.push('');
+      continue;
+    }
+    lines.push(...hangingLines(paragraph, innerWidth));
+  }
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+
 /**
  * Text as firmware pages of explicit lines, each speaker's words hanging
  * under the first row's (hangingLines): at most `maxLines` lines and

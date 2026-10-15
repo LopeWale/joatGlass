@@ -1,9 +1,9 @@
 import { utf8ByteLength } from '@evenrealities/even_hub_sdk';
 
 /**
- * The glasses' own scrolling, as the one piece every long text uses (a
- * News article and a Search result first; Messages and QuickNotes are
- * meant to follow).
+ * The glasses' own scrolling, as the one piece every long text uses: a
+ * News article, a Search result, a Messages conversation and a saved
+ * QuickNote.
  *
  * What the G2 does (Even's display and device-API docs; measured on the
  * wearer's glasses 2026-10-14, project doc
@@ -89,11 +89,23 @@ export class ScrollBox {
    * the document's end, where there is nothing more to show. */
   down(): boolean {
     if (this.atEnd) return false;
-    let next = Math.max(this.start + 1, this.end - this.visible + 1);
-    // A screen never opens on the empty line between paragraphs.
-    while (this.lines[next] === '' && next < this.end) next += 1;
-    this.place(next);
+    this.place(this.continuation());
     return true;
+  }
+
+  /**
+   * Where a box over `lines` opens when they are this document grown
+   * longer (older messages loaded below the ones read): a line below the
+   * last screen when the wearer had reached this document's end, else the
+   * same stretch. The same document reopens where it was. Undefined when
+   * `lines` is another document.
+   */
+  resume(lines: readonly string[]): number | undefined {
+    if (lines.length < this.lines.length) return undefined;
+    for (let index = 0; index < this.lines.length; index += 1) {
+      if (lines[index] !== this.lines[index]) return undefined;
+    }
+    return lines.length > this.lines.length && this.atEnd ? this.continuation() : this.start;
   }
 
   /** The stretch a screen above. False at the document's start. */
@@ -108,6 +120,14 @@ export class ScrollBox {
   /** Back to `position` (a stretch the glasses did not take). */
   moveTo(position: number): void {
     this.place(Math.max(0, Math.min(position, Math.max(0, this.lines.length - 1))));
+  }
+
+  /** One line below the top line of the stretch's last screen; a screen
+   * never opens on the empty line between paragraphs. */
+  private continuation(): number {
+    let next = Math.max(this.start + 1, this.end - this.visible + 1);
+    while (this.lines[next] === '' && next < this.end) next += 1;
+    return next;
   }
 
   private place(start: number): void {

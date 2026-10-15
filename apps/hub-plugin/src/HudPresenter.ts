@@ -18,7 +18,7 @@ import {
   validAssistantConversationSnapshot,
   type ConversationExitResult,
 } from './AssistantConversationSurface';
-import { layoutLines, paginateFromEnd, paginateHanging, paginateMeasured } from './FirmwareText';
+import { layoutHanging, layoutLines, paginateFromEnd, paginateHanging, paginateMeasured } from './FirmwareText';
 import { ScrollBox } from './ScrollBox';
 import { OVERLAY_GAP, cardTop, overlayConversation } from './ConversationOverlay';
 import { paginateEven, readerParagraphs, type EvenReaderLine } from './EvenFont';
@@ -256,8 +256,11 @@ const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', QUICKNOTES_NOTE_TITLE]
 /** Long text the glasses scroll themselves (ScrollBox): the Mac sends it
  * whole, and it reads as one scroll, a line a swipe, with no round trip
  * until a stretch's edge (the wearer's ruling after the hardware test,
- * 2026-10-14). Messages and QuickNotes are meant to join. */
-const SCROLL_BOX_READERS = new Set(['NEWS · ARTICLE', 'SEARCH · RESULT']);
+ * 2026-10-14): a News article, a Search result, a Messages conversation
+ * and a saved QuickNote (its note page and its exact text). */
+const SCROLL_BOX_READERS = new Set([
+  'NEWS · ARTICLE', 'SEARCH · RESULT', 'MESSAGES · CONVERSATION', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
+]);
 function scrollsInBox(title: string): boolean {
   return SCROLL_BOX_READERS.has(title.trim().toUpperCase());
 }
@@ -968,10 +971,12 @@ export class HudPresenter {
 
   /** A reader drawn in Even's font on the four image tiles: only when
    * opted in (VITE_EVEN_FONT_PAGES=1) and the painter can draw one, and
-   * never for FIRMWARE_TEXT_READERS. Otherwise a firmware text page. */
+   * never for FIRMWARE_TEXT_READERS or a reader the glasses scroll
+   * themselves. Otherwise a firmware text page. */
   private usesEvenFontPage(options: { nativeTextPage?: boolean; title: string }): boolean {
     return evenFontPagesEnabled && this.usesNativeTextPage(options)
       && !FIRMWARE_TEXT_READERS.has(options.title.trim().toUpperCase())
+      && !scrollsInBox(options.title)
       && this.visual?.canPaintReader?.() === true;
   }
 
@@ -2229,14 +2234,20 @@ export class HudPresenter {
     const paginate = speakerPaged(surface.options.title) ? paginateHanging : paginateMeasured;
     const scrolls = scrollsOnGlass(surface.options.title);
     const text = readerParagraphs(surface.items).join('\n');
-    // Long text the glasses scroll: the stretch that holds the line the
-    // wearer was on (a page reopened), else the document's start.
-    const box = scrollsInBox(surface.options.title)
-      ? new ScrollBox(
-        layoutLines(text, READER_TEXT_PAGE.textWidth - SCROLLBAR_INSET_PX), SCROLL_BOX_LINES, undefined,
-        this.nativeTextPage?.source === source ? this.nativeTextPage.page : 0,
+    // Long text the glasses scroll, laid out once (a conversation's
+    // speakers with their words hanging under the first row's). It opens
+    // where the wearer was: the same stretch for a page reopened, a line
+    // below the last screen for a conversation grown by older messages.
+    const boxLines = scrollsInBox(surface.options.title)
+      ? (speakerPaged(surface.options.title) ? layoutHanging : layoutLines)(
+        text, READER_TEXT_PAGE.textWidth - SCROLLBAR_INSET_PX,
       )
       : undefined;
+    const box = boxLines ? new ScrollBox(
+      boxLines, SCROLL_BOX_LINES, undefined,
+      this.nativeTextPage?.box?.resume(boxLines)
+        ?? (this.nativeTextPage?.source === source ? this.nativeTextPage.page : 0),
+    ) : undefined;
     const pages = box ? [box.head(TEXT_CONTAINER_MAX_BYTES)] : paginate(
       text,
       scrolls ? READER_TEXT_PAGE.textWidth - SCROLLBAR_INSET_PX : READER_TEXT_PAGE.textWidth,
@@ -2378,12 +2389,13 @@ export class HudPresenter {
     if (!state || (this.pageOwner !== 'text-page-native' && !evenFont) || macHint === undefined) return false;
     if (state.box) {
       // The glasses scroll inside the box themselves; this is its edge. The
-      // next stretch carries on a line below (or a screen above), and the
-      // document's own ends stay where they are.
+      // next stretch carries on a line below (or a screen above). At the
+      // document's own end the caller decides: a conversation asks the Mac
+      // for older messages, anything else stays where it is.
       if (state.boxBusy) return true;
       const box = state.box;
       const before = { page: state.page, body: state.body };
-      if (!(direction === 'down' ? box.down() : box.up())) return true;
+      if (!(direction === 'down' ? box.down() : box.up())) return false;
       state.page = box.position;
       void this.writeScrollBox(state, before.body).then((shown) => {
         if (!shown && this.nativeTextPage === state) {

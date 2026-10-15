@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-15 — Messages and QuickNotes scroll like a News article
+
+The wearer: "do the same to the message and quicknote (reading notes)" — the scrolling from hardware test 1/4, "the only thing i scrolled that works like i want".
+
+- **A Messages conversation, a saved QuickNote (`QUICKNOTES · NOTE`) and its exact text (`QUICKNOTES · DETAIL`) are read in the glasses' own scroll box** (`ScrollBox`, as News and Search since `73fcd12`): a line a swipe, both ways, no round trip until a stretch's edge, where the next stretch starts one line below the top line on screen.
+- **The Mac sends each reader whole** (`hud.list` `body`) in the reader template: who or what, a blank line, then the text (a conversation one message a line, newest first; a note's sections a blank line apart). It pages nothing: no counter row, no "up previous / down more".
+- **Older messages carry on where the wearer stopped.** Past the thread's end the swipe asks the Mac for older messages (the reader promises a second page while chat.db has more); they arrive as the same thread grown longer, and the box opens a line below the last screen (`ScrollBox.resume`). A sent reply changes the thread's top, so it opens at the top, on the reply.
+- A message's wrapped rows still hang under its words (`layoutHanging`). `READER_BODY_MAX_UNITS` is now 480,000 so a long recording's transcript arrives whole.
+- Verified in the official simulator (0.9.3, 999-byte boxes): the long thread fixture 26 swipes down and 5 up, the note fixture 15 down and 2 up, one line each, stretch handoffs included. Tests: plugin 1264 passed, typecheck clean; Mac 3644 passed (the one failure, `test_whisper_cold_start`, is in whisper_serve, which this change does not touch); mypy clean. **Mac and plugin: takes effect when JOAT restarts and the plugin is rebuilt.** Not yet checked on the glasses.
+
 ## 2026-10-14 — JOAT no longer wakes on other people's speech
 
 The wearer: "why did JOAT reply yes when I was not talking to it? … JOAT just randomly answers when I don't say anything or I was never even using the word."
