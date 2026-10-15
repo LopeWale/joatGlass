@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-15 — Build JOAT 0.1.133
+
+- Packed from `e9681ac` (clean tree) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.133 above the last recorded build; app.json, package.json and package-lock.json all 0.1.133. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1266 tests passed, typecheck clean.
+- `apps/hub-plugin/joat.ehpk`: 178697 bytes, SHA-256 `b1dd2d9e9ea1f9dee0d202c275f5e2344443fea4ebdb258bb347a01f4ae40231`. Adds to 0.1.132 the Brainstorm turn reader and the plugin's hand-over of the page to it (`f3e0567`). The room that waits on the wearer is Mac side: takes effect when JOAT restarts. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-15 — Brainstorm: you lead it, and every turn is readable in full
 
 The wearer: "why are responses being cut off and I can read it. Why is JOAT auto response for me and continue the rounds without me able to read and ask questions … what is the point of a brainstorm if I cannot lead and see the full responses so I can participate … every respond gets cut off to one line."
