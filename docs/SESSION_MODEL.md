@@ -5,21 +5,21 @@ an Agent Terminal session.
 
 ## Product definition
 
-> A wearer-initiated, steerable, potentially multi-round analysis session
-> around a topic, task, claim, problem, or evolving discussion. Collaborators
-> challenge and expand each other's work, repair unsupported claims, and
-> converge on a verified synthesis while the process remains visible on the
-> glasses.
+> A wearer-led thinking partner on the glasses. The wearer asks, and each
+> collaborator answers in full: a question broken down in detail, or a plan
+> worked step by step. After every round the room stops and waits; the
+> wearer reads, and speaks the next move when ready. Sources are checked and
+> shown beside each answer, never used to rewrite it.
 
-Only Codex CLI and Claude Code participate. JOAT owns verification, synthesis,
+Only Codex CLI and Claude Code participate. JOAT owns the source check,
 session selection, and the glasses interaction. Hermes and OpenClaw belong to
 Agent Terminal and are never Brainstorm seats or readiness dependencies.
 
 JOAT is the glasses brain. It receives the wearer's voice, owns durable
 conversation identity and branch lineage, decides which bounded action the
 utterance represents, routes content to the selected collaborator, streams the
-actual turn to the HUD, runs verification and repair, records the synthesis,
-and restores the visible session after reconnect. Codex and Claude are
+actual turn to the HUD, checks the sources and shows the result, records the
+conversation, and restores the visible session after reconnect. Codex and Claude are
 collaborators invoked by JOAT; they do not directly own the microphone, HUD,
 session state, or navigation between Brainstorms.
 
@@ -31,7 +31,7 @@ Each local record contains:
 - title and creation/update time;
 - root and parent branch IDs;
 - ordered `YOU`, `CODEX`, `CLAUDE`, `VERIFY`, and `JOAT` turns;
-- verification state and latest synthesis;
+- source-check results (the `VERIFY` rows);
 - `active`, `settled`, or `cancelled` status.
 
 The selected JOAT Mac retains full conversation content in its private local
@@ -46,6 +46,7 @@ payloads.
 | Open Brainstorm during an active run | Restore the current conversation |
 | Open Brainstorm while idle | Show recent sessions plus `NEW` |
 | Ordinary ADDRESSED speech in a selected Brainstorm | Append the next user move to that context |
+| ANY speech while the room is waiting on the wearer (Brainstorm in front) | Is the wearer's next move — no wake word; silence artifacts ("you", "thanks", "um") are ignored |
 | `continue <title>` | Resume the matching durable session; ask on ambiguity |
 | Tap a row in the idle picker | Open that session by id — no title matching |
 | `new Brainstorm <topic>` | Start an explicit new lineage; replaces a live session WITHOUT asking, because saying "new" is what removes the ambiguity |
@@ -65,9 +66,11 @@ session absorbs the utterance; that order is load-bearing, because
 addressed text and would otherwise swallow every instruction.
 
 "Ordinary speech" throughout this table means speech ADDRESSED to JOAT —
-the wake-word rule in docs/BRAINSTORM.md ("only the cancel words are heard
-without the wake word") governs, and unaddressed room conversation is
-ignored entirely, never absorbed. A blind-pair audit filed the old wording
+the wake-word rule in docs/BRAINSTORM.md (while a round runs, only the cancel
+words are heard without the wake word) governs, and unaddressed room
+conversation is ignored entirely, never absorbed. The one exception is the
+waiting room, which asked the wearer for their move: there, and only while
+Brainstorm is the view in front, unaddressed speech is that move. A blind-pair audit filed the old wording
 as a spec conflict (DOC-WAKE-01): read alone, it permitted a session to
 transcribe bystanders.
 
@@ -82,7 +85,7 @@ remains visibly marked and is excluded from later factual context.
 
 ```text
 YOU -> wearer-directed or session-selected CODEX / CLAUDE turns
-    -> VERIFY / repair -> JOAT synthesis
+    -> VERIFY rows (shown beside each answer) -> the room waits for YOU
 ```
 
 The invariant is visibility of the actual turn order, not a fixed provider
@@ -106,8 +109,10 @@ absence is structural rather than a promise.
 
 The row count is a RENDERER fact, not a wire one: 13 on Brainstorm and 12
 on a running terminal, derived in docs/BRAINSTORM.md from the drawn font
-and column. The wire carries 40 rows of scrollback and the renderer
-windows it.
+and column. The wire carries the conversation and the renderer windows it:
+up to `BRAINSTORM_TRANSCRIPT_MAX` for a Brainstorm (whole turns), 40 rows of
+scrollback for the terminal. While the room waits on the wearer, the whole
+conversation is the `BRAINSTORM · ROOM` reader instead.
 
 ## HUD ownership and other events
 

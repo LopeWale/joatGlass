@@ -423,11 +423,13 @@ class TestCostVisibility:
     async def test_the_live_line_carries_round_and_calls(self) -> None:
         sink, transport = self._sink()
         await sink.open("t", ["codex", "claude"])
-        await sink.progress(2, 2, 5)
+        await sink.progress(2, 5)
         await sink.turn("CLAUDE (critic)")
         live = self._frames(transport)[-1].active_speaker
         assert "CLAUDE" in live
-        assert "round 2/2" in live and "5 calls" in live
+        assert "round 2" in live and "5 calls" in live
+        # A round has no maximum to count to: it goes on while the wearer does.
+        assert "/" not in live
 
     async def test_it_is_optional_for_other_sinks(self) -> None:
         # A terminal or a snapshot has no use for a HUD concern and must
@@ -462,12 +464,12 @@ class TestTheAnswerSurvivesTheEnding:
     async def test_the_synthesis_is_still_there_after_the_verdict(self) -> None:
         sink, transport = self._sink()
         await sink.open("cold-start latency", ["codex", "claude"])
-        await sink.turn("JOAT (synthesis)")
-        await sink.chunk("AGREED: measure the gate.")
-        await sink.close("done — converged (agreement 0.95, round 1)")
+        await sink.turn("CODEX (proposer)")
+        await sink.chunk("Measure the gate first.")
+        await sink.close("cancelled")
         activity = self._last_activity(transport)
-        assert "AGREED: measure the gate." in activity   # the answer
-        assert "converged" in activity                   # and the verdict
+        assert "Measure the gate first." in activity     # the answer
+        assert "cancelled" in activity                   # and the verdict
 
     async def test_a_cancelled_session_keeps_what_was_said(self) -> None:
         sink, transport = self._sink()
@@ -482,7 +484,7 @@ class TestTheAnswerSurvivesTheEnding:
     async def test_the_cost_meter_clears_when_the_session_ends(self) -> None:
         sink, transport = self._sink()
         await sink.open("t", ["codex"])
-        await sink.progress(1, 2, 3)
+        await sink.progress(1, 3)
         await sink.turn("CODEX (proposer)")
         await sink.close("done")
         frames = [m for m in transport.sent
@@ -501,15 +503,15 @@ class TestTheTranscriptFillsTheGlass:
     """
 
     def test_the_producer_trims_to_exactly_what_the_wire_admits(self) -> None:
-        from joat.core.protocol import BRAINSTORM_ACTIVITY_MAX
+        from joat.core.protocol import BRAINSTORM_TRANSCRIPT_MAX
         from joat.services.sinks import HudSink
 
-        full = "x" * BRAINSTORM_ACTIVITY_MAX
+        full = "x" * BRAINSTORM_TRANSCRIPT_MAX
         assert HudSink._bounded_transcript(full) == full
 
         # One byte over: trimmed, and still a legal frame.
         trimmed = HudSink._bounded_transcript("y" + full)
-        assert len(trimmed) <= BRAINSTORM_ACTIVITY_MAX
+        assert len(trimmed) <= BRAINSTORM_TRANSCRIPT_MAX
         BrainstormHudView(state="running", topic="t", collaborators=["codex"], activity=trimmed).to_wire()
 
     def test_a_full_transcript_survives_the_wire(self) -> None:
@@ -564,19 +566,17 @@ class TestTheTranscriptFillsTheGlass:
         )
 
 
-class TestFinishedTurnsCollapseToTheirGist:
-    """The wearer must be able to FOLLOW the debate, not just witness it.
+class TestFinishedTurnsStayWhole:
+    """The wearer must be able to READ the conversation, not just witness it.
 
-    A turn is capped at 120 words, which wraps to about nine 74-column
-    lines; the transcript region draws at most seven. Streamed raw, the
-    glass showed roughly one turn and the wearer could not tell who had
-    said what. Collaborators are instructed to open with
-    `GIST: <a dozen words>`, so a finished turn has a one-line summary of
-    the speaker's OWN making to fall back to.
+    Finished turns used to collapse to the one `GIST:` line their speaker
+    opened with (and every turn was capped at 120 words), so the wearer read
+    a single line of each answer and could not read the rest. A turn is
+    kept whole; the glasses scroll it.
     """
 
     LONG = (
-        "GIST: Buffer to clause boundaries; never stream raw tokens.\n\n"
+        "Buffer to clause boundaries; never stream raw tokens.\n\n"
         "Token-level streaming is wrong for this display. Every partial "
         "update is a BLE page write, and re-sending lines as words shift "
         "wrap position produces jitter in a monochrome overlay."
@@ -594,80 +594,156 @@ class TestFinishedTurnsCollapseToTheirGist:
         await sink.chunk(self.LONG)
         assert "monochrome overlay" in transport.sent[-1].activity
 
-    async def test_a_finished_turn_keeps_only_its_gist(self) -> None:
+    async def test_a_finished_turn_keeps_all_of_its_prose(self) -> None:
         sink, transport = await self._sink()
         await sink.turn("codex (proposer)")
         await sink.chunk(self.LONG)
         await sink.turn("claude (critic)")
-        await sink.chunk("GIST: Stream it.\n\nDetail nobody has read yet.")
+        await sink.chunk("Stream it.\n\nDetail nobody has read yet.")
 
         activity = transport.sent[-1].activity
-        assert "CODEX > Buffer to clause boundaries; never stream raw tokens." \
-            in activity
-        assert "monochrome overlay" not in activity, "a finished turn kept its prose"
-        assert "Detail nobody has read yet." in activity, "the live turn lost detail"
+        assert "monochrome overlay" in activity, "a finished turn lost its prose"
+        assert "Token-level streaming is wrong" in activity
+        assert "Detail nobody has read yet." in activity
 
-    async def test_the_synthesis_is_never_collapsed(self) -> None:
+    async def test_a_gist_line_is_just_text(self) -> None:
+        """Nothing asks for a GIST any more, and nothing keys on one."""
+        sink, transport = await self._sink()
+        await sink.turn("codex (proposer)")
+        await sink.chunk("GIST: not special.\n\nThe body that follows it.")
+        await sink.turn("claude (critic)")
+        await sink.chunk("Reply.")
+
+        activity = transport.sent[-1].activity
+        assert "GIST: not special." in activity
+        assert "The body that follows it." in activity
+
+    async def test_a_very_long_answer_is_kept_to_the_last_word(self) -> None:
+        sink, transport = await self._sink()
+        answer = " ".join(f"point{i} is explained here." for i in range(600))
+        await sink.turn("codex (proposer)")
+        for i in range(0, len(answer), 500):
+            await sink.chunk(answer[i:i + 500])
+        await sink.turn("claude (critic)")
+        await sink.chunk("Reply.")
+
+        activity = transport.sent[-1].activity
+        assert "point0 is explained here." in activity
+        assert "point599 is explained here." in activity
+
+    async def test_the_last_turn_is_never_collapsed(self) -> None:
         """close() retires the last turn WHOLE. It is the answer the wearer
         sat through the session for; a one-line summary of it is a loss."""
         sink, transport = await self._sink()
-        await sink.turn("joat (synthesis)")
-        await sink.chunk("AGREED\nMeasure before caching.\n\nOPEN\nEviction order.")
-        await sink.close("converged (agreement 0.93, round 2)")
+        await sink.turn("codex (proposer)")
+        await sink.chunk("First the cache.\n\nThen eviction order.")
+        await sink.close("cancelled")
 
         activity = transport.sent[-1].activity
-        assert "OPEN" in activity and "Eviction order." in activity
-        assert "JOAT > converged (agreement 0.93, round 2)" in activity
+        assert "Then eviction order." in activity
+        assert "JOAT > cancelled" in activity
 
     async def test_a_failed_seat_is_not_quoted_as_an_argument(self) -> None:
-        """Its stdout carried the CLI's complaint. Summarised verbatim it
-        reads exactly like a position the collaborator never took."""
+        """Its stdout carried the CLI's complaint. Shown verbatim it reads
+        exactly like a position the collaborator never took."""
         sink, transport = await self._sink()
         await sink.turn("codex (proposer)")
         await sink.chunk("[!] You are out of usage credits until August 28.")
         await sink.turn("claude (critic)")
-        await sink.chunk("GIST: I will take it from here.")
+        await sink.chunk("I will take it from here.")
 
         activity = transport.sent[-1].activity
         assert "CODEX > could not answer" in activity
         assert "usage credits" not in activity
 
-    async def test_a_turn_without_a_gist_falls_back_to_its_opening_words(self) -> None:
-        sink, transport = await self._sink()
+
+class TestTheWaitingRoomIsTheReader:
+    """After a round the room stops and the conversation goes up to read, in
+    the same swipe-scroll as a News article. Nothing in it is collapsed."""
+
+    def _sink(self, *, shows: bool = True, current=lambda: True):
+        shown: list[str] = []
+        hidden: list[bool] = []
+        transport = HudTransport()
+
+        async def show_room(text: str) -> bool:
+            shown.append(text)
+            return shows
+
+        sink = HudSink(
+            HudWriter(transport),  # type: ignore[arg-type]
+            brainstorm_view_current=lambda: current(),
+            show_room=show_room,
+            hide_room=lambda: hidden.append(True),
+        )
+        return sink, transport, shown, hidden
+
+    async def _one_round(self, sink):
+        await sink.open("heat pumps", ["codex", "claude"])
         await sink.turn("codex (proposer)")
-        await sink.chunk("No gist line here, just " + "prose " * 40)
+        await sink.chunk("First paragraph.\n\nSecond paragraph of a long answer.")
         await sink.turn("claude (critic)")
-        await sink.chunk("GIST: noted.")
+        await sink.chunk("Claude agrees, then adds a plan:\n1. Survey the house\n2. Size the unit")
 
-        row = [line for line in transport.sent[-1].activity.splitlines()
-               if line.startswith("CODEX > ")][0]
-        assert row.startswith("CODEX > No gist line here, just prose")
-        assert row.endswith("…"), "an unbounded fallback would eat the screen"
-        assert len(row) <= HudSink.ROW_COLUMNS, (
-            f"a collapsed row must fit one line: {len(row)}"
-        )
+    async def test_the_whole_conversation_is_put_up_to_read(self) -> None:
+        sink, _transport, shown, _hidden = self._sink()
+        await self._one_round(sink)
+        await sink.waiting()
+        assert len(shown) == 1
+        text = shown[0]
+        assert text.index("CODEX > First paragraph.") < text.index("CLAUDE > Claude agrees")
+        assert "Second paragraph of a long answer." in text      # not collapsed
+        assert "2. Size the unit" in text                         # whole, to the end
+        assert "\n\nCLAUDE > " in text                           # a blank line between turns
 
-    async def test_a_long_speaker_prefix_does_not_push_the_row_over(self) -> None:
-        """The row budget is the WHOLE row, prefix included.
+    async def test_the_next_turn_takes_the_page_back(self) -> None:
+        sink, transport, _shown, hidden = self._sink()
+        await self._one_round(sink)
+        await sink.waiting()
+        before = len(transport.sent)
+        await sink.turn("codex (proposer) — round 2")
+        assert hidden == [True]
+        assert len(transport.sent) > before                        # the live page is painted again
+        assert transport.sent[-1].state == "running"
 
-        A fixed body cap read as correct until a live two-round session
-        produced the prefix "CLAUDE — ROUND 2 > " — nineteen columns — and
-        finished rows reached 83, so the renderer truncated a second time
-        on top of this one.
-        """
-        sink, transport = await self._sink()
-        await sink.turn("claude (critic) — round 2")
-        await sink.chunk("GIST: " + "keep the judge warm during active work " * 5)
-        await sink.turn("codex (proposer)")
-        await sink.chunk("GIST: noted.")
+    async def test_a_reader_that_could_not_open_falls_back_to_the_live_page(self) -> None:
+        sink, transport, shown, hidden = self._sink(shows=False)
+        await self._one_round(sink)
+        await sink.waiting()
+        assert len(shown) == 1
+        assert transport.sent[-1].state == "running"
+        assert "2. Size the unit" in transport.sent[-1].activity
+        assert hidden == []
 
-        collapsed = [line for line in transport.sent[-1].activity.splitlines()
-                     if line.startswith("CLAUDE")][0]
-        assert collapsed.startswith("CLAUDE — ROUND 2 > keep the judge warm")
-        assert len(collapsed) == HudSink.ROW_COLUMNS, (
-            f"row is {len(collapsed)} columns, glass holds {HudSink.ROW_COLUMNS}"
-        )
-        assert collapsed.endswith("…")
+    async def test_nothing_opens_when_brainstorm_is_not_the_current_view(self) -> None:
+        sink, transport, shown, _hidden = self._sink(current=lambda: False)
+        await sink.open("t", ["codex", "claude"])
+        await sink.waiting()
+        assert shown == []
+
+    async def test_ending_the_room_takes_the_page_back_and_keeps_the_conversation(self) -> None:
+        sink, transport, _shown, hidden = self._sink()
+        await self._one_round(sink)
+        await sink.waiting()
+        await sink.close("cancelled")
+        assert hidden == [True]
+        final = transport.sent[-1]
+        assert final.state == "cancelled"
+        assert "2. Size the unit" in final.activity
+
+    async def test_coming_back_to_a_waiting_room_shows_the_reader_again(self) -> None:
+        sink, transport, shown, _hidden = self._sink()
+        await self._one_round(sink)
+        await sink.waiting()
+        await sink.replay()
+        assert len(shown) == 2
+        assert shown[1] == shown[0]
+
+    async def test_the_room_that_is_not_waiting_does_not_open_the_reader(self) -> None:
+        sink, _transport, shown, _hidden = self._sink()
+        await self._one_round(sink)
+        await sink.replay()
+        assert shown == []
 
 
 class TestTheSilentWaitIsCovered:
@@ -1122,119 +1198,70 @@ class TestTheSnapshotQuotesWholeReplies:
 
 class TestTheRecordKeepsTheVerificationStory:
     """SESSION_MODEL.md:33 lists VERIFY among the five turn kinds the
-    durable record contains, and BRAINSTORM.md:51-52 requires a repair to
-    stream "under its own header so a turn is never silently rewritten".
-
-    Both hold — and this test exists because I nearly "fixed" them after
-    reading DebateSession._transcript, which is the PROMPT CONTEXT and
-    deliberately carries only each speaker's final text (re-feeding a
-    withdrawn claim to the room would be a defect of its own). The record
-    is built from the SINK stream, which sees every turn. Two structures,
-    different jobs; checking the wrong one invents a defect that is not
-    there, and the fix would have polluted collaborator prompts with
-    verifier output.
+    durable record contains. A checked turn gets its VERIFY rows beside it,
+    and the turn itself is never rewritten: the check shows, it does not
+    re-ask, so a long answer cannot come back shorter.
     """
 
-    async def _run_a_session_with_one_repair(self):
-        from joat.services.roundtable import Participant, RoundTable
-        from joat.services.session import DebateSession
-        from joat.services.sinks import Broadcast, DebateStateSink, HudSink
-        from joat.verifier.gate import VerifierGate
+    ANSWER = 'Cache it.\nSOURCES:\n[1] https://example.invalid :: "q"'
 
+    def _seats(self):
+        from joat.services.roundtable import Participant, RoundTable
+
+        asked: list[str] = []
+
+        def make(text):
+            async def seat(prompt: str):
+                asked.append(prompt)
+                yield text
+
+            return seat
+
+        seats = RoundTable([
+            Participant("codex", "proposer", make(self.ANSWER)),
+            Participant("claude", "critic", make("Disagree.")),
+        ])
+        return seats, asked
+
+    async def _run(self, sink):
+        from joat.verifier.gate import VerifierGate
+        from tests.unit.test_session import OneRoundSession
+
+        seats, asked = self._seats()
+
+        async def unfetchable(url: str) -> str:
+            return ""
+
+        session = OneRoundSession(
+            "caching", seats, sink, gate=VerifierGate(unfetchable, unfetchable),
+        )
+        await session.run()
+        return session, asked
+
+    async def _recorded(self):
+        from joat.services.sinks import Broadcast, DebateStateSink
         from tests.unit.test_session import SinkTransport
 
         state = DebateStateSink()
-
-        def make(texts):
-            iterator = iter(texts)
-
-            async def seat(prompt: str):
-                yield next(iterator, "GIST: nothing more")
-
-            return seat
-
-        seats = RoundTable([
-            Participant("codex", "proposer", make([
-                'GIST: cache it\nSOURCES:\n[1] https://example.invalid :: "q"',
-                "GIST: WITHDRAWN — the repaired position",
-            ])),
-            Participant("claude", "critic", make(["GIST: disagree"])),
-        ])
-
-        async def unfetchable(url: str) -> str:
-            return ""
-
-        class Judge:
-            async def stream(self, prompt: str):
-                yield "AGREEMENT: 0.95\nBLOCKING: no"
-
-        session = DebateSession(
-            "caching", seats,
-            Broadcast([HudSink(HudWriter(SinkTransport())), state]),
-            Judge(), gate=VerifierGate(unfetchable, unfetchable),
-            max_rounds=1, max_repairs=1,
+        session, asked = await self._run(
+            Broadcast([HudSink(HudWriter(SinkTransport())), state])
         )
-        await session.run()
-        return state.snapshot
+        return session, asked, state.snapshot
 
     async def test_the_verifier_turn_is_in_the_record(self) -> None:
-        snapshot = await self._run_a_session_with_one_repair()
+        _session, _asked, snapshot = await self._recorded()
         labels = [label for label, _text in snapshot.turns]
         assert any("VERIFY" in label.upper() for label in labels), labels
 
-    async def test_the_repair_carries_its_own_header(self) -> None:
-        snapshot = await self._run_a_session_with_one_repair()
+    async def test_a_denied_answer_is_not_re_asked_or_rewritten(self) -> None:
+        session, asked, snapshot = await self._recorded()
         labels = [label for label, _text in snapshot.turns]
-        assert any("repair" in label.lower() for label in labels), labels
-
-    async def test_the_withdrawn_claim_is_not_erased(self) -> None:
-        """"Never silently rewritten" is about the record a wearer opens
-        later: a repair that overwrote its original would show a clean
-        claim with no sign it had been challenged and withdrawn."""
-        snapshot = await self._run_a_session_with_one_repair()
+        assert not any("repair" in label.lower() for label in labels), labels
+        assert len(asked) == 2                       # one turn per seat, no repair turn
         joined = " ".join(text for _label, text in snapshot.turns)
-        assert "GIST: cache it" in joined, "the original was overwritten"
-        assert "the repaired position" in joined
+        assert "Cache it." in joined, "the original answer was overwritten"
 
-    async def test_the_prompt_context_carries_only_the_repaired_text(self) -> None:
-        """The other half of the same design: collaborators must NOT be
-        re-prompted with a claim the verifier already rejected."""
-        from joat.services.roundtable import Participant, RoundTable
-        from joat.services.session import DebateSession
-        from joat.verifier.gate import VerifierGate
-        from tests.unit.test_session import SinkTransport
-
-        def make(texts):
-            iterator = iter(texts)
-
-            async def seat(prompt: str):
-                yield next(iterator, "GIST: nothing more")
-
-            return seat
-
-        seats = RoundTable([
-            Participant("codex", "proposer", make([
-                'GIST: cache it\nSOURCES:\n[1] https://example.invalid :: "q"',
-                "GIST: WITHDRAWN — the repaired position",
-            ])),
-            Participant("claude", "critic", make(["GIST: disagree"])),
-        ])
-
-        async def unfetchable(url: str) -> str:
-            return ""
-
-        class Judge:
-            async def stream(self, prompt: str):
-                yield "AGREEMENT: 0.95\nBLOCKING: no"
-
-        session = DebateSession(
-            "caching", seats, HudSink(HudWriter(SinkTransport())), Judge(),
-            gate=VerifierGate(unfetchable, unfetchable),
-            max_rounds=1, max_repairs=1,
-        )
-        await session.run()
+    async def test_the_prompt_context_carries_what_the_seat_said(self) -> None:
+        session, _asked, _snapshot = await self._recorded()
         joined = " ".join(text for _label, text in session.transcript())
-        assert "the repaired position" in joined
-        assert "GIST: cache it" not in joined, (
-            "a rejected claim was re-fed to the room"
-        )
+        assert "Cache it." in joined

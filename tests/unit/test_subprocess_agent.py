@@ -116,6 +116,30 @@ class TestFailureIsVisibleButNotQuotable:
         assert "no answer within" in out
 
 
+class TestSeatsHaveRoomToAnswerInFull:
+    """A seat asked for a full, detailed answer — with its facts checked and
+    a second opinion taken — ran past the 240s default and the whole answer
+    was thrown away as "could not answer". The two Brainstorm seats get the
+    seat ceiling; the 240s default stays for everything else."""
+
+    def test_both_seats_use_the_seat_ceiling(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from joat.agents import subprocess_agent as module
+
+        monkeypatch.setattr(module, "find_codex_binary", lambda: "/bin/echo")
+        monkeypatch.setattr(module, "find_claude_binary", lambda: "/bin/echo")
+        for seat in (module.proposer(), module.critic()):
+            assert seat is not None
+            assert seat._timeout_s == module.SEAT_TURN_TIMEOUT_S
+        assert module.SEAT_TURN_TIMEOUT_S >= 600
+
+    async def test_a_seat_that_runs_out_of_time_says_so(self) -> None:
+        agent = SubprocessAgent(["/bin/sh", "-c", "sleep 5"], timeout_s=0.3, name="claude")
+        out = "".join([chunk async for chunk in agent.stream("ignored")])
+        assert is_failure(out)
+        from joat.services.roundtable import failure_summary
+        assert failure_summary(out) == "ran out of time"
+
+
 class TestModelIsChosenPerCall:
     """Boot-time capture is what made the model a launch flag."""
 
@@ -244,6 +268,39 @@ class TestStreamJsonReading:
         )
         chunks = [chunk async for chunk in agent.stream("ignored")]
         assert chunks == ["one two three"], chunks
+
+    async def test_text_written_around_a_tool_call_does_not_run_together(self) -> None:
+        """A turn that uses a tool writes its text in blocks — a sentence of
+        intent, the tool call, the answer. Read in full they ran together
+        ("...approach first.Here is how to decide"), so a later text block
+        starts a new paragraph. The first block starts the turn: no blank
+        lead, and a thinking block before it changes nothing."""
+        from joat.agents.subprocess_agent import SubprocessAgent
+
+        def line(event: str) -> str:
+            return "'" + '{"type":"stream_event","event":' + event + "}" + "'"
+
+        def start(index: int, kind: str) -> str:
+            block = '{"type":"%s"%s}' % (kind, ',"text":""' if kind == "text" else "")
+            return line('{"type":"content_block_start","index":%d,"content_block":%s}'
+                        % (index, block))
+
+        def delta(index: int, text: str) -> str:
+            return line('{"type":"content_block_delta","index":%d,'
+                        '"delta":{"type":"text_delta","text":"%s"}}' % (index, text))
+
+        lines = " ".join([
+            start(0, "thinking"),
+            start(1, "text"), delta(1, "I will check first."),
+            start(2, "tool_use"),
+            start(3, "text"), delta(3, "Here is the answer."),
+        ])
+        agent = SubprocessAgent(
+            ["/bin/sh", "-c", f"printf '%s\\n' {lines}; exit 0"],
+            stream_json=True, name="fake",
+        )
+        out = "".join([chunk async for chunk in agent.stream("ignored")])
+        assert out == "I will check first.\n\nHere is the answer.", repr(out)
 
     async def test_a_final_line_without_a_newline_still_reaches_the_wearer(
         self,

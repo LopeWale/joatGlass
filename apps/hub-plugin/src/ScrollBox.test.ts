@@ -106,6 +106,23 @@ describe('ScrollBox', () => {
     expect(early.resume(grown)).toBe(0);
   });
 
+  it('opens a document that grows at its end on the first new line, wherever the wearer stopped', () => {
+    const lines = document(300);
+    // The wearer read a little of round one and spoke their move.
+    const box = new ScrollBox(lines, VISIBLE);
+    box.down();
+    box.down();
+    expect(box.atEnd).toBe(false);
+    const grown = [...lines, '', 'YOU > give me a plan', '', 'CLAUDE > Here is the plan.'];
+    expect(box.resume(grown, true)).toBe(lines.length + 1);
+    expect(grown[box.resume(grown, true) ?? -1]).toBe('YOU > give me a plan');
+    // Without the flag a mid-document reader stays put, as before.
+    expect(box.resume(grown)).toBe(box.position);
+    // Nothing new: where the wearer was. Another document: afresh.
+    expect(box.resume(lines, true)).toBe(box.position);
+    expect(box.resume(['A different text', ...lines], true)).toBeUndefined();
+  });
+
   it('opens within the bytes a page rebuild may carry, so opening needs no second write', () => {
     const lines = document(120);
     const box = new ScrollBox(lines, VISIBLE);

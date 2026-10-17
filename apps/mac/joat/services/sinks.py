@@ -21,11 +21,7 @@ from collections.abc import Awaitable, Callable
 from typing import Protocol, TextIO
 
 from .hud import HudWriter
-from ..core.protocol import (
-    BRAINSTORM_ACTIVITY_MAX,
-    BRAINSTORM_ROW_COLUMNS,
-    BrainstormHudView,
-)
+from ..core.protocol import BRAINSTORM_TRANSCRIPT_MAX, BrainstormHudView
 from .roundtable import failure_summary, is_failure
 
 FinishedSession = Callable[
@@ -64,16 +60,27 @@ class HudSink:
         *,
         open_terminal: Callable[[], Awaitable[bool]] | None = None,
         brainstorm_view_current: Callable[[], bool] | None = None,
+        show_room: Callable[[str], Awaitable[bool]] | None = None,
+        hide_room: Callable[[], None] | None = None,
     ) -> None:
         self._hud = hud
         self._open_terminal = open_terminal
         self._brainstorm_view_current = brainstorm_view_current
+        #: Put the whole conversation up to read, in the glasses' scroll
+        #: reader, while the room waits on the wearer. True when it was
+        #: shown; `hide_room` retires that reader.
+        self._show_room = show_room
+        self._hide_room = hide_room
+        self._reader_up = False
+        #: The room has finished a round and is waiting on the wearer.
+        self._waiting = False
         self._topic = ""
         self._speakers: list[str] = []
         self._speaker = ""
-        # A finished turn keeps its GIST; only the LIVE turn keeps its
-        # detail. Holding them apart is what makes that possible — a flat
-        # string cannot say where one turn ended and the next began.
+        # Finished turns and the live one are held apart so the live turn
+        # can stream into the room page while everything before it stays
+        # whole above it; a flat string cannot say where one turn ended
+        # and the next began.
         self._done: list[str] = []
         self._head = ""
         self._body = ""
@@ -96,80 +103,30 @@ class HudSink:
         updating with nothing logged.
         """
 
-        if len(value) <= BRAINSTORM_ACTIVITY_MAX:
+        if len(value) <= BRAINSTORM_TRANSCRIPT_MAX:
             return value
-        tail = value[-BRAINSTORM_ACTIVITY_MAX:]
+        tail = value[-BRAINSTORM_TRANSCRIPT_MAX:]
         boundary = tail.find("\n")
         return tail[boundary + 1:] if boundary >= 0 else tail
 
-    _GIST = re.compile(r"^\s*GIST:\s*(\S.*)$", re.MULTILINE)
-
-    ROW_COLUMNS = BRAINSTORM_ROW_COLUMNS
-    """Character budget for a COLLAPSED turn's single row.
-
-    Was 74 (old monospace face), then 96 (proportional over the old
-    504px column). Now BRAINSTORM_ROW_COLUMNS = 105: the transcript role
-    (HudTypography TYPE.transcript, 11px proportional, 5.18px measured
-    mean advance) over the full 548px content width. The wearer caught
-    the first stale budget on screen within minutes: collapsed rows
-    ended in "…" with a quarter of the width still empty — "why are some
-    words being cut off when there is obviously room on the right?"
-
-    An estimate, deliberately: the engine cannot measure pixels. A
-    glyph-wide row that overruns simply wraps at paint time — the
-    renderer wraps by measured pixels — which costs one extra row rarely
-    instead of wasting 100px always.
-    """
-
-    @classmethod
-    def _summarise(cls, body: str, budget: int) -> str:
-        """One line standing for a whole finished turn.
-
-        Every collaborator is instructed to open with `GIST: <a dozen
-        words>` (build_prompt), so the one-line summary is the speaker's
-        own, not something inferred here. Turns without one fall back to
-        their opening words.
-
-        `budget` is what is left of the row AFTER the speaker prefix. A
-        fixed body cap looked right until a live two-round session made
-        the prefix "CLAUDE — ROUND 2 > " — nineteen columns — and pushed
-        finished rows to 83, so the renderer truncated a second time on
-        top of this one.
-        """
-        if is_failure(body):
-            # The seat's stdout carried the CLI's complaint ("out of usage
-            # credits"). Quoted as a summary it reads exactly like an
-            # argument the collaborator never made. Signed-out and spent
-            # seats are named, because the wearer can fix those from the
-            # phone.
-            return failure_summary(body)
-        found = cls._GIST.search(body)
-        line = " ".join((found.group(1) if found else body).split())
-        limit = max(1, budget)
-        return f"{line[:limit - 1]}…" if len(line) > limit else line
-
     @property
     def _activity(self) -> str:
-        """What the glasses show: every finished turn as one line, plus the
-        live turn in full.
+        """What the glasses show: every turn so far, whole, finished ones
+        and the live one alike.
 
-        A 120-word turn wraps to about nine 74-column lines, and the
-        transcript region draws at most seven — so a raw stream showed
-        roughly ONE turn and the wearer could not follow who had said what.
-        The wearer's requirement was watching the debate happen; a session
-        they cannot follow does not meet it however faithfully it streams.
+        The page shows seven rows and the wearer scrolls the rest, so no
+        turn is shortened to fit. Finished turns used to collapse to the one
+        `GIST:` line their speaker opened with; the wearer read one line of
+        every answer and could not read the rest.
         """
         rows = list(self._done)
         if self._head or self._body:
             rows.append(f"{self._head}{self._body}")
         elif not rows and self._placeholder:
             rows.append(self._placeholder)
-        # A blank line costs a whole row out of seven. Models separate their
-        # GIST from their argument with one, and the SYNTHESIS separates
-        # AGREED from OPEN the same way — and the synthesis is retired
-        # uncollapsed on purpose, so an earlier version of this that only
-        # cleaned the live row left a blank row in the one piece of content
-        # the wearer sat through the session for.
+        # A blank line costs a whole row out of seven, so the room page
+        # draws a turn's paragraphs on consecutive rows (the reader keeps
+        # them: see _reader_text).
         #
         # Applied to the whole rendering, at RENDER time: chunks arrive
         # mid-sequence while streaming, so "\n" then "\n" would slip past
@@ -177,8 +134,8 @@ class HudSink:
         # the Markdown export keep the wearer's paragraphs.
         return self._bounded_transcript(_BLANK_LINES.sub(chr(10), "\n".join(rows)))
 
-    def _retire_live_turn(self, *, collapse: bool = True) -> None:
-        """Move the live turn into the finished rows."""
+    def _retire_live_turn(self) -> None:
+        """Move the live turn into the finished rows, whole."""
         if self._head or self._body:
             if not self._streaming or not self._body.strip():
                 # The turn is over and produced nothing usable — a CLI whose
@@ -192,10 +149,13 @@ class HudSink:
                 # keeping the marker would have recorded "CODEX > Thinking…"
                 # as that seat's contribution for the rest of the session.
                 body = "said nothing"
-            elif collapse:
-                body = self._summarise(
-                    self._body, self.ROW_COLUMNS - len(self._head)
-                )
+            elif is_failure(self._body):
+                # The seat's stdout carried the CLI's complaint ("out of
+                # usage credits"). Quoted as a turn it reads exactly like an
+                # argument the collaborator never made. Signed-out and spent
+                # seats are named, because the wearer can fix those from the
+                # phone.
+                body = failure_summary(self._body)
             else:
                 body = self._body
             self._done.append(f"{self._head}{body}")
@@ -223,6 +183,13 @@ class HudSink:
             # Computation and history continue after navigation. Neither
             # streamed tokens nor the final verdict may reclaim that view.
             return
+        if self._reader_up:
+            # The wearer was reading the conversation and the room has moved
+            # on (their answer, the next seat): take the page back.
+            self._reader_up = False
+            if self._hide_room is not None:
+                self._hide_room()
+            await self._hud.begin_brainstorm()
         await self._hud.show_brainstorm(BrainstormHudView(
             state=state,
             topic=self._topic,
@@ -238,13 +205,36 @@ class HudSink:
             activity=self._activity,
         ))
 
-    async def progress(self, round_no: int, max_rounds: int, calls: int) -> None:
+    async def progress(self, round_no: int, calls: int) -> None:
         """Where the session is, and what it has spent so far.
 
         Optional by design: discovered with getattr, so a terminal or a
-        snapshot sink never has to implement a HUD concern.
+        snapshot sink never has to implement a HUD concern. A round has no
+        maximum to count to: it goes on while the wearer does.
         """
-        self._progress = f"round {round_no}/{max_rounds} · {calls} calls"
+        self._progress = f"round {round_no} · {calls} calls"
+
+    def _reader_text(self) -> str:
+        """The whole conversation as the wearer reads it: every turn, whole,
+        a blank line between turns, paragraphs kept."""
+        return "\n\n".join(self._done) or " "
+
+    async def waiting(self) -> None:
+        """The room has finished a round and waits on the wearer.
+
+        Optional by design, like progress(). The live page's last frame is
+        the end of Claude's turn; this puts the conversation up to read, as
+        one scroll the glasses move themselves, like a News article.
+        """
+        self._retire_live_turn()
+        self._speaker = ""
+        self._waiting = True
+        if self._show_room is None or self._handed_to_terminal or not self._view_is_current():
+            await self._paint("running")
+            return
+        self._reader_up = await self._show_room(self._reader_text())
+        if not self._reader_up:
+            await self._paint("running")
 
     async def open(self, topic: str, speakers: list[str]) -> None:
         self._handoff_epoch += 1
@@ -285,6 +275,7 @@ class HudSink:
     # would be the native version (recorded in the Changelog, 2026-10-05).
 
     async def turn(self, label: str) -> None:
+        self._waiting = False
         self._retire_live_turn()
         self._placeholder = ""
         self._speaker = label
@@ -320,10 +311,8 @@ class HudSink:
         one-line status where the answer had been. The verdict is a
         footer, not a replacement.
         """
-        # The last live turn is the SYNTHESIS — the thing the wearer sat
-        # through the session for. Every other turn collapses; this one
-        # stays whole.
-        self._retire_live_turn(collapse=False)
+        self._waiting = False
+        self._retire_live_turn()
         self._placeholder = ""
         self._speaker = ""
         self._progress = ""
@@ -366,6 +355,12 @@ class HudSink:
         self._handoff_epoch += 1
         epoch = self._handoff_epoch
         self._handed_to_terminal = False
+        if self._waiting and self._show_room is not None:
+            # Coming back to a room that is waiting on the wearer: the
+            # conversation they were reading, not the last live frame.
+            self._reader_up = await self._show_room(self._reader_text())
+            if self._reader_up:
+                return
         await self._hud.begin_brainstorm()
         if epoch == self._handoff_epoch and self._view_is_current():
             await self._paint(self._state)
@@ -425,6 +420,17 @@ class Broadcast:
 
     async def close(self, verdict: str) -> None:
         await self._each("close", verdict)
+
+    async def waiting(self) -> None:
+        for sink in self._sinks:
+            callback = getattr(sink, "waiting", None)
+            if callback is None:
+                continue
+            try:
+                await callback()
+            except Exception:
+                # A dead surface must not stop the room waiting for the wearer.
+                pass
 
     async def _each(self, method: str, *args: object) -> None:
         for sink in self._sinks:

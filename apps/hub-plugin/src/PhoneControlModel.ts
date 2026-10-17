@@ -53,6 +53,7 @@ const PHASE_TITLES: Record<string, string> = {
   opening: 'opening',
   independent: 'first answers',
   cross_review: 'cross review',
+  waiting: 'your move',
   meta_review: 'judging',
   synthesis: 'summary',
   closing: 'wrapping up',

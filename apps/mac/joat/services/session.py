@@ -19,7 +19,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-from ..core.interfaces import ReplyEngine
 from ..core.protocol import AudioSource, BrainstormAction, BrainstormHudView, HudNotificationCard, HudNotifications
 from ..verifier.citations import parse_citations
 from ..verifier.gate import CitationStatus, VerifierGate
@@ -36,6 +35,13 @@ MAX_BRAINSTORM_TOPIC_CHARS = 4096
 # A spoken place name or address; Mapbox Search Box caps a query at 256
 # characters, and nothing a wearer says about a destination is longer.
 MAX_NAVIGATION_DESTINATION_CHARS = 200
+
+#: What a transcriber writes for a silent microphone. A Brainstorm that is
+#: waiting on the wearer takes any speech as their move without "JOAT", so
+#: these (compared lower-cased, punctuation off) must not become one.
+_SILENCE_ARTIFACTS = frozenset({
+    "you", "thank you", "thanks", "bye", "uh", "um", "hmm", "mm", "mhm",
+})
 
 
 class BrainstormStartResult(StrEnum):
@@ -746,6 +752,18 @@ class SessionManager:
             # reorder the round table, and must never become a follow-up
             # the collaborators answer.
             steer = text if addressed is _UNSET_ADDRESSED else addressed
+            # A room stopped on the wearer is waiting for THEM, and the
+            # Brainstorm is the page they are on (checked above): whatever
+            # they say is their move, with no "JOAT" in front. The wearer
+            # started this session; they are not asking JOAT, they are
+            # answering the room. Only the sounds a silent microphone
+            # hallucinates ("you", "thank you") are not a move.
+            if (
+                not steer
+                and getattr(self._active, "awaiting_wearer", False)
+                and " ".join(lowered.replace(",", " ").split()) not in _SILENCE_ARTIFACTS
+            ):
+                steer = text.strip()
             if steer:
                 # A NEW TOPIC is not a remark. "brainstorm <something else>"
                 # spoken during a live session was swallowed whole: it became
@@ -1861,12 +1879,18 @@ def _eager(stream: AsyncIterator[str]) -> AsyncIterator[str]:
 
 
 class DebateSession(Session):
-    """One debate, streamed turn by turn — the wearer watches it happen.
+    """One brainstorm, streamed turn by turn — the wearer watches it happen
+    and drives it.
 
     Every seat at the RoundTable speaks once per round, in an order the
-    wearer can redirect by name, and then a local judge scores how far apart
-    the room still is. Each chunk reaches the sinks the moment it exists: a
-    background debate that only reported a verdict would violate the stated
+    wearer can redirect by name. Then the room STOPS and waits: the wearer
+    reads the round, and what they say next (a question, a remark, a plan to
+    work, "claude, respond") starts the next round. Nothing scores, judges or
+    summarises for them, and nothing carries on without them: a brainstorm
+    that ran its own rounds to its own verdict left the wearer an audience
+    who could neither read nor ask (the wearer, 2026-10-15). Each chunk
+    reaches the sinks the moment it exists: a background
+    debate that only reported a verdict would violate the stated
     requirement, where visibility IS the proof it was debated.
 
     N participants rather than a hardcoded proposer/critic pair keeps one
@@ -1888,11 +1912,7 @@ class DebateSession(Session):
         topic: str,
         table: RoundTable,
         sink: TranscriptSink,
-        judge: ReplyEngine | None,
         gate: VerifierGate | None = None,
-        max_repairs: int = 1,
-        max_rounds: int = 2,
-        agreement_threshold: float = 0.85,
         on_phase: Callable[[str], None] | None = None,
         prior: tuple[tuple[str, str], ...] = (),
         session_id: str = "",
@@ -1914,11 +1934,10 @@ class DebateSession(Session):
         self.root_id = root_id or self.session_id
         self._table = table
         self._sink = sink
-        self._judge = judge
         self._gate = gate
-        self._max_repairs = max_repairs
-        self._max_rounds = max_rounds
-        self._agreement_threshold = agreement_threshold
+        #: Set while the room is stopped on the wearer; their next move
+        #: (consume_transcript / direct) resolves it.
+        self._floor: asyncio.Future[None] | None = None
         self._on_phase = on_phase
         #: Where a session's wall-clock actually went, by fixed phase name.
         self._phase_seconds: dict[str, float] = {}
@@ -1955,10 +1974,53 @@ class DebateSession(Session):
 
     def cancel(self) -> None:
         self._cancelled = True
+        self._release_floor()
+
+    @property
+    def awaiting_wearer(self) -> bool:
+        """True while the room is stopped, waiting for the wearer's move."""
+        return self._floor is not None and not self._floor.done()
+
+    def _release_floor(self) -> None:
+        floor = self._floor
+        if floor is not None and not floor.done():
+            floor.set_result(None)
+
+    async def _await_wearer(self) -> None:
+        """Stop after a round until the wearer makes their move.
+
+        The sink is told first (the glasses put the whole conversation up to
+        read), then nothing happens until the wearer speaks, names a seat or
+        stops the room. A wearer reading is not a slow phase: the time is
+        kept out of the phase timings.
+        """
+        floor: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._floor = floor
+        hook = getattr(self._sink, "waiting", None)
+        if hook is not None:
+            try:
+                await hook()
+            except Exception:
+                log.warning("waiting state not painted", exc_info=True)
+        waited_from = time.monotonic()
+        try:
+            await floor
+        finally:
+            if self._floor is floor:
+                self._floor = None
+            if self._phase_started is not None:
+                self._phase_started += time.monotonic() - waited_from
 
     WEARER_LABEL = "YOU"
 
     def consume_transcript(self, text: str) -> bool:
+        consumed = self._consume_transcript(text)
+        if consumed:
+            # The room is stopped on the wearer; this is their move.
+            self._release_floor()
+        return consumed
+
+    def _consume_transcript(self, text: str) -> bool:
         """The wearer adds a thought mid-session — the YOU turn.
 
         docs/BRAINSTORM.md lists YOU alongside CODEX / CLAUDE / VERIFY /
@@ -1966,9 +2028,10 @@ class DebateSession(Session):
         is what makes the wearer a participant rather than an audience.
         The turn lands in the transcript, so the next speaker answers it.
 
-        Only reached with ADDRESSED speech (SessionManager gates that), and
-        never for a nomination — "claude, respond" steers the room rather
-        than becoming a quoted remark.
+        Reached with ADDRESSED speech, or with any speech while the room is
+        stopped on the wearer (SessionManager gates that), and never for a
+        nomination — "claude, respond" steers the room rather than becoming
+        a quoted remark.
         """
         said = text.strip()
         if not said or self._cancelled:
@@ -2089,6 +2152,8 @@ class DebateSession(Session):
         if mode is not None:
             self._next_mode = mode
             log.info("wearer routed %s: %s", seat.name, mode)
+        # Naming a seat is a move: the next round starts with them.
+        self._release_floor()
         return seat.name
 
     async def handle_brainstorm_action(self, action: BrainstormAction) -> bool:
@@ -2126,24 +2191,26 @@ class DebateSession(Session):
             await self._finish("blocked · collaborator disconnected; open Hermes to retry")
 
     async def _run(self) -> None:
-        """The starter design, fully visible: independent reviews →
-        cross-review → meta-review → synthesis.
+        """The room, driven by the wearer.
 
         A ROUND is one turn for every seat. Round 1 is INDEPENDENT — each
         seat answers blind, because two views with no cross-contamination
-        are worth more than one view plus an echo. From round 2 the seats
-        cross-review each other. After each round the judge's meta-review
-        scores agreement, and the loop CONVERGES at ≥ threshold with no
-        blocking issues — otherwise the room goes around again, capped at
-        max_rounds — after which JOAT streams the verified synthesis.
+        are worth more than one view plus an echo. After a round the room
+        STOPS and waits for the wearer: they read it, then ask, remark, name
+        a seat or point a stage direction ("tear that apart"), and that move
+        starts the next round, in which the seats cross-review each other
+        and answer the wearer. Nothing scores or summarises for them, and
+        nothing carries on by itself. The room ends when the wearer stops it
+        (the cancel words, or Back and a cancel).
         """
         self._set_phase("opening")
         adopt = getattr(self._sink, "adopt_identity", None)
         if adopt is not None:
             adopt(self.session_id, self.parent_id, self.root_id)
         await self._sink.open(self._topic, self._table.names)
-        outcome = "no judge — one round"
-        for round_no in range(1, self._max_rounds + 1):
+        round_no = 0
+        while True:
+            round_no += 1
             self._set_phase("independent" if round_no == 1 else "cross_review")
             # One turn from every seated collaborator — the wearer's round
             # invariant. The snapshot makes mid-round redirects reorder the
@@ -2159,6 +2226,7 @@ class DebateSession(Session):
             self._prefetch = (
                 self._prefetch_round_one() if round_no == 1 else {}
             )
+            moves_before = self._wearer_turns
             for _ in range(len(self._table)):
                 speaker = self._table.next_speaker()
                 said = await self._verified_turn(speaker, round_no)
@@ -2175,8 +2243,8 @@ class DebateSession(Session):
                 elif said:
                     self._transcript.append((speaker.label, said))
             # A debate needs at least two positions in the room. One voice
-            # plus a stack trace is a monologue, and scoring it would report
-            # convergence with nobody to converge with.
+            # plus a stack trace is a monologue, and a room with nobody to
+            # answer the wearer's next move is not worth waiting in.
             # The wearer's own turns are not collaborator positions: a
             # transcript of YOU plus one failed seat is still a monologue.
             positions = len(self._transcript) - self._wearer_turns
@@ -2192,43 +2260,15 @@ class DebateSession(Session):
                     + remedy
                 )
                 return
-            if self._judge is None:
-                break
-            self._set_phase("meta_review")
-            judged = await self._judge_turn(round_no)
+            # The wearer spoke while the round was running (an addressed
+            # remark): that already is their move, so the next round starts
+            # on it. Otherwise the room stops here and waits for them.
+            if self._wearer_turns == moves_before:
+                self._set_phase("waiting")
+                await self._await_wearer()
             if self._cancelled:
                 await self._finish("cancelled")
                 return
-            agreement, blocking = parse_judgment(judged)
-            if agreement is not None and agreement >= self._agreement_threshold \
-                    and not blocking:
-                outcome = f"converged (agreement {agreement:.2f}, round {round_no})"
-                break
-            if agreement is None:
-                # FAIL CLOSED — docs/BRAINSTORM.md:44-45: "an illegible
-                # judgment fails closed and never green-lights convergence."
-                # This broke the loop instead, which is the OPPOSITE
-                # failure: an unreadable judge ended the session at that
-                # round, indistinguishable on the glass from a converged
-                # one. Not-converged means the room goes around again;
-                # max_rounds is what bounds the loop, not the judge's
-                # legibility.
-                if round_no == self._max_rounds:
-                    outcome = (
-                        f"no convergence after {round_no} round(s) "
-                        "(judge unreadable)"
-                    )
-                    break
-                outcome = f"judge unreadable at round {round_no} — continuing"
-                continue
-            if round_no == self._max_rounds:
-                outcome = f"no convergence after {round_no} round(s) (last {agreement:.2f})"
-                break
-        if (self._judge is not None and not self._cancelled
-                and len(self._transcript) >= 2):
-            self._set_phase("synthesis")
-            await self._synthesis_turn(outcome)
-        await self._finish(f"done — {outcome}")
 
     async def _offer_recovery(self, speaker: Participant) -> None:
         """Name the way out, at the moment the wearer needs it.
@@ -2256,108 +2296,9 @@ class DebateSession(Session):
         if callback is None:
             return
         try:
-            await callback(round_no, self._max_rounds, self._calls)
+            await callback(round_no, self._calls)
         except Exception:
             log.warning("progress not painted", exc_info=True)
-
-    async def _synthesis_turn(self, outcome: str) -> None:
-        """JOAT's visible verified synthesis — the product of the session.
-
-        BRAINSTORM.md: JOAT "produces the visible synthesis" and "never
-        turns a missing citation or provider failure into a verified
-        synthesis". So the prompt hands the local model the verifier's
-        per-turn verdicts and forbids asserting anything unverified —
-        an open disagreement is a finding to list, not something to
-        paper over. Runs even when the judge could not score: an
-        illegible meta-review blocks CONVERGENCE, not the summary the
-        wearer walks away with.
-        """
-        assert self._judge is not None
-        await self._sink.turn("JOAT (synthesis)")
-        verification = "; ".join(self._verify_summary) or "no citations offered"
-        collected: list[str] = []
-        async for chunk in self._judge.stream(
-            "Write the verified synthesis of this discussion. Under 120 "
-            "words, plain text. Exactly two sections with these headers:\n"
-            "AGREED: what the collaborators now agree on — assert ONLY "
-            "claims the verifier passed or that need no citation.\n"
-            "OPEN: unresolved disagreements and any claim that stayed "
-            "unverified — name who holds what.\n\n"
-            f"Topic: {self._topic}\n\n{self._transcript_text()}\n\n"
-            f"Judge outcome: {outcome}\n"
-            f"Citation verification: {verification}"
-        ):
-            if self._cancelled:
-                break
-            collected.append(chunk)
-            await self._sink.chunk(chunk)
-        text = "".join(collected).strip()
-        if text:
-            # The synthesis is a turn like any other: it lands in the
-            # transcript so the reopenable panel holds the product, not
-            # just the path to it.
-            self._transcript.append(("JOAT (synthesis)", text))
-            if not self._cancelled:
-                await self._verify_synthesis(text)
-
-    async def _verify_synthesis(self, text: str) -> None:
-        """Say what the "verified synthesis" actually rests on (the audit's B3).
-
-        The synthesis prompt forbids asserting unverified claims, but the
-        label promised verification the pipeline never performed on the
-        synthesis itself, and a session in which nobody cited anything
-        still ended under the same banner. One VERIFY line closes the gap:
-        the synthesis's own citations are checked when it offers any, and
-        otherwise the wearer is told plainly how many sources the whole
-        session had checked — which may be none.
-        """
-        citations = parse_citations(text)
-        if citations:
-            try:
-                await self._verify_visibly("JOAT (synthesis)", text)
-            except Exception:
-                log.exception("synthesis verification failed")
-                await self._sink.turn("VERIFY")
-                await self._sink.chunk("the synthesis's sources could not be checked\n")
-            return
-        checked = sum(
-            1 for entry in self._verify_summary
-            if "sources check out" in entry or "sources don't hold up" in entry
-        )
-        await self._sink.turn("VERIFY")
-        if checked:
-            await self._sink.chunk(
-                f"the synthesis cites nothing new; {checked} earlier turn(s) had their sources checked\n"
-            )
-        else:
-            await self._sink.chunk(
-                "no sources were cited in this session — this is the collaborators' "
-                "agreement, not verified fact\n"
-            )
-
-    async def _judge_turn(self, round_no: int) -> str:
-        assert self._judge is not None
-        # Name the seat that actually judges. It read "local" while the
-        # verdict came from a cloud CLI (the audit's A7).
-        judge_name = str(getattr(self._judge, "name", "") or "local")
-        await self._sink.turn(f"JUDGE ({judge_name}) — round {round_no}")
-        verification = "; ".join(self._verify_summary) or "no citations offered"
-        collected: list[str] = []
-        async for chunk in self._judge.stream(
-            "You are the judge of a short debate between "
-            f"{len(self._table)} collaborators. In under 60 words give a "
-            "verdict and what to do. Weigh verified claims above unverified "
-            "ones. End with exactly two lines:\n"
-            "AGREEMENT: <0.00-1.00, how much the participants now agree>\n"
-            "BLOCKING: <yes|no, do the objections block acting on this>\n\n"
-            f"Topic: {self._topic}\n\n{self._transcript_text()}\n\n"
-            f"Citation verification: {verification}"
-        ):
-            if self._cancelled:
-                break
-            collected.append(chunk)
-            await self._sink.chunk(chunk)
-        return "".join(collected)
 
     def _transcript_text(self) -> str:
         """What the collaborators are shown: the earlier conversation, then
@@ -2394,11 +2335,11 @@ class DebateSession(Session):
         return started
 
     async def _verified_turn(self, speaker: Participant, round_no: int) -> str:
-        """One speaker's turn plus its visible verification (and one repair).
+        """One speaker's turn plus its visible verification.
 
         The verifier is itself a turn on the transcript — the wearer watches
-        each citation get checked and fabrications get bounced. A turn is
-        never silently rewritten: every repair streams under its own header.
+        each citation get checked. A turn is never rewritten: what the seat
+        said is what stays in the room.
         """
         label = speaker.label if round_no == 1 else f"{speaker.label} — round {round_no}"
         # Round 1 is independent by construction: colleague turns are
@@ -2433,25 +2374,16 @@ class DebateSession(Session):
         text = await self._stream_turn(
             label, started if started is not None else speaker.stream(prompt),
         )
-        if self._gate is None or self._cancelled or is_failure(text):
-            return text
-        for attempt in range(self._max_repairs + 1):
-            verdict_ok, repair = await self._verify_visibly(label, text)
-            if verdict_ok or self._cancelled or attempt == self._max_repairs:
-                return text
-            self._calls += 1
-            text = await self._stream_turn(
-                f"{label} — repair {attempt + 1}",
-                speaker.stream(
-                    f"{prompt}\n\nYour previous answer:\n{text}\n\n"
-                    f"The citation verifier rejected it:\n{repair}\n"
-                    "Fix the citations (verbatim quotes at real URLs) or drop "
-                    "the unverifiable claims, then answer again."
-                ),
-            )
+        if self._gate is not None and not self._cancelled and not is_failure(text):
+            # The check SHOWS whether the sources hold up and never asks the
+            # seat again: a repair turn re-asked for a corrected answer and
+            # the corrected one replaced what the wearer had read in the
+            # room's next prompt, so a long answer came back as one short
+            # paragraph. The wearer reads what the seat said.
+            await self._verify_visibly(label, text)
         return text
 
-    async def _verify_visibly(self, label: str, text: str) -> tuple[bool, str]:
+    async def _verify_visibly(self, label: str, text: str) -> None:
         assert self._gate is not None
         citations = parse_citations(text)
         if not citations:
@@ -2461,7 +2393,7 @@ class DebateSession(Session):
             # spent a row per turn to report that nothing happened. The
             # summary still records it; the lens is for the discussion.
             self._verify_summary.append(f"{label}: no citations")
-            return True, ""
+            return
         # VERIFY, exactly — docs/SESSION_MODEL.md:33 and BRAINSTORM.md:68 both
         # name the five transcript prefixes as YOU / CODEX / CLAUDE / VERIFY /
         # JOAT, and this emitted a sixth. Every durable record, export and
@@ -2480,7 +2412,6 @@ class DebateSession(Session):
         outcome = "sources check out" if verdict.passed else "sources don't hold up"
         await self._sink.chunk(outcome + "\n")
         self._verify_summary.append(f"{label}: {outcome} ({len(citations)} citation(s))")
-        return verdict.passed, verdict.repair_request
 
     async def _stream_turn(self, label: str, stream: AsyncIterator[str]) -> str:
         await self._sink.turn(label)
@@ -2508,8 +2439,7 @@ class DebateSession(Session):
         SESSION_MODEL.md:34 keeps "verification state" on the record; every
         stored row had null because nothing ever passed it. None = nothing
         needed checking (most thinking sessions — NOT a failure); the
-        per-turn summary's LAST entry per speaker wins, because a repaired
-        turn is re-verified and the repair is the standing outcome.
+        session passes only if every checked turn did.
         """
         last: dict[str, bool] = {}
         for entry in self._verify_summary:
@@ -2566,8 +2496,7 @@ class DebateSession(Session):
     #: as a key is a privacy boundary, and a test that re-lists these from
     #: memory gets them wrong (mine did — it forgot meta_review).
     PHASES = (
-        "opening", "independent", "cross_review",
-        "meta_review", "synthesis", "closing",
+        "opening", "independent", "cross_review", "waiting", "closing",
     )
 
     def phase_timings(self) -> dict[str, float]:
@@ -2588,17 +2517,3 @@ def seat_participants(
         for name, role, agent in seats if agent
     ]
     return RoundTable(present)
-
-
-_AGREEMENT = re.compile(r"AGREEMENT:\s*([01](?:\.\d+)?)", re.IGNORECASE)
-_BLOCKING = re.compile(r"BLOCKING:\s*(yes|no)", re.IGNORECASE)
-
-
-def parse_judgment(text: str) -> tuple[float | None, bool]:
-    """(agreement or None if unscored, blocking). Malformed → (None, True):
-    an illegible judge never green-lights convergence."""
-    m = _AGREEMENT.search(text)
-    agreement = min(1.0, max(0.0, float(m.group(1)))) if m else None
-    b = _BLOCKING.search(text)
-    blocking = True if b is None else b.group(1).lower() == "yes"
-    return agreement, blocking

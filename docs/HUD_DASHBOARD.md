@@ -216,9 +216,9 @@ Line 1 and line 2 of `Card.render()` (`cards.py:105-114`) become two *containers
 |apps on Apple silicon.                        |
 +----------------------------------------------+  y=160 id5 CONTEXT bright3  <- verifier, OUT of the stream
 |VERIFIER [1] OK  [2] FAIL no quote match      |
-|DENIED - repair 1 of 1 requested              |
+|shown beside the answer, never a rewrite      |
 +----------------------------------------------+  y=224 id6 TRAY    bright2
-|propose>critique>judge              agree 0.78|
+|round 1 · 2 calls                             |
 +----------------------------------------------+  y=256 id7 HINT    bright1
 |say stop to cancel                            |
 +----------------------------------------------+  y=288

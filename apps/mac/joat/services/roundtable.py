@@ -54,6 +54,10 @@ plugin screen on the phone (Accounts), not a terminal on the Mac."""
 LIMIT_DETAIL = "usage limit — switch account on the phone"
 """The notice detail for a seat whose subscription is spent for now."""
 
+TIMED_OUT_DETAIL = "no answer within"
+"""How the notice for a seat that ran out of time begins (`no answer within
+600s`); the HUD row says it ran out of time."""
+
 
 def failure_notice(name: str, detail: str) -> str:
     return f"{FAILURE_MARK} {name} could not answer: {detail}".strip()
@@ -62,9 +66,11 @@ def failure_notice(name: str, detail: str) -> str:
 def failure_summary(text: str) -> str:
     """The few words a HUD row shows for a failed turn.
 
-    Only the two actionable causes are named; anything else stays the
-    generic "could not answer" — the raw detail is an exit code or a CLI
-    complaint, and quoting it reads like an argument the seat never made.
+    The causes the wearer can act on are named — signed out, spent, and out
+    of time (a question to ask again, or to ask more narrowly); anything
+    else stays the generic "could not answer" — the raw detail is an exit
+    code or a CLI complaint, and quoting it reads like an argument the seat
+    never made.
     """
     for line in text.splitlines():
         stripped = line.lstrip()
@@ -74,6 +80,8 @@ def failure_summary(text: str) -> str:
             return SIGNED_OUT_DETAIL
         if LIMIT_DETAIL in stripped:
             return LIMIT_DETAIL
+        if TIMED_OUT_DETAIL in stripped:
+            return "ran out of time"
     return "could not answer"
 
 
@@ -428,16 +436,24 @@ def build_prompt(topic: str, speaker: Participant, transcript: Sequence[tuple[st
         )
     else:
         lines.append(
-            f"You are {speaker.label}. Open the discussion with a concrete "
-            "position."
+            f"You are {speaker.label}. The question above is the person's "
+            "own. Answer it directly."
         )
-    # The production image HUD has no Brainstorm scrollback: it exposes a
-    # bounded live activity window and reserves swipe-down for cancellation.
-    # Keep every generated turn concise enough to remain useful at a glance;
-    # the terminal is the companion surface for a longer discussion.
+    # A Brainstorm is a thinking partner: the wearer asks, the seats break
+    # the question down, or work a plan they asked for, and the wearer reads
+    # all of it on the glasses. So there is NO length cap and no one-line
+    # summary to open with (the cap and a "GIST:" line made every answer a
+    # few shallow sentences, the wearer's "short and meaningless", and the
+    # glasses collapsed each finished turn to that one line). Plain text
+    # only: the lens draws no markdown.
     lines.append(
-        "Open with one line, exactly 'GIST: <your position in a dozen "
-        "words>', then give one concise response. Under 120 words in total, "
-        "plain text, no markdown."
+        "This is a thinking session with a person, who is reading your "
+        "answer on smart glasses and will reply by voice. Answer what they "
+        "asked in full and in detail: break the question down, explain the "
+        "reasoning step by step, and give concrete examples. If they asked "
+        "for a plan, work the plan: numbered steps, what each needs, what "
+        "could go wrong. A [YOU] turn above is the person's own message: "
+        "answer the latest one before anything else. Be as long as the "
+        "answer needs and no longer. Plain text only, no markdown symbols."
     )
     return "\n".join(lines) + contract

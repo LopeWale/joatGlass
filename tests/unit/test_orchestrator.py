@@ -422,7 +422,7 @@ async def held_brainstorm():
         Participant(name=name, role=role, stream=collaborator)
         for name, role in (("codex", "proposer"), ("claude", "critic"))
     ])
-    session = DebateSession("Desk organization", seats, HudSink(hud), None, max_rounds=1)
+    session = DebateSession("Desk organization", seats, HudSink(hud))
     manager = SessionManager(
         hud, lambda _topic: session,
         brainstorm_view_current=lambda: selected[0] == "Brainstorm",

@@ -119,6 +119,28 @@ def _diagnostic_text(stderr: list[str], stdout_errors: list[str], plain_stdout: 
     return "\n".join(part for part in parts if part)[-4000:]
 
 
+def _opens_text_block(line: str) -> bool:
+    """True for the stream line that begins a new block of answer text.
+
+    A `claude -p` turn that uses a tool writes its text in several blocks
+    (a sentence of intent, the tool call, then the answer), and the deltas
+    of those blocks are separate strings with nothing between them — read
+    in full they run together ("...approach first.Here is how to decide").
+    The caller puts a paragraph break where a later block begins.
+    """
+    if '"content_block_start"' not in line or '"text"' not in line:
+        return False
+    try:
+        event = json.loads(line)
+    except (ValueError, UnicodeError):
+        return False
+    inner = event.get("event") if isinstance(event, dict) else None
+    if not isinstance(inner, dict) or inner.get("type") != "content_block_start":
+        return False
+    block = inner.get("content_block")
+    return isinstance(block, dict) and block.get("type") == "text"
+
+
 def _stream_json_event(line: str) -> tuple[str, str | None, bool]:
     """One `--output-format stream-json` line, read for what it carries.
 
@@ -266,6 +288,7 @@ class SubprocessAgent:
         pending = ""
         timed_out = False
         streamed = False
+        text_started = False
         final_answer = ""
         result_failed = False
         try:
@@ -308,8 +331,11 @@ class SubprocessAgent:
                         elif self._capture and line.strip() and not _is_json_line(line):
                             stdout_errors.append(line[-1_000:])
                             del stdout_errors[:-8]
+                        if text_started and _opens_text_block(line):
+                            batch.append("\n\n")
                         if text:
                             batch.append(text)
+                            text_started = True
                     if batch:
                         streamed = True
                         yield "".join(batch)
@@ -419,6 +445,14 @@ class SubprocessAgent:
         return bool(self._noise and self._noise.match(line.strip()))
 
 
+SEAT_TURN_TIMEOUT_S = 600.0
+"""How long a Brainstorm seat may take to answer. A seat is asked for a full,
+detailed answer, and a thorough one (a plan, with its facts checked and a
+second opinion taken) was measured past the 240s default and then thrown
+away as "could not answer". Ten minutes is a ceiling for a seat that has
+stalled, not a pace: the wearer watches the words arrive."""
+
+
 def proposer(
     model: Callable[[], str | None] | None = None,
     env_provider: EnvProvider | None = None,
@@ -444,6 +478,7 @@ def proposer(
         # Captured so a failed turn can say "signed out" or "usage limit"
         # instead of an exit code (agents/cli_failures.py).
         capture=True,
+        timeout_s=SEAT_TURN_TIMEOUT_S,
         env_provider=env_provider,
     )
 
@@ -477,4 +512,5 @@ def critic(
                            noise=_CLAUDE_NOISE, name="claude",
                            model=model, model_flag="--model",
                            stream_json=True, capture=True,
+                           timeout_s=SEAT_TURN_TIMEOUT_S,
                            env_provider=env_provider)

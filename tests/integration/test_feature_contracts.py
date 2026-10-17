@@ -290,6 +290,7 @@ async def test_mcp_brainstorm_topic_reaches_both_collaborators_and_live_hud(tmp_
     prompts: dict[str, list[str]] = {"codex": [], "claude": []}
     release = asyncio.Event()
     settled = asyncio.Event()
+    rooms: list[DebateSession] = []
 
     def collaborator(name: str, answer: str):
         async def stream(prompt: str) -> AsyncIterator[str]:
@@ -300,14 +301,16 @@ async def test_mcp_brainstorm_topic_reaches_both_collaborators_and_live_hud(tmp_
 
     def factory(topic: str) -> DebateSession:
         topics.append(topic)
-        return DebateSession(topic, RoundTable([
-            Participant("codex", "collaborator", collaborator("codex", "GIST: Sort by use.\nKeep daily tools close.")),
-            Participant("claude", "collaborator", collaborator("claude", "GIST: Leave a clear zone.\nKeep one work surface free.")),
-        ]), HudSink(hud), None, max_rounds=1)
+        room = DebateSession(topic, RoundTable([
+            Participant("codex", "collaborator", collaborator("codex", "Sort by use.\nKeep daily tools close.")),
+            Participant("claude", "collaborator", collaborator("claude", "Leave a clear zone.\nKeep one work surface free.")),
+        ]), HudSink(hud))
+        rooms.append(room)
+        return room
 
     sessions = SessionManager(
         hud, factory, brainstorm_available=lambda: True,
-        on_state=lambda state: settled.set() if state == "settled" else None,
+        on_state=lambda state: settled.set() if state == "cancelled" else None,
     )
     belt = ToolBelt()
     endpoint = AgentEndpoint(UnusedEngine(), "fixture-token", port=0, tools=belt)
@@ -343,8 +346,17 @@ async def test_mcp_brainstorm_topic_reaches_both_collaborators_and_live_hud(tmp_
             })
             assert busy["isError"] is True and topics == [topic]
             release.set()
-            await asyncio.wait_for(settled.wait(), timeout=1)
+            # Both collaborators answer, then the room WAITS for the wearer:
+            # it neither carries on by itself nor ends.
+            async def until_waiting() -> None:
+                while not (rooms and rooms[0].awaiting_wearer):
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(until_waiting(), timeout=1)
+            assert sessions.active
             assert all(len(value) == 1 and topic in value[0] for value in prompts.values())
+            assert sessions.handle_transcript("stop", addressed=None) is True
+            await asyncio.wait_for(settled.wait(), timeout=1)
             frames = [message for message in output.sent if isinstance(message, BrainstormHudView)]
             entries = [message for message in output.sent if isinstance(message, HudRebuild)]
             assert len(entries) == 1 and entries[0].reason == "brainstorm"
@@ -355,7 +367,7 @@ async def test_mcp_brainstorm_topic_reaches_both_collaborators_and_live_hud(tmp_
             assert frames[0].collaborators == ["codex", "claude"]
             assert any("Sort by use" in frame.activity for frame in frames)
             assert any("Leave a clear zone" in frame.activity for frame in frames)
-            assert frames[-1].state == "settled" and not sessions.active
+            assert frames[-1].state == "cancelled" and not sessions.active
             assert (await rpc(endpoint.port, "tools/call", call))["isError"] is False
             assert topics == [topic], "a late retry cannot launch the collaborators again"
         finally:

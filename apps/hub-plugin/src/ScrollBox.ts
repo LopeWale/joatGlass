@@ -111,13 +111,24 @@ export class ScrollBox {
    * last screen when the wearer had reached this document's end, else the
    * same stretch. The same document reopens where it was. Undefined when
    * `lines` is another document.
+   *
+   * `opensOnNew` is for a document that only ever grows at its end and is
+   * reopened to read what was added (a Brainstorm room, after the wearer's
+   * next move): it opens on the first new line, wherever the wearer had
+   * stopped reading.
    */
-  resume(lines: readonly string[]): number | undefined {
+  resume(lines: readonly string[], opensOnNew = false): number | undefined {
     if (lines.length < this.lines.length) return undefined;
     for (let index = 0; index < this.lines.length; index += 1) {
       if (lines[index] !== this.lines[index]) return undefined;
     }
-    return lines.length > this.lines.length && this.atEnd ? this.continuation() : this.start;
+    if (lines.length === this.lines.length) return this.start;
+    if (opensOnNew) {
+      let first = this.lines.length;
+      while (first < lines.length - 1 && lines[first] === '') first += 1;
+      return first;
+    }
+    return this.atEnd ? this.continuation() : this.start;
   }
 
   /** The stretch a screen above. False at the document's start. */

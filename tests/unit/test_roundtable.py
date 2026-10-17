@@ -90,7 +90,7 @@ class TestPromptConstruction:
         t = table("codex")
         prompt = build_prompt("tabs or spaces", t.peek(), [])
         assert "tabs or spaces" in prompt
-        assert "Open the discussion" in prompt
+        assert "Answer it directly" in prompt
 
     def test_later_speakers_see_every_prior_turn_in_order(self) -> None:
         # This IS the sequencing guarantee: turn N+1 cannot be built before
@@ -121,21 +121,35 @@ class TestFailureNotices:
         assert not is_failure("")
 
 
-class TestLensFirstAnswerContract:
-    def test_prompts_keep_the_live_glasses_stream_concise(self) -> None:
-        """Brainstorm's production image surface has no scrollback, so its
-        prompt cannot claim that the wearer can read arbitrarily deep output
-        by swiping. The terminal remains the long-form companion surface."""
-        from joat.services.roundtable import Participant, RoundTable, build_prompt
+class TestAnswersAreAskedForInFull:
+    """The reported failure was a prompt that capped every seat at 120 words
+    and asked for a one-line GIST, so replies were cut and meaningless."""
+
+    def _prompt(self, transcript=()):
+        from joat.services.roundtable import Participant, build_prompt
 
         async def noop(prompt: str):  # pragma: no cover - never driven
             yield ""
 
         seat = Participant(name="codex", role="proposer", stream=noop)
-        prompt = build_prompt("heat pumps", seat, [])
-        assert "GIST:" in prompt
-        assert "Under 120 words" in prompt
-        assert "as much depth" not in prompt
+        return build_prompt("heat pumps", seat, list(transcript))
+
+    def test_no_length_cap_and_no_gist(self) -> None:
+        prompt = self._prompt()
+        assert "GIST" not in prompt
+        assert "120" not in prompt
+        assert "words" not in prompt.replace("word-for-word", "")
+        assert "in full and in detail" in prompt
+
+    def test_a_plan_is_worked_not_summarised(self) -> None:
+        prompt = self._prompt()
+        assert "work the plan" in prompt
+        assert "numbered steps" in prompt
+
+    def test_the_latest_wearer_turn_is_answered_first(self) -> None:
+        prompt = self._prompt([("YOU", "give me the plan")])
+        assert "give me the plan" in prompt
+        assert "answer the latest one before anything else" in prompt
 
 
 class TestRoundInvariant:

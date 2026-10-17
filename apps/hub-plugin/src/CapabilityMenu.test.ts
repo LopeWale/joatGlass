@@ -198,6 +198,31 @@ describe('Brainstorm surface ownership', () => {
     expect(await menu.presentList('MESSAGES', ['Old conversation'], 'old-request', true)).toBe(false);
     expect(menu.mayPresentBrainstorm(visit)).toBe(true);
   });
+
+  it('the Brainstorm conversation reader takes the page from the room, so its gestures are the reader\'s and not "show terminal" / "cancel"', async () => {
+    // The room waits on the wearer after every round and puts the whole
+    // conversation up to read. While the reader was up the room's controller
+    // still owned the page: a tap was sent as `show_terminal` and Back as
+    // `cancel` (simulator, 2026-10-15).
+    const { menu, sent } = rig();
+    menu.claimBrainstormVisit(menu.captureBrainstormVisit());
+    const controller = new BrainstormController({ sendBrainstorm: () => true });
+    controller.present({ screen: 'brainstorm', state: 'running', topic: '', collaborators: [], activity: '' });
+    menu.onSurfaceDeparture = () => controller.clear();
+    expect(controller.isActive()).toBe(true);
+
+    expect(await menu.presentList(
+      'BRAINSTORM · ROOM', ['CODEX > Heat pumps win.', '', 'CLAUDE > Only near a pipeline.'], 'voice-room-1', true,
+      'speak: your move · 2x tap: back',
+    )).toBe(true);
+    expect(controller.isActive()).toBe(false);
+
+    sent.length = 0;
+    expect(menu.handleClick()).toBe(true);
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'capdata', selectedName: 'BRAINSTORM', selectedIndex: 0, requestId: 'voice-room-1',
+    });
+  });
 });
 
 /** The Mac's thread (2026-10-06): one reader it pages itself, a counter row

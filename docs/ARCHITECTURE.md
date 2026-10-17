@@ -15,8 +15,8 @@
 | Audio pipeline | `joat/audio` | Ingests 16 kHz mono PCM, VAD/wake word, STT. **Relay path: the Hub SDK delivers PCM already decoded** — LC3 decode (`liblc3`, `0xF1`/NUS, mic enable `[0x0E, 0x01]`) applies only to the direct-BLE path |
 | HUD renderer | `joat/display` | 576×288 canvas, text containers, cards, differential page updates |
 | Reasoning | `joat/services`, `joat/agents` | Orchestrator: route utterances to the mind — `SeatSwitch` over `ClaudeCliReplyEngine` / `CodexCliReplyEngine` (the official CLIs on the wearer's subscriptions, spawned through the same `SubprocessAgent` as the Brainstorm seats, the belt offered over MCP) with the resident MLX engine as the offline seat — or Brainstorm (planning path; `debate` remains a compatibility trigger). `AgentEndpoint` serves the same mind to Even AI's Agent Configure and the belt to the CLIs at `/mcp` |
-| Brainstorm agents | `joat/agents` | Subscription-authenticated `SubprocessAgent` adapters for `codex exec -s read-only` and `claude -p`, plus the Verifier Gate and JOAT synthesis; Hermes/OpenClaw are a separate future Agent Terminal boundary |
-| Verifier Gate | `joat/verifier` | Citation fetch → Wayback → fuzzy quote match → NLI claim support → verdict + repair request |
+| Brainstorm agents | `joat/agents` | Subscription-authenticated `SubprocessAgent` adapters for `codex exec -s read-only` and `claude -p`, plus the Verifier Gate (its result is shown beside each answer); Hermes/OpenClaw are a separate future Agent Terminal boundary |
+| Verifier Gate | `joat/verifier` | Citation fetch → Wayback → fuzzy quote match → NLI claim support → verdict |
 | Channels | `joat/channels` | iMessage/Mail/Calendar, macOS Notification Center triage → HUD cards |
 | Computer use | `joat/computeruse` | cua driver in Lume sandbox (Mac), iPhone Mirroring + OCR + Karabiner (iOS) |
 
@@ -124,19 +124,19 @@ unlocked; background continuation is not promised.
 
 ## 5. Durable Brainstorm conversation with Verifier Gate
 
-Brainstorm is a wearer-initiated, steerable, potentially multi-round analysis
-session around a topic, task, claim, problem, or evolving discussion. `debate`
+Brainstorm is a wearer-led thinking partner: the wearer asks, each
+collaborator answers in full, and the room waits for the wearer's next move
+after every round. `debate`
 remains a legacy voice alias, not the product or storage model. A durable local
 Brainstorm record owns its session ID, title, branch lineage, ordered turns,
-verification state, JOAT synthesis, and `active` / `settled` / `cancelled`
-status. Opening Brainstorm restores the active conversation or presents recent
+source-check results, and `active` / `settled` / `cancelled` status. Opening Brainstorm restores the active conversation or presents recent
 sessions plus `NEW`; it does not manufacture a new room every time.
 
 JOAT is the glasses brain and session authority. The glasses speak to JOAT,
 not directly to either CLI. JOAT interprets explicit session controls, owns
 context and turn order, invokes the chosen collaborator, streams the result to
-the wearer, applies verification/repair, records the synthesis, and restores
-the semantic HUD after reconnect. Codex and Claude are bounded collaborators
+the wearer, checks the sources each answer cites and shows the result, records
+the conversation, and restores the semantic HUD after reconnect. Codex and Claude are bounded collaborators
 inside that JOAT-owned loop.
 
 Only the user's existing CLI subscriptions participate. Neither provider owns
@@ -149,7 +149,8 @@ G2 voice -> JOAT session/controller -> next collaborator selected from:
        - codex exec -s read-only  (subscription auth; cli_env.STRIP_ENV dropped)
        - claude -p                (subscription auth; cli_env.STRIP_ENV dropped)
      -> wearer-directed or continued collaborator turns
-     -> JOAT VERIFY / bounded repair -> JOAT synthesis -> G2 HUD
+     -> JOAT VERIFY rows (shown, never a rewrite) -> G2 HUD
+     -> the room waits for the wearer's next move
 ```
 
 Four properties are structural rather than policy, so a refactor cannot
@@ -168,7 +169,7 @@ quietly drop them:
   credits"), so only the exit code separates an answer from an error. A
   turn carrying a `[!]` failure notice streams to the wearer and is then
   excluded from the transcript — otherwise the next speaker rebuts a
-  billing notice and the judge scores it.
+  billing notice.
 - **Context changes are explicit.** Ordinary speech is the next user move in
   the selected conversation. `new Brainstorm`, `branch this`, and `continue
   <title>` are explicit lineage operations. A clearly unrelated replacement
@@ -197,7 +198,7 @@ the plugin wants one.
 Brainstorm streams to every `TranscriptSink` at once (`services/sinks.py`):
 the dense glasses transcript and the local console. The durable Brainstorm
 store is the restart-safe source of truth for recent sessions, continuation,
-branching, verification, and synthesis. G2 acceptance evidence contains only
+branching, and the source check. G2 acceptance evidence contains only
 synthetic content, bounded state transitions, gesture metadata, and frame
 hashes; it never includes Brainstorm transcript text.
 

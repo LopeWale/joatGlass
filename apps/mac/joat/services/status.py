@@ -50,9 +50,11 @@ _BRAINSTORM_STATES = frozenset({
 })
 _BRAINSTORM_PHASES = frozenset({
     "idle", "opening", "closing",
-    # The starter design, per phase: blind first round, cross-review
-    # rounds, the judge's meta-review, JOAT's verified synthesis.
-    "independent", "cross_review", "meta_review", "synthesis",
+    # Per phase: the blind first round, the cross-review rounds, and the
+    # room waiting for the wearer's move between rounds. (meta_review and
+    # synthesis belonged to the judge JOAT no longer runs; they stay valid
+    # so an older record still reads.)
+    "independent", "cross_review", "waiting", "meta_review", "synthesis",
     "turn",  # legacy single-phase label; kept so old callers stay valid
 })
 _PERSONAL_DATA_STATES = frozenset({

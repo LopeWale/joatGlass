@@ -310,7 +310,9 @@ class _NoteReaderState:
     text: str = ""
 
 
-_SCROLLING_READER_TITLES = frozenset({"QUICKNOTES · NOTE", "QUICKNOTES · DETAIL"})
+_SCROLLING_READER_TITLES = frozenset({
+    "QUICKNOTES · NOTE", "QUICKNOTES · DETAIL", "BRAINSTORM · ROOM",
+})
 """Readers sent whole and read in the glasses' own scroll box (the Hub's
 ScrollBox): the glasses scroll them a line a swipe, so the Mac pages
 nothing (the wearer's ruling, 2026-10-15)."""
@@ -1192,6 +1194,39 @@ class CapabilityRouter:
             self._request_context.reset(token)
             if reader is not None and self._note_reader is reader:
                 self._note_reader = None
+
+    #: What the Brainstorm reader promises: the room is waiting on the wearer.
+    BRAINSTORM_ROOM_HINT = "speak: your move"
+
+    async def show_brainstorm_room(self, text: str) -> bool:
+        """Put the whole Brainstorm conversation up to read.
+
+        The room has finished a round and is waiting on the wearer, so this
+        is a reader, not a status frame: every turn so far, whole, scrolled
+        by the glasses like a News article. The room's next frame takes the
+        page back. True when it was put up.
+        """
+        if not self.brainstorm_view_current:
+            return False
+        request_id = (self._active_request_id if self._active_capability == "BRAINSTORM"
+                      and self._active_request_id else voice_request_id())
+        self._active_capability = "BRAINSTORM"
+        self._active_request_id = request_id
+        token = self._request_context.set(request_id)
+        try:
+            await self._open_note_reader(
+                "BRAINSTORM · ROOM", "", text, "brainstorm-room",
+                capability="BRAINSTORM", tap_hint=self.BRAINSTORM_ROOM_HINT,
+            )
+        finally:
+            self._request_context.reset(token)
+        return True
+
+    def hide_brainstorm_room(self) -> None:
+        """The room has moved on: the reader is no longer the page."""
+        reader = self._note_reader
+        if reader is not None and reader.title == "BRAINSTORM · ROOM":
+            self._note_reader = None
 
     async def open_terminal_from_brainstorm(self) -> bool:
         """Use the same picker and lane preparation as an ordinary Terminal open."""

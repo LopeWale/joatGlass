@@ -522,7 +522,7 @@ async def main() -> None:
     log.info("switchable models — %s", models.summary())
 
     replier: ReplyEngine | None = None
-    # JOAT's chores (judge, synthesis, rewording) and the Even AI door each
+    # JOAT's chores (rewording a collaborator's answer) and the Even AI door each
     # answer from their own seats; None means the mind is off entirely.
     worker: ReplyEngine | None = None
     door_replier: ReplyEngine | None = None
@@ -633,12 +633,11 @@ async def main() -> None:
             on_pick=lambda name: status.set(llm="ready", seat=name),
         )
         replier = seat_switch
-        # JOAT's own chores — judging a Brainstorm round, the synthesis,
-        # rewording a collaborator's answer — get their OWN seats and CLI
-        # sessions (the audit's A7): a verdict prompt was landing in the
-        # wearer's conversation history, and a chore was waiting on the
-        # same lock as their next spoken question. No tools, no facts
-        # block; everything a chore needs is in its prompt.
+        # JOAT's own chores — rewording a collaborator's answer — get their
+        # OWN seats and CLI sessions (the audit's A7): a chore prompt was
+        # landing in the wearer's conversation history, and a chore was
+        # waiting on the same lock as their next spoken question. No tools,
+        # no facts block; everything a chore needs is in its prompt.
         worker_seats: dict[str, ReplyEngine] = {}
         if mlx_replier is not None:
             worker_seats["local"] = LocalTaskEngine(mlx_replier, WORKER_PERSONA)
@@ -1058,9 +1057,10 @@ async def main() -> None:
                     hud,
                     open_terminal=lambda: capabilities.open_terminal_from_brainstorm(),
                     brainstorm_view_current=lambda: capabilities.brainstorm_view_current,
+                    show_room=capabilities.show_brainstorm_room,
+                    hide_room=capabilities.hide_brainstorm_room,
                 ),
                            TerminalSink(), debate_state]),
-                worker,
                 gate=gate,
                 on_phase=publish_brainstorm_phase,
                 prior=prior,
@@ -1083,8 +1083,9 @@ async def main() -> None:
                 hud,
                 open_terminal=lambda: capabilities.open_terminal_from_brainstorm(),
                 brainstorm_view_current=lambda: capabilities.brainstorm_view_current,
+                show_room=capabilities.show_brainstorm_room,
+                hide_room=capabilities.hide_brainstorm_room,
             ), TerminalSink(), debate_state]),
-            worker,
             gate=gate,
             on_phase=publish_brainstorm_phase,
         )

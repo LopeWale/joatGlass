@@ -1103,6 +1103,18 @@ discussion.
 """
 
 
+BRAINSTORM_TRANSCRIPT_MAX = 65_536
+"""How much of a Brainstorm's conversation rides one frame, in characters.
+
+Not the screen: the room page shows seven rows and the wearer scrolls
+through the rest, so this is how much conversation the frame can hold. It
+was BRAINSTORM_ACTIVITY_MAX (about 4,200 characters, forty one-line rows),
+which was enough for two collapsed turns and cut one full answer; a
+Brainstorm turn is now whole, and a few rounds of two full answers is tens
+of thousands of characters. The oldest rows drop first (HudSink); the
+whole conversation is kept on the Mac and in the saved record either way."""
+
+
 @dataclass(frozen=True, slots=True)
 class BrainstormHudView:
     """Bounded, non-secret state for the Brainstorm conversation.
@@ -1145,7 +1157,7 @@ class BrainstormHudView:
                     self.active_speaker, "active speaker", 64, allow_empty=True,
                 ),
                 "activity": _brainstorm_text(
-                    self.activity, "activity", BRAINSTORM_ACTIVITY_MAX,
+                    self.activity, "activity", BRAINSTORM_TRANSCRIPT_MAX,
                     allow_empty=True,
                 ),
             },

@@ -97,6 +97,8 @@ def test_failure_summary_names_only_actionable_causes() -> None:
     assert failure_summary(failure_notice("claude", SIGNED_OUT_DETAIL)) == SIGNED_OUT_DETAIL
     assert failure_summary(failure_notice("codex", LIMIT_DETAIL)) == LIMIT_DETAIL
     assert failure_summary(failure_notice("codex", "exited 1 — see the log")) == "could not answer"
+    # A seat that ran out of time says so: the wearer can ask again.
+    assert failure_summary(failure_notice("claude", "no answer within 600s")) == "ran out of time"
 
 
 # ── registry ─────────────────────────────────────────────────────────────────

@@ -19,7 +19,7 @@ const TEXT_PAGE_TITLES = new Set([
   'NOTIFICATIONS · DETAIL', 'NAVIGATION', 'NEWS · ARTICLE', 'SEARCH · RESULT',
   'MESSAGES · REVIEW', 'MESSAGES · COMPOSE', 'MESSAGES · SETUP', 'MESSAGES · ACCESS',
   'MESSAGES · RETRY', 'MESSAGES · SENT', 'MESSAGES · FAILED', 'MESSAGES · CANCELLED',
-  'MESSAGES · UNCERTAIN', 'BRAINSTORM · SAVED', 'ACTIVITY · EMPTY',
+  'MESSAGES · UNCERTAIN', 'BRAINSTORM · SAVED', 'BRAINSTORM · ROOM', 'ACTIVITY · EMPTY',
   'PLANNING · REFRESH', 'PLANNING · REMINDER', 'AGENT TERMINAL · CHECK',
 ]);
 
@@ -753,7 +753,12 @@ export class CapabilityMenu {
       }
       return true;
     }
-    if (this.pendingTitle !== 'BRAINSTORM') this.retireBrainstormSurface();
+    // The conversation reader is a page the room waits on the wearer to
+    // answer: its Back and gestures belong to that reader, not to the room
+    // page it replaced (whose tap is "show terminal" and whose Back is
+    // "cancel"). The room's own next frame takes the page back
+    // (hud.rebuild 'brainstorm'). Simulator 2026-10-15.
+    if (this.pendingTitle !== 'BRAINSTORM' || normalized === 'BRAINSTORM · ROOM') this.retireBrainstormSurface();
     const messagesState = this.pendingTitle === 'MESSAGES'
       ? resolveMessagesViewState(title, selectable)
       : undefined;

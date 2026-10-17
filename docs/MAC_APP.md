@@ -242,8 +242,9 @@ include:
 - `CriticAgent`: `claude -p --output-format json --allowedTools "WebSearch,WebFetch" --max-turns N`. Constructor takes an `AuthStrategy` (subscription binary | metered API key + `--max-budget-usd`) so the ToS fallback is a config change.
 - `JudgeAgent`: the worker seat (`WORKER_PERSONA` on its own CLI session, or
   the resident MLX model through its task-only completion path); emits an
-  agreement score + blocking issues. The judge line on the glasses names
-  the seat that actually answered.
+  agreement score + blocking issues. The Brainstorm room no longer uses it:
+  the wearer leads, so nothing scores agreement, converges or summarises for
+  them (docs/BRAINSTORM.md).
 - `OpenClawTerminalAgent`: paired private-WSS adapter. It is an **Agent
   Terminal** worker only. Per [BRAINSTORM.md](BRAINSTORM.md) and
   [ARCHITECTURE.md §5](ARCHITECTURE.md), Hermes and OpenClaw neither
@@ -262,7 +263,7 @@ include:
 
 ## Config (`config/`)
 
-- `joat.toml`: mode (desk/mobile/auto), STT engine, MLX model ids, Brainstorm caps (internally still named `debate`: max rounds, retries, judge threshold 0.85), budget caps.
+- `joat.toml`: mode (desk/mobile/auto), STT engine, MLX model ids, Debate-loop caps (internally still named `debate`: max rounds, retries, judge threshold 0.85 — not read by the Brainstorm room), budget caps.
 - `plan.schema.json` / `critique.schema.json`: the debate JSON schemas.
 - `domains.allowlist`: verifier domain reputation seeds; Hub `app.json` WS domains.
 - Pinned CLI versions (Codex v0.148.0 at time of writing) — re-verify flags on upgrade.

@@ -6,19 +6,25 @@ Terminal wrapper.
 
 ## Product definition
 
-> A wearer-initiated, steerable, potentially multi-round analysis session
-> around a topic, task, claim, problem, or evolving discussion. Collaborators
-> challenge and expand each other's work, repair unsupported claims, and
-> converge on a verified synthesis while the process remains visible on the
-> glasses.
+> A wearer-led thinking partner on the glasses. The wearer asks, and each
+> collaborator answers in full: a question broken down in detail, or a plan
+> worked step by step. After every round the room stops and waits; the
+> wearer reads, and speaks the next move when ready. Sources are checked and
+> shown beside each answer, never used to rewrite it.
+
+The wearer leads. Nothing in a Brainstorm carries on, agrees, scores or
+summarises on the wearer's behalf: a round is every seat going once, and the
+next one starts when the wearer says so.
 
 ## Collaborators and authority
 
 JOAT is the glasses brain and the only wearer-facing controller. It receives
 voice from the G2, owns session memory and lineage, interprets start/continue/
 branch/stop controls, chooses the next collaborator according to the wearer's
-direction and the recorded turn policy, streams work to the HUD, verifies or
-repairs claims, and produces the visible synthesis. Codex and Claude operate
+direction and the recorded turn policy, streams work to the HUD, and checks the
+sources each answer cites. It does not judge the collaborators, vote, or
+write a summary of its own: the wearer reads what each of them said and
+decides what happens next. Codex and Claude operate
 inside this JOAT-owned conversation; neither is the interface or session owner.
 
 - `codex exec -s read-only` uses the user's Codex subscription and cannot write
@@ -37,38 +43,65 @@ inside this JOAT-owned conversation; neither is the interface or session owner.
 
 A round is one turn from every seated collaborator — an invariant, not a
 default: a mid-round voice redirect reorders the seats still owing a turn and
-can never make one speak twice. The starter design runs:
+can never make one speak twice. The room runs ONE round per wearer move, then
+stops:
 
 1. **Independent** — round 1 withholds the transcript, so each seat answers
    blind. Two uncontaminated views are worth more than one view and an echo.
-2. **Cross-review** — round 2 onward, every seat sees everything said.
-3. **Meta-review** — after each round the local judge scores agreement and
-   blocking objections; the session converges above threshold, otherwise the
-   room goes around again up to the configured maximum. An illegible judgment
-   fails closed and never green-lights convergence.
-4. **Synthesis** — JOAT streams the verified result: `AGREED` asserts only
-   claims the verifier passed or that need no citation, `OPEN` names the
-   unresolved disagreements and who holds them. It runs even when the judge
-   could not score, and never runs on fewer than two positions.
+2. **Cross-review** — a later round: every seat sees everything said,
+   including the wearer's move, and answers the latest move before anything
+   else.
+3. **Waiting** — the room stops and the glasses put the whole conversation
+   up to read (see "The room" below). Nothing carries it on: no judge scores
+   agreement, no round limit runs out, no synthesis closes the discussion, and
+   no idle timer starts another round. The wearer's spoken words are the next
+   move — a new question, "now give me a step by step plan", a stage
+   direction ("tear that apart") or a nomination ("ask Codex if that's
+   true"). They need no wake word, because the room asked for them; only the
+   noise words a transcriber writes for silence ("you", "thanks", "um") are
+   not a move. The way out is the cancel words, or Back.
 
-Unverified claims return to the SAME collaborator for repair, streamed under
-its own header so a turn is never silently rewritten. Two structures with
-opposite jobs make that work, and confusing them invents a defect: the
-DURABLE RECORD (built from the sink stream) keeps the original, the VERIFY
-turn and the `— repair N` header, because that is the story the wearer
-opens later; the PROMPT CONTEXT (`DebateSession.transcript()`) carries only
-each speaker's final text, because re-feeding the room a claim the verifier
-just rejected would be a defect of its own. A collaborator that
-fails is shown and then excluded from the transcript — a provider error is
-never quoted as a position.
+The room also ends by itself when fewer than two collaborators gave a
+position ("insufficient collaborators"): a conversation needs two sides.
+
+Each seat is asked for its answer in full and in detail. A question is
+broken down — what it depends on, the options, the trade-offs, an example; a
+request for a plan is worked as numbered steps with their order, what each
+needs and where it can go wrong. There is no length cap on a turn, and
+nothing on the glasses collapses a finished turn to a gist.
+
+A seat has ten minutes to answer (`SEAT_TURN_TIMEOUT_S`). The ceiling is for
+a seat that has stalled, not a pace: the wearer watches the words arrive. A
+seat that runs out of time shows "ran out of time"; one that is signed out or
+over its usage limit is named as such, with where to fix it.
 
 A nomination may carry the question it is asking — "ask Codex if that's
 true" hands over the floor AND records the question, so the seat is
 prompted with it rather than answering something nobody asked.
 
-While a session runs, only the cancel words are heard without the wake word.
-Steering requires the wearer to address JOAT, so an overheard sentence can
-neither reorder the round table nor reach a collaborator.
+While a round runs, only the cancel words are heard without the wake word.
+Steering then requires the wearer to address JOAT, so an overheard sentence
+can neither reorder the round table nor reach a collaborator; an addressed
+remark made mid-round counts as the wearer's move, and the next round starts
+on it. While the room waits, the wearer's unaddressed speech is the move —
+but only while Brainstorm is the view in front. With another feature in
+front, speech goes to JOAT as usual.
+
+### Source check
+
+As each answer finishes, JOAT looks up the sources it cited. The result is
+shown beside the answer as `VERIFY` rows: each source OK or FAIL, with how
+much of the quote was found. It is a display, not a gate: a failed source is
+never sent back to the seat, and nothing is rewritten, shortened or withheld.
+The wearer sees the answer and the check, and decides how far to trust it.
+
+Two structures with opposite jobs hold a session, and confusing them invents a
+defect: the DURABLE RECORD (built from the sink stream) keeps every turn,
+including a failed one, because that is the story the wearer opens later; the
+PROMPT CONTEXT (`DebateSession.transcript()`) carries only each speaker's
+final text, because re-feeding the room a seat's provider error would be a
+defect of its own. A collaborator that fails is shown and then excluded from
+the transcript — a provider error is never quoted as a position.
 
 ## Conversation behavior
 
@@ -80,8 +113,21 @@ than a silent reset.
 
 Every actual turn is visible with a `YOU`, `CODEX`, `CLAUDE`, `VERIFY`, or
 `JOAT` prefix. The order is the order that occurred, not a fixed provider
-sequence. Unsupported claims remain visibly uncertain until repaired; JOAT
-never turns a missing citation or provider failure into a verified synthesis.
+sequence. A source that fails the check stays visibly marked FAIL; JOAT never
+presents a missing citation or a provider failure as verified.
+
+## The room
+
+When a round ends the glasses open `BRAINSTORM · ROOM`: the whole
+conversation, every turn in the order it happened, nothing collapsed or cut.
+It is the glasses' own scroll text box — the same one a News article uses, a
+line a swipe with the firmware's scrollbar — and the footer reads
+`swipe: scroll · speak: your move · 2x tap: back`. A tap does nothing; the
+move is spoken. When the wearer's move starts the next round the glasses
+return to the live view, and when that round ends the room reopens on the
+wearer's move and the new answers, not where they had stopped reading the
+round before. Back leaves the room to the overview and the session carries on
+in the background.
 
 ## G2 layout
 
@@ -114,16 +160,21 @@ the derivation next to the constant.
 
 Proportional type has no true column count — 105 is an average. The
 renderer measures each row with the canvas and wraps on the measurement
-(`brainstormTranscriptRowCount`); the constant only sizes the wire budget
-(`BRAINSTORM_ACTIVITY_MAX`), which carries 40 rows of scrollback, not one
-screenful. A test re-derives that equality from the renderer so the two
-cannot drift apart.
+(`brainstormTranscriptRowCount`); the constant sizes the Agent Terminal's
+wire budget (`BRAINSTORM_ACTIVITY_MAX`), which carries 40 rows of
+scrollback, not one screenful. A test re-derives that equality from the
+renderer so the two cannot drift apart.
 
-Those rows hold about one 120-word turn, so a FINISHED turn collapses to
-the one-line `GIST:` its speaker is instructed to open with, and only the
-live turn keeps its prose. The synthesis is never collapsed. Without that
-the glass showed a single turn and the wearer could not follow who had
-said what — which is the whole point of watching.
+A Brainstorm turn is whole. A finished turn is never collapsed to a
+one-line gist: the live view follows the newest words while a round runs,
+and the conversation that rides the frame is bounded only by
+`BRAINSTORM_TRANSCRIPT_MAX` (64 KB — several rounds of full answers; the
+oldest rows drop first from the live frame, while the whole conversation is
+kept on the Mac and in the saved record). When the round ends, the room
+reader (above) carries the conversation whole. An earlier release cut each
+answer to about 120 words and a one-line gist so that two turns fitted the
+screen; the wearer could not read what the collaborators had said, so the
+cap and the collapse were removed rather than tuned.
 
 The speaker tag is drawn dim and the words bright. One brightness for
 everything made a screen of discussion a flat wall with no way in, on the
