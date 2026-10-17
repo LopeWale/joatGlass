@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-17 — Build JOAT 0.1.136
+
+- Packed from `d34eb72` (clean under `apps/hub-plugin`) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.136 above the last recorded build; app.json, package.json and package-lock.json all 0.1.136. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1273 tests passed, typecheck clean.
+- `apps/hub-plugin/joat.ehpk`: 178965 bytes, SHA-256 `deb6993f6b5deb6252c256a02a144e44836aefb4f617107ae4aa82cf66765854`. Adds to 0.1.135 the Pomodoro sessions count, the `timer` phase and `blocksPerSet` on the wire. It needs the Mac at the same revision (restart JOAT; migration 17 runs on start). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-17 — Pomodoro: set the sessions and the lengths by voice, and a plain countdown
 
 The wearer: "i cannot config the time or breaks or the number of sessions, or the simple timing/counterdown capabilities i wanted with it".
