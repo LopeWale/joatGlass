@@ -1638,7 +1638,9 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       this.fitText(context, pomodoroBlockLabel(pomodoro), paneX, layout.mainTopBaselineY + 62, paneWidth);
       context.fillStyle = gray(CHROME);
       context.font = TYPE.secondary;
-      context.fillText(pomodoroCycleDots(pomodoro.completed), paneX, layout.mainTopBaselineY + 84);
+      if (pomodoro.phase !== 'timer') {
+        context.fillText(pomodoroCycleDots(pomodoro.completed, pomodoro.blocksPerSet), paneX, layout.mainTopBaselineY + 84);
+      }
       return;
     }
 

@@ -2,9 +2,11 @@
 
 The checkpoint carries the wearer's configured focus and break lengths
 alongside the phase. The lengths live in their own single-row table
-(`pomodoro_lengths`, migration 13): migration 11's checkpoint table is
-checksummed history, so a database from before the lengths were
-configurable simply has no lengths row and loads the classic 25/5/15 cycle.
+(`pomodoro_lengths`, migration 13): a database from before the lengths
+were configurable simply has no lengths row and loads the classic 25/5/15
+cycle. The phase state lives in `pomodoro_state` (migration 17), which
+replaced migration 11's checkpoint table when sessions per set and the
+countdown phase became configurable.
 """
 
 from __future__ import annotations
@@ -16,6 +18,9 @@ from .store import DurableStore, StorageError
 DEFAULT_FOCUS_MS = 25 * 60_000
 DEFAULT_SHORT_BREAK_MS = 5 * 60_000
 DEFAULT_LONG_BREAK_MS = 15 * 60_000
+DEFAULT_BLOCKS_PER_SET = 4
+MAX_BLOCKS_PER_SET = 12
+PHASES = ("idle", "focus", "break", "long_break", "timer")
 _MAX_LENGTH_MS = 24 * 3_600_000
 _LENGTH_FIELDS = ("focus_ms", "short_break_ms", "long_break_ms")
 
@@ -38,6 +43,7 @@ class PomodoroCheckpoint:
     focus_ms: int = DEFAULT_FOCUS_MS
     short_break_ms: int = DEFAULT_SHORT_BREAK_MS
     long_break_ms: int = DEFAULT_LONG_BREAK_MS
+    blocks_per_set: int = DEFAULT_BLOCKS_PER_SET
 
 
 def _require_integer(name: str, value: int) -> None:
@@ -55,9 +61,7 @@ def _require_length(name: str, value: int) -> None:
 def _validate(checkpoint: PomodoroCheckpoint) -> None:
     if not isinstance(checkpoint, PomodoroCheckpoint):
         raise ValueError("checkpoint must be a PomodoroCheckpoint")
-    if type(checkpoint.phase) is not str or checkpoint.phase not in (
-        "idle", "focus", "break", "long_break",
-    ):
+    if type(checkpoint.phase) is not str or checkpoint.phase not in PHASES:
         raise ValueError("invalid Timer phase")
     if type(checkpoint.running) is not bool:
         raise ValueError("running must be a boolean")
@@ -66,13 +70,18 @@ def _validate(checkpoint: PomodoroCheckpoint) -> None:
     _require_length("length_ms", checkpoint.length_ms)
     for name in _LENGTH_FIELDS:
         _require_length(name, getattr(checkpoint, name))
+    _require_integer("blocks_per_set", checkpoint.blocks_per_set)
+    if not 1 <= checkpoint.blocks_per_set <= MAX_BLOCKS_PER_SET:
+        raise ValueError(f"blocks_per_set must be 1 to {MAX_BLOCKS_PER_SET}")
     if checkpoint.remaining_ms > checkpoint.length_ms:
         raise ValueError("remaining_ms must not exceed length_ms")
+    blocks = checkpoint.blocks_per_set
     completed_range = {
         "idle": range(1),
-        "focus": range(4),
-        "break": range(1, 4),
-        "long_break": range(4, 5),
+        "timer": range(1),
+        "focus": range(blocks),
+        "break": range(1, blocks),
+        "long_break": range(blocks, blocks + 1),
     }[checkpoint.phase]
     if checkpoint.completed not in completed_range:
         raise ValueError("completed count does not match the Timer phase")
@@ -94,13 +103,13 @@ class PomodoroStore:
     def load(self) -> PomodoroCheckpoint | None:
         rows = self._store.execute(
             "SELECT id,phase,running,remaining_ms,length_ms,completed,"
-            "ends_at_unix_ms,saved_at_unix_ms FROM pomodoro_checkpoint LIMIT 2"
+            "ends_at_unix_ms,saved_at_unix_ms,blocks_per_set FROM pomodoro_state LIMIT 2"
         ).fetchall()
         if not rows:
-            return None
+            return self._lengths_only()
         if len(rows) != 1 or type(rows[0][0]) is not int or rows[0][0] != 1:
             raise PomodoroStateError("invalid Timer checkpoint slot")
-        _, phase, running, remaining, length, completed, ends_at, saved_at = rows[0]
+        _, phase, running, remaining, length, completed, ends_at, saved_at, blocks = rows[0]
         if type(running) is not int or running not in (0, 1):
             raise PomodoroStateError("invalid Timer checkpoint running state")
         focus, short_break, long_break = self._load_lengths()
@@ -115,11 +124,25 @@ class PomodoroStore:
             focus_ms=focus,
             short_break_ms=short_break,
             long_break_ms=long_break,
+            blocks_per_set=blocks,
         )
         try:
             _validate(checkpoint)
         except ValueError as exc:
             raise PomodoroStateError("invalid Timer checkpoint fields") from exc
+        return checkpoint
+
+    def _lengths_only(self) -> PomodoroCheckpoint | None:
+        """Lengths saved, no phase state (an upgrade dropped it): an idle timer."""
+        if not self._store.execute("SELECT 1 FROM pomodoro_lengths LIMIT 1").fetchall():
+            return None
+        focus, short_break, long_break = self._load_lengths()
+        checkpoint = PomodoroCheckpoint("idle", False, focus, focus, 0, None, 0,
+            focus, short_break, long_break)
+        try:
+            _validate(checkpoint)
+        except ValueError as exc:
+            raise PomodoroStateError("invalid Timer lengths") from exc
         return checkpoint
 
     def _load_lengths(self) -> tuple[int, int, int]:
@@ -138,14 +161,15 @@ class PomodoroStore:
         _validate(checkpoint)
         with self._store.transaction() as db:
             db.execute(
-                "INSERT INTO pomodoro_checkpoint("
+                "INSERT INTO pomodoro_state("
                 "id,phase,running,remaining_ms,length_ms,completed,"
-                "ends_at_unix_ms,saved_at_unix_ms) VALUES (1,?,?,?,?,?,?,?) "
+                "ends_at_unix_ms,saved_at_unix_ms,blocks_per_set) VALUES (1,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "phase=excluded.phase,running=excluded.running,"
                 "remaining_ms=excluded.remaining_ms,length_ms=excluded.length_ms,"
                 "completed=excluded.completed,ends_at_unix_ms=excluded.ends_at_unix_ms,"
-                "saved_at_unix_ms=excluded.saved_at_unix_ms",
+                "saved_at_unix_ms=excluded.saved_at_unix_ms,"
+                "blocks_per_set=excluded.blocks_per_set",
                 (
                     checkpoint.phase,
                     int(checkpoint.running),
@@ -154,6 +178,7 @@ class PomodoroStore:
                     checkpoint.completed,
                     checkpoint.ends_at_unix_ms,
                     checkpoint.saved_at_unix_ms,
+                    checkpoint.blocks_per_set,
                 ),
             )
             db.execute(

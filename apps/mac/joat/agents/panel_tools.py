@@ -165,6 +165,54 @@ def web_search_tool(search: SearchService, panels: PanelPublisher | None = None)
     )
 
 
+_SETTING_KINDS = ("focus", "short_break", "long_break", "sessions", "timer")
+
+
+def pomodoro_set_tool(pomodoro: PomodoroService) -> Tool:
+    """The wearer's own phrasing of a setting the exact verbs missed.
+
+    "Make my focus blocks forty minutes long", "I want six rounds today",
+    "give me a twelve minute timer": the same setters the deterministic
+    voice commands call, with the same bounds, so the model cannot set
+    anything the verbs cannot.
+    """
+
+    async def run(arguments: dict[str, Any]) -> str:
+        setting = arguments.get("setting")
+        value = arguments.get("value")
+        if setting not in _SETTING_KINDS:
+            return f"Unknown setting. Use one of: {', '.join(_SETTING_KINDS)}."
+        if type(value) is not int:
+            return "Give a whole number."
+        if setting == "sessions":
+            return pomodoro.set_sessions(value)
+        if setting == "timer":
+            return pomodoro.start_timer(value)
+        return pomodoro.set_length(setting, value)
+
+    return Tool(
+        name="pomodoro_set",
+        description=(
+            "Change the wearer's pomodoro: the minutes of a focus block, a short break or a long "
+            "break, the number of focus blocks (sessions) before the long break, or start a plain "
+            "countdown timer of N minutes. Whole numbers only; minutes for every setting except "
+            "sessions."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "setting": {"type": "string", "enum": list(_SETTING_KINDS),
+                    "description": "What to change."},
+                "value": {"type": "integer",
+                    "description": "Minutes (1 to 1440), or the session count (1 to 12)."},
+            },
+            "required": ["setting", "value"],
+        },
+        run=run,
+        decision_hints=("pomodoro", "focus", "break", "session", "round", "timer", "countdown"),
+    )
+
+
 def pomodoro_status_tool(pomodoro: PomodoroService) -> Tool:
     async def run(_arguments: dict[str, Any]) -> str:
         return pomodoro.status_text()

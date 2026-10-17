@@ -49,7 +49,8 @@ async def test_restart_and_reconnect_publish_remaining_time_then_accept_current_
             await panels.publish_all()
             wire = output.panels[-1].to_wire()["pomodoro"]
             assert wire == {"phase": "focus", "running": True, "remainingMs": 1_375_000,
-                "lengthMs": 1_500_000, "completed": 0, "endsAtUnixMs": deadline}
+                "lengthMs": 1_500_000, "completed": 0, "endsAtUnixMs": deadline,
+                "blocksPerSet": 4}
             now[0] += 5
             await panels.publish_all()  # the ordinary greet/reconnect callback
             assert output.panels[-1].to_wire()["pomodoro"]["remainingMs"] == 1_370_000

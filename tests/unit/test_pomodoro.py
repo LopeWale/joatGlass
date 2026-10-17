@@ -42,11 +42,12 @@ class TestStateMachine:
         # A page opened by hand is a control surface: Start, then the lengths.
         assert service.rows() == (
             "▶ Start a focus block", "Focus: 25 min", "Short break: 5 min", "Long break: 15 min",
+            "Sessions: 4", "▶ 10 min timer",
         )
         state = service.state()
         assert state.phase == "idle" and state.running is False
         assert state.remaining_ms == state.length_ms == 25 * 60_000
-        assert service.status_text() == "No pomodoro running. A focus block is 25 minutes."
+        assert service.status_text() == "No pomodoro running. A focus block is 25 minutes, 4 to a set."
         assert "Say" not in service.status_text()
 
     def test_start_runs_a_focus_block_with_an_end_instant(self) -> None:
@@ -104,7 +105,7 @@ class TestStateMachine:
         assert service.phase == "long_break"
         assert service.completed == 4
         assert service.state().length_ms == 15 * 60_000
-        assert cards[-1].summary == "Four blocks done — long break, 15 min"
+        assert cards[-1].summary == "4 blocks done — long break, 15 min"
         clock.now += 900
         service.tick()
         assert service.phase == "focus" and service.completed == 0
@@ -141,14 +142,15 @@ class TestLengths:
         assert service.control(1) == "Focus blocks: 30 minutes."
         assert service.rows() == (
             "▶ Start a focus block", "Focus: 30 min", "Short break: 5 min", "Long break: 15 min",
+            "Sessions: 4", "▶ 10 min timer",
         )
         state = service.state()
         assert state.phase == "idle" and state.running is False
         assert state.remaining_ms == state.length_ms == 30 * 60_000
-        assert service.status_text() == "No pomodoro running. A focus block is 30 minutes."
+        assert service.status_text() == "No pomodoro running. A focus block is 30 minutes, 4 to a set."
         assert service.control(2) == "Short breaks: 10 minutes."
         assert service.control(3) == "Long breaks: 20 minutes."
-        assert service.rows()[1:] == ("Focus: 30 min", "Short break: 10 min", "Long break: 20 min")
+        assert service.rows()[1:4] == ("Focus: 30 min", "Short break: 10 min", "Long break: 20 min")
         assert service.lengths == PomodoroLengths(30 * 60_000, 10 * 60_000, 20 * 60_000)
 
     @pytest.mark.parametrize(("index", "noun", "presets"), [
@@ -165,7 +167,7 @@ class TestLengths:
 
     def test_a_length_off_the_preset_ladder_steps_to_the_next_larger_preset(self) -> None:
         service, _, _, _ = make(PomodoroLengths(focus_ms=120_000, short_break_ms=16 * 60_000))
-        assert service.rows()[1:] == ("Focus: 2 min", "Short break: 16 min", "Long break: 15 min")
+        assert service.rows()[1:4] == ("Focus: 2 min", "Short break: 16 min", "Long break: 15 min")
         assert service.control(1) == "Focus blocks: 15 minutes."
         assert service.control(2) == "Short breaks: 3 minutes."  # past the top: wraps
 
@@ -187,7 +189,7 @@ class TestLengths:
             clock.now += 1800
             service.tick()
         assert service.phase == "long_break" and service.state().length_ms == 20 * 60_000
-        assert cards[-1].summary == "Four blocks done — long break, 20 min"
+        assert cards[-1].summary == "4 blocks done — long break, 20 min"
 
     def test_a_length_changed_mid_block_applies_from_the_next_block(self) -> None:
         service, clock, _, _ = make()
@@ -206,7 +208,113 @@ class TestLengths:
         service, _, _, _ = make()
         with pytest.raises(ValueError, match="unknown pomodoro length"):
             service.cycle_length("nap")
-        assert service.rows()[1:] == ("Focus: 25 min", "Short break: 5 min", "Long break: 15 min")
+        assert service.rows()[1:4] == ("Focus: 25 min", "Short break: 5 min", "Long break: 15 min")
+
+
+class TestSessionsAndTimer:
+    def test_sessions_set_the_blocks_before_the_long_break(self) -> None:
+        service, clock, cards, _ = make()
+        assert service.set_sessions(2) == "2 sessions to a set."
+        assert service.state().blocks_per_set == 2
+        assert service.rows()[4] == "Sessions: 2"
+        service.start()
+        clock.now += 25 * 60
+        service.tick()
+        assert service.phase == "break"
+        clock.now += 5 * 60
+        service.tick()
+        clock.now += 25 * 60
+        service.tick()
+        assert service.phase == "long_break" and service.completed == 2
+        assert cards[-1].summary == "2 blocks done — long break, 15 min"
+        assert service.status_text().endswith("left in your long break.")
+
+    def test_sessions_tap_row_steps_the_presets_and_wraps(self) -> None:
+        service, _, _, _ = make()
+        seen = []
+        for _ in range(7):
+            service.control(4)
+            seen.append(service.lengths.blocks_per_set)
+        assert seen == [5, 6, 8, 2, 3, 4, 5]
+
+    def test_sessions_that_would_orphan_the_block_under_way_are_refused(self) -> None:
+        service, clock, _, _ = make()
+        service.start()
+        for _ in range(2):  # focus, break, focus -> two blocks done, third under way
+            clock.now += 25 * 60
+            service.tick()
+            clock.now += 5 * 60
+            service.tick()
+        assert service.phase == "focus" and service.completed == 2
+        assert "2 blocks into this set" in service.set_sessions(2)
+        assert service.lengths.blocks_per_set == 4
+        assert service.set_sessions(6) == "6 sessions to a set."
+        assert service.phase == "focus" and service.completed == 2
+
+    def test_sessions_are_bounded(self) -> None:
+        service, _, _, _ = make()
+        assert service.set_sessions(0) == "A set is 1 to 12 sessions."
+        assert service.set_sessions(13) == "A set is 1 to 12 sessions."
+        assert service.set_sessions(1) == "1 session to a set."
+        service.start()
+        clock_ms = service.state().length_ms
+        assert clock_ms == 25 * 60_000
+
+    def test_set_length_takes_any_whole_minutes(self) -> None:
+        service, _, _, _ = make()
+        assert service.set_length("focus", 40) == "Focus blocks: 40 minutes."
+        assert service.set_length("short_break", 7) == "Short breaks: 7 minutes."
+        assert service.rows()[1:4] == ("Focus: 40 min", "Short break: 7 min", "Long break: 15 min")
+        assert service.state().length_ms == service.state().remaining_ms == 40 * 60_000
+        assert service.set_length("focus", 0) == "A length is 1 to 1440 minutes."
+        assert service.set_length("focus", 1441) == "A length is 1 to 1440 minutes."
+        with pytest.raises(ValueError):
+            service.set_length("nap", 5)
+
+    def test_a_countdown_runs_once_and_goes_idle(self) -> None:
+        service, clock, cards, _ = make()
+        assert service.start_timer(12) == "Timer set for 12 minutes."
+        state = service.state()
+        assert state.phase == "timer" and state.running and state.length_ms == 12 * 60_000
+        assert service.rows() == ("Pause", "Cancel timer")
+        assert service.status_text() == "12 minutes left in your timer."
+        clock.now += 12 * 60
+        service.tick()
+        assert service.phase == "idle" and not service.running and service.completed == 0
+        assert [c.source for c in cards] == ["Timer done"]
+        assert cards[0].summary == "12 minutes timer finished"
+        assert service.state().length_ms == 25 * 60_000  # the page is a pomodoro page again
+
+    def test_a_countdown_pauses_resumes_and_cancels(self) -> None:
+        service, clock, cards, _ = make()
+        service.start_timer(5)
+        clock.now += 120
+        service.pause()
+        clock.now += 600
+        assert service.state().remaining_ms == 3 * 60_000
+        service.resume()
+        clock.now += 3 * 60
+        service.tick()
+        assert service.phase == "idle" and cards[-1].source == "Timer done"
+        service.start_timer(5)
+        assert service.control(1) == "Pomodoro reset."
+        assert service.phase == "idle"
+
+    def test_one_timer_at_a_time(self) -> None:
+        service, _, _, _ = make()
+        service.start()
+        assert service.start_timer(5).startswith("A pomodoro is already under way.")
+        service.reset()
+        service.start_timer(5)
+        assert service.start_timer(9).startswith("A timer is already under way.")
+        assert service.state().length_ms == 5 * 60_000
+        service.reset()
+        assert service.start_timer(0) == "A timer is 1 to 1440 minutes."
+
+    def test_the_idle_timer_row_starts_a_ten_minute_countdown(self) -> None:
+        service, _, _, _ = make()
+        assert service.control(5) == "Timer set for 10 minutes."
+        assert service.phase == "timer"
 
 
 class TestAsyncIntegration:
@@ -360,9 +468,10 @@ class TestDurableRecovery:
             recovered.activate_restored()
             assert recovered.rows() == (
                 "▶ Start a focus block", "Focus: 30 min", "Short break: 10 min", "Long break: 20 min",
+                "Sessions: 4", "▶ 10 min timer",
             )
             assert recovered.state().length_ms == recovered.state().remaining_ms == 30 * 60_000
-            assert recovered.status_text() == "No pomodoro running. A focus block is 30 minutes."
+            assert recovered.status_text() == "No pomodoro running. A focus block is 30 minutes, 4 to a set."
             assert recovered.start() == "Focus block 1 of 4. 30 minutes."
             clock.now += 1800
             recovered.tick()
@@ -383,7 +492,7 @@ class TestDurableRecovery:
             assert recovered.phase == "focus" and recovered.state().length_ms == 9000
             assert recovered.lengths == PomodoroLengths()
             recovered.reset()
-            assert recovered.rows()[1:] == ("Focus: 25 min", "Short break: 5 min", "Long break: 15 min")
+            assert recovered.rows()[1:4] == ("Focus: 25 min", "Short break: 5 min", "Long break: 15 min")
 
     async def test_constructor_waits_for_explicit_activation_before_callbacks(self, tmp_path: Path) -> None:
         clock = Clock()

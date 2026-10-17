@@ -142,4 +142,16 @@ describe('pomodoro labels shared by the pane and the page', () => {
     expect(pomodoroCycleDots(0)).toBe('○ ○ ○ ○');
     expect(pomodoroCycleDots(3)).toBe('● ● ● ○');
   });
+
+  it('follows the wearer\'s session count and names a plain countdown', async () => {
+    const { pomodoroBlockLabel, pomodoroCycleDots, pomodoroPhaseLabel } = await import('./PanelRail');
+    const base = { running: true, remainingMs: 1, lengthMs: 1_500_000, completed: 1, blocksPerSet: 6 };
+    expect(pomodoroBlockLabel({ ...base, phase: 'focus' })).toBe('Focus · block 2 of 6');
+    expect(pomodoroBlockLabel({ ...base, phase: 'break', completed: 6 })).toBe('Break · 6 of 6 done');
+    expect(pomodoroBlockLabel({ ...base, phase: 'timer', lengthMs: 12 * 60_000 })).toBe('Timer');
+    expect(pomodoroBlockLabel({ ...base, phase: 'timer', running: false })).toBe('Paused · Timer');
+    expect(pomodoroPhaseLabel('timer')).toBe('Timer');
+    expect(pomodoroCycleDots(2, 6)).toBe('● ● ○ ○ ○ ○');
+    expect(pomodoroCycleDots(2, 12)).toBe('●●○○○○○○○○○○');
+  });
 });

@@ -102,6 +102,7 @@ export function pomodoroPhaseLabel(phase: PomodoroPhase): string {
     case 'focus': return 'Focus';
     case 'break': return 'Break';
     case 'long_break': return 'Long break';
+    case 'timer': return 'Timer';
     default: return 'Ready';
   }
 }
@@ -113,15 +114,22 @@ export function pomodoroBlockLabel(pomodoro: HudPanelPomodoro): string {
   if (pomodoro.phase === 'idle') {
     return `Ready · ${Math.round(pomodoro.lengthMs / 60_000)} min focus`;
   }
-  const block = pomodoro.phase === 'focus'
-    ? `Focus · block ${Math.min(4, pomodoro.completed + 1)} of 4`
-    : `${pomodoroPhaseLabel(pomodoro.phase)} · ${pomodoro.completed} of 4 done`;
+  const sets = pomodoro.blocksPerSet ?? 4;
+  // A timer is one countdown, not a block of a set; the countdown row adds
+  // the minutes left.
+  const block = pomodoro.phase === 'timer'
+    ? 'Timer'
+    : pomodoro.phase === 'focus'
+      ? `Focus · block ${Math.min(sets, pomodoro.completed + 1)} of ${sets}`
+      : `${pomodoroPhaseLabel(pomodoro.phase)} · ${pomodoro.completed} of ${sets} done`;
   return pomodoro.running ? block : `Paused · ${block}`;
 }
 
-/** "● ● ○ ○" — the set of four, from the firmware-safe glyph set. */
-export function pomodoroCycleDots(completed: number): string {
-  return Array.from({ length: 4 }, (_, index) => (index < completed ? '●' : '○')).join(' ');
+/** "● ● ○ ○" — the set, from the firmware-safe glyph set. */
+export function pomodoroCycleDots(completed: number, blocksPerSet = 4): string {
+  // A long set drops the gaps so twelve blocks still fit one pane line.
+  return Array.from({ length: blocksPerSet }, (_, index) => (index < completed ? '●' : '○'))
+    .join(blocksPerSet > 6 ? '' : ' ');
 }
 
 /** Milliseconds until the countdown's next visible change at the given
@@ -263,7 +271,8 @@ function restoreContent(tab: PanelContentTab, value: unknown): PanelContent | un
   if (typeof pomodoro === 'object' && pomodoro !== null) {
     const p = pomodoro as Record<string, unknown>;
     if (
-      (p.phase === 'idle' || p.phase === 'focus' || p.phase === 'break' || p.phase === 'long_break')
+      (p.phase === 'idle' || p.phase === 'focus' || p.phase === 'break' || p.phase === 'long_break'
+        || p.phase === 'timer')
       && typeof p.running === 'boolean'
       && typeof p.remainingMs === 'number'
       && typeof p.lengthMs === 'number'
@@ -275,6 +284,7 @@ function restoreContent(tab: PanelContentTab, value: unknown): PanelContent | un
         remainingMs: p.remainingMs,
         lengthMs: p.lengthMs,
         completed: p.completed,
+        ...(typeof p.blocksPerSet === 'number' ? { blocksPerSet: p.blocksPerSet } : {}),
         ...(typeof p.endsAtUnixMs === 'number' ? { endsAtUnixMs: p.endsAtUnixMs } : {}),
       };
     }

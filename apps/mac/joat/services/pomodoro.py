@@ -28,9 +28,11 @@ import time
 from ..channels.cards import Card, Urgency
 from ..core.protocol import HudPanelPomodoro
 from ..persistence.pomodoro import (
+    DEFAULT_BLOCKS_PER_SET,
     DEFAULT_FOCUS_MS,
     DEFAULT_LONG_BREAK_MS,
     DEFAULT_SHORT_BREAK_MS,
+    MAX_BLOCKS_PER_SET,
     PomodoroCheckpoint,
     PomodoroStore,
 )
@@ -41,7 +43,9 @@ log = logging.getLogger(__name__)
 FOCUS_MS = DEFAULT_FOCUS_MS
 SHORT_BREAK_MS = DEFAULT_SHORT_BREAK_MS
 LONG_BREAK_MS = DEFAULT_LONG_BREAK_MS
-BLOCKS_PER_SET = 4
+BLOCKS_PER_SET = DEFAULT_BLOCKS_PER_SET
+#: The longest a spoken length may be: the wire and the store both stop at a day.
+MAX_LENGTH_MIN = 24 * 60
 
 Phase = str  # "idle" | "focus" | "break" | "long_break"
 LengthKind = str  # "focus" | "short_break" | "long_break"
@@ -52,6 +56,9 @@ LENGTH_PRESETS_MIN: dict[LengthKind, tuple[int, ...]] = {
     "short_break": (3, 5, 10, 15),
     "long_break": (10, 15, 20, 30),
 }
+SESSION_PRESETS = (2, 3, 4, 5, 6, 8)
+#: The countdown the idle page starts with one tap; any other length is spoken.
+QUICK_TIMER_MIN = 10
 _LENGTH_ROW_LABELS: dict[LengthKind, str] = {
     "focus": "Focus", "short_break": "Short break", "long_break": "Long break",
 }
@@ -74,6 +81,7 @@ class PomodoroLengths:
     focus_ms: int = FOCUS_MS
     short_break_ms: int = SHORT_BREAK_MS
     long_break_ms: int = LONG_BREAK_MS
+    blocks_per_set: int = BLOCKS_PER_SET
 
     def for_phase(self, phase: Phase) -> int:
         if phase == "focus":
@@ -102,9 +110,23 @@ class PomodoroLengths:
         minutes = next((preset for preset in presets if preset * 60_000 > current), presets[0])
         return replace(self, **{f"{kind}_ms": minutes * 60_000})
 
+    def with_next_sessions(self) -> PomodoroLengths:
+        """The next session-count preset above the current one, wrapping."""
+        count = next((n for n in SESSION_PRESETS if n > self.blocks_per_set), SESSION_PRESETS[0])
+        return replace(self, blocks_per_set=count)
+
+    def with_minutes(self, kind: LengthKind, minutes: int) -> PomodoroLengths:
+        """Any whole-minute length, 1 minute to a day."""
+        if kind not in LENGTH_PRESETS_MIN:
+            raise ValueError(f"unknown pomodoro length {kind!r}")
+        if not 1 <= minutes <= MAX_LENGTH_MIN:
+            raise ValueError(f"a length is 1 to {MAX_LENGTH_MIN} minutes")
+        return replace(self, **{f"{kind}_ms": minutes * 60_000})
+
     @classmethod
     def from_checkpoint(cls, checkpoint: PomodoroCheckpoint) -> PomodoroLengths:
-        return cls(checkpoint.focus_ms, checkpoint.short_break_ms, checkpoint.long_break_ms)
+        return cls(checkpoint.focus_ms, checkpoint.short_break_ms, checkpoint.long_break_ms,
+            checkpoint.blocks_per_set)
 
 
 OnChange = Callable[[], Awaitable[None]]
@@ -184,11 +206,14 @@ class PomodoroService:
         if not self._commit(checkpoint):
             self._activated = False
             return
-        finished_label = {"focus": "Focus", "break": "Break", "long_break": "Long break"}[finished]
-        next_label = {"focus": "Focus", "break": "Short break", "long_break": "Long break"}[next_phase]
-        self._recovery_notice = (
-            f"{finished_label} deadline passed while JOAT was away. {next_label} is paused."
-        )
+        if finished == "timer":
+            self._recovery_notice = "Your timer finished while JOAT was away."
+        else:
+            finished_label = {"focus": "Focus", "break": "Break", "long_break": "Long break"}[finished]
+            next_label = {"focus": "Focus", "break": "Short break", "long_break": "Long break"}[next_phase]
+            self._recovery_notice = (
+                f"{finished_label} deadline passed while JOAT was away. {next_label} is paused."
+            )
         if self._notify is not None:
             self._notify(Card(source="Timer recovered", channel="Pomodoro",
                 summary=self._recovery_notice, urgency=Urgency.NOTIFY, event_class="pomodoro.phase"))
@@ -235,6 +260,7 @@ class PomodoroService:
             length_ms=self._length_ms,
             completed=self._completed,
             ends_at_unix_ms=self._ends_at_unix_ms if self._running else None,
+            blocks_per_set=self._lengths.blocks_per_set,
         )
 
     @property
@@ -257,9 +283,13 @@ class PomodoroService:
                      partial(self.cycle_length, kind))
                     for kind in ("focus", "short_break", "long_break")
                 ),
+                (f"Sessions: {self._lengths.blocks_per_set}", self.cycle_sessions),
+                (f"▶ {QUICK_TIMER_MIN} min timer", partial(self.start_timer, QUICK_TIMER_MIN)),
             )
         if not self._running:
             return (("▶ Resume", self.resume), ("Reset", self.reset))
+        if self._phase == "timer":
+            return (("Pause", self.pause), ("Cancel timer", self.reset))
         skip = "Skip to break" if self._phase == "focus" else "Skip break"
         return (("Pause", self.pause), (skip, self.skip), ("Reset", self.reset))
 
@@ -272,13 +302,16 @@ class PomodoroService:
         if self._error is not None:
             return self._error
         prefix = f"{self._recovery_notice} " if self._recovery_notice else ""
+        blocks = self._lengths.blocks_per_set
         if self._phase == "idle":
-            return f"No pomodoro running. A focus block is {_minutes_phrase(self._lengths.focus_ms)}."
+            return (f"No pomodoro running. A focus block is {_minutes_phrase(self._lengths.focus_ms)}, "
+                f"{blocks} to a set.")
         minutes = max(0, -(-self.remaining_ms() // 60_000))
         what = {
-            "focus": f"focus block {min(BLOCKS_PER_SET, self._completed + 1)} of {BLOCKS_PER_SET}",
+            "focus": f"focus block {min(blocks, self._completed + 1)} of {blocks}",
             "break": "short break",
             "long_break": "long break",
+            "timer": "timer",
         }.get(self._phase, self._phase)
         state = "" if self._running else "Paused. "
         return f"{prefix}{state}{minutes} minute{'s' if minutes != 1 else ''} left in your {what}."
@@ -292,10 +325,29 @@ class PomodoroService:
         if self._phase == "idle":
             if not self._begin("focus"):
                 return self.status_text()
-            return f"Focus block {self._completed + 1} of {BLOCKS_PER_SET}. {_minutes_phrase(self._lengths.focus_ms)}."
+            return (f"Focus block {self._completed + 1} of {self._lengths.blocks_per_set}. "
+                f"{_minutes_phrase(self._lengths.focus_ms)}.")
         if not self._running:
             return self.resume()
         return "The timer is already running. " + self.status_text()
+
+    def start_timer(self, minutes: int) -> str:
+        """A plain one-shot countdown: runs once, says so, and goes idle.
+
+        One timer at a time: it shares the Pomodoro's page, chip and
+        checkpoint, so it will not start over a pomodoro or another timer.
+        """
+        if not self._can_control():
+            return self.status_text()
+        if not 1 <= minutes <= MAX_LENGTH_MIN:
+            return f"A timer is 1 to {MAX_LENGTH_MIN} minutes."
+        if self._phase != "idle":
+            what = "A timer" if self._phase == "timer" else "A pomodoro"
+            return f"{what} is already under way. Say reset first. " + self.status_text()
+        length = minutes * 60_000
+        if not self._commit(self._phase_checkpoint("timer", completed=0, running=True, length_ms=length)):
+            return self.status_text()
+        return f"Timer set for {_minutes_phrase(length)}."
 
     def pause(self) -> str:
         if not self._can_control():
@@ -342,14 +394,39 @@ class PomodoroService:
         if not self._can_control():
             return self.status_text()
         lengths = self._lengths.with_next_preset(kind)
-        if self._phase == "idle":
-            checkpoint = self._phase_checkpoint("idle", completed=0, running=False, lengths=lengths)
-        else:
-            checkpoint = self._checkpoint(running=self._running, remaining_ms=self.remaining_ms(),
-                ends_at=self._ends_at_unix_ms if self._running else None, lengths=lengths)
-        if not self._commit(checkpoint):
+        if not self._apply_lengths(lengths):
             return self.status_text()
         return f"{_LENGTH_RECEIPT_NOUNS[kind]}: {_minutes_phrase(lengths.of(kind))}."
+
+    def set_length(self, kind: LengthKind, minutes: int) -> str:
+        """Set one length to any whole number of minutes (a spoken value)."""
+        if not self._can_control():
+            return self.status_text()
+        if not 1 <= minutes <= MAX_LENGTH_MIN:
+            return f"A length is 1 to {MAX_LENGTH_MIN} minutes."
+        lengths = self._lengths.with_minutes(kind, minutes)
+        if not self._apply_lengths(lengths):
+            return self.status_text()
+        return f"{_LENGTH_RECEIPT_NOUNS[kind]}: {_minutes_phrase(lengths.of(kind))}."
+
+    def set_sessions(self, count: int) -> str:
+        """Focus blocks before the long break. Applies to the next set."""
+        if not self._can_control():
+            return self.status_text()
+        if not 1 <= count <= MAX_BLOCKS_PER_SET:
+            return f"A set is 1 to {MAX_BLOCKS_PER_SET} sessions."
+        if not self._sessions_fit(count):
+            return (f"You are {self._completed} blocks into this set. "
+                f"Say reset, then set {count} sessions.")
+        if not self._apply_lengths(replace(self._lengths, blocks_per_set=count)):
+            return self.status_text()
+        return f"{count} session{'s' if count != 1 else ''} to a set."
+
+    def cycle_sessions(self) -> str:
+        """A tap on the Sessions row: the next preset count, wrapping."""
+        if not self._can_control():
+            return self.status_text()
+        return self.set_sessions(self._lengths.with_next_sessions().blocks_per_set)
 
     def control(self, index: int) -> str:
         """A tap on one of rows(): the action paired with that row."""
@@ -394,16 +471,38 @@ class PomodoroService:
         lengths = lengths or self._lengths
         return PomodoroCheckpoint(self._phase, running, remaining_ms, self._length_ms,
             self._completed, ends_at, self._now_ms(),
-            lengths.focus_ms, lengths.short_break_ms, lengths.long_break_ms)
+            lengths.focus_ms, lengths.short_break_ms, lengths.long_break_ms, lengths.blocks_per_set)
 
     def _phase_checkpoint(self, phase: Phase, *, completed: int, running: bool,
-                          lengths: PomodoroLengths | None = None) -> PomodoroCheckpoint:
+                          lengths: PomodoroLengths | None = None,
+                          length_ms: int | None = None) -> PomodoroCheckpoint:
         lengths = lengths or self._lengths
-        length = lengths.for_phase(phase)
+        length = length_ms if length_ms is not None else lengths.for_phase(phase)
         now = self._now_ms()
         return PomodoroCheckpoint(phase, running, length, length, completed,
             now + length if running else None, now,
-            lengths.focus_ms, lengths.short_break_ms, lengths.long_break_ms)
+            lengths.focus_ms, lengths.short_break_ms, lengths.long_break_ms, lengths.blocks_per_set)
+
+    def _apply_lengths(self, lengths: PomodoroLengths) -> bool:
+        """Persist new lengths. Idle, the page's countdown follows the focus
+        length; during a phase the block under way keeps the length it
+        started with and the new one applies from the next of its kind."""
+        if self._phase == "idle":
+            checkpoint = self._phase_checkpoint("idle", completed=0, running=False, lengths=lengths)
+        else:
+            checkpoint = self._checkpoint(running=self._running, remaining_ms=self.remaining_ms(),
+                ends_at=self._ends_at_unix_ms if self._running else None, lengths=lengths)
+        return self._commit(checkpoint)
+
+    def _sessions_fit(self, count: int) -> bool:
+        """Can a set of `count` take the phase under way without a rewrite?"""
+        if self._phase in ("idle", "timer"):
+            return True
+        if self._phase == "focus":
+            return self._completed < count
+        if self._phase == "break":
+            return 1 <= self._completed < count
+        return self._completed == count
 
     def _adopt(self, checkpoint: PomodoroCheckpoint) -> None:
         # The checkpoint is the one truth, lengths included: a restart keeps
@@ -452,27 +551,46 @@ class PomodoroService:
         return self._commit(self._phase_checkpoint(phase, completed=self._completed, running=True))
 
     def _next_phase(self) -> tuple[Phase, int]:
+        if self._phase == "timer":
+            return "idle", 0
         if self._phase == "focus":
             completed = self._completed + 1
-            return ("long_break" if completed >= BLOCKS_PER_SET else "break"), completed
+            return ("long_break" if completed >= self._lengths.blocks_per_set else "break"), completed
         return "focus", 0 if self._phase == "long_break" else self._completed
 
     def _advance(self, *, skipped: bool = False) -> None:
         """The current phase is over: count it, start what follows."""
         finished = self._phase
+        finished_ms = self._length_ms
         next_phase, completed = self._next_phase()
-        if self._commit(self._phase_checkpoint(next_phase, completed=completed, running=True)):
-            self._announce(finished, next_phase, skipped)
+        if self._commit(self._phase_checkpoint(next_phase, completed=completed,
+                running=next_phase != "idle")):
+            if finished == "timer":
+                self._announce_timer(finished_ms, skipped)
+            else:
+                self._announce(finished, next_phase, skipped)
+
+    def _announce_timer(self, finished_ms: int, skipped: bool) -> None:
+        if self._notify is None:
+            return
+        self._notify(Card(
+            source="Timer ended" if skipped else "Timer done",
+            channel="Pomodoro",
+            summary=f"{_minutes_phrase(finished_ms)} timer " + ("ended early" if skipped else "finished"),
+            urgency=Urgency.NOTIFY,
+            event_class="pomodoro.phase",
+        ))
 
     def _announce(self, finished: Phase, next_phase: Phase, skipped: bool) -> None:
         if self._notify is None:
             return
         minutes = self._length_ms // 60_000
         if next_phase == "focus":
-            summary = f"Focus block {self._completed + 1} of {BLOCKS_PER_SET} — {minutes} min"
+            summary = f"Focus block {self._completed + 1} of {self._lengths.blocks_per_set} — {minutes} min"
             headline = "Break over" if not skipped else "Break skipped"
         elif next_phase == "long_break":
-            summary = f"Four blocks done — long break, {minutes} min"
+            blocks = self._lengths.blocks_per_set
+            summary = f"{blocks} block{'s' if blocks != 1 else ''} done — long break, {minutes} min"
             headline = "Focus done"
         else:
             summary = f"Break for {minutes} min"

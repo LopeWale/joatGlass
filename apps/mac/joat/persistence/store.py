@@ -685,6 +685,37 @@ _MIGRATION_16 = (
     """,
 )
 
+_MIGRATION_17 = (
+    # Configurable sessions per set, and a one-shot countdown phase. Migration
+    # 11's checkpoint table pins the phases to four names and the completed
+    # count to a set of four in CHECK constraints, and it is checksummed
+    # history. The manifest recognises only CREATE and DROP, so the old table
+    # is dropped and the state gets a table of its own: a timer in flight at
+    # upgrade comes back idle, and the lengths (their own table) are kept.
+    """
+    DROP TABLE pomodoro_checkpoint
+    """,
+    """
+    CREATE TABLE pomodoro_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        phase TEXT NOT NULL CHECK (phase IN ('idle','focus','break','long_break','timer')),
+        running INTEGER NOT NULL CHECK (running IN (0,1)),
+        remaining_ms INTEGER NOT NULL CHECK (remaining_ms >= 0),
+        length_ms INTEGER NOT NULL CHECK (length_ms BETWEEN 1 AND 86400000),
+        blocks_per_set INTEGER NOT NULL CHECK (blocks_per_set BETWEEN 1 AND 12),
+        completed INTEGER NOT NULL CHECK (completed BETWEEN 0 AND 12),
+        ends_at_unix_ms INTEGER CHECK (ends_at_unix_ms >= 0),
+        saved_at_unix_ms INTEGER NOT NULL CHECK (saved_at_unix_ms >= 0),
+        CHECK (remaining_ms <= length_ms),
+        CHECK (
+            (running = 1 AND phase != 'idle' AND ends_at_unix_ms IS NOT NULL) OR
+            (running = 0 AND ends_at_unix_ms IS NULL)
+        )
+    ) STRICT
+    """,
+)
+
+
 _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "durable_actions", _MIGRATION_1),
     (2, "text_quick_notes", _MIGRATION_2),
@@ -702,6 +733,7 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (14, "durable_saved_places", _MIGRATION_14),
     (15, "live_quicknote_transcription", _MIGRATION_15),
     (16, "quicknote_undo_without_speakers", _MIGRATION_16),
+    (17, "pomodoro_sessions_and_countdown", _MIGRATION_17),
 )
 
 

@@ -74,13 +74,14 @@ def test_migration_12_preserves_v11_ledger_and_timer_data(tmp_path, monkeypatch)
         with DurableStore(path) as db:
             ledger = db.execute('SELECT * FROM schema_migrations ORDER BY version').fetchall()
             db.execute("INSERT INTO pomodoro_checkpoint VALUES(1,'focus',0,60000,60000,0,NULL,42)")
-            timer = db.execute('SELECT * FROM pomodoro_checkpoint').fetchone()
     with DurableStore(path) as db:
         # 12 terminal_checkpoints; 13 pomodoro_lengths; 14 saved_places;
-        # 15 live QuickNote transcription (FEAT-002)
-        assert db.schema_version == 16
+        # 15 live QuickNote transcription (FEAT-002); 17 pomodoro_state replaces
+        # the checkpoint table (a timer in flight comes back idle)
+        assert db.schema_version == 17
         assert db.execute('SELECT * FROM schema_migrations WHERE version<=11 ORDER BY version').fetchall() == ledger
-        assert db.execute('SELECT * FROM pomodoro_checkpoint').fetchone() == timer
+        assert db.execute('SELECT count(*) FROM pomodoro_state').fetchone() == (0,)
+        assert not db.execute("SELECT 1 FROM sqlite_schema WHERE name='pomodoro_checkpoint'").fetchall()
         assert db.execute('SELECT count(*) FROM terminal_checkpoints').fetchone() == (0,)
         assert db.check_integrity() == ('ok', ())
 

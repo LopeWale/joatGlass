@@ -1611,9 +1611,26 @@ class TestHudPanelWire:
             "remainingMs": 1_499_000,
             "lengthMs": 1_500_000,
             "completed": 2,
+            "blocksPerSet": 4,
             "endsAtUnixMs": 1_760_000_000_000,
         }
         assert wire["activate"] is True
+
+    def test_timer_phase_and_a_longer_set_ride_the_wire(self) -> None:
+        from joat.core.protocol import HudPanelPomodoro, ProtocolError
+
+        wire = HudPanelPomodoro(phase="timer", running=True, remaining_ms=60_000,
+            length_ms=60_000, completed=0, ends_at_unix_ms=1, blocks_per_set=6).to_wire()
+        assert wire["phase"] == "timer" and wire["blocksPerSet"] == 6
+        # completed may reach the set size, never past it
+        HudPanelPomodoro(phase="long_break", running=False, remaining_ms=1, length_ms=1,
+            completed=6, blocks_per_set=6).to_wire()
+        with pytest.raises(ProtocolError):
+            HudPanelPomodoro(phase="long_break", running=False, remaining_ms=1, length_ms=1,
+                completed=7, blocks_per_set=6).to_wire()
+        with pytest.raises(ProtocolError):
+            HudPanelPomodoro(phase="focus", running=False, remaining_ms=1, length_ms=1,
+                completed=0, blocks_per_set=13).to_wire()
 
     def test_hud_panel_refuses_unknown_tabs_and_phases(self) -> None:
         from joat.core.protocol import HudPanel, HudPanelPomodoro, ProtocolError

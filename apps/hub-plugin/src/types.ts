@@ -856,7 +856,8 @@ export type PanelTab = (typeof PANEL_TABS)[number];
 export const PANEL_CONTENT_TABS = ['planner', 'news', 'pomodoro', 'quicknotes', 'search'] as const;
 export type PanelContentTab = (typeof PANEL_CONTENT_TABS)[number];
 
-export type PomodoroPhase = 'idle' | 'focus' | 'break' | 'long_break';
+/** `timer` is the plain one-shot countdown: no breaks, no sets. */
+export type PomodoroPhase = 'idle' | 'focus' | 'break' | 'long_break' | 'timer';
 
 /** The timer as the Mac last knew it. The plugin counts down from
  * `endsAtUnixMs` on its own clock, so a tick costs no Mac traffic. */
@@ -869,8 +870,10 @@ export interface HudPanelPomodoro {
   remainingMs: number;
   /** Length of the current phase, for a progress bar. */
   lengthMs: number;
-  /** Focus blocks finished in the current set of four. */
+  /** Focus blocks finished in the current set. */
   completed: number;
+  /** Focus blocks before the long break; the wearer sets it. Absent = 4. */
+  blocksPerSet?: number;
 }
 
 /** The request id a panel row tap echoes: the tab and the content revision

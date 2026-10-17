@@ -75,7 +75,7 @@ def test_latest_checkpoint_replaces_the_single_slot(api: Any, tmp_path: Path) ->
                           ends_at_unix_ms=None, remaining_ms=12_345, saved_at_unix_ms=120_000)
         repository.save(last)
         assert repository.load() == last
-        assert db.execute("SELECT count(*) FROM pomodoro_checkpoint").fetchone() == (1,)
+        assert db.execute("SELECT count(*) FROM pomodoro_state").fetchone() == (1,)
 
 
 def test_save_uses_existing_owned_transaction_and_rolls_back_failure(
@@ -163,14 +163,14 @@ def test_invalid_stored_state_raises_without_resetting_or_rewriting(
         db.execute("PRAGMA ignore_check_constraints=ON")
         try:
             # Column names are the fixed test cases above, never external data.
-            db.execute(f"UPDATE pomodoro_checkpoint SET {column}=?", (value,))
+            db.execute(f"UPDATE pomodoro_state SET {column}=?", (value,))
         finally:
             db.execute("PRAGMA ignore_check_constraints=OFF")
-        before = db.execute("SELECT * FROM pomodoro_checkpoint").fetchone()
+        before = db.execute("SELECT * FROM pomodoro_state").fetchone()
         assert issubclass(api.PomodoroStateError, StorageError)
         with pytest.raises(api.PomodoroStateError):
             repository.load()
-        assert db.execute("SELECT * FROM pomodoro_checkpoint").fetchone() == before
+        assert db.execute("SELECT * FROM pomodoro_state").fetchone() == before
 
 
 def test_database_constraints_reject_invalid_direct_writes(api: Any, tmp_path: Path) -> None:
@@ -179,11 +179,11 @@ def test_database_constraints_reject_invalid_direct_writes(api: Any, tmp_path: P
         repository = api.PomodoroStore(db)
         repository.save(value)
         for assignment in (
-            "running=2", "completed=4", "remaining_ms=length_ms+1", "id=2",
+            "running=2", "completed=13", "blocks_per_set=0", "blocks_per_set=13", "remaining_ms=length_ms+1", "id=2",
             "length_ms=86400001",
         ):
             with pytest.raises(sqlite3.IntegrityError):
-                db.execute(f"UPDATE pomodoro_checkpoint SET {assignment}")
+                db.execute(f"UPDATE pomodoro_state SET {assignment}")
         assert repository.load() == value
 
 
@@ -231,11 +231,11 @@ def test_invalid_stored_lengths_raise_without_resetting_or_rewriting(
             db.execute(f"UPDATE pomodoro_lengths SET {column}=?", (value,))
         finally:
             db.execute("PRAGMA ignore_check_constraints=OFF")
-        before = (db.execute("SELECT * FROM pomodoro_checkpoint").fetchone(),
+        before = (db.execute("SELECT * FROM pomodoro_state").fetchone(),
                   db.execute("SELECT * FROM pomodoro_lengths").fetchone())
         with pytest.raises(api.PomodoroStateError):
             repository.load()
-        assert (db.execute("SELECT * FROM pomodoro_checkpoint").fetchone(),
+        assert (db.execute("SELECT * FROM pomodoro_state").fetchone(),
                 db.execute("SELECT * FROM pomodoro_lengths").fetchone()) == before
 
 

@@ -1656,7 +1656,7 @@ class HudNotifications:
 #: Search left the rail for the menu (2026-10-11) and still pushes its page.
 #: Plugin counterpart: PANEL_CONTENT_TABS in apps/hub-plugin/src/types.ts.
 PANEL_TABS: tuple[str, ...] = ("planner", "news", "pomodoro", "search", "quicknotes")
-POMODORO_PHASES = frozenset({"idle", "focus", "break", "long_break"})
+POMODORO_PHASES = frozenset({"idle", "focus", "break", "long_break", "timer"})
 #: SDK caps carried over from HudList: a panel is a list the plugin caches.
 PANEL_ROW_LIMIT = 20
 PANEL_ROW_CHARACTERS = 64
@@ -1689,13 +1689,17 @@ class HudPanelPomodoro:
     length_ms: int
     completed: int
     ends_at_unix_ms: int | None = None
+    #: Focus blocks before the long break; the wearer sets it.
+    blocks_per_set: int = 4
 
     def to_wire(self) -> dict[str, Any]:
         if self.phase not in POMODORO_PHASES:
             raise ProtocolError(f"unknown pomodoro phase {self.phase!r}")
         if not 0 <= self.remaining_ms <= self.length_ms <= 24 * 3_600_000:
             raise ProtocolError("pomodoro remaining/length out of range")
-        if not 0 <= self.completed <= 4:
+        if not 1 <= self.blocks_per_set <= 12:
+            raise ProtocolError("pomodoro blocks per set out of range")
+        if not 0 <= self.completed <= self.blocks_per_set:
             raise ProtocolError("pomodoro completed count out of range")
         wire: dict[str, Any] = {
             "phase": self.phase,
@@ -1703,6 +1707,7 @@ class HudPanelPomodoro:
             "remainingMs": self.remaining_ms,
             "lengthMs": self.length_ms,
             "completed": self.completed,
+            "blocksPerSet": self.blocks_per_set,
         }
         if self.ends_at_unix_ms is not None:
             if self.ends_at_unix_ms < 0:

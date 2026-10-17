@@ -19,6 +19,7 @@ const PHASE_WORD: Readonly<Record<Exclude<HudPanelPomodoro['phase'], 'idle'>, st
   focus: 'Focus',
   break: 'Break',
   long_break: 'Break',
+  timer: 'Timer',
 };
 
 /** "Focus 12m", "Break 4m", "Paused 12m"; nothing while the timer is idle.

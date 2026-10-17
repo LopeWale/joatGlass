@@ -158,6 +158,80 @@ class TestPomodoro:
         assert activated(transport) == ["pomodoro"]
 
 
+class TestPomodoroSettings:
+    def make(self) -> tuple[PomodoroService, PomodoroCommands, Transport]:
+        transport = Transport()
+        pomodoro = PomodoroService(clock=lambda: 1_000.0)
+        return pomodoro, PomodoroCommands(pomodoro, PanelPublisher(transport, {"pomodoro": pomodoro})), transport
+
+    @pytest.mark.parametrize("phrase,minutes", [
+        ("Set a timer for 12 minutes.", 12), ("start a 10 minute timer", 10),
+        ("set a timer for an hour", 60), ("time me for forty-five minutes", 45),
+        ("set a timer for half an hour", 30), ("set a countdown for 2 hours", 120),
+    ])
+    async def test_countdown_phrases(self, phrase: str, minutes: int) -> None:
+        pomodoro, commands, transport = self.make()
+        assert await commands.handle_command(phrase) == f"Timer set for {minutes} minutes."
+        assert pomodoro.phase == "timer" and pomodoro.state().length_ms == minutes * 60_000
+        assert activated(transport) == ["pomodoro"]
+
+    async def test_a_bare_timer_is_still_the_pomodoro(self) -> None:
+        pomodoro, commands, _ = self.make()
+        assert await commands.handle_command("start a timer") == "Focus block 1 of 4. 25 minutes."
+        assert pomodoro.phase == "focus"
+
+    @pytest.mark.parametrize("phrase,expected", [
+        ("set focus to 40 minutes", "Focus blocks: 40 minutes."),
+        ("Set the short break to 10", "Short breaks: 10 minutes."),
+        ("long break time twenty minutes", "Long breaks: 20 minutes."),
+        ("change focus time to half an hour", "Focus blocks: 30 minutes."),
+        ("set work time to fifty", "Focus blocks: 50 minutes."),
+    ])
+    async def test_length_phrases(self, phrase: str, expected: str) -> None:
+        _, commands, _ = self.make()
+        assert await commands.handle_command(phrase) == expected
+
+    @pytest.mark.parametrize("phrase,count", [
+        ("set sessions to six", 6), ("do 3 sessions", 3), ("five sessions", 5),
+        ("set the number of sessions to eight", 8),
+    ])
+    async def test_session_phrases(self, phrase: str, count: int) -> None:
+        pomodoro, commands, _ = self.make()
+        assert (await commands.handle_command(phrase) or "").startswith(f"{count} session")
+        assert pomodoro.lengths.blocks_per_set == count
+
+    @pytest.mark.parametrize("phrase", [
+        "set a timer for 90 seconds", "set my alarm for 7 am", "remind me in 5 minutes",
+        "set the volume to 40",
+    ])
+    async def test_unrelated_phrases_fall_through(self, phrase: str) -> None:
+        _, commands, _ = self.make()
+        assert await commands.handle_command(phrase) is None
+
+    async def test_out_of_range_values_are_refused_in_words(self) -> None:
+        _, commands, _ = self.make()
+        assert await commands.handle_command("set focus to 2000 minutes") == "A length is 1 to 1440 minutes."
+        assert await commands.handle_command("set sessions to thirty") == "A set is 1 to 12 sessions."
+
+
+class TestPomodoroSetTool:
+    async def test_the_model_sets_what_the_verbs_set_and_no_more(self) -> None:
+        from joat.agents.panel_tools import pomodoro_set_tool
+
+        pomodoro = PomodoroService(clock=lambda: 1_000.0)
+        tool = pomodoro_set_tool(pomodoro)
+        assert await tool.run({"setting": "focus", "value": 40}) == "Focus blocks: 40 minutes."
+        assert await tool.run({"setting": "sessions", "value": 6}) == "6 sessions to a set."
+        assert await tool.run({"setting": "short_break", "value": 0}) == "A length is 1 to 1440 minutes."
+        assert await tool.run({"setting": "sessions", "value": 99}) == "A set is 1 to 12 sessions."
+        assert (await tool.run({"setting": "volume", "value": 3})).startswith("Unknown setting.")
+        assert await tool.run({"setting": "focus", "value": "forty"}) == "Give a whole number."
+        assert await tool.run({"setting": "focus", "value": True}) == "Give a whole number."
+        assert await tool.run({"setting": "timer", "value": 12}) == "Timer set for 12 minutes."
+        assert pomodoro.phase == "timer"
+        assert (pomodoro.lengths.focus_ms, pomodoro.lengths.blocks_per_set) == (40 * 60_000, 6)
+
+
 class TestSearch:
     @pytest.fixture
     def rig(self):

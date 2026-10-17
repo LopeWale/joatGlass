@@ -108,6 +108,81 @@ class NewsCommands:
         return None
 
 
+_UNITS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19,
+}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+         "eighty": 80, "ninety": 90}
+_NUMBER_WORDS = "|".join(sorted((*_UNITS, *_TENS), key=len, reverse=True))
+#: "40", "forty five", "forty-five", "twelve".
+_NUMBER = rf"(?:\d{{1,4}}|(?:{_NUMBER_WORDS})(?:[ -](?:{'|'.join(_UNITS)}))?)"
+#: "40 minutes", "an hour", "half an hour", "2 hours", "ninety minutes".
+_DURATION = (
+    rf"(?:half an hour|(?:an|one) hour|{_NUMBER} (?:minutes?|mins?|hours?)|{_NUMBER})"
+)
+
+
+def _spoken_number(text: str) -> int | None:
+    text = text.strip().replace("-", " ")
+    if text.isdigit():
+        return int(text)
+    total = 0
+    for word in text.split():
+        if word in _TENS:
+            total += _TENS[word]
+        elif word in _UNITS:
+            total += _UNITS[word]
+        else:
+            return None
+    return total if text else None
+
+
+def _duration_minutes(text: str) -> int | None:
+    """Whole minutes in a spoken duration; a bare number is minutes."""
+    text = text.strip()
+    if text == "half an hour":
+        return 30
+    if text in ("an hour", "one hour"):
+        return 60
+    match = re.fullmatch(rf"({_NUMBER})(?: (minutes?|mins?|hours?))?", text)
+    if match is None:
+        return None
+    value = _spoken_number(match.group(1))
+    if value is None:
+        return None
+    return value * 60 if (match.group(2) or "").startswith("hour") else value
+
+
+_LENGTH_KINDS = {
+    "focus": "focus", "work": "focus", "pomodoro": "focus",
+    "short break": "short_break", "break": "short_break",
+    "long break": "long_break",
+}
+_KIND_WORDS = "focus|work|pomodoro|short break|long break|break"
+_KIND = rf"(?P<kind>{_KIND_WORDS})"
+_KIND2 = rf"(?P<kind2>{_KIND_WORDS})"
+_POMODORO_SET_LENGTH = re.compile(
+    rf"^(?:set|change|make)(?: my| the)? {_KIND}(?: (?:time|length|timer|block|session))?"
+    rf"(?: to| for)? (?P<amount>{_DURATION})$"
+    rf"|^{_KIND2} (?:time|length) (?:to )?(?P<amount2>{_DURATION})$"
+)
+_POMODORO_SET_SESSIONS = re.compile(
+    rf"^(?:(?:set|change|make)(?: my| the)? (?:sessions?|blocks?|rounds?|cycles?)(?: per set)?"
+    rf"(?: to)? (?P<count>{_NUMBER})"
+    rf"|(?:set|change|make)(?: my| the)? (?:number of |count of )(?:sessions?|blocks?|rounds?|cycles?)"
+    rf"(?: to)? (?P<count2>{_NUMBER})"
+    rf"|(?:do |use |have )?(?P<count3>{_NUMBER}) (?:sessions?|blocks?|rounds?|focus blocks?)"
+    rf"(?: (?:per|a|in a|before (?:the|a) long break))?(?: set)?)$"
+)
+_TIMER_START = re.compile(
+    rf"^(?:(?:set|start|begin|run|make)(?: me)?(?: a| an)? (?:timer|countdown)(?: for| of)? (?P<amount>{_DURATION})"
+    rf"|(?:set|start|begin|run|make)(?: me)?(?: a| an)? (?P<amount2>{_DURATION}) (?:timer|countdown)"
+    rf"|(?:count ?down|time me for|time) (?P<amount3>{_DURATION}))$"
+)
+
 _POMODORO_START = re.compile(
     r"^(?:start|begin|run)(?: a| my| the)? (?:pomodoro|focus(?: block| session| timer)?|timer)$"
 )
@@ -136,6 +211,31 @@ class PomodoroCommands:
 
     async def handle_command(self, text: str) -> str | None:
         normalized = _normalize(text)
+        timer = _TIMER_START.fullmatch(normalized)
+        if timer is not None:
+            minutes = _duration_minutes(timer.group("amount") or timer.group("amount2") or timer.group("amount3"))
+            if minutes is None:
+                return None
+            reply = self._pomodoro.start_timer(minutes)
+            await self._panels.activate("pomodoro")
+            return reply
+        length = _POMODORO_SET_LENGTH.fullmatch(normalized)
+        if length is not None:
+            minutes = _duration_minutes(length.group("amount") or length.group("amount2"))
+            if minutes is None:
+                return None
+            kind = _LENGTH_KINDS[length.group("kind") or length.group("kind2")]
+            reply = self._pomodoro.set_length(kind, minutes)
+            await self._panels.activate("pomodoro")
+            return reply
+        sessions = _POMODORO_SET_SESSIONS.fullmatch(normalized)
+        if sessions is not None:
+            count = _spoken_number(sessions.group("count") or sessions.group("count2") or sessions.group("count3"))
+            if count is None:
+                return None
+            reply = self._pomodoro.set_sessions(count)
+            await self._panels.activate("pomodoro")
+            return reply
         if _POMODORO_OPEN.fullmatch(normalized):
             await self._panels.activate("pomodoro")
             return "Opening the timer. " + self._pomodoro.status_text()

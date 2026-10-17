@@ -73,11 +73,17 @@ async def main() -> None:
     connected = asyncio.Event()
     report: dict[str, object] = {}
     taps: list[InputEvent] = []
+    drive: dict[str, tuple[object, object]] = {}
     gateway = HubGatewayTransport(host='127.0.0.1', port=18791)
     gateway.on_hello(lambda _h: connected.set())
 
     def on_input(event: InputEvent) -> None:
         taps.append(event)
+        if drive and event.container_name == 'capdata' and event.selected_name == 'POMODORO':
+            panels = drive['on'][0]
+            asyncio.get_running_loop().create_task(
+                panels.select('POMODORO', event.selected_index or 0, event.request_id))  # type: ignore[attr-defined]
+            return
         if event.container_name == 'capdata' and event.selected_name == 'NEWS':
             # The Mac answers a headline tap with the article page.
             asyncio.get_running_loop().create_task(gateway.send(HudList(
@@ -142,6 +148,37 @@ async def main() -> None:
         await asyncio.sleep(7.0)
         await snap('6-pomodoro-minute-later', 0.5)
         report['pomodoro_tick_timing'] = timing_since(console(), ids); ids = last_id(console())
+        # The REAL timer service answers taps, as the Mac does: a tap on a
+        # length row must reach the Mac as ITS row (past the plugin-authored
+        # countdown row) and the repaint must show the change.
+        from joat.services.panels import PanelPublisher
+        from joat.services.pomodoro import PomodoroService
+        holder: dict[str, PanelPublisher] = {}
+        real = PomodoroService(on_change=lambda: holder['panels'].publish('pomodoro'))
+        holder['panels'] = PanelPublisher(gateway, {'pomodoro': real})
+        drive['on'] = (holder['panels'], real)
+        await holder['panels'].publish('pomodoro')
+        await asyncio.sleep(1.0)
+        await snap('6b-pomodoro-idle-rows', 0.6)
+        await press('down', 0.5)   # countdown row -> Start
+        await press('down', 0.5)   # Start -> Focus
+        await press('click', 1.5)  # Focus 25 -> 30
+        await snap('6c-after-focus-tap', 0.6)
+        # A repaint rebuilds the firmware list, which has no cursor-setting
+        # API: the cursor is back on row 0 after every tap.
+        for _ in range(5):         # Start, Focus, Short, Long, Sessions
+            await press('down', 0.5)
+        await press('click', 1.5)  # Sessions 4 -> 5
+        await snap('6d-after-sessions-tap', 0.6)
+        for _ in range(6):         # ... down to the 10 min timer
+            await press('down', 0.5)
+        await press('click', 1.5)
+        await snap('6e-after-timer-tap', 0.6)
+        report['pomodoro_after_taps'] = {'rows': list(real.rows()), 'phase': real.phase,
+                                         'sessions': real.lengths.blocks_per_set,
+                                         'focus_min': real.lengths.focus_ms // 60_000}
+        real.reset()
+        drive.clear()
         await press('double_click', 1.0)
         report['pomodoro_home_timing'] = timing_since(console(), ids); ids = last_id(console())
 

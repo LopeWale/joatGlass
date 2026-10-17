@@ -130,7 +130,8 @@ from .services.prompted_speech import PromptedSpeechRuntime
 from .services.voice_latency import VoiceLatencyStore
 from .services.ambient import AmbientPublisher
 from .agents.panel_tools import (
-    news_article_tool, news_headlines_tool, pomodoro_status_tool, web_search_tool,
+    news_article_tool, news_headlines_tool, pomodoro_set_tool, pomodoro_status_tool,
+    web_search_tool,
 )
 from .services.news import NewsService
 from .services.local_commands import (
@@ -587,6 +588,7 @@ async def main() -> None:
             news_article_tool(news),
             web_search_tool(search, panels),
             pomodoro_status_tool(pomodoro),
+            pomodoro_set_tool(pomodoro),
         ]
         # Availability can change after startup; the tools report access
         # failures and retry the same read-only store on each request.

@@ -119,7 +119,7 @@ export function pomodoroPaneGrid(
   if (content?.empty) return [['', content.headline ?? 'Timer unavailable'], ['', content.empty]];
   if (!pomodoro) return [['Timer', 'Focus timer'], ['', 'Say “JOAT, start a pomodoro”']];
   if (pomodoro.phase === 'idle') {
-    return [['Timer', pomodoroBlockLabel(pomodoro)], ['', 'tap: start'], ['Cycle', pomodoroCycleDots(pomodoro.completed)]];
+    return [['Timer', pomodoroBlockLabel(pomodoro)], ['', 'tap: start'], ['Cycle', pomodoroCycleDots(pomodoro.completed, pomodoro.blocksPerSet)]];
   }
   const remaining = pomodoroRemainingMs(pomodoro, nowMs);
   const done = pomodoro.lengthMs > 0 ? 1 - remaining / pomodoro.lengthMs : 0;
@@ -127,7 +127,7 @@ export function pomodoroPaneGrid(
     ['Timer', pomodoroBlockLabel(pomodoro)],
     ['Left', `${formatMinutesLeft(remaining)}${pomodoro.running ? '' : ' · paused'}`],
     ['', progressBar(done, PANE_TEXT_WIDTH)],
-    ['Cycle', pomodoroCycleDots(pomodoro.completed)],
+    ...(pomodoro.phase === 'timer' ? [] : [['Cycle', pomodoroCycleDots(pomodoro.completed, pomodoro.blocksPerSet)] as PaneRow]),
     ...(content?.rows ?? []).map((row): PaneRow => ['', row]),
   ];
 }
