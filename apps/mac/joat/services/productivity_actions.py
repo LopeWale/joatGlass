@@ -80,7 +80,31 @@ _REMINDER_USAGE = (
 # the plugin's eight-second window plus the gate's paint before it and the
 # page restore after the tap, which an acceptance waits for before leaving.
 _CONFIRM_SECONDS = 20.0
+# What the journal's one row per origin says about asking again (see
+# ProductivityActionController._origin_for_next_attempt).
+_ORIGIN_CREATED = frozenset({"succeeded", "reconciled_succeeded"})
+_ORIGIN_MAY_EXIST = frozenset({
+    "approved", "dispatching", "verifying", "uncertain", "reconciling", "manual_review",
+})
+_ORIGIN_NOT_WRITTEN = frozenset({
+    "rejected", "expired", "cancelled", "superseded", "invalidated", "failed",
+    "reconciled_absent",
+})
+_ORIGIN_ATTEMPTS = 25
 log = logging.getLogger(__name__)
+
+
+def _fit_to_units(text: str, units: int) -> str:
+    """Cut ``text`` at a word to at most ``units`` UTF-16 units, ending in an ellipsis."""
+    if utf16_units(text) <= units:
+        return text
+    kept = text
+    while kept and utf16_units(kept + "…") > units:
+        kept = kept[:-1]
+    head, space, _ = kept.rpartition(" ")
+    if space and len(head) >= len(kept) // 2:
+        kept = head
+    return kept.rstrip(" ,;:.-–—") + "…"
 
 
 @dataclass(frozen=True)
@@ -145,6 +169,10 @@ class _CivilIntent:
             f"{self.date.strftime('%b')} {self.date.day}, {self.date.year} "
             f"at {self.date:%H:%M}"
         )
+
+    def display_short(self) -> str:
+        """The day and time alone, for a prompt that has no room for more."""
+        return f"{self.date.strftime('%b')} {self.date.day} at {self.date:%H:%M}"
 
 
 class ProductivityActionController:
@@ -292,8 +320,15 @@ class ProductivityActionController:
         intent: ReminderIntent,
         *,
         origin: ActionOrigin | None = None,
+        fit_title: bool = False,
     ) -> str:
-        """Validate a typed candidate, then use the same confirmed native path."""
+        """Validate a typed candidate, then use the same confirmed native path.
+
+        ``fit_title`` is for text the wearer did not dictate word for word (a
+        note's to-do): the confirmation is the short form and the title is cut
+        at a word to fit it, so the screen shows exactly what is written.
+        Without it a title too long for the exact prompt is refused.
+        """
         if self._bridge is None:
             return "Open JOAT on the Mac and connect Reminders first."
         title = self._valid_title(intent.title)
@@ -320,6 +355,11 @@ class ProductivityActionController:
             or origin.ordinal < 0
         ):
             return "Reminder proposal provenance was invalid. Nothing was created."
+        if origin is not None:
+            next_origin = self._origin_for_next_attempt(origin, title)
+            if isinstance(next_origin, str):
+                return next_origin
+            origin = next_origin
 
         prepared = await self._prepare(
             entity="reminders",
@@ -329,6 +369,17 @@ class ProductivityActionController:
         if isinstance(prepared, str):
             return prepared
         container, chosen_ms = prepared
+        if fit_title:
+            head, tail = "Remind + alert “", f"”? {civil.display_short()}"
+            title = _fit_to_units(
+                title, CONFIRM_PROMPT_MAX_UTF16_UNITS - utf16_units(head + tail),
+            )
+            prompt = f"{head}{title}{tail}"
+        else:
+            prompt = (
+                f"Create reminder + JOAT alert “{title}”? {container.title} · "
+                f"{civil.display()} · {civil.zone}"
+            )
         body: dict[str, object] = {
             "store_instance_id": container.store_instance_id,
             "store_generation": container.store_generation,
@@ -339,10 +390,6 @@ class ProductivityActionController:
             # EventKit owns the due alarm; JOAT monitors are a separate overlay.
             "alarm_offsets_seconds": [0],
         }
-        prompt = (
-            f"Create reminder + JOAT alert “{title}”? {container.title} · "
-            f"{civil.display()} · {civil.zone}"
-        )
         return await self._confirm_and_write(
             kind="reminders.create",
             method="reminders.create",
@@ -361,6 +408,36 @@ class ProductivityActionController:
             planning_anchor_unix_ms=chosen_ms,
             origin=origin,
         )
+
+    def _origin_for_next_attempt(
+        self, origin: ActionOrigin, title: str,
+    ) -> ActionOrigin | str:
+        """Say whether an origin's earlier attempts allow asking again.
+
+        The journal keeps one row per origin so a second tap cannot write the
+        same reminder twice: a created one is answered, not repeated. A row that
+        never wrote anything (declined, timed out, refused) must not block the
+        retry its own receipt invites, so the next attempt takes a numbered
+        origin of its own and the earlier rows stay behind as the audit trail.
+        """
+        for attempt in range(_ORIGIN_ATTEMPTS):
+            candidate = origin if attempt == 0 else ActionOrigin(
+                kind=origin.kind,
+                identifier=f"{origin.identifier}~{attempt}",
+                ordinal=origin.ordinal,
+            )
+            state = self._journal.state_for_origin(
+                candidate.kind, candidate.identifier, candidate.ordinal,
+            )
+            if state is None:
+                return candidate
+            if state in _ORIGIN_CREATED:
+                return f"Reminder already created: {title}."
+            if state in _ORIGIN_MAY_EXIST:
+                return "The reminder may have been created. Check Reminders before retrying."
+            if state not in _ORIGIN_NOT_WRITTEN:
+                return "That reminder is still waiting for your answer."
+        return "That reminder was declined too many times. Add it in Reminders."
 
     async def complete_reminder_by_identity(self, native_identifier: str) -> str | None:
         """Complete the selected native item through the ordinary confirmed flow.

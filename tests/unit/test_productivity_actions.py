@@ -10,7 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 from joat.core.confirmation import ConfirmationResult
-from joat.core.protocol import ProductivityHudView
+from joat.core.protocol import (
+    CONFIRM_PROMPT_MAX_UTF16_UNITS,
+    ProductivityHudView,
+    utf16_units,
+)
 from joat.native.bridge import NativeBridgeUnavailable
 from joat.persistence.actions import ActionDraft, ActionJournal
 from joat.persistence.store import DurableStore
@@ -122,7 +126,9 @@ class ConfirmationHarness:
         return ConfirmationResult(
             action_id=action_id,
             accepted=self.accept,
-            challenge_id="challenge-1",
+            # A real challenge is single-use; a second confirmation in one
+            # journal must not reuse the first one's id.
+            challenge_id=f"challenge-{len(self.prompts)}",
             session_id="session-1",
             payload_digest=payload,
             preview_digest=hashlib.sha256(prompt.encode()).digest(),
@@ -1139,4 +1145,284 @@ class TestTypedReminderIntent:
         assert result == "Reminder proposal provenance was invalid. Nothing was created."
         assert confirms.prompts == []
         assert bridge.calls == []
+        store.close()
+
+
+# Lengths (characters) of the 39 to-dos a real JOAT summarized on this Mac,
+# 2026-10-17. Only 2 of them fit the exact reminder prompt, so a note's
+# "tap: reminders" refused the rest before anything was written.
+REAL_TODO_LENGTHS = [
+    33, 34, 37, 37, 37, 37, 44, 46, 46, 46, 47, 47, 50, 56, 58, 58, 58, 59, 60, 64,
+    65, 67, 69, 69, 74, 75, 75, 76, 77, 81, 81, 81, 86, 86, 90, 93, 97, 99, 117,
+]
+_WORDS = "call the school office about pickup and book room for review notes".split()
+
+
+class EchoingReminderBridge(FakeBridge):
+    """Answers a reminder write with the reminder it was asked to make."""
+
+    async def call(self, method, body=None, **kwargs):  # type: ignore[no-untyped-def]
+        if method == "reminders.create" and body is not None:
+            self.write_result = {
+                "calendar_item_identifier": f"reminder-{len(self.calls)}",
+                "calendar_identifier": body["calendar_identifier"],
+                "title": body["title"],
+                "due": body["due"],
+                "alarms": [{
+                    "relative_offset_seconds": None,
+                    "absolute_unix_ms": body["resolved_due_unix_ms"],
+                }],
+                "is_completed": False,
+            }
+        return await super().call(method, body, **kwargs)
+
+
+def todo_of_length(length: int) -> str:
+    words: list[str] = []
+    while len(" ".join(words)) < length:
+        words.append(_WORDS[len(words) % len(_WORDS)])
+    return " ".join(words)[:length].rstrip()
+
+
+class TestNoteReminderFit:
+    """A note's to-do is a model's sentence; the confirm screen is 120 units."""
+
+    DUE = {"date": "2026-09-01", "time": "09:00", "time_zone": "America/Chicago"}
+    LONG = (
+        "Call the school office about the schedule change and ask whether the "
+        "Thursday pickup moves to the afternoon"
+    )
+
+    @staticmethod
+    def origin(ordinal: int = 0) -> ActionOrigin:
+        return ActionOrigin(kind="voice_note.todo", identifier="capture-1", ordinal=ordinal)
+
+    @staticmethod
+    def rig_with_list(tmp_path: Path, *, accept: bool = True):  # type: ignore[no-untyped-def]
+        bridge = EchoingReminderBridge(
+            containers=[reminder_container("Reminders", "list-1", default=True)],
+        )
+        return (bridge, *rig(tmp_path, bridge, accept=accept))
+
+    @staticmethod
+    def written_titles(bridge: FakeBridge) -> list[object]:
+        return [call[1]["title"] for call in bridge.calls if call[0] == "reminders.create"]
+
+    async def test_the_exact_prompt_still_refuses_a_title_it_cannot_show_whole(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, _, store = self.rig_with_list(tmp_path)
+
+        result = await controller.create_reminder(
+            ReminderIntent(title=self.LONG, **self.DUE), origin=self.origin(),
+        )
+
+        assert result == (
+            "The exact action is too long for the confirmation screen. Shorten the title."
+        )
+        assert confirms.prompts == []
+        assert self.written_titles(bridge) == []
+        store.close()
+
+    async def test_a_long_todo_is_cut_at_a_word_and_written_as_shown(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, _, store = self.rig_with_list(tmp_path)
+
+        result = await controller.create_reminder(
+            ReminderIntent(title=self.LONG, **self.DUE),
+            origin=self.origin(),
+            fit_title=True,
+        )
+
+        (written,) = self.written_titles(bridge)
+        assert isinstance(written, str)
+        assert result == f"Created Reminder: {written}."
+        assert written.endswith("…") and self.LONG.startswith(written[:-1])
+        assert self.LONG[len(written) - 1] == " "
+        assert confirms.prompts == [f"Remind + alert “{written}”? Sep 1 at 09:00"]
+        assert utf16_units(confirms.prompts[0]) <= CONFIRM_PROMPT_MAX_UTF16_UNITS
+        store.close()
+
+    async def test_a_title_that_already_fits_is_written_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, _, store = self.rig_with_list(tmp_path)
+
+        result = await controller.create_reminder(
+            ReminderIntent(title="Email the release notes", **self.DUE),
+            origin=self.origin(),
+            fit_title=True,
+        )
+
+        assert result == "Created Reminder: Email the release notes."
+        assert self.written_titles(bridge) == ["Email the release notes"]
+        assert confirms.prompts == ["Remind + alert “Email the release notes”? Sep 1 at 09:00"]
+        store.close()
+
+    @pytest.mark.parametrize("length", sorted(set(REAL_TODO_LENGTHS)))
+    async def test_every_real_todo_length_reaches_the_confirmation(
+        self, tmp_path: Path, length: int
+    ) -> None:
+        bridge, controller, confirms, _, store = self.rig_with_list(tmp_path)
+
+        result = await controller.create_reminder(
+            ReminderIntent(title=todo_of_length(length), **self.DUE),
+            origin=self.origin(),
+            fit_title=True,
+        )
+
+        assert result.startswith("Created Reminder: ")
+        assert utf16_units(confirms.prompts[0]) <= CONFIRM_PROMPT_MAX_UTF16_UNITS
+        store.close()
+
+    async def test_the_cut_counts_utf16_units_not_characters(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, _, store = self.rig_with_list(tmp_path)
+
+        result = await controller.create_reminder(
+            ReminderIntent(title="😀" * 70, **self.DUE),
+            origin=self.origin(),
+            fit_title=True,
+        )
+
+        assert result.startswith("Created Reminder: ")
+        assert utf16_units(confirms.prompts[0]) <= CONFIRM_PROMPT_MAX_UTF16_UNITS
+        store.close()
+
+    async def test_a_declined_reminder_can_be_asked_again_from_the_same_note(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, journal, store = self.rig_with_list(
+            tmp_path, accept=False,
+        )
+        intent = ReminderIntent(title="Email the release notes", **self.DUE)
+
+        first = await controller.create_reminder(intent, origin=self.origin())
+        confirms.accept = True
+        second = await controller.create_reminder(intent, origin=self.origin())
+
+        assert first == "Reminder cancelled."
+        assert second == "Created Reminder: Email the release notes."
+        assert journal.state_for_origin("voice_note.todo", "capture-1", 0) == "rejected"
+        assert journal.state_for_origin("voice_note.todo", "capture-1~1", 0) == "succeeded"
+        store.close()
+
+    async def test_a_declined_reminder_can_be_asked_again_the_next_day(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, _, store = self.rig_with_list(tmp_path, accept=False)
+        first = await controller.create_reminder(
+            ReminderIntent(title="Email the release notes", **self.DUE),
+            origin=self.origin(),
+        )
+        confirms.accept = True
+        second = await controller.create_reminder(
+            ReminderIntent(title="Email the release notes", **{**self.DUE, "date": "2026-09-02"}),
+            origin=self.origin(),
+        )
+
+        assert first == "Reminder cancelled."
+        assert second == "Created Reminder: Email the release notes."
+        store.close()
+
+    async def test_several_declines_in_a_row_still_leave_the_way_open(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, journal, store = self.rig_with_list(
+            tmp_path, accept=False,
+        )
+        intent = ReminderIntent(title="Email the release notes", **self.DUE)
+
+        for _ in range(3):
+            assert await controller.create_reminder(
+                intent, origin=self.origin(),
+            ) == "Reminder cancelled."
+        confirms.accept = True
+        last = await controller.create_reminder(intent, origin=self.origin())
+
+        assert last == "Created Reminder: Email the release notes."
+        assert journal.state_for_origin("voice_note.todo", "capture-1~3", 0) == "succeeded"
+        store.close()
+
+    async def test_a_created_reminder_is_answered_not_created_twice(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, _, _, store = self.rig_with_list(tmp_path)
+        intent = ReminderIntent(title="Email the release notes", **self.DUE)
+
+        first = await controller.create_reminder(intent, origin=self.origin())
+        second = await controller.create_reminder(intent, origin=self.origin())
+
+        assert first == "Created Reminder: Email the release notes."
+        assert second == "Reminder already created: Email the release notes."
+        assert self.written_titles(bridge) == ["Email the release notes"]
+        store.close()
+
+    async def test_a_reminder_that_may_exist_is_never_asked_again(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, _, store = self.rig_with_list(tmp_path)
+        bridge.write_error = NativeBridgeUnavailable(
+            "reply lost", possible_external_commit=True,
+        )
+        intent = ReminderIntent(title="Email the release notes", **self.DUE)
+
+        first = await controller.create_reminder(intent, origin=self.origin())
+        bridge.write_error = None
+        second = await controller.create_reminder(intent, origin=self.origin())
+
+        assert first == "The reminder may have been created. Check Reminders before retrying."
+        assert second == first
+        assert len(confirms.prompts) == 1
+        store.close()
+
+    async def test_a_reminder_that_failed_before_writing_can_be_asked_again(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, _, _, store = self.rig_with_list(tmp_path)
+        bridge.write_error = NativeBridgeUnavailable(
+            "not dispatched", possible_external_commit=False,
+        )
+        intent = ReminderIntent(title="Email the release notes", **self.DUE)
+
+        first = await controller.create_reminder(intent, origin=self.origin())
+        bridge.write_error = None
+        second = await controller.create_reminder(intent, origin=self.origin())
+
+        assert first == "Reminders did not create the reminder. Check JOAT on the Mac."
+        assert second == "Created Reminder: Email the release notes."
+        store.close()
+
+    async def test_an_unanswered_prompt_is_not_stacked_with_a_second_one(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, journal, store = self.rig_with_list(tmp_path)
+        journal.create_draft(
+            ActionDraft(
+                kind="reminders.create",
+                canonical_payload=b"{}",
+                target_digest=hashlib.sha256(b"list-1").digest(),
+                idempotency_key="reminders.create:voice_note.todo:capture-1:0",
+                origin_kind="voice_note.todo",
+                origin_id="capture-1",
+                origin_ordinal=0,
+            ),
+            now_us=1,
+        )
+
+        result = await controller.create_reminder(
+            ReminderIntent(title="Email the release notes", **self.DUE),
+            origin=self.origin(),
+        )
+
+        assert result == "That reminder is still waiting for your answer."
+        assert confirms.prompts == []
+        store.close()
+
+    def test_an_origin_with_no_action_has_no_state(self, tmp_path: Path) -> None:
+        _, _, _, journal, store = self.rig_with_list(tmp_path)
+
+        assert journal.state_for_origin("voice_note.todo", "nobody", 0) is None
         store.close()

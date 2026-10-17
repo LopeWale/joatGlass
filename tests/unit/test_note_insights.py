@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from joat.persistence.store import DurableStore
 from joat.persistence.voice_notes import VoiceNoteStore
@@ -244,16 +247,22 @@ async def test_command_grammar_routes_summarize_ask_and_unknown(tmp_path: Path) 
 
 
 class FakeProductivity:
-    def __init__(self) -> None:
+    def __init__(self, receipts: list[str] | None = None) -> None:
         self.intents: list[tuple[ReminderIntent, ActionOrigin | None]] = []
+        self.fit_flags: list[bool] = []
+        self._receipts = list(receipts or [])
 
     async def create_reminder(
         self,
         intent: ReminderIntent,
         *,
         origin: ActionOrigin | None = None,
+        fit_title: bool = False,
     ) -> str:
         self.intents.append((intent, origin))
+        self.fit_flags.append(fit_title)
+        if self._receipts:
+            return self._receipts.pop(0)
         return f"Created Reminder: {intent.title}."
 
 
@@ -288,6 +297,73 @@ async def test_todos_become_confirmed_reminders_with_provenance(tmp_path: Path) 
         assert first_origin.kind == "voice_note.todo"
         assert first_origin.identifier == "capture-1"
         assert [origin.ordinal for _, origin in productivity.intents if origin] == [0, 1]
+        # A to-do is a model's sentence: cut to fit the screen, not refused by it.
+        assert productivity.fit_flags == [True, True]
+
+
+async def _receipt_for(
+    tmp_path: Path, receipts: list[str],
+) -> str:
+    completer = FakeCompleter([_SHAPED])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    commands = NoteInsightCommandController(
+        insights,
+        productivity=FakeProductivity(receipts),  # type: ignore[arg-type]
+        local_time_zone=lambda: "America/Chicago",
+        now=lambda: datetime(2026, 8, 31, 20, 0, tzinfo=timezone.utc),
+    )
+    with durable:
+        retained_note(notes)
+        await insights.summarize_last()
+        return await commands.handle_command("create reminders from the last note") or ""
+
+
+async def test_a_refused_reminder_says_why_and_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="joat.services.note_insights")
+
+    receipt = await _receipt_for(
+        tmp_path, ["Reminder cancelled.", "Created Reminder: Book the retro room."],
+    )
+
+    assert receipt == (
+        "Created 1 of 2 reminders from “Launch sync”, due tomorrow 09:00. "
+        "Reminder cancelled."
+    )
+    assert "not created: Reminder cancelled." in caplog.text
+
+
+async def test_every_reminder_refused_still_names_the_reason(tmp_path: Path) -> None:
+    receipt = await _receipt_for(
+        tmp_path, ["Reminders is unavailable. Check JOAT on the Mac."] * 2,
+    )
+
+    assert receipt == (
+        "Created 0 of 2 reminders from “Launch sync”, due tomorrow 09:00. "
+        "Reminders is unavailable. Check JOAT on the Mac."
+    )
+
+
+async def test_a_second_tap_reports_reminders_that_already_exist(tmp_path: Path) -> None:
+    receipt = await _receipt_for(tmp_path, [
+        "Reminder already created: Email the release notes.",
+        "Reminder already created: Book the retro room.",
+    ])
+
+    assert receipt == "The reminders from “Launch sync” are already in Reminders."
+
+
+async def test_new_and_existing_reminders_are_counted_apart(tmp_path: Path) -> None:
+    receipt = await _receipt_for(tmp_path, [
+        "Reminder already created: Email the release notes.",
+        "Created Reminder: Book the retro room.",
+    ])
+
+    assert receipt == (
+        "Created 1 of 2 reminders from “Launch sync”, due tomorrow 09:00. "
+        "1 already in Reminders. Adjust times in Planning."
+    )
 
 
 async def test_reminders_require_a_summary_first(tmp_path: Path) -> None:

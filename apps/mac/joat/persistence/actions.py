@@ -182,6 +182,15 @@ class ActionJournal:
     def get(self, action_id: str) -> ActionRecord:
         return self._get_with(self._store._db, action_id)
 
+    def state_for_origin(self, kind: str, identifier: str, ordinal: int) -> str | None:
+        """The state of the one action an origin names, or None if it has none."""
+        row = self._store.execute(
+            "SELECT state FROM actions "
+            "WHERE origin_kind = ? AND origin_id = ? AND origin_ordinal = ?",
+            (kind, identifier, ordinal),
+        ).fetchone()
+        return None if row is None else str(row[0])
+
     def recent(self, *, limit: int = 5) -> tuple[ActionActivity, ...]:
         if (
             isinstance(limit, bool)

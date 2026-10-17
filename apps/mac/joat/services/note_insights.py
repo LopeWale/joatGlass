@@ -509,7 +509,9 @@ class NoteInsightCommandController:
         except ZoneInfoNotFoundError:
             return "The Mac's time zone is unavailable, so reminders cannot be scheduled."
         due_date = (local_now + timedelta(days=1)).strftime("%Y-%m-%d")
-        created = 0
+        total = len(todos)
+        created = already = 0
+        reasons: list[str] = []
         for ordinal, todo in enumerate(todos):
             receipt = await self._productivity.create_reminder(
                 ReminderIntent(
@@ -523,14 +525,35 @@ class NoteInsightCommandController:
                     identifier=note.capture_id,
                     ordinal=ordinal,
                 ),
+                # A to-do is a model's sentence, not the wearer's dictation:
+                # it is cut to fit the confirmation rather than refused by it.
+                fit_title=True,
             )
             if receipt.startswith("Created Reminder:"):
                 created += 1
-        total = len(todos)
-        return (
-            f"Created {created} of {total} reminder{'s' if total != 1 else ''} "
-            f"from “{title}”, due tomorrow 09:00. Adjust times in Planning."
+            elif receipt.startswith("Reminder already created:"):
+                already += 1
+            else:
+                # The tap's receipt used to say only "Created 0 of N", and the
+                # log said nothing: every refusal looked like it never ran.
+                log.info(
+                    "note reminder %d of %d for %s not created: %s",
+                    ordinal + 1, total, note.capture_id, receipt,
+                )
+                reasons.append(receipt)
+        plural = "s" if total != 1 else ""
+        if already == total:
+            verb = "are" if total != 1 else "is"
+            return f"The reminder{plural} from “{title}” {verb} already in Reminders."
+        summary = (
+            f"Created {created} of {total} reminder{plural} "
+            f"from “{title}”, due tomorrow 09:00."
         )
+        if already:
+            summary += f" {already} already in Reminders."
+        if reasons:
+            return f"{summary} {reasons[0]}"
+        return f"{summary} Adjust times in Planning."
 
     async def _export_to_notes(self) -> str:
         note = self._insights.latest_retained()

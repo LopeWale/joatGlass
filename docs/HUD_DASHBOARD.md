@@ -380,8 +380,16 @@ never leave the Mac) into summary + key points + todos, engine-attributed
 and replaceable — "resummarize with claude" is the explicit cloud opt-in via
 the official CLI. Tapping a recording opens summary/key points/todos;
 "ask the last note …" answers from the transcript; "create reminders from
-the last note" walks each todo through the existing confirmed EventKit gate
-(due tomorrow 09:00, provenance `voice_note.todo`); "send the last note to
+the last note" (or a tap on the note) walks each todo through the existing
+confirmed EventKit gate (due tomorrow 09:00, provenance `voice_note.todo`).
+A todo is a model's sentence, so its confirmation is the short form
+`Remind + alert “…”? Oct 18 at 09:00` and the title is cut at a word to fit
+the native page's 120 units (`create_reminder(fit_title=True)`); what the
+screen shows is exactly what is written. A todo declined or timed out can be
+asked again by tapping once more (each attempt is its own journal row,
+`<capture>~N`), one already created is answered "already in Reminders" and
+never written twice, and the receipt names the first reason a todo was not
+created. "send the last note to
 my notes" writes Apple Notes on the Mac (JOAT folder — the Even plugin has
 no phone-side Notes API) and iCloud carries it to the phone.
 
