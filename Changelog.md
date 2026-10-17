@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-17 — QuickNote reminders: fit the confirm screen, allow a retry, say why
+
+The wearer: "the reminder creation from quick note is also failing; check the logs".
+
+- **What the logs showed.** Nothing: no error, no traceback, no reminder line since the engine started, and the action journal has no `reminders.create` row at all. So no attempt had reached the confirmation. The tap's receipt said only "Created 0 of N reminders".
+- **Why.** The reminder confirmation is the exact prompt `Create reminder + JOAT alert “<title>”? <list> · <date>, <year> at <time> · <zone>`, and the native confirmation page holds 120 UTF-16 units. The fixed words use 84, which leaves 36 for the to-do. A to-do is a model's sentence (the 39 on this Mac: median 64, longest 117), so 37 of 39 were refused with "too long for the confirmation screen" before the journal was touched, and `create_reminders_for` kept only the count.
+- **A second fault behind it.** A declined or timed-out reminder could never be asked again: its payload is purged on cancel, the origin's idempotency key then conflicts, `ActionConflictError` escaped and the tap answered "try again". A reminder already created threw the same way on a second tap.
+- **Fix.** `create_reminder(fit_title=True)`, for the note flow only: the short confirmation `Remind + alert “<title>”? Oct 18 at 09:00` with the title cut at a word to fit (the reminder is written with the cut title, so the screen shows exactly what is written; the full text stays in the note). The spoken "remind me to ..." keeps the strict exact prompt. A retry after an attempt that wrote nothing takes a numbered origin (`<capture>~N`) and the earlier rows stay as the audit trail; a created one answers "already in Reminders" and is never written twice; one that may exist stays "check Reminders"; one still waiting says so (`ActionJournal.state_for_origin`). The receipt names the first reason a to-do was not created, and each one is logged (`note reminder 2 of 4 for <capture> not created: ...`).
+- **Verified.** 39 of 39 real to-dos reach the confirmation through the production controller (5 shortened, widest prompt 120 of 120) against a throwaway journal and a bridge that echoes the reminder back. Tests: the 39 real lengths, emoji at the cut, retry after one and several declines and the next day, no double write, may-exist and failed-before-write, and the note-level receipts. Full suite 3758 passed, mypy's one existing error in `reply_engine.py`.
+- **Not verified.** The real EventKit write and the confirmation on the glasses: the Mac app's bridge accepts only the engine it launched, so a probe from outside is refused. Mac engine only, no plugin change; it needs a JOAT restart.
+
 ## 2026-10-17 — Build JOAT 0.1.136
 
 - Packed from `d34eb72` (clean under `apps/hub-plugin`) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.136 above the last recorded build; app.json, package.json and package-lock.json all 0.1.136. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1273 tests passed, typecheck clean.
