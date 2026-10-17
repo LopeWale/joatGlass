@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-16 — Build JOAT 0.1.135
+
+- Packed from `ba6aab2` (clean tree) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.135 above the last recorded build; app.json, package.json and package-lock.json all 0.1.135.
+- `apps/hub-plugin/joat.ehpk`: 178854 bytes, SHA-256 `668e65752cefbbcb57aa23a6257e661f1388fd3810d643c67a3e06f11f0a7ce1`. Adds to 0.1.134 the wearer-led Brainstorm: one round per move, whole answers, the `BRAINSTORM · ROOM` reader (`ba6aab2`). The Mac engine needs the same revision (restart); the plugin alone shows the reader only when the engine sends it.
+
 ## 2026-10-16 — Brainstorm: the wearer leads, and every answer is shown in full
 
 The wearer: Brainstorm is a thinking partner, "i can ask question and they break it down for me with details or i can ask for a plan and they help brainstorm". Two things were wrong: responses were cut to a line and unreadable, and JOAT carried the rounds on by itself, agreeing and coordinating for them. The 0.1.133 redesign made it worse and was reverted (`81fe353`); this is the fix on top of the original, and nothing else.
