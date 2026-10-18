@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-18 — Build JOAT 0.1.138
+
+- Packed from `49b40bb` (clean tree) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.138 above the last recorded build (0.1.137); app.json, package.json and package-lock.json all 0.1.138. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Typecheck clean; the code is `4405d7c` (plugin 1281 tests passed), and `49b40bb` changes only the version numbers.
+- `apps/hub-plugin/joat.ehpk`: 179048 bytes, SHA-256 `b83f6e6c263bc42a70686e8d391a2208c5a17faaae34dc52d56c4ea9672bc930`. Adds to 0.1.137 the Planning month's shared footer and no "Planning" title beside the month. Plugin only: the Mac needs no restart for it. Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-18 — Planning month: the shared footer, and no title beside the month
 
 The wearer: "replace the planning footer with the reusable footer we use with all the other pages. also remove the planning word that is on the same row as the 'Month Year'".
