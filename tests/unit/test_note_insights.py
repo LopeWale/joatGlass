@@ -4,19 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import date, datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from joat.persistence.store import DurableStore
 from joat.persistence.voice_notes import VoiceNoteStore
+from joat.services.commitments import Commitment
 from joat.services.note_insights import (
     NoteInsightCommandController,
     NoteInsightsService,
+    _due_date,
     parse_insights,
 )
-from joat.services.productivity_actions import ActionOrigin, ReminderIntent
+from joat.services.productivity_actions import (
+    ActionOrigin,
+    ReminderBatchResult,
+    ReminderIntent,
+)
 
 _SHAPED = (
     "SUMMARY:\n"
@@ -246,139 +254,462 @@ async def test_command_grammar_routes_summarize_ask_and_unknown(tmp_path: Path) 
         assert await commands.handle_command("what time is it") is None
 
 
+#: A Monday, 09:00 in Chicago. The note below was recorded then.
+NOTE_US = int(datetime(2026, 8, 31, 14, 0, tzinfo=timezone.utc).timestamp() * 1_000_000)
+#: Monday afternoon in Chicago: that morning's 09:00 has already gone by.
+NOW = datetime(2026, 8, 31, 20, 0, tzinfo=timezone.utc)
+
+SPOKEN = (
+    "We agreed to ship Friday. I need to email the release notes to the team tomorrow. "
+    "QA signs off Thursday. I'll book the retro room on Friday."
+)
+EMAIL_QUOTE = "I need to email the release notes to the team tomorrow."
+COMMITMENT_REPLY = (
+    "TASK: Email the release notes\n"
+    f"QUOTE: {EMAIL_QUOTE}\n"
+    "TASK: Book the retro room\n"
+    "QUOTE: I'll book the retro room on Friday.\n"
+    # The model's own idea: nothing in the note says it, so it is never offered.
+    "TASK: Schedule a meeting with the IT department\n"
+    "QUOTE: We should schedule a meeting with the IT department.\n"
+)
+EMAIL_KEY = Commitment(task="Email the release notes", quote=EMAIL_QUOTE).key
+BOOK_KEY = Commitment(task="Book the retro room", quote="I'll book the retro room on Friday.").key
+
+
 class FakeProductivity:
-    def __init__(self, receipts: list[str] | None = None) -> None:
-        self.intents: list[tuple[ReminderIntent, ActionOrigin | None]] = []
-        self.fit_flags: list[bool] = []
-        self._receipts = list(receipts or [])
+    """What the controller needs of the confirmed-reminder writer."""
 
-    async def create_reminder(
+    def __init__(
         self,
-        intent: ReminderIntent,
+        result: ReminderBatchResult | None = None,
         *,
-        origin: ActionOrigin | None = None,
-        fit_title: bool = False,
-    ) -> str:
-        self.intents.append((intent, origin))
-        self.fit_flags.append(fit_title)
-        if self._receipts:
-            return self._receipts.pop(0)
-        return f"Created Reminder: {intent.title}."
+        created: set[str] | None = None,
+    ) -> None:
+        self.batches: list[tuple[list[tuple[ReminderIntent, ActionOrigin]], str]] = []
+        self.created = created or set()
+        self._result = result
+
+    def is_created(self, origin: ActionOrigin) -> bool:
+        return origin.identifier in self.created
+
+    async def create_reminder_batch(
+        self,
+        items: Sequence[tuple[ReminderIntent, ActionOrigin]],
+        *,
+        label: str,
+    ) -> ReminderBatchResult:
+        self.batches.append((list(items), label))
+        if self._result is not None:
+            return self._result
+        return ReminderBatchResult(created=len(items))
 
 
-async def test_todos_become_confirmed_reminders_with_provenance(tmp_path: Path) -> None:
-    completer = FakeCompleter([_SHAPED])
-    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
-    productivity = FakeProductivity()
-    commands = NoteInsightCommandController(
+class FakeReview:
+    """The glasses list page: shows every line, then the wearer decides."""
+
+    def __init__(self, decision: bool | None = True) -> None:
+        self.decision = decision
+        self.shown: list[tuple[str, tuple[str, ...]]] = []
+
+    async def __call__(self, title: str, lines: Sequence[str]) -> bool | None:
+        self.shown.append((title, tuple(lines)))
+        return self.decision
+
+
+def reminder_commands(
+    insights: NoteInsightsService,
+    productivity: FakeProductivity | None,
+    review: FakeReview | None,
+    *,
+    zone: str | None = "America/Chicago",
+) -> NoteInsightCommandController:
+    return NoteInsightCommandController(
         insights,
         productivity=productivity,  # type: ignore[arg-type]
-        local_time_zone=lambda: "America/Chicago",
-        now=lambda: datetime(2026, 8, 31, 20, 0, tzinfo=timezone.utc),
+        review_reminders=review,
+        local_time_zone=lambda: zone,
+        now=lambda: NOW,
     )
+
+
+async def test_spoken_commitments_are_read_then_confirmed_once_with_provenance(
+    tmp_path: Path,
+) -> None:
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    productivity, review = FakeProductivity(), FakeReview()
+    commands = reminder_commands(insights, productivity, review)
     with durable:
-        retained_note(notes)
-        await insights.summarize_last()
+        # No summary has been made: the transcript alone is the source.
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
 
-        receipt = await commands.handle_command("create reminders from the last note")
+        receipt = await commands.create_reminders_for("capture-1")
 
-        assert receipt == (
-            "Created 2 of 2 reminders from “Launch sync”, due tomorrow 09:00. "
-            "Adjust times in Planning."
-        )
-        assert [intent.title for intent, _ in productivity.intents] == [
+        assert receipt == "Added 2 reminders from “Launch sync”. Adjust times in Planning."
+        # Every reminder is shown in full, with the day it will fire.
+        assert review.shown == [(
+            "Launch sync",
+            (
+                "□ Email the release notes — Sep 1 at 09:00",
+                "□ Book the retro room — Sep 4 at 09:00",
+            ),
+        )]
+        ((items, label),) = productivity.batches
+        assert label == "Launch sync"
+        assert [intent.title for intent, _ in items] == [
             "Email the release notes", "Book the retro room",
         ]
-        first_intent, first_origin = productivity.intents[0]
-        assert first_intent.date == "2026-09-01"
-        assert first_intent.time == "09:00"
-        assert first_intent.time_zone == "America/Chicago"
-        assert first_origin is not None
-        assert first_origin.kind == "voice_note.todo"
-        assert first_origin.identifier == "capture-1"
-        assert [origin.ordinal for _, origin in productivity.intents if origin] == [0, 1]
-        # A to-do is a model's sentence: cut to fit the screen, not refused by it.
-        assert productivity.fit_flags == [True, True]
+        # "tomorrow" is the day after the note; "Friday" the first Friday after it.
+        assert [intent.date for intent, _ in items] == ["2026-09-01", "2026-09-04"]
+        assert {(intent.time, intent.time_zone) for intent, _ in items} == {
+            ("09:00", "America/Chicago"),
+        }
+        assert [(origin.kind, origin.identifier, origin.ordinal) for _, origin in items] == [
+            ("voice_note.commitment", f"capture-1:{EMAIL_KEY}", 0),
+            ("voice_note.commitment", f"capture-1:{BOOK_KEY}", 0),
+        ]
+        # The private transcript went to the local engine only, asked once.
+        assert len(completer.calls) == 1
+        assert "retro room" in completer.calls[0][1]
 
 
-async def _receipt_for(
-    tmp_path: Path, receipts: list[str],
-) -> str:
-    completer = FakeCompleter([_SHAPED])
+async def test_a_task_the_wearer_never_said_is_never_offered(tmp_path: Path) -> None:
+    completer = FakeCompleter([COMMITMENT_REPLY])
     durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
-    commands = NoteInsightCommandController(
-        insights,
-        productivity=FakeProductivity(receipts),  # type: ignore[arg-type]
-        local_time_zone=lambda: "America/Chicago",
-        now=lambda: datetime(2026, 8, 31, 20, 0, tzinfo=timezone.utc),
+    productivity, review = FakeProductivity(), FakeReview()
+    commands = reminder_commands(insights, productivity, review)
+    with durable:
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        await commands.create_reminders_for("capture-1")
+
+        assert all("IT department" not in line for line in review.shown[0][1])
+        assert all(
+            "IT department" not in intent.title
+            for intent, _ in productivity.batches[0][0]
+        )
+
+
+async def test_nothing_is_written_unless_the_list_is_confirmed(tmp_path: Path) -> None:
+    for decision, expected in [
+        (False, "Reminders cancelled."),
+        (None, "Reminders were not added: the list was not answered in time."),
+    ]:
+        completer = FakeCompleter([COMMITMENT_REPLY])
+        durable, notes, insights = service(tmp_path / f"{decision}.sqlite3", completer)
+        productivity, review = FakeProductivity(), FakeReview(decision)
+        commands = reminder_commands(insights, productivity, review)
+        with durable:
+            retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+            receipt = await commands.create_reminders_for("capture-1")
+
+            assert receipt == expected
+            assert len(review.shown) == 1
+            assert productivity.batches == []
+
+
+async def test_a_declined_final_confirmation_cancels_without_a_count(tmp_path: Path) -> None:
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    productivity = FakeProductivity(ReminderBatchResult(declined=True))
+    commands = reminder_commands(insights, productivity, FakeReview())
+    with durable:
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        assert await commands.create_reminders_for("capture-1") == "Reminders cancelled."
+        assert len(productivity.batches) == 1
+
+
+async def test_a_note_where_nothing_was_promised_offers_nothing(tmp_path: Path) -> None:
+    completer = FakeCompleter(["NONE"])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    productivity, review = FakeProductivity(), FakeReview()
+    commands = reminder_commands(insights, productivity, review)
+    with durable:
+        retained_note(notes, base_us=NOTE_US)
+
+        receipt = await commands.create_reminders_for("capture-1")
+
+        assert receipt == (
+            "“Launch sync” has no reminders: I add only what you said you will do."
+        )
+        assert review.shown == [] and productivity.batches == []
+
+
+async def test_a_silent_model_is_reported_and_asked_again_next_time(tmp_path: Path) -> None:
+    completer = FakeCompleter([None, COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    productivity, review = FakeProductivity(), FakeReview()
+    commands = reminder_commands(insights, productivity, review)
+    with durable:
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        first = await commands.create_reminders_for("capture-1")
+        second = await commands.create_reminders_for("capture-1")
+
+        assert first == "The local model did not answer. Try again in a moment."
+        assert review.shown and second.startswith("Added 2 reminders")
+        assert len(completer.calls) == 2
+
+
+async def test_the_model_reads_a_note_once_however_often_it_is_opened(tmp_path: Path) -> None:
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    review = FakeReview(False)
+    commands = reminder_commands(insights, FakeProductivity(), review)
+    with durable:
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        for _ in range(3):
+            assert await commands.create_reminders_for("capture-1") == "Reminders cancelled."
+
+        assert len(completer.calls) == 1
+        assert len(review.shown) == 3
+        assert review.shown[0] == review.shown[2]
+
+
+async def test_reminders_already_made_are_not_offered_again(tmp_path: Path) -> None:
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    productivity = FakeProductivity(created={f"capture-1:{EMAIL_KEY}"})
+    review = FakeReview()
+    commands = reminder_commands(insights, productivity, review)
+    with durable:
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        receipt = await commands.create_reminders_for("capture-1")
+
+        assert receipt == (
+            "Added 1 reminder from “Launch sync”. 1 already in Reminders. "
+            "Adjust times in Planning."
+        )
+        assert review.shown[0][1] == ("□ Book the retro room — Sep 4 at 09:00",)
+        assert [intent.title for intent, _ in productivity.batches[0][0]] == ["Book the retro room"]
+
+
+@pytest.mark.parametrize(
+    ("created", "expected"),
+    [
+        ({EMAIL_KEY, BOOK_KEY}, "The reminders from “Launch sync” are already in Reminders."),
+        ({BOOK_KEY}, None),
+    ],
+)
+async def test_a_second_tap_after_everything_was_made_asks_nothing(
+    tmp_path: Path, created: set[str], expected: str | None,
+) -> None:
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    productivity = FakeProductivity(created={f"capture-1:{key}" for key in created})
+    review = FakeReview()
+    commands = reminder_commands(insights, productivity, review)
+    with durable:
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        receipt = await commands.create_reminders_for("capture-1")
+
+        if expected is not None:
+            assert receipt == expected
+            assert review.shown == [] and productivity.batches == []
+        else:
+            assert len(review.shown) == 1
+
+
+async def test_one_reminder_already_made_reads_in_the_singular(tmp_path: Path) -> None:
+    completer = FakeCompleter(["TASK: Email the release notes\nQUOTE: " + EMAIL_QUOTE])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    commands = reminder_commands(
+        insights, FakeProductivity(created={f"capture-1:{EMAIL_KEY}"}), FakeReview(),
     )
     with durable:
-        retained_note(notes)
-        await insights.summarize_last()
-        return await commands.handle_command("create reminders from the last note") or ""
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        assert await commands.create_reminders_for("capture-1") == (
+            "The reminder from “Launch sync” is already in Reminders."
+        )
 
 
-async def test_a_refused_reminder_says_why_and_is_logged(
+async def test_a_reminder_that_could_not_be_written_says_why_and_is_logged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO, logger="joat.services.note_insights")
-
-    receipt = await _receipt_for(
-        tmp_path, ["Reminder cancelled.", "Created Reminder: Book the retro room."],
-    )
-
-    assert receipt == (
-        "Created 1 of 2 reminders from “Launch sync”, due tomorrow 09:00. "
-        "Reminder cancelled."
-    )
-    assert "not created: Reminder cancelled." in caplog.text
-
-
-async def test_every_reminder_refused_still_names_the_reason(tmp_path: Path) -> None:
-    receipt = await _receipt_for(
-        tmp_path, ["Reminders is unavailable. Check JOAT on the Mac."] * 2,
-    )
-
-    assert receipt == (
-        "Created 0 of 2 reminders from “Launch sync”, due tomorrow 09:00. "
-        "Reminders is unavailable. Check JOAT on the Mac."
-    )
-
-
-async def test_a_second_tap_reports_reminders_that_already_exist(tmp_path: Path) -> None:
-    receipt = await _receipt_for(tmp_path, [
-        "Reminder already created: Email the release notes.",
-        "Reminder already created: Book the retro room.",
-    ])
-
-    assert receipt == "The reminders from “Launch sync” are already in Reminders."
-
-
-async def test_new_and_existing_reminders_are_counted_apart(tmp_path: Path) -> None:
-    receipt = await _receipt_for(tmp_path, [
-        "Reminder already created: Email the release notes.",
-        "Created Reminder: Book the retro room.",
-    ])
-
-    assert receipt == (
-        "Created 1 of 2 reminders from “Launch sync”, due tomorrow 09:00. "
-        "1 already in Reminders. Adjust times in Planning."
-    )
-
-
-async def test_reminders_require_a_summary_first(tmp_path: Path) -> None:
-    durable, notes, insights = service(tmp_path / "joat.sqlite3", FakeCompleter([]))
-    commands = NoteInsightCommandController(
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    problem = "Reminders did not create the reminder. Check JOAT on the Mac."
+    commands = reminder_commands(
         insights,
-        productivity=FakeProductivity(),  # type: ignore[arg-type]
-        local_time_zone=lambda: "America/Chicago",
+        FakeProductivity(ReminderBatchResult(created=1, problems=(problem,))),
+        FakeReview(),
     )
     with durable:
-        retained_note(notes)
-        receipt = await commands.handle_command("create reminders from the last note")
-        assert receipt == (
-            "“Launch sync” has no summary yet. Say: summarize the last note, first."
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        receipt = await commands.create_reminders_for("capture-1")
+
+        assert receipt == f"Added 1 of 2 reminders from “Launch sync”. {problem}"
+        assert f"not created: {problem}" in caplog.text
+
+
+async def test_a_reminder_the_journal_found_made_meanwhile_is_counted_apart(
+    tmp_path: Path,
+) -> None:
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    commands = reminder_commands(
+        insights, FakeProductivity(ReminderBatchResult(created=1, already=1)), FakeReview(),
+    )
+    with durable:
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        assert await commands.create_reminders_for("capture-1") == (
+            "Added 1 of 2 reminders from “Launch sync”. 1 already in Reminders."
+            " Adjust times in Planning."
         )
+
+
+async def test_a_refusal_is_the_receipt(tmp_path: Path) -> None:
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    refusal = "Open JOAT on the Mac and connect Reminders first."
+    commands = reminder_commands(
+        insights, FakeProductivity(ReminderBatchResult(refused=refusal)), FakeReview(),
+    )
+    with durable:
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        assert await commands.create_reminders_for("capture-1") == refusal
+
+
+async def test_reminders_say_what_is_missing_before_asking_anything(tmp_path: Path) -> None:
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    with durable:
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        no_productivity = reminder_commands(insights, None, FakeReview())
+        no_review = reminder_commands(insights, FakeProductivity(), None)
+        no_zone = reminder_commands(insights, FakeProductivity(), FakeReview(), zone=None)
+        bad_zone = reminder_commands(insights, FakeProductivity(), FakeReview(), zone="Mars/Olympus")
+        missing = reminder_commands(insights, FakeProductivity(), FakeReview())
+
+        assert await no_productivity.create_reminders_for("capture-1") == (
+            "Reminders are unavailable on this Mac."
+        )
+        assert await no_review.create_reminders_for("capture-1") == (
+            "Reminders cannot be shown on the glasses right now."
+        )
+        for commands in (no_zone, bad_zone):
+            assert await commands.create_reminders_for("capture-1") == (
+                "The Mac's time zone is unavailable, so reminders cannot be scheduled."
+            )
+        assert await missing.create_reminders_for("nope") == "That note no longer exists."
+        # None of that spent a model pass.
+        assert completer.calls == []
+
+
+async def test_the_spoken_command_points_at_the_notes_own_page(tmp_path: Path) -> None:
+    """The list is drawn on the note's page, which the glasses show only to the
+    visit that opened it; a spoken request neither guesses nor waits in vain."""
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    productivity, review = FakeProductivity(), FakeReview()
+    commands = reminder_commands(insights, productivity, review)
+    with durable:
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        receipt = await commands.handle_command("Create reminders from the last note.")
+
+        assert receipt == "Open “Launch sync” in QuickNotes and tap: reminders. You read them first."
+        assert completer.calls == [] and review.shown == [] and productivity.batches == []
+
+
+async def test_the_command_needs_a_retained_note(tmp_path: Path) -> None:
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", FakeCompleter([]))
+    commands = reminder_commands(insights, FakeProductivity(), FakeReview())
+    with durable:
+        assert await commands.handle_command("create reminders from the last note") == (
+            "There is no retained note to create reminders from."
+        )
+
+
+async def test_reminders_can_come_from_any_note_not_only_the_last(tmp_path: Path) -> None:
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    productivity = FakeProductivity()
+    commands = reminder_commands(insights, productivity, FakeReview())
+    with durable:
+        retained_note(notes, "older", transcript=SPOKEN, base_us=NOTE_US)
+        retained_note(notes, "newer", transcript="Nothing to do here.", base_us=NOTE_US + 1_000_000)
+
+        receipt = await commands.create_reminders_for("older")
+
+        assert receipt.startswith("Added 2 reminders from “Launch sync”")
+        assert {origin.identifier.split(":")[0] for _, origin in productivity.batches[0][0]} == {
+            "older",
+        }
+
+
+async def test_a_day_that_has_already_passed_moves_to_the_next_nine(tmp_path: Path) -> None:
+    # Recorded two weeks ago: "tomorrow" was long ago, so the first 09:00 ahead is used.
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    review = FakeReview()
+    commands = reminder_commands(insights, FakeProductivity(), review)
+    with durable:
+        retained_note(
+            notes, transcript=SPOKEN, base_us=NOTE_US - 14 * 86_400 * 1_000_000,
+        )
+
+        await commands.create_reminders_for("capture-1")
+
+        assert review.shown[0][1] == (
+            "□ Email the release notes — Sep 1 at 09:00",
+            "□ Book the retro room — Sep 1 at 09:00",
+        )
+
+
+async def test_commitments_are_unavailable_without_the_local_model(tmp_path: Path) -> None:
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", None)
+    with durable:
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        assert await insights.commitments("capture-1") is None
+        assert await insights.commitments("nope") is None
+
+
+class TestDueDate:
+    MONDAY = date(2026, 8, 31)
+    #: Chicago is five hours behind UTC in August.
+    AFTERNOON = datetime(2026, 8, 31, 15, 0, tzinfo=ZoneInfo("America/Chicago"))
+    EARLY = datetime(2026, 8, 31, 7, 0, tzinfo=ZoneInfo("America/Chicago"))
+
+    @pytest.mark.parametrize(
+        ("day", "now", "expected"),
+        [
+            # Nothing named: the note's own day, unless its 09:00 is behind us.
+            (None, "EARLY", date(2026, 8, 31)),
+            (None, "AFTERNOON", date(2026, 9, 1)),
+            ("today", "EARLY", date(2026, 8, 31)),
+            ("today", "AFTERNOON", date(2026, 9, 1)),
+            ("tomorrow", "AFTERNOON", date(2026, 9, 1)),
+            # A weekday is the first one AFTER the note's day, never the same day.
+            ("tuesday", "AFTERNOON", date(2026, 9, 1)),
+            ("friday", "AFTERNOON", date(2026, 9, 4)),
+            ("monday", "AFTERNOON", date(2026, 9, 7)),
+            ("sunday", "AFTERNOON", date(2026, 9, 6)),
+        ],
+    )
+    def test_the_named_day_wins_and_the_past_cannot_alert(
+        self, day: str | None, now: str, expected: date,
+    ) -> None:
+        assert _due_date(day, self.MONDAY, getattr(self, now)) == expected
+
+    def test_an_old_note_moves_to_the_next_nine_still_ahead(self) -> None:
+        old = date(2026, 8, 10)
+
+        assert _due_date("friday", old, self.AFTERNOON) == date(2026, 9, 1)
+        assert _due_date("friday", old, self.EARLY) == date(2026, 8, 31)
 
 
 class FakeExporter:
@@ -503,27 +834,6 @@ async def test_the_post_summary_step_runs_even_when_the_summary_fails(
 
         assert followed == ["capture-1"]
         assert notes.insights("capture-1") is None
-
-
-async def test_reminders_can_come_from_any_note_not_only_the_last(tmp_path: Path) -> None:
-    completer = FakeCompleter([_SHAPED])
-    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
-    productivity = FakeProductivity()
-    commands = NoteInsightCommandController(
-        insights,
-        productivity=productivity,  # type: ignore[arg-type]
-        local_time_zone=lambda: "America/Chicago",
-        now=lambda: datetime(2026, 8, 31, 20, 0, tzinfo=timezone.utc),
-    )
-    with durable:
-        retained_note(notes, "older", base_us=10)
-        retained_note(notes, "newer", base_us=100)
-        await insights.summarize("older")
-
-        receipt = await commands.create_reminders_for("older")
-
-        assert receipt.startswith("Created 2 of 2 reminders from “Launch sync”")
-        assert {origin.identifier for _, origin in productivity.intents if origin} == {"older"}
 
 
 class FakeSync:

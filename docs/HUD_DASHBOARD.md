@@ -45,7 +45,7 @@ the voice; the Mac app writes `news.json`.
 (7 days back, 6 ahead, eight rows, "+N more" past that), each row led by
 `[Late]`, a time, `[Today]`, `[Tmrw]` or a weekday in the label column. A tap
 opens Planning. It is read from EventKit every minute and pushed only when a
-row would read differently; QuickNotes' "create reminders" nudges it at once.
+row would read differently; a note's "tap: reminders" nudges it at once.
 Planning's own day page shows a reminder only on its due day, so a missed one
 would vanish there; this tab keeps it until it is done. **Notifications left
 the rail**: it is the first row of the menu while the overview is up, and
@@ -379,17 +379,30 @@ after. On save the Mac auto-summarizes locally (resident MLX; transcripts
 never leave the Mac) into summary + key points + todos, engine-attributed
 and replaceable — "resummarize with claude" is the explicit cloud opt-in via
 the official CLI. Tapping a recording opens summary/key points/todos;
-"ask the last note …" answers from the transcript; "create reminders from
-the last note" (or a tap on the note) walks each todo through the existing
-confirmed EventKit gate (due tomorrow 09:00, provenance `voice_note.todo`).
-A todo is a model's sentence, so its confirmation is the short form
-`Remind + alert “…”? Oct 18 at 09:00` and the title is cut at a word to fit
-the native page's 120 units (`create_reminder(fit_title=True)`); what the
-screen shows is exactly what is written. A todo declined or timed out can be
-asked again by tapping once more (each attempt is its own journal row,
-`<capture>~N`), one already created is answered "already in Reminders" and
-never written twice, and the receipt names the first reason a todo was not
-created. "send the last note to
+"ask the last note …" answers from the transcript;
+a tap on a note's page ("tap: reminders") turns what the wearer SAID they
+will do into Reminders. They are not the summary's next steps (the model's
+own ideas): a second local pass (`services/commitments.py`) proposes each
+task with the words it came from, and plain code keeps only what the
+transcript backs up (the quote is in the transcript, carries a commitment
+cue such as "I need to", "I'll", "remind me", and says the task; one per
+sentence, at most eight). The glasses then open a scrolling list of every
+reminder in full with its day ("□ Email the release notes — Oct 19 at
+09:00"; `QUICKNOTES · DETAIL`, "tap: add N"), and one tap goes on to a
+single native confirmation "Add N reminders from “<note>”?". That one
+confirmation is bound to a batch action whose payload lists the digest of
+each reminder, so approving it approves exactly the list that was read
+(`reminders.create_batch`, `ActionJournal.approve_batch_child`); each
+reminder is still its own journal row with its own origin
+(`voice_note.commitment`, one per spoken sentence), read-back and receipt.
+Each is a 09:00 reminder in the default list, dated the day the wearer named
+("tomorrow", a weekday after the note's day) or else the note's day; a 09:00
+already past moves to the next one ahead. Nothing needs a summary first.
+Declining writes nothing and the note can be asked again; one already
+created is counted "already in Reminders" and never written twice; one that
+may exist is not retried. The spoken "create reminders from the last note"
+points at the note's own tap, because the glasses show a note page only to
+the visit that opened it. "send the last note to
 my notes" writes Apple Notes on the Mac (JOAT folder — the Even plugin has
 no phone-side Notes API) and iCloud carries it to the phone.
 

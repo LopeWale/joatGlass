@@ -16,7 +16,7 @@ import re
 import secrets
 import time
 import unicodedata
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -35,8 +35,10 @@ from ..native.bridge import (
     NativeBridgeUnavailable,
 )
 from ..persistence.actions import (
+    ActionConflictError,
     ActionDraft,
     ActionJournal,
+    ActionRecord,
     ConfirmationEvidence,
     ExternalReference,
 )
@@ -122,6 +124,39 @@ class ActionOrigin:
     kind: str
     identifier: str
     ordinal: int = 0
+
+
+@dataclass(frozen=True)
+class _OriginRefusal:
+    """Why an origin's earlier attempts mean the reminder is not asked again."""
+
+    message: str
+    #: True when the reminder already exists: the answer is "already there".
+    created: bool = False
+
+
+@dataclass(frozen=True)
+class ReminderBatchResult:
+    """What one confirmed batch of reminders came to."""
+
+    created: int = 0
+    #: Reminders the journal already shows as created, so they were not asked again.
+    already: int = 0
+    #: Wearer-facing reasons for reminders that were not written, in order.
+    problems: tuple[str, ...] = ()
+    #: The wearer said no (or did not answer) to the one confirmation.
+    declined: bool = False
+    #: Set when nothing could be asked at all.
+    refused: str | None = None
+
+
+@dataclass(frozen=True)
+class _BatchMember:
+    title: str
+    body: dict[str, object]
+    payload: bytes
+    chosen_ms: int
+    origin: ActionOrigin
 
 
 @dataclass(frozen=True)
@@ -357,8 +392,8 @@ class ProductivityActionController:
             return "Reminder proposal provenance was invalid. Nothing was created."
         if origin is not None:
             next_origin = self._origin_for_next_attempt(origin, title)
-            if isinstance(next_origin, str):
-                return next_origin
+            if isinstance(next_origin, _OriginRefusal):
+                return next_origin.message
             origin = next_origin
 
         prepared = await self._prepare(
@@ -411,7 +446,7 @@ class ProductivityActionController:
 
     def _origin_for_next_attempt(
         self, origin: ActionOrigin, title: str,
-    ) -> ActionOrigin | str:
+    ) -> ActionOrigin | _OriginRefusal:
         """Say whether an origin's earlier attempts allow asking again.
 
         The journal keeps one row per origin so a second tap cannot write the
@@ -432,12 +467,254 @@ class ProductivityActionController:
             if state is None:
                 return candidate
             if state in _ORIGIN_CREATED:
-                return f"Reminder already created: {title}."
+                return _OriginRefusal(f"Reminder already created: {title}.", created=True)
             if state in _ORIGIN_MAY_EXIST:
-                return "The reminder may have been created. Check Reminders before retrying."
+                return _OriginRefusal(
+                    "The reminder may have been created. Check Reminders before retrying."
+                )
             if state not in _ORIGIN_NOT_WRITTEN:
-                return "That reminder is still waiting for your answer."
-        return "That reminder was declined too many times. Add it in Reminders."
+                return _OriginRefusal("That reminder is still waiting for your answer.")
+        return _OriginRefusal("That reminder was declined too many times. Add it in Reminders.")
+
+    def is_created(self, origin: ActionOrigin) -> bool:
+        """True when an earlier confirmation already created this origin's reminder."""
+        refusal = self._origin_for_next_attempt(origin, "")
+        return isinstance(refusal, _OriginRefusal) and refusal.created
+
+    async def create_reminder_batch(
+        self,
+        items: Sequence[tuple[ReminderIntent, ActionOrigin]],
+        *,
+        label: str,
+    ) -> ReminderBatchResult:
+        """Ask the wearer once, then write every reminder in ``items`` whole.
+
+        The one confirmation is bound to a batch action whose payload lists
+        the digest of each reminder's exact payload, so approving it approves
+        exactly those reminders and nothing else. Each reminder is still its
+        own journal action with its own origin, read-back and receipt; it is
+        approved only through the batch (``approve_batch_child``). A reminder
+        whose origin already shows as created is left alone, so tapping again
+        never writes it twice. ``label`` names the source (a note's title) on
+        the confirmation.
+        """
+        if self._bridge is None:
+            return ReminderBatchResult(refused="Open JOAT on the Mac and connect Reminders first.")
+        members: list[_BatchMember] = []
+        container: _ResolvedContainer | None = None
+        already = 0
+        problems: list[str] = []
+        for intent, origin in items:
+            title = self._valid_title(intent.title)
+            if title is None:
+                problems.append("Reminder title must be 1 to 200 visible characters.")
+                continue
+            try:
+                if re.fullmatch(_ZONE, intent.time_zone) is None or len(intent.time_zone) > 128:
+                    raise ValueError
+                civil = self._civil(intent.date, intent.time, intent.time_zone)
+            except ValueError:
+                problems.append(_REMINDER_USAGE)
+                continue
+            if (
+                not origin.kind
+                or len(origin.kind) > 128
+                or not origin.identifier
+                or len(origin.identifier) > 256
+                or isinstance(origin.ordinal, bool)
+                or not isinstance(origin.ordinal, int)
+                or origin.ordinal < 0
+            ):
+                problems.append("Reminder proposal provenance was invalid. Nothing was created.")
+                continue
+            next_origin = self._origin_for_next_attempt(origin, title)
+            if isinstance(next_origin, _OriginRefusal):
+                if next_origin.created:
+                    already += 1
+                else:
+                    problems.append(next_origin.message)
+                continue
+            prepared = await self._prepare(
+                entity="reminders", selected_title=intent.list_title, civil=civil,
+            )
+            if isinstance(prepared, str):
+                return ReminderBatchResult(already=already, refused=prepared)
+            member_container, chosen_ms = prepared
+            if container is not None and (
+                member_container.identifier != container.identifier
+                or member_container.store_generation != container.store_generation
+            ):
+                return ReminderBatchResult(
+                    already=already,
+                    refused="Reminders changed while I prepared the list. Please try again.",
+                )
+            container = member_container
+            body: dict[str, object] = {
+                "store_instance_id": member_container.store_instance_id,
+                "store_generation": member_container.store_generation,
+                "calendar_identifier": member_container.identifier,
+                "title": title,
+                "due": civil.to_wire(),
+                "resolved_due_unix_ms": chosen_ms,
+                "alarm_offsets_seconds": [0],
+            }
+            members.append(_BatchMember(
+                title=title, body=body, payload=self._canonical(body),
+                chosen_ms=chosen_ms, origin=next_origin,
+            ))
+        if not members or container is None:
+            return ReminderBatchResult(already=already, problems=tuple(problems))
+
+        count = len(members)
+        head = f"Add {count} reminder{'s' if count != 1 else ''} from “"
+        source = " ".join(label.split()) or "Untitled"
+        prompt = head + _fit_to_units(
+            source, CONFIRM_PROMPT_MAX_UTF16_UNITS - utf16_units(head + "”?"),
+        ) + "”?"
+        parent_payload = self._canonical({
+            "kind": "reminders.create_batch",
+            "children": [hashlib.sha256(member.payload).hexdigest() for member in members],
+            # Two batches of the same reminders are two decisions.
+            "nonce": secrets.token_hex(16),
+        })
+        now_us = time.time_ns() // 1_000
+        parent = self._journal.create_draft(
+            ActionDraft(
+                kind="reminders.create_batch",
+                canonical_payload=parent_payload,
+                target_digest=hashlib.sha256(
+                    b"joat-eventkit-container-v1\0" + container.identifier.encode("utf-8")
+                ).digest(),
+                idempotency_key=f"reminders.create_batch:{secrets.token_hex(16)}",
+            ),
+            now_us=now_us,
+        )
+        self._journal.mark_ready(
+            parent.action_id,
+            reason_code="native_schema_and_target_valid",
+            now_us=now_us + 1,
+        )
+        verdict = await self._decide(parent, prompt)
+        if verdict != "approved":
+            return ReminderBatchResult(
+                already=already,
+                problems=tuple(problems),
+                declined=True,
+                refused=(
+                    "Reminders were not added because confirmation could not be verified."
+                    if verdict == "unverified" else None
+                ),
+            )
+        attempt = self._journal.begin_attempt(
+            parent.action_id,
+            adapter="eventkit.native-bridge",
+            adapter_version="1",
+            request_id=f"native:{parent.action_id}",
+            now_us=time.time_ns() // 1_000,
+        )
+        created = 0
+        uncertain = False
+        evidence_parts: list[str] = []
+        for member in members:
+            receipt = await self._write_batch_member(parent, member, container)
+            if receipt.startswith("Created Reminder:"):
+                created += 1
+                evidence_parts.append(f"{member.origin.identifier}:{member.origin.ordinal}:created")
+            else:
+                problems.append(receipt)
+                if "may have been created" in receipt:
+                    uncertain = True
+                evidence_parts.append(f"{member.origin.identifier}:{member.origin.ordinal}:not")
+        self._finish_batch(parent, attempt.attempt_id, created, len(members), uncertain, evidence_parts)
+        return ReminderBatchResult(
+            created=created, already=already, problems=tuple(problems),
+        )
+
+    async def _write_batch_member(
+        self,
+        parent: ActionRecord,
+        member: _BatchMember,
+        container: _ResolvedContainer,
+    ) -> str:
+        """Journal one reminder of an approved batch, then write it."""
+        now_us = time.time_ns() // 1_000
+        origin = member.origin
+        try:
+            record = self._journal.create_draft(
+                ActionDraft(
+                    kind="reminders.create",
+                    canonical_payload=member.payload,
+                    target_digest=hashlib.sha256(
+                        b"joat-eventkit-container-v1\0" + container.identifier.encode("utf-8")
+                    ).digest(),
+                    idempotency_key=f"reminders.create:{origin.kind}:{origin.identifier}:{origin.ordinal}",
+                    origin_kind=origin.kind,
+                    origin_id=origin.identifier,
+                    origin_ordinal=origin.ordinal,
+                ),
+                now_us=now_us,
+            )
+            self._journal.mark_ready(
+                record.action_id,
+                reason_code="native_schema_and_target_valid",
+                now_us=now_us + 1,
+            )
+            self._journal.approve_batch_child(
+                parent.action_id, record.action_id, now_us=now_us + 2,
+            )
+        except ActionConflictError:
+            log.exception("a batch reminder could not be journaled")
+            return "Reminders did not create the reminder. Check JOAT on the Mac."
+        return await self._write_approved(
+            record,
+            kind="reminders.create",
+            method="reminders.create",
+            body=member.body,
+            target=container,
+            display_title=member.title,
+            success=f"Created Reminder: {member.title}.",
+            uncertain="The reminder may have been created. Check Reminders before retrying.",
+            failed="Reminders did not create the reminder. Check JOAT on the Mac.",
+            monitor_due_unix_ms=member.chosen_ms,
+            planning_anchor_unix_ms=member.chosen_ms,
+        )
+
+    def _finish_batch(
+        self,
+        parent: ActionRecord,
+        attempt_id: str,
+        created: int,
+        total: int,
+        uncertain: bool,
+        evidence_parts: list[str],
+    ) -> None:
+        """Close the batch action: succeeded only if every reminder was written."""
+        now_us = time.time_ns() // 1_000
+        try:
+            if created == total:
+                self._journal.record_success(
+                    parent.action_id,
+                    attempt_id,
+                    outcome="batch_written",
+                    verification_level="read_back_matched",
+                    evidence_digest=hashlib.sha256(
+                        self._canonical({"members": evidence_parts})
+                    ).digest(),
+                    now_us=now_us,
+                )
+                self._purge_payload_best_effort(parent.action_id)
+            else:
+                self._journal.record_failure(
+                    parent.action_id,
+                    attempt_id,
+                    error_code="batch_member_uncertain" if uncertain else "batch_member_failed",
+                    possible_external_commit=uncertain,
+                    now_us=now_us,
+                )
+                if not uncertain:
+                    self._purge_payload_best_effort(parent.action_id)
+        except Exception:
+            log.exception("could not close the batch action %s", parent.action_id)
 
     async def complete_reminder_by_identity(self, native_identifier: str) -> str | None:
         """Complete the selected native item through the ordinary confirmed flow.
@@ -687,6 +964,70 @@ class ProductivityActionController:
             return None
         return anchor
 
+    async def _decide(
+        self, record: ActionRecord, prompt: str,
+    ) -> Literal["approved", "declined", "unverified"]:
+        """Ask the wearer once and record the answer in the journal.
+
+        ``approved`` only when the authenticated channel returned evidence
+        bound to this record's payload and the wearer said yes; ``declined``
+        for an answer of no or a timed-out confirmation; ``unverified`` when
+        no evidence came back at all. Anything but ``approved`` has already
+        had its payload dropped.
+        """
+        try:
+            decision = await self._confirm(
+                record.action_id,
+                prompt,
+                _CONFIRM_SECONDS,
+                payload_digest=record.payload_digest.hex(),
+            )
+        except asyncio.CancelledError:
+            self._journal.cancel_unconfirmed(
+                record.action_id,
+                reason_code="confirmation_cancelled",
+                now_us=time.time_ns() // 1_000,
+            )
+            self._journal.purge_payload(record.action_id)
+            raise
+        except Exception:
+            self._journal.cancel_unconfirmed(
+                record.action_id,
+                reason_code="confirmation_channel_failed",
+                now_us=time.time_ns() // 1_000,
+            )
+            self._journal.purge_payload(record.action_id)
+            return "unverified"
+        if not isinstance(decision, ConfirmationResult):
+            self._journal.cancel_unconfirmed(
+                record.action_id,
+                reason_code="confirmation_missing_evidence",
+                now_us=time.time_ns() // 1_000,
+            )
+            self._journal.purge_payload(record.action_id)
+            return "unverified"
+        self._journal.record_confirmation(
+            record.action_id,
+            ConfirmationEvidence(
+                challenge_id=decision.challenge_id,
+                challenge_token=decision.challenge_id,
+                session_id=decision.session_id,
+                pairing_identity_digest=decision.pairing_identity_digest,
+                authorization_digest=decision.authorization_digest,
+                payload_digest=decision.payload_digest,
+                preview_digest=decision.preview_digest,
+                issued_at_us=decision.issued_at_us,
+                expires_at_us=decision.expires_at_us,
+                preview_completed_at_us=decision.preview_completed_at_us,
+                decided_at_us=decision.decided_at_us,
+                accepted=decision.accepted,
+            ),
+        )
+        if self._journal.get(record.action_id).state != "approved":
+            self._journal.purge_payload(record.action_id)
+            return "declined"
+        return "approved"
+
     async def _confirm_and_write(
         self,
         *,
@@ -735,28 +1076,8 @@ class ProductivityActionController:
             reason_code="native_schema_and_target_valid",
             now_us=now_us + 1,
         )
-        try:
-            decision = await self._confirm(
-                record.action_id,
-                prompt,
-                _CONFIRM_SECONDS,
-                payload_digest=record.payload_digest.hex(),
-            )
-        except asyncio.CancelledError:
-            self._journal.cancel_unconfirmed(
-                record.action_id,
-                reason_code="confirmation_cancelled",
-                now_us=time.time_ns() // 1_000,
-            )
-            self._journal.purge_payload(record.action_id)
-            raise
-        except Exception:
-            self._journal.cancel_unconfirmed(
-                record.action_id,
-                reason_code="confirmation_channel_failed",
-                now_us=time.time_ns() // 1_000,
-            )
-            self._journal.purge_payload(record.action_id)
+        verdict = await self._decide(record, prompt)
+        if verdict == "unverified":
             await self._publish_workflow_status(
                 kind,
                 "not_saved",
@@ -764,39 +1085,7 @@ class ProductivityActionController:
                 planning_anchor_unix_ms,
             )
             return not_saved
-        if not isinstance(decision, ConfirmationResult):
-            self._journal.cancel_unconfirmed(
-                record.action_id,
-                reason_code="confirmation_missing_evidence",
-                now_us=time.time_ns() // 1_000,
-            )
-            self._journal.purge_payload(record.action_id)
-            await self._publish_workflow_status(
-                kind,
-                "not_saved",
-                display_title,
-                planning_anchor_unix_ms,
-            )
-            return not_saved
-        self._journal.record_confirmation(
-            record.action_id,
-            ConfirmationEvidence(
-                challenge_id=decision.challenge_id,
-                challenge_token=decision.challenge_id,
-                session_id=decision.session_id,
-                pairing_identity_digest=decision.pairing_identity_digest,
-                authorization_digest=decision.authorization_digest,
-                payload_digest=decision.payload_digest,
-                preview_digest=decision.preview_digest,
-                issued_at_us=decision.issued_at_us,
-                expires_at_us=decision.expires_at_us,
-                preview_completed_at_us=decision.preview_completed_at_us,
-                decided_at_us=decision.decided_at_us,
-                accepted=decision.accepted,
-            ),
-        )
-        if self._journal.get(record.action_id).state != "approved":
-            self._journal.purge_payload(record.action_id)
+        if verdict == "declined":
             await self._publish_workflow_status(
                 kind,
                 "cancelled",
@@ -805,6 +1094,43 @@ class ProductivityActionController:
             )
             return cancelled
 
+        return await self._write_approved(
+            record,
+            kind=kind,
+            method=method,
+            body=body,
+            target=target,
+            display_title=display_title,
+            success=success,
+            uncertain=uncertain,
+            failed=failed,
+            monitor_due_unix_ms=monitor_due_unix_ms,
+            planning_anchor_unix_ms=planning_anchor_unix_ms,
+            success_phase=success_phase,
+        )
+
+    async def _write_approved(
+        self,
+        record: ActionRecord,
+        *,
+        kind: str,
+        method: str,
+        body: dict[str, object],
+        target: _ResolvedContainer,
+        display_title: str,
+        success: str,
+        uncertain: str,
+        failed: str,
+        monitor_due_unix_ms: int | None,
+        planning_anchor_unix_ms: int | None,
+        success_phase: Literal["saved", "completed"] = "saved",
+    ) -> str:
+        """Write one approved action to EventKit and record exactly what happened.
+
+        The action is already ``approved``: by its own confirmation, or as a
+        member of a batch the wearer confirmed whole.
+        """
+        assert self._bridge is not None
         # A Reminder can be rescheduled while its confirmation is visible.
         # Do not keep showing its queried pre-confirmation day after the
         # point where native state may have changed. A successful completion

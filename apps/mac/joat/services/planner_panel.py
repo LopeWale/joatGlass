@@ -7,12 +7,12 @@ row of the menu while the overview is up.
 
 What the tab shows is the wearer's open Reminders: what is overdue, what is
 due today, and what is due in the next six days, earliest first. That is the
-list QuickNotes feeds ("create reminders from the last note" makes one
-Reminder per to-do), and the same Reminders Planning merges with Calendar
-events. It is not Planning's own day page: Planning shows a reminder only on
-the day it is due, so a missed one drops out of sight there. A to-do glance
-should keep it until it is done, so this tab asks EventKit for a window of
-days and keeps the overdue ones in view (`load_native_reminders`).
+list QuickNotes feeds (a note's "tap: reminders" makes one Reminder per
+thing the wearer said they will do), and the same Reminders Planning merges
+with Calendar events. It is not Planning's own day page: Planning shows a
+reminder only on the day it is due, so a missed one drops out of sight there.
+A to-do glance should keep it until it is done, so this tab asks EventKit for
+a window of days and keeps the overdue ones in view (`load_native_reminders`).
 
 A tap on the tab opens Planning itself (the plugin does that; the tab has no
 rows of its own to open), the way a tap on QuickNotes opens QuickNotes.

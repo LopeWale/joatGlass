@@ -1659,6 +1659,9 @@ async def main() -> None:
         exporter=AppleNotesExporter(),
         sync=notes_sync,
         local_time_zone=system_local_time_zone,
+        # The reminders a note would add are read whole on the glasses before
+        # the one confirmation; capabilities is composed further down.
+        review_reminders=lambda title, lines: capabilities.review_note_reminders(title, lines),
     )
     # Agent Terminal roster: the wearer's existing OpenClaw work sessions,
     # by spoken name. Strictly NOT Brainstorm — these lanes never join the

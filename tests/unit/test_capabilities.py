@@ -3536,3 +3536,110 @@ class TestTerminalOpeningLease:
         assert not started[1][3]()
         release.set()
         await asyncio.gather(first, second)
+
+
+class TestTheRemindersListPage:
+    """2026-10-18: a note's reminders are listed whole and read before the
+    one confirmation; the page writes nothing itself."""
+
+    LINES = (
+        "□ Email the release notes — Oct 19 at 09:00",
+        "□ Book the retro room — Oct 23 at 09:00",
+    )
+
+    async def test_every_reminder_is_listed_whole_and_a_tap_goes_on(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path)
+        decision = asyncio.create_task(
+            router.review_note_reminders("Standup notes", self.LINES, timeout_s=5)
+        )
+        await wait_until(lambda: router._note_reader is not None)
+        reader = router._note_reader
+        assert reader is not None
+        frame = [m for m in transport.sent if isinstance(m, HudList)][-1]
+
+        # The glasses' own scroll box carries the whole list: one frame, no pages.
+        assert frame.title == "QUICKNOTES · DETAIL"
+        assert frame.items == [] and frame.body is not None
+        assert "Add 2 reminders from “Standup notes”" in frame.body
+        for line in self.LINES:
+            assert line in frame.body
+        assert frame.to_wire()["readerPage"]["count"] == 1
+        assert frame.selectable is True
+        assert frame.hint is not None and "tap: add 2" in frame.hint
+
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="QUICKNOTES",
+            selected_index=0, request_id=router._active_request_id,
+        ))
+        assert await asyncio.wait_for(decision, 2) is True
+
+    async def test_a_long_list_needs_no_last_page_before_the_tap(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path)
+        lines = tuple(
+            f"□ Reminder number {index} with a few more words to fill the line — Oct 19 at 09:00"
+            for index in range(8)
+        )
+        decision = asyncio.create_task(
+            router.review_note_reminders("Standup notes", lines, timeout_s=5)
+        )
+        await wait_until(lambda: router._note_reader is not None)
+        reader = router._note_reader
+        assert reader is not None and len(reader.pages) > 1 and reader.index == 0
+        frame = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert frame.body is not None and all(line in frame.body for line in lines)
+
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="QUICKNOTES",
+            selected_index=0, request_id=router._active_request_id,
+        ))
+        assert await asyncio.wait_for(decision, 2) is True
+
+    async def test_leaving_the_page_is_a_no(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, _transport, _ = make_router(tmp_path)
+        decision = asyncio.create_task(
+            router.review_note_reminders("Standup notes", self.LINES, timeout_s=5)
+        )
+        await wait_until(lambda: router._note_reader is not None)
+
+        router._note_reader = None
+
+        assert await asyncio.wait_for(decision, 2) is False
+
+    async def test_no_tap_in_time_is_unanswered(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, _transport, _ = make_router(tmp_path)
+
+        assert await router.review_note_reminders(
+            "Standup notes", self.LINES, timeout_s=0.3,
+        ) is None
+
+    async def test_a_note_with_no_summary_still_offers_its_reminders(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """Reminders come from what was said, so the summary is not needed."""
+        asked: list[str] = []
+
+        async def reminders(capture_id: str) -> str:
+            asked.append(capture_id)
+            return "Added 1 reminder from “Standup notes”. Adjust times in Planning."
+
+        store = DurableStore(tmp_path / "durable.sqlite3")
+        voice_notes = VoiceNoteStore(store)
+        _retained_voice_note(voice_notes, "capture-1", base_us=20)
+        assert voice_notes.insights("capture-1") is None
+        router, transport, _ = make_router(tmp_path, voice_notes=voice_notes)
+        router._note_reminders = reminders
+        await router.open("QuickNotes", request_id="notes-remind")
+        await router._select_capability_row("QUICKNOTES", 1, "rec", "notes-remind")
+        page = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert page.title == "QUICKNOTES · NOTE"
+        assert page.hint is not None and "tap: reminders" in page.hint
+        assert page.selectable is True
+
+        router.on_input(InputEvent(container_name="capdata", selected_name="QUICKNOTES",
+                                   selected_index=0, request_id="notes-remind"))
+        await wait_until(lambda: asked == ["capture-1"])
+        await wait_until(lambda: "Added 1 reminder" in " ".join(receipts(transport)))
+        shown = receipts(transport)
+        # The model takes a few seconds: the wearer is told it is working first.
+        assert shown.index("Finding your reminders…") < next(
+            index for index, text in enumerate(shown) if text.startswith("Added 1 reminder")
+        )
+        store.close()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -243,6 +244,7 @@ class ActionJournal:
         to_state: str,
         reason_code: str,
         now_us: int,
+        detail_digest: bytes | None = None,
     ) -> None:
         row = db.execute(
             "SELECT state,state_version FROM actions WHERE action_id = ?",
@@ -265,9 +267,9 @@ class ActionJournal:
             raise ActionConflictError("action state changed concurrently")
         db.execute(
             "INSERT INTO action_events("
-            "action_id,seq,from_state,to_state,reason_code,at_us"
-            ") VALUES (?,?,?,?,?,?)",
-            (action_id, version + 1, state, to_state, reason_code, now_us),
+            "action_id,seq,from_state,to_state,reason_code,at_us,detail_digest"
+            ") VALUES (?,?,?,?,?,?,?)",
+            (action_id, version + 1, state, to_state, reason_code, now_us, detail_digest),
         )
 
     def mark_ready(self, action_id: str, *, reason_code: str, now_us: int) -> None:
@@ -354,6 +356,66 @@ class ActionJournal:
                 to_state=final_state,
                 reason_code="confirmation_expired" if expired else f"wearer_{decision}",
                 now_us=evidence.decided_at_us,
+            )
+
+    def approve_batch_child(
+        self,
+        parent_id: str,
+        child_id: str,
+        *,
+        now_us: int,
+    ) -> None:
+        """Approve one action the wearer confirmed as a member of a batch.
+
+        A confirmation is bound to one payload and one action, so it cannot
+        approve several actions itself. A batch is therefore one action of its
+        own: its payload lists the SHA-256 of every member's payload, so the
+        digest the wearer confirmed pins the exact members. Only while that
+        batch is dispatching (it was approved, then began) may a ready action
+        whose payload digest the batch lists be approved under it, once per
+        listed copy. The member's history records the batch it came from.
+        """
+
+        with self._store.transaction() as db:
+            parent = self._get_with(db, parent_id)
+            if not parent.kind.endswith(".create_batch") or parent.state != "dispatching":
+                raise ActionConflictError(
+                    "a batch member needs a dispatching batch; "
+                    f"{parent.kind} is {parent.state}"
+                )
+            row = db.execute(
+                "SELECT canonical_payload FROM action_payloads WHERE action_id = ?",
+                (parent_id,),
+            ).fetchone()
+            if row is None:
+                raise ActionConflictError("batch payload is no longer retained")
+            try:
+                listed = json.loads(bytes(row[0]))["children"]
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ActionConflictError("batch payload does not list its members") from exc
+            child = self._get_with(db, child_id)
+            allowed = (
+                sum(1 for item in listed if item == child.payload_digest.hex())
+                if isinstance(listed, list)
+                else 0
+            )
+            used = db.execute(
+                "SELECT count(*) FROM action_events e JOIN actions a "
+                "ON a.action_id = e.action_id "
+                "WHERE e.reason_code = 'batch_approved' AND e.detail_digest = ? "
+                "AND a.payload_digest = ?",
+                (parent.payload_digest, child.payload_digest),
+            ).fetchone()
+            if used is None or int(used[0]) >= allowed:
+                raise ActionConflictError("action is not a member of the approved batch")
+            self._transition(
+                db,
+                child_id,
+                expected=("ready",),
+                to_state="approved",
+                reason_code="batch_approved",
+                now_us=now_us,
+                detail_digest=parent.payload_digest,
             )
 
     def begin_attempt(

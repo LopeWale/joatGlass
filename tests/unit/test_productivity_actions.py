@@ -23,6 +23,7 @@ from joat.services.productivity_actions import ProductivityActionController
 from joat.services.productivity_actions import (
     ActionOrigin,
     CalendarEventIntent,
+    ReminderBatchResult,
     ReminderIntent,
 )
 
@@ -1425,4 +1426,251 @@ class TestNoteReminderFit:
         _, _, _, journal, store = self.rig_with_list(tmp_path)
 
         assert journal.state_for_origin("voice_note.todo", "nobody", 0) is None
+        store.close()
+
+
+class FailingNthWriteBridge(EchoingReminderBridge):
+    """Fails the reminder writes whose (1-based) position is in ``failures``."""
+
+    def __init__(self, *args, failures=None, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(*args, **kwargs)
+        self.failures: dict[int, Exception] = failures or {}
+        self.writes = 0
+
+    async def call(self, method, body=None, **kwargs):  # type: ignore[no-untyped-def]
+        if method == "reminders.create":
+            self.writes += 1
+            if self.writes in self.failures:
+                self.calls.append((method, body or {}, None, None))
+                raise self.failures[self.writes]
+        return await super().call(method, body, **kwargs)
+
+
+class TestReminderBatch:
+    """One wearer confirmation adds every reminder of a note, each written whole."""
+
+    DUE = {"date": "2026-10-19", "time": "09:00", "time_zone": "America/Chicago"}
+
+    @staticmethod
+    def item(title: str, key: str, **due: str) -> tuple[ReminderIntent, ActionOrigin]:
+        fields = {**TestReminderBatch.DUE, **due}
+        return (
+            ReminderIntent(title=title, **fields),
+            ActionOrigin(kind="voice_note.commitment", identifier=f"capture-1:{key}", ordinal=0),
+        )
+
+    @staticmethod
+    def rig_with_list(tmp_path: Path, *, accept: bool = True, failures=None):  # type: ignore[no-untyped-def]
+        bridge = FailingNthWriteBridge(
+            containers=[reminder_container("Reminders", "list-1", default=True)],
+            failures=failures,
+        )
+        return (bridge, *rig(tmp_path, bridge, accept=accept))
+
+    @staticmethod
+    def written_titles(bridge: FakeBridge) -> list[object]:
+        return [call[1]["title"] for call in bridge.calls if call[0] == "reminders.create"]
+
+    @staticmethod
+    def batch_state(store: DurableStore) -> str:
+        row = store.execute(
+            "SELECT state FROM actions WHERE kind = 'reminders.create_batch'"
+        ).fetchone()
+        assert row is not None
+        return str(row[0])
+
+    async def test_one_confirmation_writes_every_reminder_whole(self, tmp_path: Path) -> None:
+        bridge, controller, confirms, journal, store = self.rig_with_list(tmp_path)
+        items = [
+            self.item("Call the plumber", "a"),
+            self.item("Send the invoice to Dele", "b"),
+            self.item("Book the dentist for Friday", "c", date="2026-10-20"),
+        ]
+
+        result = await controller.create_reminder_batch(items, label="Plumbing and invoices")
+
+        assert result == ReminderBatchResult(created=3)
+        assert confirms.prompts == ["Add 3 reminders from “Plumbing and invoices”?"]
+        assert self.written_titles(bridge) == [
+            "Call the plumber",
+            "Send the invoice to Dele",
+            "Book the dentist for Friday",
+        ]
+        assert self.batch_state(store) == "succeeded"
+        for _, origin in items:
+            assert journal.state_for_origin(origin.kind, origin.identifier, 0) == "succeeded"
+        # Each reminder was approved through the one batch, not by a confirmation of its own.
+        assert store.execute(
+            "SELECT count(*) FROM action_events WHERE reason_code = 'batch_approved'"
+        ).fetchone()[0] == 3
+        assert store.execute("SELECT count(*) FROM confirmation_challenges").fetchone()[0] == 1
+        store.close()
+
+    async def test_a_single_reminder_reads_in_the_singular(self, tmp_path: Path) -> None:
+        _, controller, confirms, _, store = self.rig_with_list(tmp_path)
+
+        result = await controller.create_reminder_batch(
+            [self.item("Call the plumber", "a")], label="Plumber",
+        )
+
+        assert result.created == 1
+        assert confirms.prompts == ["Add 1 reminder from “Plumber”?"]
+        store.close()
+
+    async def test_a_long_note_title_is_cut_to_fit_the_confirm_screen(
+        self, tmp_path: Path
+    ) -> None:
+        _, controller, confirms, _, store = self.rig_with_list(tmp_path)
+
+        await controller.create_reminder_batch(
+            [self.item("Call the plumber", "a"), self.item("Send the invoice", "b")],
+            label="Notes about the kitchen renovation, the invoice for the tiles, "
+            "the plumber and everything I promised the school this week " * 2,
+        )
+
+        (prompt,) = confirms.prompts
+        assert prompt.startswith("Add 2 reminders from “") and prompt.endswith("…”?")
+        assert utf16_units(prompt) <= CONFIRM_PROMPT_MAX_UTF16_UNITS
+        store.close()
+
+    async def test_a_declined_batch_writes_nothing_and_can_be_asked_again(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, journal, store = self.rig_with_list(tmp_path, accept=False)
+        items = [self.item("Call the plumber", "a"), self.item("Send the invoice", "b")]
+
+        first = await controller.create_reminder_batch(items, label="Plumbing")
+        # The declined attempt left no reminder rows behind and wrote nothing.
+        assert store.execute(
+            "SELECT count(*) FROM actions WHERE kind = 'reminders.create'"
+        ).fetchone()[0] == 0
+        assert self.written_titles(bridge) == []
+        assert self.batch_state(store) == "rejected"
+        confirms.accept = True
+        second = await controller.create_reminder_batch(items, label="Plumbing")
+
+        assert first.declined and first.created == 0
+        assert second == ReminderBatchResult(created=2)
+        assert len(confirms.prompts) == 2
+        assert self.written_titles(bridge) == ["Call the plumber", "Send the invoice"]
+        assert journal.state_for_origin("voice_note.commitment", "capture-1:a", 0) == "succeeded"
+        store.close()
+
+    async def test_reminders_already_created_are_not_asked_or_written_again(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, _, store = self.rig_with_list(tmp_path)
+        first_two = [self.item("Call the plumber", "a"), self.item("Send the invoice", "b")]
+        three = [*first_two, self.item("Book the dentist", "c")]
+
+        await controller.create_reminder_batch(first_two, label="Plumbing")
+        second = await controller.create_reminder_batch(three, label="Plumbing")
+        third = await controller.create_reminder_batch(three, label="Plumbing")
+
+        assert second == ReminderBatchResult(created=1, already=2)
+        assert third == ReminderBatchResult(already=3)
+        assert confirms.prompts == [
+            "Add 2 reminders from “Plumbing”?",
+            "Add 1 reminder from “Plumbing”?",
+        ]
+        assert self.written_titles(bridge) == [
+            "Call the plumber", "Send the invoice", "Book the dentist",
+        ]
+        store.close()
+
+    async def test_a_reminder_that_failed_before_writing_is_the_only_one_asked_again(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, _, store = self.rig_with_list(
+            tmp_path,
+            failures={2: NativeBridgeUnavailable("not dispatched", possible_external_commit=False)},
+        )
+        items = [self.item("Call the plumber", "a"), self.item("Send the invoice", "b")]
+
+        first = await controller.create_reminder_batch(items, label="Plumbing")
+        second = await controller.create_reminder_batch(items, label="Plumbing")
+
+        assert first == ReminderBatchResult(
+            created=1,
+            problems=("Reminders did not create the reminder. Check JOAT on the Mac.",),
+        )
+        assert second == ReminderBatchResult(created=1, already=1)
+        assert confirms.prompts == [
+            "Add 2 reminders from “Plumbing”?",
+            "Add 1 reminder from “Plumbing”?",
+        ]
+        store.close()
+
+    async def test_a_reminder_that_may_exist_makes_the_batch_uncertain_and_is_not_retried(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, _, store = self.rig_with_list(
+            tmp_path,
+            failures={2: NativeBridgeUnavailable("reply lost", possible_external_commit=True)},
+        )
+        items = [self.item("Call the plumber", "a"), self.item("Send the invoice", "b")]
+
+        first = await controller.create_reminder_batch(items, label="Plumbing")
+        second = await controller.create_reminder_batch(items, label="Plumbing")
+
+        assert first.created == 1
+        assert first.problems == (
+            "The reminder may have been created. Check Reminders before retrying.",
+        )
+        assert self.batch_state(store) == "uncertain"
+        assert second.created == 0 and second.already == 1
+        assert second.problems == first.problems
+        assert len(confirms.prompts) == 1
+        assert self.written_titles(bridge).count("Send the invoice") == 1
+        store.close()
+
+    async def test_a_reminder_with_no_usable_title_is_reported_and_the_rest_proceed(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, controller, confirms, _, store = self.rig_with_list(tmp_path)
+
+        result = await controller.create_reminder_batch(
+            [self.item("   ", "a"), self.item("Send the invoice", "b")], label="Plumbing",
+        )
+
+        assert result == ReminderBatchResult(
+            created=1, problems=("Reminder title must be 1 to 200 visible characters.",),
+        )
+        assert confirms.prompts == ["Add 1 reminder from “Plumbing”?"]
+        store.close()
+
+    async def test_nothing_to_add_asks_nothing(self, tmp_path: Path) -> None:
+        bridge, controller, confirms, _, store = self.rig_with_list(tmp_path)
+
+        result = await controller.create_reminder_batch([], label="Plumbing")
+
+        assert result == ReminderBatchResult()
+        assert confirms.prompts == [] and bridge.calls == []
+        store.close()
+
+    async def test_without_the_native_bridge_nothing_is_asked(self, tmp_path: Path) -> None:
+        store = DurableStore(tmp_path / "joat.sqlite3")
+        confirms = ConfirmationHarness(accept=True)
+        controller = ProductivityActionController(
+            None, confirms, ActionJournal(store), TaskOccurrenceStore(store),
+        )  # type: ignore[arg-type]
+
+        result = await controller.create_reminder_batch(
+            [self.item("Call the plumber", "a")], label="Plumbing",
+        )
+
+        assert result.refused == "Open JOAT on the Mac and connect Reminders first."
+        assert confirms.prompts == []
+        store.close()
+
+    async def test_is_created_is_true_only_after_a_confirmed_write(self, tmp_path: Path) -> None:
+        _, controller, confirms, _, store = self.rig_with_list(tmp_path, accept=False)
+        _, origin = self.item("Call the plumber", "a")
+
+        assert not controller.is_created(origin)
+        await controller.create_reminder_batch([self.item("Call the plumber", "a")], label="P")
+        assert not controller.is_created(origin)
+        confirms.accept = True
+        await controller.create_reminder_batch([self.item("Call the plumber", "a")], label="P")
+        assert controller.is_created(origin)
         store.close()

@@ -15,12 +15,14 @@ injected exporter so this module never owns AppleScript or process spawning.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as clock_time
 from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -35,6 +37,7 @@ from .productivity_actions import (
     ProductivityActionController,
     ReminderIntent,
 )
+from .commitments import Commitment, extract_commitments
 from .notes_sync import voice_document
 from .voice_note_capture import DEFAULT_TITLE
 
@@ -61,7 +64,14 @@ class NoteExporter(Protocol):
 _MAX_DIRECT_CHARS = 20_000
 _MAX_FOLD_CHUNKS = 8
 _ASK_TAIL_CHARS = 18_000
-_MAX_REMINDER_HANDOFF = 8
+_COMMITMENT_CACHE_NOTES = 16
+#: Shown the whole list of reminders a note would add; True = go on to the
+#: one confirmation, False = the wearer left, None = no answer in time.
+ReminderReview = Callable[[str, tuple[str, ...]], Awaitable[bool | None]]
+_WEEKDAYS = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+}
 
 _INSIGHTS_SYSTEM = (
     "You distill the transcript of a recorded conversation, meeting, speech or "
@@ -218,6 +228,9 @@ class NoteInsightsService:
         self._claude = claude
         self._clock_us = clock_us or (lambda: time.time_ns() // 1_000)
         self._summarizing: set[str] = set()
+        # What the wearer said they will do, per note and transcript.
+        self._commitment_cache: dict[str, tuple[str, tuple[Commitment, ...]]] = {}
+        self._commitment_lock = asyncio.Lock()
         # What follows the automatic summary of a just-saved note, whether
         # or not the summary worked (FEAT-002: the Apple Notes copy).
         self._after_summary = after_summary
@@ -249,6 +262,37 @@ class NoteInsightsService:
             elif segment.kind == "gap":
                 parts.append("[recording gap]")
         return "\n".join(parts)
+
+    async def commitments(self, capture_id: str) -> tuple[Commitment, ...] | None:
+        """What the wearer said they will do in a note (services/commitments.py).
+
+        None when the local model cannot be asked or did not answer. Found once
+        per transcript and kept in memory: the model is greedy, so asking again
+        would give the same answer, and a restart simply asks again.
+        """
+        completer = self._local
+        if completer is None:
+            return None
+        try:
+            self._notes.get(capture_id)
+        except VoiceNoteError:
+            return None
+        transcript = self.transcript_text(capture_id)
+        if not transcript.strip():
+            return ()
+        digest = hashlib.sha256(transcript.encode("utf-8")).hexdigest()
+        async with self._commitment_lock:
+            cached = self._commitment_cache.get(capture_id)
+            if cached is not None and cached[0] == digest:
+                return cached[1]
+            found = await extract_commitments(completer, transcript)
+            if found is None:
+                return None
+            self._commitment_cache.pop(capture_id, None)
+            self._commitment_cache[capture_id] = (digest, found)
+            while len(self._commitment_cache) > _COMMITMENT_CACHE_NOTES:
+                self._commitment_cache.pop(next(iter(self._commitment_cache)))
+            return found
 
     def schedule_summarize(self, capture_id: str) -> None:
         """Fire-and-forget local summarization after a retained save."""
@@ -412,6 +456,27 @@ class NoteInsightsService:
         return parse_insights(raw) if raw else None
 
 
+def _due_date(day: str | None, note_day: date, now: datetime) -> date:
+    """The day a spoken commitment is due, at 09:00.
+
+    The day the wearer named wins ("tomorrow", a weekday after the note's day);
+    otherwise the note's own day. A 09:00 that has already gone by cannot
+    alert, so it moves to the first 09:00 still ahead.
+    """
+    base = note_day
+    if day == "tomorrow":
+        base = note_day + timedelta(days=1)
+    elif day in _WEEKDAYS:
+        base = note_day + timedelta(days=(_WEEKDAYS[day] - note_day.weekday() - 1) % 7 + 1)
+    nine = datetime.combine(base, clock_time(9, 0), tzinfo=now.tzinfo)
+    if nine > now:
+        return base
+    ahead = datetime.combine(now.date(), clock_time(9, 0), tzinfo=now.tzinfo)
+    if ahead <= now:
+        ahead += timedelta(days=1)
+    return ahead.date()
+
+
 def _log_task_failure(task: asyncio.Task[None]) -> None:
     if not task.cancelled() and task.exception() is not None:
         log.error("auto-summary task failed", exc_info=task.exception())
@@ -437,8 +502,10 @@ class NoteInsightCommandController:
         sync: NoteSync | None = None,
         local_time_zone: Callable[[], str | None] | None = None,
         now: Callable[[], datetime] | None = None,
+        review_reminders: ReminderReview | None = None,
     ) -> None:
         self._insights = insights
+        self._review = review_reminders
         self._productivity = productivity
         self._exporter = exporter
         self._sync = sync
@@ -467,7 +534,13 @@ class NoteInsightCommandController:
             note = self._insights.latest_retained()
             if note is None:
                 return "There is no retained note to create reminders from."
-            return await self.create_reminders_for(note.capture_id)
+            # The wearer reads every reminder before approving it, and the
+            # list is drawn on the note's own page: the glasses show a note
+            # page only to the visit that opened it, so a spoken request
+            # (from anywhere) is pointed at the tap instead of guessing.
+            title = note.title or "Untitled"
+            short = title if len(title) <= 40 else title[:39].rstrip() + "…"
+            return f"Open “{short}” in QuickNotes and tap: reminders. You read them first."
         if _EXPORT_NOTES.fullmatch(normalized) is not None:
             return await self._export_to_notes()
         if self._sync is not None:
@@ -487,20 +560,22 @@ class NoteInsightCommandController:
             log.exception("refreshing the Apple Note after a summary failed")
 
     async def create_reminders_for(self, capture_id: str) -> str:
-        """Each next step of one note becomes a confirmed, due-tomorrow reminder."""
+        """The tasks the wearer said they will do, as one confirmed batch of reminders.
+
+        The tasks are not the summary's NEXT STEPS (the model's own ideas): they
+        are sentences of the transcript that carry a commitment, found by
+        services/commitments.py. The wearer reads every reminder in full, then
+        confirms the lot once; each is written whole.
+        """
         if self._productivity is None:
             return "Reminders are unavailable on this Mac."
+        if self._review is None:
+            return "Reminders cannot be shown on the glasses right now."
         try:
             note = self._insights.note(capture_id)
         except VoiceNoteError:
             return "That note no longer exists."
         title = note.title or "Untitled"
-        stored = self._insights.insights(note.capture_id)
-        if stored is None:
-            return f"“{title}” has no summary yet. Say: summarize the last note, first."
-        todos = stored.todos[:_MAX_REMINDER_HANDOFF]
-        if not todos:
-            return f"“{title}” has no todos to create reminders from."
         zone = self._local_time_zone()
         if zone is None:
             return "The Mac's time zone is unavailable, so reminders cannot be scheduled."
@@ -508,51 +583,63 @@ class NoteInsightCommandController:
             local_now = self._now().astimezone(ZoneInfo(zone))
         except ZoneInfoNotFoundError:
             return "The Mac's time zone is unavailable, so reminders cannot be scheduled."
-        due_date = (local_now + timedelta(days=1)).strftime("%Y-%m-%d")
-        total = len(todos)
-        created = already = 0
-        reasons: list[str] = []
-        for ordinal, todo in enumerate(todos):
-            receipt = await self._productivity.create_reminder(
-                ReminderIntent(
-                    title=todo[:200],
-                    date=due_date,
-                    time="09:00",
-                    time_zone=zone,
-                ),
-                origin=ActionOrigin(
-                    kind="voice_note.todo",
-                    identifier=note.capture_id,
-                    ordinal=ordinal,
-                ),
-                # A to-do is a model's sentence, not the wearer's dictation:
-                # it is cut to fit the confirmation rather than refused by it.
-                fit_title=True,
+        found = await self._insights.commitments(note.capture_id)
+        if found is None:
+            return "The local model did not answer. Try again in a moment."
+        if not found:
+            return f"“{title}” has no reminders: I add only what you said you will do."
+        started_us = note.started_at_us or note.created_at_us
+        note_day = datetime.fromtimestamp(started_us / 1_000_000, ZoneInfo(zone)).date()
+        already = 0
+        items: list[tuple[ReminderIntent, ActionOrigin]] = []
+        lines: list[str] = []
+        for commitment in found:
+            # The sentence names the reminder, so saying it again, or tapping
+            # twice, finds the one already made.
+            origin = ActionOrigin(
+                kind="voice_note.commitment",
+                identifier=f"{note.capture_id}:{commitment.key}",
+                ordinal=0,
             )
-            if receipt.startswith("Created Reminder:"):
-                created += 1
-            elif receipt.startswith("Reminder already created:"):
+            if self._productivity.is_created(origin):
                 already += 1
-            else:
-                # The tap's receipt used to say only "Created 0 of N", and the
-                # log said nothing: every refusal looked like it never ran.
-                log.info(
-                    "note reminder %d of %d for %s not created: %s",
-                    ordinal + 1, total, note.capture_id, receipt,
-                )
-                reasons.append(receipt)
-        plural = "s" if total != 1 else ""
-        if already == total:
-            verb = "are" if total != 1 else "is"
+                continue
+            due = _due_date(commitment.day, note_day, local_now)
+            items.append((
+                ReminderIntent(
+                    title=commitment.task, date=due.isoformat(), time="09:00", time_zone=zone,
+                ),
+                origin,
+            ))
+            lines.append(f"□ {commitment.task} — {due:%b} {due.day} at 09:00")
+        if not items:
+            plural = "s" if already != 1 else ""
+            verb = "are" if already != 1 else "is"
             return f"The reminder{plural} from “{title}” {verb} already in Reminders."
+        decision = await self._review(title, tuple(lines))
+        if decision is None:
+            return "Reminders were not added: the list was not answered in time."
+        if not decision:
+            return "Reminders cancelled."
+        result = await self._productivity.create_reminder_batch(items, label=title)
+        already += result.already
+        for problem in result.problems:
+            log.info("note reminder for %s not created: %s", note.capture_id, problem)
+        if result.refused is not None:
+            return result.refused
+        if result.declined:
+            return "Reminders cancelled."
+        total = len(items)
+        plural = "s" if total != 1 else ""
         summary = (
-            f"Created {created} of {total} reminder{plural} "
-            f"from “{title}”, due tomorrow 09:00."
+            f"Added {result.created} reminder{plural} from “{title}”."
+            if result.created == total
+            else f"Added {result.created} of {total} reminder{plural} from “{title}”."
         )
         if already:
             summary += f" {already} already in Reminders."
-        if reasons:
-            return f"{summary} {reasons[0]}"
+        if result.problems:
+            return f"{summary} {result.problems[0]}"
         return f"{summary} Adjust times in Planning."
 
     async def _export_to_notes(self) -> str:
@@ -576,6 +663,7 @@ __all__ = [
     "NoteInsightsService",
     "NoteSync",
     "ParsedInsights",
+    "ReminderReview",
     "TaskCompleter",
     "clean_title",
     "parse_insights",

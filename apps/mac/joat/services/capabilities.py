@@ -1152,9 +1152,29 @@ class CapabilityRouter:
             capability="AGENT TERMINAL", tap_hint="tap: send", timeout_s=timeout_s,
         )
 
+    async def review_note_reminders(
+        self, note_title: str, lines: tuple[str, ...], *, timeout_s: float = 90.0,
+    ) -> bool | None:
+        """Show every reminder a note would add, whole, before the one confirmation.
+
+        True when the wearer taps to go on to the confirmation, False when they
+        leave the page, None when it timed out. This page writes nothing: the
+        confirmation that follows is what approves the reminders. It is the
+        glasses' own scroll box (a line a swipe), so there is no last page to
+        reach before the tap is offered.
+        """
+        count = len(lines)
+        return await self._review_draft(
+            "QUICKNOTES · DETAIL",
+            f"Add {count} reminder{'s' if count != 1 else ''} from “{note_title}”",
+            "\n".join(lines),
+            capability="QUICKNOTES", tap_hint=f"tap: add {count}", timeout_s=timeout_s,
+            last_page_only=False,
+        )
+
     async def _review_draft(
         self, title: str, heading: str, body: str, *,
-        capability: str, tap_hint: str, timeout_s: float,
+        capability: str, tap_hint: str, timeout_s: float, last_page_only: bool = True,
     ) -> bool | None:
         loop = asyncio.get_running_loop()
         decided: asyncio.Future[bool] = loop.create_future()
@@ -1163,7 +1183,8 @@ class CapabilityRouter:
         async def confirm_from_review() -> None:
             current = self._note_reader
             if (current is not None and current is reader
-                    and current.index == len(current.pages) - 1 and not decided.done()):
+                    and (not last_page_only or current.index == len(current.pages) - 1)
+                    and not decided.done()):
                 decided.set_result(True)
 
         # Reviewing this draft is an internal step of the same action. A new
@@ -1178,6 +1199,7 @@ class CapabilityRouter:
             reader = _NoteReaderState(
                 title, heading, paginate_reader_text(body), f"review-{secrets.token_hex(16)}",
                 capability=capability, on_tap=confirm_from_review, tap_hint=tap_hint,
+                text=body,
             )
             self._note_reader = reader
             await self._show_note_reader()
@@ -2956,8 +2978,9 @@ class CapabilityRouter:
                 rows.extend(f"– {point}" for point in insights.key_points)
             if insights.todos:
                 rows.extend(["", "NEXT STEPS"])
-                # □ reads as an unchecked box: these are the actionable rows,
-                # and a tap on this page makes them reminders.
+                # □ reads as an unchecked box: these are the actionable rows.
+                # A tap on this page makes reminders only from what was said
+                # (listed whole for the wearer to read first), not from these.
                 rows.extend(f"□ {todo}" for todo in insights.todos)
         if is_latest:
             rows.extend(["", "Say: ask the last note …"])
@@ -2972,10 +2995,11 @@ class CapabilityRouter:
         on_tap: Callable[[], Awaitable[None]] | None = None
         tap_hint: str | None = None
         reminders = self._note_reminders
-        if reminders is not None and insights is not None and insights.todos:
+        if reminders is not None and any(segment.kind == "transcript" for segment in segments):
             capture_id = note.capture_id
 
             async def add_reminders() -> None:
+                await self._hud.receipt("Finding your reminders…")
                 receipt = await reminders(capture_id)
                 await self._hud.receipt(receipt)
                 await self._hud.settle_assistant()
