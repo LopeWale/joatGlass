@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-18 — Build JOAT 0.1.137
+
+- Packed from `c058f6d` (clean under `apps/hub-plugin`) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.137 above the last recorded build (0.1.136); app.json, package.json and package-lock.json all 0.1.137. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1277 tests passed, typecheck clean.
+- `apps/hub-plugin/joat.ehpk`: 178890 bytes, SHA-256 `971840f5f7175b97644ac8c6ef8972dc2516cf206011f85efd3c90525c4b567a`. Adds to 0.1.136 the spoken reminders list: the glasses app now takes the `QUICKNOTES · DETAIL` list the Mac opens for "create reminders from the last note". It needs the Mac at the same revision (restart JOAT). Not uploaded to Even Hub, not installed, not verified on physical glasses.
+
 ## 2026-10-18 — QuickNote reminders: only what you said, read first, one confirm
 
 The wearer, after the 2026-10-17 fix: reminders made from a note were the summary's invented "next steps" (for example "Schedule a meeting with the IT department" from a note that never said so), each one asked for separately. Chosen: reminders come from what was said, the whole list is read on the glasses, and one confirmation adds them all.
