@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-18 — Planning month: the shared footer, and no title beside the month
+
+The wearer: "replace the planning footer with the reusable footer we use with all the other pages. also remove the planning word that is on the same row as the 'Month Year'".
+
+- **Footer.** The Planning month is the one page drawn as a picture, and it drew a footer of its own: small, grey and centred in the canvas face. It now draws the line every firmware page carries: the firmware font at full size, 4 px in from the left, in the bottom band, at firmware brightness 1 (image gray 68), from the glyph atlas (`FOOTER_HINT`, `footerHintRun`, `HudCanvasRenderer.drawFooterHint`). Both month layouts use it, the split dashboard and the grid-only month. `evenTextWidth`, `fitOneLineEven` and `drawEvenText` take an optional `wordSpace` (default unchanged): the extra gap at spaces is for the smaller scales, and at full size it made the line wider than the firmware's.
+- **Title.** The bold "Planning" at the left of the month row is gone from both layouts; the header already says PLANNING · MONTH. The month and year label stays where it was.
+- **Verified in the simulator** (`scripts/simulator_planning_native_probe.py`, fixture data): the month page's footer lights the same number of pixels (762), on the same rows (263 to 283) and at the same alpha (179) as the week page's native footer, from x = 4. The line ends at x = 341 where the firmware's ends at 339. Not measured on glasses.
+- **Tests.** Four new: the footer run (position, level, width against the firmware's), a too-long footer cut with an ellipsis, no "Planning" title, and the footer drawn bottom-left rather than centred (the last two fail with the old drawing). Plugin 1281 passed, typecheck clean. Plugin only; not packed, version still 0.1.137.
+
 ## 2026-10-18 — Build JOAT 0.1.137
 
 - Packed from `c058f6d` (clean under `apps/hub-plugin`) with `scripts/pack.sh` and the builder's `.env` package id and Mac candidates. Version guard: 0.1.137 above the last recorded build (0.1.136); app.json, package.json and package-lock.json all 0.1.137. `--sdk-ver 0.0.16`, minimum Even App 2.2.10. Plugin 1277 tests passed, typecheck clean.

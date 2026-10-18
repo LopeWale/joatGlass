@@ -133,6 +133,98 @@ describe('Planning month geometry', () => {
   });
 });
 
+/** A 2D context that records the text drawn and does nothing else. */
+function recordingContext(): {
+  context: CanvasRenderingContext2D;
+  texts: Array<{ text: string; x: number; y: number; align: string }>;
+} {
+  const texts: Array<{ text: string; x: number; y: number; align: string }> = [];
+  const state: Record<string, unknown> = { font: '', textAlign: 'left', fillStyle: '' };
+  const context = new Proxy(state, {
+    get(target, key: string) {
+      if (key === 'fillText') {
+        return (text: string, x: number, y: number) => {
+          texts.push({ text, x, y, align: String(target['textAlign']) });
+        };
+      }
+      if (key === 'measureText') return (value: string) => ({ width: value.length * 6 });
+      if (key in target) return target[key];
+      return () => undefined;
+    },
+    set(target, key: string, value) {
+      target[key] = value;
+      return true;
+    },
+  }) as unknown as CanvasRenderingContext2D;
+  return { context, texts };
+}
+
+describe('the footer a page drawn as a picture shares with every firmware page', () => {
+  const HINT = 'tap: choose · swipe: move · 2x tap: back';
+
+  it('is the firmware hint line: 4 px in, one dim line of the firmware font', () => {
+    const run = HudCanvas.footerHintRun(HINT)!;
+
+    // Firmware brightness 1 is image gray 68 (the fourth of sixteen levels).
+    expect(run).toMatchObject({ text: HINT, x: 4, y: 257, alpha: 68 / 255 });
+    // The firmware's own line of these words lit x = 4 to 339 on the simulator:
+    // its advances at full size, with no extra gap at the spaces.
+    expect(run.width).toBeGreaterThan(336);
+    expect(run.width).toBeLessThan(344);
+  });
+
+  it('is cut with an ellipsis where the band is too narrow, and not drawn when empty', () => {
+    const run = HudCanvas.footerHintRun(`${HINT} · ${HINT} · ${HINT}`)!;
+
+    expect(run.text.endsWith('…')).toBe(true);
+    expect(run.width).toBeLessThanOrEqual(HudCanvas.FOOTER_HINT.maxWidth);
+    expect(HudCanvas.footerHintRun('   ')).toBeUndefined();
+  });
+
+  describe('on the Planning month dashboard', () => {
+    const month = parsePlanningMonthTitle('PLANNING · PLAN · SEPTEMBER 2026')!;
+    const grid = Array.from({ length: 42 }, (_, index) => {
+      const value = new Date(Date.UTC(2026, 7, 31 + index));
+      return {
+        day: value.toISOString().slice(0, 10),
+        eventCount: 0,
+        reminderCount: 0,
+        inMonth: value.getUTCMonth() === 8,
+        entries: [],
+      };
+    });
+
+    function drawDashboard(): ReturnType<typeof recordingContext>['texts'] {
+      const { context, texts } = recordingContext();
+      const renderer = Object.create(HudCanvasRenderer.prototype) as unknown as {
+        drawPlanningDashboard: (...args: unknown[]) => void;
+      };
+      renderer.drawPlanningDashboard(
+        context, { hint: HINT, items: [], selectedIndex: 0 }, month, grid,
+        { dateIndex: 1, focused: false, itemIndex: 0 }, undefined,
+      );
+      return texts;
+    }
+
+    it('draws no "Planning" title beside the month and year', () => {
+      const texts = drawDashboard().map((entry) => entry.text);
+
+      expect(texts).not.toContain('Planning');
+      expect(texts).toContain('SEP 2026');
+    });
+
+    it('draws its footer where the other pages do, not centred above the bottom edge', () => {
+      const drawn = drawDashboard();
+      // With no glyph atlas each character is drawn on its own.
+      const footer = drawn.filter((entry) => entry.text.length === 1 && entry.y > 253);
+
+      expect(footer.map((entry) => entry.text).join('')).toBe(HINT.replace(/\s+/gu, ''));
+      expect(footer[0]!.x).toBe(4);
+      expect(drawn.some((entry) => entry.align === 'center' && entry.y === 267)).toBe(false);
+    });
+  });
+});
+
 describe('parseHudLabeledValue', () => {
   it('treats a normal assistant reply as content, never as a label', () => {
     expect(parseHudLabeledValue('Your meeting starts in 19 minutes.', 'REPLY')).toEqual({

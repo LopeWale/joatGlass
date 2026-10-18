@@ -416,6 +416,43 @@ function readerRuns(lines: readonly EvenReaderLine[], hint: string): ReaderRun[]
   return runs;
 }
 
+/**
+ * The footer every firmware page carries. Even's hint region
+ * (HudPageBuilder: `region(ContainerId.Hint, ...)`, y 253, 35 high, 4 px of
+ * padding) holds one line of the firmware font at its own size, left-aligned,
+ * at firmware brightness 1. A page drawn as a picture (the Planning month)
+ * draws the same run from the glyph atlas, so its footer is that footer, not
+ * a second style. Brightness 1 is the fourth of sixteen image levels, the
+ * gray QUIET (68): on the simulator both light pixels at alpha 179 from
+ * x = 4. (DIM_WORDS, 179 of 255, is that alpha read back as an image gray;
+ * a gray of 179 lit at full alpha in the same capture, so it is not this
+ * level.)
+ */
+export const FOOTER_HINT = {
+  x: 4,
+  /** The cell top: the band's 253 plus the region's 4 px of padding. */
+  top: 257,
+  /** The band less its padding both sides, the width a native hint is cut to. */
+  maxWidth: 568,
+  scale: 1,
+  /** Full size is the firmware's own spacing; the extra gap is for the smaller scales. */
+  wordSpace: 0,
+  alpha: QUIET / 255,
+} as const;
+
+/** The footer's one run, shortened with "…" where the line is too long. */
+export function footerHintRun(hint: string): ReaderRun | undefined {
+  const text = fitOneLineEven(
+    hint.trim(), FOOTER_HINT.maxWidth, FOOTER_HINT.scale, '', FOOTER_HINT.wordSpace,
+  );
+  if (text.length === 0) return undefined;
+  return {
+    text, x: FOOTER_HINT.x, y: FOOTER_HINT.top,
+    width: evenTextWidth(text, FOOTER_HINT.scale, FOOTER_HINT.wordSpace),
+    alpha: FOOTER_HINT.alpha,
+  };
+}
+
 export type HudIconName =
   | 'messages'
   | 'notifications'
@@ -1129,7 +1166,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         this.drawOverview(context, frame, icons);
         break;
       case 'list':
-        this.drawList(context, frame);
+        this.drawList(context, frame, await loadEvenFont());
         break;
       case 'navigation':
         this.drawNavigation(context, frame.navigation);
@@ -1721,6 +1758,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   private drawList(
     context: CanvasRenderingContext2D,
     frame: Extract<HudVisualFrame, { kind: 'list' }>,
+    atlas: HTMLImageElement | undefined,
   ): void {
     const planningMonth = parsePlanningMonthTitle(frame.title);
     const planningGrid = planningMonth && planningGridMatchesMonth(planningMonth, frame.planningGrid)
@@ -1728,13 +1766,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       : undefined;
     if (!planningMonth || !planningGrid) return;
     if (frame.planningPane) {
-      this.drawPlanningDashboard(context, frame, planningMonth, planningGrid, frame.planningPane);
+      this.drawPlanningDashboard(context, frame, planningMonth, planningGrid, frame.planningPane, atlas);
       return;
     }
     if (canRenderPlanningMonthGrid(
       planningMonth, planningGrid, frame.selectable, frame.selectedIndex, frame.items.length,
     )) {
-      this.drawPlanningMonth(context, frame, planningMonth, planningGrid);
+      this.drawPlanningMonth(context, frame, planningMonth, planningGrid, atlas);
     }
   }
 
@@ -1749,6 +1787,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     frame: Extract<HudVisualFrame, { kind: 'list' }>,
     month: PlanningMonth,
     planningGrid: readonly PlanningGridCell[],
+    atlas: HTMLImageElement | undefined,
   ): void {
     const gridLeft = 37;
     const gridRight = 539;
@@ -1758,11 +1797,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
     const selectedWeek = frame.selectedIndex;
 
+    // The header's own words name the page; the month needs no title of its own.
     context.textBaseline = 'middle';
-    context.textAlign = 'left';
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.title;
-    context.fillText('Planning', 36, 48);
     context.textAlign = 'right';
     context.fillStyle = gray(SUPPORT);
     context.font = TYPE.meta;
@@ -1828,9 +1864,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.fillStyle = gray(CHROME);
     context.font = TYPE.microMono;
     this.fitText(context, `WEEK ${selectedWeek + 1}/6 · NEXT ${nextMonth}`, 288, 257, 500);
-    context.fillStyle = gray(QUIET);
-    context.font = TYPE.hint;
-    this.fitText(context, frame.hint, 288, 267, 500);
+    this.drawFooterHint(context, atlas, frame.hint);
   }
 
   /**
@@ -1846,17 +1880,15 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     month: PlanningMonth,
     planningGrid: readonly PlanningGridCell[],
     pane: { dateIndex: number; focused: boolean; itemIndex: number },
+    atlas: HTMLImageElement | undefined,
   ): void {
     const geometry = PLANNING_DASHBOARD;
     const cellWidth = (geometry.gridRight - geometry.gridLeft) / 7;
     const dateIndex = Math.max(0, Math.min(41, pane.dateIndex));
     const hovered = planningGrid[dateIndex];
 
+    // The header's own words name the page; the month needs no title of its own.
     context.textBaseline = 'middle';
-    context.textAlign = 'left';
-    context.fillStyle = gray(BRIGHT);
-    context.font = TYPE.title;
-    context.fillText('Planning', geometry.gridLeft + 2, geometry.headerBaselineY - 14);
     context.textAlign = 'right';
     context.fillStyle = gray(CHROME);
     context.font = TYPE.meta;
@@ -1971,11 +2003,22 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.fillText(`+${total - entries.length} more`, geometry.paneLeft, 247);
     }
 
-    context.fillStyle = gray(QUIET);
-    context.font = TYPE.hint;
-    context.textAlign = 'center';
-    this.fitText(context, frame.hint, 288, 267, 500);
+    this.drawFooterHint(context, atlas, frame.hint);
     void paneWidth;
+  }
+
+  /** The footer every firmware page carries, drawn from the glyph atlas (FOOTER_HINT). */
+  private drawFooterHint(
+    context: CanvasRenderingContext2D,
+    atlas: HTMLImageElement | undefined,
+    hint: string,
+  ): void {
+    const run = footerHintRun(hint);
+    if (!run) return;
+    drawEvenText(context, atlas, run.text, run.x, run.y, {
+      alpha: run.alpha, fallbackFont: TYPE.hint, scale: FOOTER_HINT.scale,
+      wordSpace: FOOTER_HINT.wordSpace,
+    });
   }
 
   /** Strip over the live page; black-fills its own rect so rows beneath can't bleed through. */

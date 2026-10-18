@@ -52,11 +52,14 @@ export const EVEN_WORD_SPACE = 1.5;
 
 /** The width of one line of text in Even's font at `scale`: pretext's
  * advances scaled, plus the word spacing. Drawing places each glyph at its
- * prefix's width, so measuring and drawing always agree. */
-export function evenTextWidth(text: string, scale = EVEN_FONT_SCALE): number {
+ * prefix's width, so measuring and drawing always agree. `wordSpace` is 0
+ * for text at full size, where the firmware's own space needs no help. */
+export function evenTextWidth(
+  text: string, scale = EVEN_FONT_SCALE, wordSpace = EVEN_WORD_SPACE,
+): number {
   if (text.length === 0) return 0;
   const spaces = text.match(/ /gu)?.length ?? 0;
-  return getTextWidth(text) * scale + spaces * EVEN_WORD_SPACE;
+  return getTextWidth(text) * scale + spaces * wordSpace;
 }
 
 /** Where to break a token wider than the whole line: after a URL or path
@@ -101,16 +104,17 @@ export function wrapEven(text: string, maxWidth: number, scale = EVEN_FONT_SCALE
  * `keep` (a page count, a time) is appended whole and never shortened. */
 export function fitOneLineEven(
   text: string, maxWidth: number, scale = EVEN_FONT_SCALE, keep = '',
+  wordSpace = EVEN_WORD_SPACE,
 ): string {
   const full = `${text}${keep}`;
-  if (evenTextWidth(full, scale) <= maxWidth) return full;
+  if (evenTextWidth(full, scale, wordSpace) <= maxWidth) return full;
   const chars = Array.from(text.trimEnd());
   let low = 0;
   let high = chars.length;
   while (low < high) {
     const mid = Math.ceil((low + high) / 2);
     const candidate = `${chars.slice(0, mid).join('').trimEnd()}${ELLIPSIS}${keep}`;
-    if (evenTextWidth(candidate, scale) <= maxWidth) low = mid; else high = mid - 1;
+    if (evenTextWidth(candidate, scale, wordSpace) <= maxWidth) low = mid; else high = mid - 1;
   }
   return low > 0 ? `${chars.slice(0, low).join('').trimEnd()}${ELLIPSIS}${keep}` : keep;
 }
@@ -394,16 +398,17 @@ export function drawEvenText(
   text: string,
   x: number,
   y: number,
-  options: { scale?: number; alpha?: number; fallbackFont: string },
+  options: { scale?: number; alpha?: number; wordSpace?: number; fallbackFont: string },
 ): void {
   const scale = options.scale ?? EVEN_FONT_SCALE;
+  const wordSpace = options.wordSpace ?? EVEN_WORD_SPACE;
   const chars = Array.from(text);
   context.save();
   context.globalAlpha = options.alpha ?? 1;
   context.imageSmoothingEnabled = false;
   let prefix = '';
   for (const char of chars) {
-    const left = x + evenTextWidth(prefix, scale);
+    const left = x + evenTextWidth(prefix, scale, wordSpace);
     prefix += char;
     if (/\s/u.test(char)) continue;
     const point = char.codePointAt(0) ?? 0;
