@@ -3643,3 +3643,74 @@ class TestTheRemindersListPage:
             index for index, text in enumerate(shown) if text.startswith("Added 1 reminder")
         )
         store.close()
+
+
+class TestTheRemindersListOpensWhereTheGlassesWillTakeIt:
+    """2026-10-18: the glasses show a QuickNotes reader only to the visit a
+    tap opened, or to a new spoken request. So the list answers a note page's
+    tap in that visit, and is a request of its own when said from anywhere."""
+
+    LINES = ("□ Email the release notes — Oct 19 at 09:00",)
+
+    async def test_from_a_note_page_it_stays_in_that_visit(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        seen: list[str | None] = []
+
+        async def reminders(capture_id: str) -> str:
+            decision = asyncio.create_task(
+                router.review_note_reminders("Standup notes", self.LINES, timeout_s=5)
+            )
+            await wait_until(lambda: any(
+                isinstance(m, HudList) and m.title == "QUICKNOTES · DETAIL"
+                for m in transport.sent))
+            seen.append([m for m in transport.sent if isinstance(m, HudList)][-1].request_id)
+            router._note_reader = None            # the wearer leaves it
+            await asyncio.wait_for(decision, 2)
+            return "Reminders cancelled."
+
+        store = DurableStore(tmp_path / "durable.sqlite3")
+        voice_notes = VoiceNoteStore(store)
+        _retained_voice_note(voice_notes, "capture-1", base_us=20)
+        router, transport, _ = make_router(tmp_path, voice_notes=voice_notes)
+        router._note_reminders = reminders
+        await router.open("QuickNotes", request_id="notes-remind")
+        await router._select_capability_row("QUICKNOTES", 1, "rec", "notes-remind")
+        router.on_input(InputEvent(container_name="capdata", selected_name="QUICKNOTES",
+                                   selected_index=0, request_id="notes-remind"))
+        await wait_until(lambda: seen != [])
+        assert seen == ["notes-remind"]
+        store.close()
+
+    async def test_said_from_anywhere_it_is_a_new_spoken_request(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path)
+        # A QuickNotes visit opened from the menu, with no note page open.
+        await router.open("QuickNotes", request_id="notes-list")
+        decision = asyncio.create_task(
+            router.review_note_reminders("Standup notes", self.LINES, timeout_s=5)
+        )
+        await wait_until(lambda: router._note_reader is not None)
+        frame = [m for m in transport.sent if isinstance(m, HudList)][-1]
+
+        assert frame.title == "QUICKNOTES · DETAIL"
+        assert frame.request_id is not None and frame.request_id.startswith("voice-")
+        assert router._active_request_id == frame.request_id
+        # Its tap, carrying that request, goes on to the confirmation.
+        router.on_input(InputEvent(
+            container_name="capdata", selected_name="QUICKNOTES",
+            selected_index=0, request_id=frame.request_id,
+        ))
+        assert await asyncio.wait_for(decision, 2) is True
+
+    async def test_leaving_a_spoken_list_is_a_no(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path)
+        decision = asyncio.create_task(
+            router.review_note_reminders("Standup notes", self.LINES, timeout_s=5)
+        )
+        await wait_until(lambda: router._note_reader is not None)
+        request_id = router._active_request_id
+
+        router.on_input(InputEvent(
+            container_name="capability-lifecycle", selected_name="quicknotes-home",
+            request_id=request_id,
+        ))
+
+        assert await asyncio.wait_for(decision, 2) is False

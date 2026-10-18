@@ -1245,6 +1245,74 @@ describe('CapabilityMenu', () => {
     expect(sent).toHaveLength(before);
   });
 
+  describe('the reminders list the Mac opens for a spoken request', () => {
+    const list = (reminders: string) => readerRows(
+      [], `Add 2 reminders from “Standup notes”\n\n${reminders}`,
+    );
+    const rows = '□ Email the release notes — Oct 19 at 09:00\n□ Book the retro room — Oct 23 at 09:00';
+    const page = { id: 'review-abc', index: 0, count: 1 };
+
+    it('is taken with no tap before it, and its tap reaches the Mac', async () => {
+      // "create reminders from the last note", said from anywhere: no note
+      // was opened by a row tap, so only a new voice generation can bring it.
+      const { menu, listOptions, sent } = rig();
+      const requestId = 'voice-reminders-1';
+      expect(await menu.presentList(
+        'QUICKNOTES · DETAIL', list(rows), requestId, true, 'tap: add 2 · left x2: back',
+        undefined, undefined, undefined, undefined, undefined, page,
+      )).toBe(true);
+      expect(listOptions[listOptions.length - 1]).toMatchObject({
+        title: 'QUICKNOTES · DETAIL', nativeTextPage: true,
+      });
+      menu.handleList(click(0));
+      expect(sent[sent.length - 1]).toMatchObject({ event: {
+        containerName: 'capdata', selectedName: 'QUICKNOTES', selectedIndex: 0, requestId,
+      } });
+    });
+
+    it('tells the Mac when the wearer leaves it', async () => {
+      const { menu, sent } = rig();
+      const requestId = 'voice-reminders-2';
+      await menu.presentList(
+        'QUICKNOTES · DETAIL', list(rows), requestId, true, 'tap: add 2 · left x2: back',
+        undefined, undefined, undefined, undefined, undefined, page,
+      );
+      await menu.toggle();
+      expect(sent[sent.length - 1]).toMatchObject({ kind: 'input', event: {
+        containerName: 'capability-lifecycle', requestId,
+      } });
+      expect(String((sent[sent.length - 1]!.event as { selectedName: string }).selectedName))
+        .toMatch(/^quicknotes-(list|home)$/);
+    });
+
+    it('is still dropped when it is not a new spoken request', async () => {
+      const { menu } = rig();
+      // A page with no voice generation behind it answers a row tap or nothing.
+      expect(await menu.presentList(
+        'QUICKNOTES · DETAIL', list(rows), 'menu-request', true, 'tap: add 2 · left x2: back',
+        undefined, undefined, undefined, undefined, undefined, page,
+      )).toBe(false);
+      // And a second frame of the spoken visit already open needs its tap too.
+      expect(await menu.presentList(
+        'QUICKNOTES · DETAIL', list(rows), 'voice-reminders-3', true, 'tap: add 2 · left x2: back',
+        undefined, undefined, undefined, undefined, undefined, page,
+      )).toBe(true);
+      expect(await menu.presentList(
+        'QUICKNOTES · DETAIL', list(rows), 'voice-reminders-3', true, 'tap: add 2 · left x2: back',
+        undefined, undefined, undefined, undefined, undefined, page,
+      )).toBe(false);
+    });
+
+    it('does not let a spoken request bring a note page', async () => {
+      const { menu } = rig();
+      expect(await menu.presentList(
+        'QUICKNOTES · NOTE', readerRows([], 'Standup notes\n\nTRANSCRIPT\nWords.'),
+        'voice-note-1', false, 'left x2: back', undefined, undefined, undefined, undefined,
+        undefined, page,
+      )).toBe(false);
+    });
+  });
+
   it('asks the Mac for a thread page only where its reader has one', async () => {
     const r = rig();
     const { menu, sent } = r;

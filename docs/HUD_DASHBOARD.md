@@ -401,8 +401,13 @@ already past moves to the next one ahead. Nothing needs a summary first.
 Declining writes nothing and the note can be asked again; one already
 created is counted "already in Reminders" and never written twice; one that
 may exist is not retried. The spoken "create reminders from the last note"
-points at the note's own tap, because the glasses show a note page only to
-the visit that opened it. "send the last note to
+runs the same flow: with a note's page open the list answers that page;
+said from anywhere else the Mac puts the list up as a spoken request of its
+own (a fresh `voice-` request id) and the glasses app takes that page once
+(`CapabilityMenu.presentList`: a QuickNotes `NOTE` or `DETAIL` page is
+otherwise taken only for the visit a row tap opened, so a repeat frame of
+the same id, any `NOTE` page and any non-voice id are still dropped).
+"send the last note to
 my notes" writes Apple Notes on the Mac (JOAT folder — the Even plugin has
 no phone-side Notes API) and iCloud carries it to the phone.
 

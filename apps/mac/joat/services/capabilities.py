@@ -1164,17 +1164,25 @@ class CapabilityRouter:
         reach before the tap is offered.
         """
         count = len(lines)
+        # From a note's own page the list answers that tap, in the same visit.
+        # Said from anywhere else ("create reminders from the last note") there
+        # is no such visit, and the glasses show a note's page only to the visit
+        # that opened it: the list is then a request of its own, which they take
+        # like any spoken page.
+        reader = self._note_reader
+        from_note_page = reader is not None and reader.title == "QUICKNOTES · NOTE"
         return await self._review_draft(
             "QUICKNOTES · DETAIL",
             f"Add {count} reminder{'s' if count != 1 else ''} from “{note_title}”",
             "\n".join(lines),
             capability="QUICKNOTES", tap_hint=f"tap: add {count}", timeout_s=timeout_s,
-            last_page_only=False,
+            last_page_only=False, fresh_request=not from_note_page,
         )
 
     async def _review_draft(
         self, title: str, heading: str, body: str, *,
         capability: str, tap_hint: str, timeout_s: float, last_page_only: bool = True,
+        fresh_request: bool = False,
     ) -> bool | None:
         loop = asyncio.get_running_loop()
         decided: asyncio.Future[bool] = loop.create_future()
@@ -1191,7 +1199,8 @@ class CapabilityRouter:
         # request ID makes the Hub retire its selected-message owner; clearing
         # selection here also cancels the prepared action calling this method.
         request_id = (self._active_request_id if self._active_capability == capability
-                      and self._active_request_id else voice_request_id())
+                      and self._active_request_id and not fresh_request
+                      else voice_request_id())
         self._active_capability = capability
         self._active_request_id = request_id
         token = self._request_context.set(request_id)

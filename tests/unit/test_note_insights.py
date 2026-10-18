@@ -608,20 +608,39 @@ async def test_reminders_say_what_is_missing_before_asking_anything(tmp_path: Pa
         assert completer.calls == []
 
 
-async def test_the_spoken_command_points_at_the_notes_own_page(tmp_path: Path) -> None:
-    """The list is drawn on the note's page, which the glasses show only to the
-    visit that opened it; a spoken request neither guesses nor waits in vain."""
+async def test_the_spoken_command_runs_the_same_flow_as_the_tap(tmp_path: Path) -> None:
     completer = FakeCompleter([COMMITMENT_REPLY])
     durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
     productivity, review = FakeProductivity(), FakeReview()
     commands = reminder_commands(insights, productivity, review)
     with durable:
-        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+        retained_note(notes, "older", transcript="Nothing to do here.", base_us=NOTE_US)
+        retained_note(notes, "newer", transcript=SPOKEN, base_us=NOTE_US + 1_000_000)
 
         receipt = await commands.handle_command("Create reminders from the last note.")
 
-        assert receipt == "Open “Launch sync” in QuickNotes and tap: reminders. You read them first."
-        assert completer.calls == [] and review.shown == [] and productivity.batches == []
+        # "The last note": the list is read first, then one confirmation.
+        assert receipt == "Added 2 reminders from “Launch sync”. Adjust times in Planning."
+        assert len(review.shown) == 1 and len(productivity.batches) == 1
+        assert {origin.identifier.split(":")[0] for _, origin in productivity.batches[0][0]} == {
+            "newer",
+        }
+
+
+async def test_the_spoken_command_adds_nothing_unless_the_list_is_confirmed(
+    tmp_path: Path,
+) -> None:
+    completer = FakeCompleter([COMMITMENT_REPLY])
+    durable, notes, insights = service(tmp_path / "joat.sqlite3", completer)
+    productivity, review = FakeProductivity(), FakeReview(None)
+    commands = reminder_commands(insights, productivity, review)
+    with durable:
+        retained_note(notes, transcript=SPOKEN, base_us=NOTE_US)
+
+        receipt = await commands.handle_command("create reminders from the last note")
+
+        assert receipt == "Reminders were not added: the list was not answered in time."
+        assert productivity.batches == []
 
 
 async def test_the_command_needs_a_retained_note(tmp_path: Path) -> None:

@@ -534,13 +534,9 @@ class NoteInsightCommandController:
             note = self._insights.latest_retained()
             if note is None:
                 return "There is no retained note to create reminders from."
-            # The wearer reads every reminder before approving it, and the
-            # list is drawn on the note's own page: the glasses show a note
-            # page only to the visit that opened it, so a spoken request
-            # (from anywhere) is pointed at the tap instead of guessing.
-            title = note.title or "Untitled"
-            short = title if len(title) <= 40 else title[:39].rstrip() + "…"
-            return f"Open “{short}” in QuickNotes and tap: reminders. You read them first."
+            # The same flow as the note page's tap: the wearer reads every
+            # reminder, then confirms once.
+            return await self.create_reminders_for(note.capture_id)
         if _EXPORT_NOTES.fullmatch(normalized) is not None:
             return await self._export_to_notes()
         if self._sync is not None:

@@ -716,7 +716,14 @@ export class CapabilityMenu {
         || (reviewVisit.retired.size >= 256 && readerPage.id !== reviewVisit.activeId))) return true;
     // A reader response is always answering a row tap in this visit. Check
     // before voice-generation adoption so a late page cannot reopen it.
-    if (isQuickNotesReaderTitle(title ?? '')
+    // The one reader the Mac opens by itself is the list of reminders it read
+    // out of a note for a spoken request: nothing was tapped, and it arrives
+    // as a NEW voice generation, which the adoption below takes like any
+    // spoken page. A page of the visit already open still needs its tap.
+    const spokenReminderList = title?.trim().toUpperCase() === 'QUICKNOTES · DETAIL'
+      && requestId !== undefined && requestId.startsWith(VOICE_REQUEST_PREFIX)
+      && requestId !== this.pendingRequestId;
+    if (isQuickNotesReaderTitle(title ?? '') && !spokenReminderList
       && (!this.noteReaderTraceId || requestId !== this.pendingRequestId)) return false;
     const conversationalTerminal = title?.trim().toUpperCase() === 'AGENT TERMINAL'
       && !selectable && requestId?.startsWith(VOICE_REQUEST_PREFIX)
