@@ -14,6 +14,14 @@ The G2's 576×288 display, captured in Even's official simulator with demo data 
 | ![Note summary](docs/images/hud-quicknote-summary.png)<br>**Note**: summary, key points, to-dos | ![Agent Terminal](docs/images/hud-agent-terminal.png)<br>**Agent Terminal**: pick an agent, speak to it |
 | ![Brainstorm](docs/images/hud-brainstorm.png)<br>**Brainstorm**: Codex and Claude debate live | ![Brainstorm sessions](docs/images/hud-brainstorm-sessions.png)<br>**Brainstorm sessions**: resume a past one |
 
+## On the iPhone
+
+JOAT Brain runs the brain on the phone, so the glasses work with no Mac in the loop. It is also a notebook for the Apple Pencil. See [docs/IOS_APP.md](docs/IOS_APP.md).
+
+| | | | |
+|:-:|:-:|:-:|:-:|
+| ![Home](docs/images/ios/home.png)<br>**Home** | ![Notes](docs/images/ios/notes.png)<br>**Notes** | ![Notebook](docs/images/ios/notebook-write.png)<br>**Notebook** | ![Messages](docs/images/ios/messages.png)<br>**Messages** |
+
 ## System at a glance
 
 ```
@@ -47,7 +55,7 @@ utilsG2/
 │   │   ├── channels/         # iMessage, Mail, Notification triage
 │   │   ├── computeruse/      # cua driver, iPhone Mirroring adapters
 │   │   └── services/         # Orchestrator, session, handoff manager
-│   ├── ios-companion/        # Phase 5: Swift background-BLE companion
+│   ├── ios-companion/        # JOAT Brain: the brain on the iPhone, notebook, Messages shortcuts
 │   └── hub-plugin/           # Even Hub SDK plugin (TypeScript + Vite)
 ├── vendor/                   # Cloned third-party repos (see docs/STARTER_REPOS.md)
 ├── config/                   # App config, schemas, allowlists
@@ -63,6 +71,7 @@ utilsG2/
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases 0–5 with success metrics |
 | [docs/RULES.md](docs/RULES.md) | Engineering rules, safety gates, ToS constraints |
 | [docs/MAC_APP.md](docs/MAC_APP.md) | Mac Studio brain — detailed design |
+| [docs/IOS_APP.md](docs/IOS_APP.md) | JOAT Brain on the iPhone — screens, the notebook, Messages shortcuts, building your own |
 | [docs/HUB_PLUGIN.md](docs/HUB_PLUGIN.md) | Even Hub SDK reference — the relay path, container model, audio/IMU/location APIs |
 | [docs/STARTER_REPOS.md](docs/STARTER_REPOS.md) | Verified GitHub repos to clone so we don't build from zero |
 | [docs/TESTING.md](docs/TESTING.md) | Three testing tiers (vitest / simulator / glasses), event-shape probe, nod calibration |
@@ -93,6 +102,8 @@ developer account, and an Apple Developer account to sign `JOAT.app`.
    Even Hub developer project and install it on your phone.
 5. **Pair once.** Open JOAT.app's pairing window, then open JOAT on the
    glasses. See [docs/MAC_APP.md](docs/MAC_APP.md) for details.
+
+To run the brain on the iPhone instead of the Mac, see [docs/IOS_APP.md](docs/IOS_APP.md#build-your-own).
 
 ## Key constraints (read RULES.md before coding)
 
