@@ -1,8 +1,8 @@
 # Changelog
 
-## 2026-11-10 (later) — notebook: pinch to zoom, the eraser hands back the pen, Edit page fixed; Messages shortcuts and JOAT Brain docs in the repo
+## 2026-11-10 (later) — JOAT Brain 1.0 (202611102035): notebook: pinch to zoom, the eraser hands back the pen, Edit page fixed; Messages shortcuts and JOAT Brain docs in the repo
 
-Not uploaded to TestFlight yet (202611101256 still has the blank Edit page and no zoom).
+JOAT Brain 1.0 (202611102035) uploaded to TestFlight. No plugin change.
 
 - **Pinch to zoom** (the wearer: "I cannot zoom in on the note"):
   - Up to 4×, in Write and in Type. In Write, two fingers scroll and zoom; in Type, one finger scrolls.
