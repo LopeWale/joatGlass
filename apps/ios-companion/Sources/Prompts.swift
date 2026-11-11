@@ -17,12 +17,18 @@ final class Prompts: BrainFeature {
         let answer: (String?) -> Void
         var partial = ""
         let timeout: DispatchWorkItem
+        /// Answered, the card stays until the next question replaces it.
+        let hold: Bool
     }
 
     private let link: PluginLink
     /// The plugin echoes it: one value per plugin connection.
     private var generation = "phone-" + ConfirmGate.hex(8)
     private var open: Open?
+    /// An answered question still on the glasses (`hold`): its card shows
+    /// what was heard while the owner works out the next question. A new
+    /// question replaces it there; `cancel` takes it down.
+    private var held: String?
     /// The mic the plugin streams now (`device.micSource`): a question must
     /// name it, or the plugin refuses it (AudioStreamer.openPromptMicrophone,
     /// the Mac's hub_gateway prompt_audio_source).
@@ -35,20 +41,27 @@ final class Prompts: BrainFeature {
     func pluginConnected() {
         generation = "phone-" + ConfirmGate.hex(8)
         micSource = "glasses"
+        held = nil
         finish(nil, notify: false, why: "plugin reconnected")
     }
 
     /// Show `question` and hand the next sentence (or nil: cancelled, timed
-    /// out, the mic refused) to `answer`, once, on the main queue.
+    /// out, the mic refused) to `answer`, once, on the main queue. `hold`:
+    /// the answered card stays up until the owner asks again or cancels
+    /// (Messages' "Who should I text?" while the contact is looked up: the
+    /// card closing first left the glasses on the list, and a tap there
+    /// cancelled the draft before the next question came, 2026-11-11).
     func ask(_ question: String, ownerKind: String, ownerId: String, field: String,
-             seconds: Int = 30, answer: @escaping (String?) -> Void) {
+             seconds: Int = 30, hold: Bool = false, answer: @escaping (String?) -> Void) {
         finish(nil, notify: true, why: "replaced")
+        // The glasses replace a held card with this question themselves.
+        held = nil
         let id = ConfirmGate.hex(16)
         let timeout = DispatchWorkItem { [weak self] in
             guard self?.open?.id == id else { return }
             self?.finish(nil, notify: true, why: "no answer in \(seconds) s")
         }
-        open = Open(id: id, answer: answer, timeout: timeout)
+        open = Open(id: id, answer: answer, timeout: timeout, hold: hold)
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds), execute: timeout)
         link.send([
             "kind": "prompt.present", "promptId": id, "question": String(question.prefix(1000)),
@@ -62,8 +75,22 @@ final class Prompts: BrainFeature {
         #endif
     }
 
-    /// The question is no longer wanted (the wearer left, a newer one).
-    func cancel(_ why: String) { finish(nil, notify: true, why: why) }
+    /// The question is no longer wanted (the wearer left, a newer one),
+    /// nor a held card.
+    func cancel(_ why: String) {
+        finish(nil, notify: true, why: why)
+        guard let id = held else { return }
+        held = nil
+        link.send(["kind": "prompt.cancel", "promptId": id, "connectionGeneration": generation])
+        Log.add("prompt \(id.prefix(6)) taken down: \(why)")
+    }
+
+    /// Words under the held card ("Mike · looking up…").
+    func note(_ text: String) {
+        guard let id = held else { return }
+        link.send(["kind": "prompt.partial", "promptId": id, "connectionGeneration": generation,
+                   "text": String(text.suffix(600))])
+    }
 
     /// A finished sentence: the answer, when a question is open.
     func heard(_ text: String) -> Bool {
@@ -86,6 +113,11 @@ final class Prompts: BrainFeature {
     func handle(kind: String, message: [String: Any]) {
         if kind == "device" {
             if let source = message.string("micSource"), source == "glasses" || source == "phone" { micSource = source }
+            return
+        }
+        if kind == "prompt.cancel", let id = held, message.string("promptId") == id {
+            held = nil
+            Log.add("prompt \(id.prefix(6)) closed on the glasses while held")
             return
         }
         guard let o = open else { return }
@@ -125,7 +157,9 @@ final class Prompts: BrainFeature {
         guard let o = open else { return }
         open = nil
         o.timeout.cancel()
-        if notify {
+        let hold = o.hold && said != nil
+        if hold { held = o.id }
+        if notify && !hold {
             link.send(["kind": "prompt.cancel", "promptId": o.id, "connectionGeneration": generation])
         }
         if said == nil { Log.add("prompt \(o.id.prefix(6)) closed: \(why)") }

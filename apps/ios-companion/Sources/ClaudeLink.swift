@@ -78,22 +78,39 @@ final class ClaudeLink {
     }
 
     static let handwritingSystem = """
-        You transcribe a handwritten notebook page. Write out exactly the words written on it, in reading order, \
-        keeping the writer's spelling. Put each sentence, list item or heading on its own line, and join the lines \
-        of a sentence the writer wrapped onto the next line. Where there is a sketch or diagram instead of \
-        words, write [sketch: a few words saying what it shows]. If the page has no words at all, reply with the single \
-        word NONE. No commentary, no markdown.
+        You transcribe a notebook page: its handwriting, and any screenshots or photos pasted into it (a slide from \
+        a course video, say). Write out exactly the words written on it, in reading order, keeping the writer's \
+        spelling. Put each sentence, list item or heading on its own line, and join the lines of a sentence the \
+        writer wrapped onto the next line. Where there is a sketch or diagram instead of words, write [sketch: a few \
+        words saying what it shows]. After the handwriting, write out the words of each pasted image in order, the \
+        same way: its title on its own line, then its points, one per line, leaving out app buttons, video player \
+        controls and other screen furniture; for a picture, chart or diagram with no words, write [image: a few \
+        words saying what it shows]. If there are no words at all, reply with the single word NONE. No commentary, \
+        no markdown.
         """
 
-    /// A notebook page (Notebook.swift) as PNGs from top to bottom: its
-    /// handwriting as text. The images go before the text (vision docs).
-    func readHandwriting(_ pngs: [Data], completion: @escaping (Result<String, MacLink.Failure>) -> Void) {
-        var content: [[String: Any]] = pngs.map {
-            ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": $0.base64EncodedString()]]
+    /// A notebook page (Notebook.swift): the handwriting as PNGs from top to
+    /// bottom, then the pasted images as JPEGs; all of it as text. The
+    /// images go before the text (vision docs).
+    func readHandwriting(_ pngs: [Data], pasted: [Data] = [],
+                         completion: @escaping (Result<String, MacLink.Failure>) -> Void) {
+        func image(_ data: Data, _ type: String) -> [String: Any] {
+            ["type": "image", "source": ["type": "base64", "media_type": type, "data": data.base64EncodedString()]]
         }
-        content.append(["type": "text", "text": pngs.count == 1
-            ? "This image is one handwritten page."
-            : "These \(pngs.count) images are one handwritten page, from top to bottom."])
+        var content = pngs.map { image($0, "image/png") } + pasted.map { image($0, "image/jpeg") }
+        var about: [String] = []
+        switch pngs.count {
+        case 0: break
+        case 1: about.append("The first image is the page's handwriting.")
+        default: about.append("The first \(pngs.count) images are the page's handwriting, from top to bottom.")
+        }
+        switch pasted.count {
+        case 0: break
+        case 1: about.append(pngs.isEmpty ? "This image was pasted into the page." : "The last image was pasted into the page.")
+        default: about.append(pngs.isEmpty ? "These \(pasted.count) images were pasted into the page, in order."
+                                           : "The last \(pasted.count) were pasted into the page, in order.")
+        }
+        content.append(["type": "text", "text": about.joined(separator: " ")])
         send(model: config?.noteModel ?? Self.noteModel, system: Self.handwritingSystem,
              messages: [["role": "user", "content": content]], maxTokens: 4000, tools: nil, thinking: false,
              completion: completion)

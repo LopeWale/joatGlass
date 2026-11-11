@@ -44,9 +44,13 @@ final class Cues {
 
     private let claude: ClaudeLink
     private(set) var given: [Cue] = []
-    /// The prep in use (the newest, or the one picked in JOAT Brain), read
+    /// The prep note in use (picked in JOAT Brain or on the glasses), read
     /// at every request: talking points that land mid-note are used.
     weak var prep: Prep?
+    /// The note started with "Skip & start": no prep note for it.
+    private(set) var usesPrep = true
+    /// The prep note this note's cues answer from.
+    var prepNote: Prep.Note? { usesPrep ? prep?.active : nil }
     private var transcript = ""
     private var askedUpTo = 0
     private var lastAsk = Date.distantPast
@@ -65,8 +69,9 @@ final class Cues {
     }
     var available: Bool { claude.configured }
 
-    /// A note opened: a clean slate, with the prep it uses.
-    func begin() {
+    /// A note opened: a clean slate, with the prep note it uses (none: Skip & start).
+    func begin(usePrep: Bool = true) {
+        usesPrep = usePrep
         generation += 1
         given = []
         transcript = ""
@@ -75,7 +80,7 @@ final class Cues {
         inFlight = false
         running = true
         pauseTimer?.cancel()
-        Log.add("cues: note opened\(prep?.active.map { " with prep “\($0.title)”" } ?? " without prep")\(enabled ? "" : " (cues off)")")
+        Log.add("cues: note opened\(prepNote.map { " with prep note “\($0.title)” (\($0.items.count) items)" } ?? " without prep")\(enabled ? "" : " (cues off)")")
     }
 
     #if DEBUG
@@ -134,7 +139,7 @@ final class Cues {
         inFlight = true
         let g = generation
         let started = Date()
-        claude.cue(system: Self.system(prep: prep?.active), text: Self.request(earlier: earlier, said: String(said.suffix(900)), given: given)) { [weak self] result in
+        claude.cue(system: Self.system(prep: prepNote), text: Self.request(earlier: earlier, said: String(said.suffix(900)), given: given)) { [weak self] result in
             guard let self, self.generation == g else { return }
             self.inFlight = false
             let ms = Int(Date().timeIntervalSince(started) * 1000)
@@ -177,12 +182,13 @@ final class Cues {
       title: at most 28 characters. text: at most 120 characters, plain words, no markdown.
     """
 
-    static func system(prep: Prep.Doc?) -> [[String: Any]] {
+    static func system(prep: Prep.Note?) -> [[String: Any]] {
         var blocks: [[String: Any]] = [["type": "text", "text": instructions]]
-        if let prep {
+        if let prep, !prep.items.isEmpty {
             var material = "PREP MATERIAL: \(prep.title)\n"
             if !prep.points.isEmpty { material += "Talking points:\n" + prep.points.map { "- \($0)" }.joined(separator: "\n") + "\n\n" }
-            material += prep.text
+            // Every item in the prep note (Even: the files in a Prep Note all count).
+            material += prep.material
             // The same prefix on every request of the note: cached by Claude.
             blocks.append(["type": "text", "text": material, "cache_control": ["type": "ephemeral"]])
         } else {

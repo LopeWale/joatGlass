@@ -1,5 +1,116 @@
 # Changelog
 
+## 2026-11-11 (later) — JOAT Brain 1.0 (202611111326): prep notes are folders, and the glasses pick one
+
+JOAT Brain 1.0 (202611111326) uploaded to TestFlight. No plugin change.
+
+- **What was asked.** The wearer: "when a prep note is created, it's created like a folder, and you could add multiple to that folder prep note, and then click that folder prep note, and every file that's in there is used in whatever conversation you start."
+- **Even's own sources:**
+  - The Conversate article: create a Prep Note by typing preparation details, by uploading supporting files, or both ("manually enter preparation details while simultaneously uploading supporting files"). Then select it to start, or tap Start for none.
+  - The Even app's release notes: "Add notes or upload documents to automatically generate Prep Notes."
+  - Read on 2026-11-03, the same article gave the limits: 5,000 characters, or five PDF/DOCX/TXT files of 5 MB each. Today's version doesn't give them.
+- **Before:** each file, link, typed note or notebook page was its own prep item, and the cues used only the one ticked.
+- **Now** (`Prep.swift`):
+  - A prep note holds typed notes, files, links and notebook pages, as many as needed.
+  - Talking points (up to eight) come from all of it. They're made again when an item is added or removed, and again if it changed while they were being made.
+  - The AI cues get every item. The 60,000-character cap is shared evenly, and a short item leaves its share to the others (`Prep.Note.material`).
+  - A prep note keeps a name the wearer gives it; otherwise Claude names it.
+  - Earlier prep items each became a prep note holding that item (the wearer's choice). The one in use stays in use.
+- **JOAT Brain › Prep:**
+  - New prep note.
+  - The list: tick the one in use; tap one to open it.
+  - In a prep note: its name, Add files… (several at once), Paste (a link or text), Type notes…, the items (swipe to remove), and the talking points.
+  - Share a file to JOAT Brain: it asks which prep note, or a new one (the wearer's choice).
+  - Notes › a page › Add to a prep note… asks the same.
+- **On the glasses** (`QuickNotes.swift`), as Even's Conversate: + Create new note asks for a prep note ("QUICKNOTES · PREP NOTE"). The one in use is first (●), then the others, then Skip & start. 2x tap goes back to the list.
+  - Skip & start: that note has no prep note; the cues give no prep answers, and its cue list has no prep row.
+  - The prep reader lists what the talking points came from.
+  - The title isn't "QUICKNOTES · PREP": the plugin draws that title as a text page, so its rows couldn't be chosen. On the new title, 2x tap goes back to the list in the plugin itself, so the next tap there counts as a list tap.
+- **Simulator:**
+  - UI test `PrepUITests`: a new prep note, named, with typed notes and pasted text. Its four talking points came from both (the budget, and the pasted learning rate). The list showed it in use with 2 items.
+  - Two simulators (`e2e_1030.py prep`, `prepskip`): two old-format prep items became two prep notes. The glasses' picker showed both and Skip & start. 2x tap went back to the list. The second prep note was picked, and its talking points showed in the note. Skip & start opened a note without prep.
+  - The notebook test's Add to a prep note → New prep note, and the other tests, still pass.
+- **Not tested here:** a file shared from another app (the Share sheet), and the picker on the G2.
+
+## 2026-11-11 (afternoon) — JOAT Brain 1.0 (202611111237): a notebook page is Letter paper, and a page can't be lost
+
+JOAT Brain 1.0 (202611111237) uploaded to TestFlight. No plugin change.
+
+- **What was asked.**
+  - A page started on the Duo's outer screen and continued on the inner screen in landscape showed a big gap: the page was as wide as the screen, so the typing reflowed and the ink stayed where it was.
+  - The wearer: "We have one size that should be the size of a paper," as the other note apps do, and "I should be able to scroll horizontally and vertically."
+  - And: "there's no way to save notes I make. All the notes I did yesterday, I cannot retrieve them anymore… it doesn't save when I say I'm done."
+- **The page is paper** (`Notebook.swift`, `PageView`):
+  - US Letter, 612 × 792 points a sheet, as in GoodNotes (Letter by default in the US; its pages match the paper they print on) and Notability. It doesn't depend on the screen, so the typing wraps the same everywhere.
+  - It opens zoomed to fill the screen's width: zoom = view width ÷ page width, as Apple's PencilKit sample fits its fixed-width canvas. On the Duo's outer screen the page's view is 382 points (beside the sensor bar), so 0.62×. The inner screen is 669 points wide, or 951 in landscape (the simulator's device profile).
+  - Pinch to zoom in (up to 4×, or 4× the fitted zoom if that's more); zoomed in, it scrolls sideways as well as up and down.
+  - When the width changes (folding, unfolding), the zoom keeps its ratio to the fitted zoom, and the same part of the page stays in view.
+  - A dashed line and the sheet's number mark where a sheet ends. Another sheet is added as the writing nears the end of the last.
+  - Pasted images fit the sheet's width.
+  - A page written before keeps its ink: the page is wider than Letter when its ink reaches further, since it was as wide as the screen it was written on. Its typing now wraps at the page's width.
+  - Typed text is redrawn sharp up to 2.5× zoom, not 4×: each line and pasted image is drawn at that scale, and more costs memory the phone may not have.
+- **A page can't be lost:**
+  - Code review found nothing that deletes a saved page. Until now, though, nothing was written until Done, and Done saved what the editor's SwiftUI state held. A page whose editor went away without Done, or whose app was stopped (by iOS too), was lost.
+  - The page now writes itself to disk 1.5 s after each change, and at once when JOAT Brain leaves the screen (`pages/draft.*`). Cancel drops it.
+  - Done saves the page from the editor itself, so a draft that couldn't be written doesn't matter. (The Mac's disk filled up during a test run, and a draft wasn't written: "errno 28".)
+  - A page left behind is saved as Done would have: when its editor goes away, at the next start of JOAT Brain, when the Notes list appears, or before another page opens. A new page whose editor went away carries on from it.
+  - What happened to yesterday's pages is still open: the wearer was asked whether they showed in Notes after Done, and whether the phone was folded or the app left while they were open.
+- **A page starts with a pen.** The tool picker keeps its last tool from page to page. Left on the eraser, a new page had no pen to go back to, so every stroke erased. The simulator's notebook test found it: its strokes left no ink.
+- **Simulator** (UI test `PaperUITests`, iPhone Duo simulator):
+  - The page's view narrowed to 300 points, then back to 382, as a fold changes the width. The page filled the width both times, and the text wrapped the same at both widths (screenshots).
+  - Zoomed in: one finger scrolled the page sideways.
+  - Typed, waited, quit JOAT Brain without Done; at the next start the page was in Notes.
+  - Typed, then the editor was closed without Done or Cancel; the page was in Notes.
+  - The notebook, zoom, paste and screens tests still pass.
+- **Not tested here:**
+  - A real fold: the simulator can't fold, so the test narrows the page's view instead.
+  - Turning the phone: JOAT Brain lists portrait only, so the simulator doesn't turn it.
+  - XCUITest reports the zoomed text view's frame scaled twice (612 × zoom × zoom). The app's layout log has the right width, and the test allows for it.
+
+## 2026-11-11 (later) — JOAT Brain 1.0 (202611110940): paste words and images into a notebook page; Recent texts show their date
+
+JOAT Brain 1.0 (202611110940) uploaded to TestFlight. No plugin change.
+
+- **What was asked.** The wearer: "I cannot paste anything on the writing and typing sections, even an image." With the app beside a YouTube course, they screenshot a slide and want it on the page. Their choices: images go in line with the typing, and Claude reads them.
+- **Paste** (`Notebook.swift`):
+  - Type: the edit menu's Paste (and ⌘V) puts words, or an image, at the cursor. A text view pastes only words by itself (`allowsEditingTextAttributes` is off), so `PastingTextView` handles images. Choosing Paste in the edit menu asks no "Allow Paste?".
+  - Write and Type: a Paste button in the toolbar (SwiftUI `PasteButton`, also no "Allow Paste?"). In Write it adds to the end of the page.
+  - The keyboard's "Photo · Paste from …" suggestion (iOS 27) and drops onto the typing go through the text view's paste delegate (`UITextPasteDelegate`).
+  - Each image sits on its own line, as wide as the page (or its own width), and follows the page's width.
+  - Kept beside the ink: each image as a JPEG of up to 2048 px (`pages/<id>-<hash>.jpg`), and its place in the typing (`pages/<id>.page.json`). An image taken off the page loses its file at Done.
+  - The saved page shows the images under the ink.
+- **Claude reads them** (`ClaudeLink.readHandwriting`): up to 10 pasted images (long edge at most 1568 px) go with the handwriting. Claude writes each one's words after the handwriting (title, then points; no player controls), or "[image: …]" for a picture with no words. The page's text, title, overview and next steps then include the slides. "Read the pasted images" shows when a page couldn't be read.
+- **Messages › Recent:** a text from before today shows its date as well as its time. The wearer's three-day-old texts showed a time only.
+- **Simulator** (UI test `PasteUITests`, iPhone Duo simulator; screenshots in `docs/IOS_APP.md`):
+  - Typed a line, then pasted words with the edit menu: they landed as typed.
+  - Pasted a 1280 × 720 slide with the edit menu (Type) and a second with the toolbar button (Write, at the end).
+  - Done: the saved page shows both. Claude read their titles and points into the page's text (193 characters, under 2 s) and titled the page.
+  - The notebook, zoom and screens tests still pass.
+- **Fixed on the way:**
+  - At its own size, a 1280-point slide showed cut off and pushed the toolbar off the page. Images are now sized to the page.
+  - UIKit's own paste put a blank line before pasted words once the view took images. Words are now put in as typed.
+- **Not tested here:**
+  - The keyboard's paste suggestion: the test's tap didn't reach it.
+  - Drops.
+  - The toolbar button with a copy from another app. Copies made by the test runner didn't load in the app; a copy made by JOAT Brain itself pasted.
+  - A real screenshot on the phone.
+
+## 2026-11-11 — JOAT Brain 1.0 (202611110811): a new message no longer stops after the name
+
+JOAT Brain 1.0 (202611110811) uploaded to TestFlight. No plugin change.
+
+- **What was asked.** The wearer: "When I try to send a new message, JOAT pop up, and I tell it the name of the recipient. I see that he's correctly recognized, but nothing happens after that. It just closes and goes back to the message list."
+- **Code review.** After "Who should I text?" is answered, JOAT Brain closed the question card at once, then looked the contact up.
+  - The lookup had no time limit and showed nothing on the glasses. A name that isn't one exact contact name goes to Apple's on-device model (up to 300 contacts; rate limited for an app in the background), then Claude (up to 1500 contacts; the request allows 90 s).
+  - Meanwhile the glasses sat on the Messages list. A tap there cancels the draft, and a lookup that finished after that asked nothing.
+  - The simulator check of 2026-11-07 had two contacts (0.7 s), and its seeded answers ignore cancels.
+- **Fixes:**
+  - The recipient question stays on the glasses after the answer and shows "<name> · looking up…"; "What should I say to …?" replaces it (`Prompts.ask(hold:)`, `note`). No match takes it down.
+  - One contact with every word said (a first or a last name) is picked with no model.
+  - Time limits: the on-device model 4 s, the whole lookup 12 s.
+- **Simulator** (two simulators, seeded answers): New message → "my wife" → the test contact, an on-device pick in 1.7 s → "What should I say to …?" → "See you at seven" → confirm → queued for the send shortcut. A reply in Family still goes to the group. The question cards can't be seen there: Even's simulator closes each question about 50 ms after showing it (its mic quirk).
+- **Not tested here:** the held card and "looking up…" on the glasses, and a lookup against the wearer's real contacts.
+
 ## 2026-11-10 (later) — JOAT Brain 1.0 (202611102035): notebook: pinch to zoom, the eraser hands back the pen, Edit page fixed; Messages shortcuts and JOAT Brain docs in the repo
 
 JOAT Brain 1.0 (202611102035) uploaded to TestFlight. No plugin change.

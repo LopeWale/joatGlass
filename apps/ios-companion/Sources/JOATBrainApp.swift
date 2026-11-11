@@ -69,6 +69,8 @@ final class JOATRuntime: NSObject, UNUserNotificationCenterDelegate {
         b.quickNotes.cues = cues
         b.quickNotes.onStoreChange = { [notes] in Task { @MainActor in notes.reload() } }
         b.start()
+        // A notebook page left open when JOAT Brain last stopped is saved.
+        Notebook.recoverDraft(quickNotes: b.quickNotes)
         endurance.start()
         #if DEBUG
         DebugSeed.launched(b)
@@ -99,6 +101,12 @@ final class JOATRuntime: NSObject, UNUserNotificationCenterDelegate {
     }
 }
 
+/// A file shared to JOAT Brain, waiting for its prep note.
+struct SharedFile: Identifiable {
+    let url: URL
+    var id: String { url.absoluteString }
+}
+
 struct ContentView: View {
     @StateObject private var permissions = Permissions()
     @ObservedObject private var notes = JOATRuntime.shared.notes
@@ -107,6 +115,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var phase
     /// `-JOATTab notes` at launch opens that tab (Simulator screenshots).
     @State private var tab = UserDefaults.standard.string(forKey: "JOATTab") ?? "home"
+    @State private var shared: SharedFile?
 
     var body: some View {
         TabView(selection: $tab) {
@@ -121,8 +130,15 @@ struct ContentView: View {
             DiagnosticsView()
                 .tabItem { Label("Diagnostics", systemImage: "stethoscope") }.tag("diagnostics")
         }
-        // Share › JOAT Brain on a PDF or text file (CFBundleDocumentTypes).
-        .onOpenURL { url in JOATRuntime.shared.prep.addFile(url) }
+        // Share › JOAT Brain on a PDF or text file (CFBundleDocumentTypes):
+        // which prep note it goes into (the wearer's choice, 2026-11-11).
+        .onOpenURL { url in shared = SharedFile(url: url) }
+        .sheet(item: $shared) { file in
+            PrepTargetPicker(what: "“\(file.url.lastPathComponent)”", cancelled: { Prep.dropInboxCopy(file.url) }) { target in
+                JOATRuntime.shared.prep.addFile(file.url, to: target)
+                tab = "prep"
+            }
+        }
         .onAppear {
             JOATRuntime.shared.start(reason: "opened")
             JOATRuntime.shared.askPermissions()

@@ -268,7 +268,8 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         inputs = []; recordedBefore = 0; discardPending = false; resumeAfterKeep = false
         holding = false; holdInput = nil; laneClosedAt = nil; finalizing = false
         closeCueViews()
-        cues?.begin()
+        cues?.begin(usePrep: notePrepChoice)
+        notePrepChoice = true
         persist()
         #if DEBUG
         DebugSeed.noteOpened(self, cues: cues)
@@ -487,8 +488,9 @@ final class QuickNotes: VoiceCommand, PanelProvider {
 
     // MARK: - Pages (capabilities.py, QuickNotes half)
 
-    /// cues: the AI cues & prep list; reader: one cue, or the prep notes.
-    private enum Page { case list, live, finish, discard, cues, reader }
+    /// cues: the AI cues & prep list; reader: one cue, or the prep notes;
+    /// prepPick: the prep note for a new note, or Skip & start.
+    private enum Page { case list, live, finish, discard, cues, reader, prepPick }
     private enum Row { case control(String, String), voice(VoiceNote), text(TextNote), cue(Int), prep }
 
     static let pageSize = 15
@@ -500,6 +502,8 @@ final class QuickNotes: VoiceCommand, PanelProvider {
     static let discardControls = [("Discard", "confirm_discard"), ("Cancel", "keep")]
 
     private var page: Page?
+    /// The next note starts with the prep note in use (false: Skip & start).
+    private var notePrepChoice = true
     private var finishShown = false
     private var rows: [Row] = []
     private var listRows: [Row] = []
@@ -566,7 +570,7 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         case .voice(let n): return "[\(Cards.age(n.updated))] ● \(n.title.isEmpty ? "Untitled" : n.title)"
         case .text(let t): return "[\(Cards.age(t.updated))] \(t.text)"
         case .cue(let i): return cues.flatMap { $0.given.indices.contains(i) ? $0.given[i] : nil }.map { "\($0.label) · \($0.title)" } ?? ""
-        case .prep: return "Prep notes · \(prep?.active?.title ?? "")"
+        case .prep: return "Prep notes · \(notePrep?.title ?? "")"
         }
     }
 
@@ -672,7 +676,7 @@ final class QuickNotes: VoiceCommand, PanelProvider {
     private func showCues() {
         guard active else { return }
         var list: [Row] = []
-        if prep?.active != nil { list.append(.prep) }
+        if notePrep != nil { list.append(.prep) }
         let given = cues?.given ?? []
         list += given.indices.reversed().map { .cue($0) }
         var labels = list.map(label)
@@ -696,18 +700,26 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         showReader("QUICKNOTES · CUE", "\(cue.label.uppercased()) · \(Cards.age(cue.at))\n\(cue.title)\n\n\(cue.body)", from: from)
     }
 
-    /// The prep's talking points to read during the note (Even's expanded
-    /// Prep Note: numbered points, scrolled by swipe).
+    /// The prep note this note uses: none when it started with Skip & start.
+    private var notePrep: Prep.Note? { cues.map { $0.prepNote } ?? prep?.active }
+
+    /// The prep note's talking points to read during the note (Even's
+    /// expanded Prep Note: numbered points, scrolled by swipe), and what's in it.
     private func openPrep(from: Page) {
         var lines: [String]
-        if let doc = prep?.active {
-            lines = ["PREP NOTES", doc.title, ""]
-            if doc.points.isEmpty {
+        if let note = notePrep {
+            lines = ["PREP NOTES", note.title, ""]
+            if note.points.isEmpty {
                 lines.append("Talking points aren't ready yet.")
-                lines += ["", String(doc.text.prefix(3000))]
+                if let first = note.items.first { lines += ["", String(first.text.prefix(3000))] }
             } else {
-                lines += doc.points.enumerated().map { "\($0.offset + 1). \($0.element)" }
+                lines += note.points.enumerated().map { "\($0.offset + 1). \($0.element)" }
             }
+            if note.items.count > 1 {
+                lines += ["", "From: " + note.items.map(\.title).joined(separator: " · ")]
+            }
+        } else if cues?.usesPrep == false {
+            lines = ["PREP NOTES", "This note started without a prep note (Skip & start)."]
         } else {
             lines = ["PREP NOTES", "No prep notes yet.", "",
                      "On your phone, share a file to JOAT Brain, or paste a link or notes in its Prep tab."]
@@ -805,6 +817,9 @@ final class QuickNotes: VoiceCommand, PanelProvider {
             readerTap?()
             return
         }
+        // 2x tap on the prep note page: the plugin went back to the list by
+        // itself, so this tap (it carries the list's page) is on the list.
+        if page == .prepPick, pageIndex != nil { show() }
         if page == .list, (pageIndex ?? 0) != listIndex { return }
         guard rows.indices.contains(index) else { return }
         switch rows[index] {
@@ -826,10 +841,17 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         var receipt: String?
         switch action {
         case "start_hold":
-            finishShown = false
-            micReopened = false
-            let started = start(title: Self.clockTitle(), hold: true)
-            if !active { receipt = started }
+            // Even's Conversate: choose a Prep Note, or Skip & Start.
+            if let prep, !prep.notes.isEmpty {
+                showPrepPicker()
+                return
+            }
+            receipt = startHeld(usePrep: true)
+        case "start_skip":
+            receipt = startHeld(usePrep: false)
+        case let pick where pick.hasPrefix("start_prep:"):
+            prep?.select(String(pick.dropFirst("start_prep:".count)))
+            receipt = startHeld(usePrep: true)
         case "cues":
             // A tap on the open note (only a long press records, as Even's
             // QuickNote), or on the cues page's status row.
@@ -865,6 +887,30 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         show()
     }
 
+    /// + Create new note, with the prep note picked (or none).
+    private func startHeld(usePrep: Bool) -> String? {
+        finishShown = false
+        micReopened = false
+        notePrepChoice = usePrep
+        let started = start(title: Self.clockTitle(), hold: true)
+        return active ? nil : started
+    }
+
+    /// The prep note for the new note: the one in use first, then the
+    /// others, newest first, then Skip & start. 2x tap: back to the list.
+    private func showPrepPicker() {
+        guard let prep else { return }
+        let inUse = prep.active?.id
+        let ordered = prep.notes.filter { $0.id == inUse } + prep.notes.filter { $0.id != inUse }
+        rows = ordered.map { .control($0.id == inUse ? "● \($0.title)" : $0.title, "start_prep:\($0.id)") }
+            + [.control("Skip & start", "start_skip")]
+        page = .prepPick
+        stopTicker()
+        // Not "QUICKNOTES · PREP": the plugin draws that title as a text page.
+        menu?.sendCurrent(["title": "QUICKNOTES · PREP NOTE", "items": rows.map(label),
+                           "hint": "tap: start with it · " + CapabilityMenu.backHint, "selectable": true])
+    }
+
     static func clockTitle() -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -878,6 +924,7 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         case "quicknotes-finish":
             if active, page == .live { finishShown = true; showLive() }
         case "quicknotes-back":
+            if page == .prepPick, !active { show(); return }
             guard active else { return }
             if discardPending { apply("keep") } else if finishShown { apply("back_to_live") }
             else if page == .reader, readerFrom == .cues { showCues() }

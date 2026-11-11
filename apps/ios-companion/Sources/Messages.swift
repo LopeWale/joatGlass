@@ -441,9 +441,12 @@ final class Messages: VoiceCommand {
 
     private func askRecipient(_ d: Draft, question: String, tries: Int) {
         ui(d, "awaiting_input", question)
-        prompts?.ask(question, ownerKind: "messages", ownerId: d.id, field: "recipient") { [weak self] said in
+        // Held: the card stays on the glasses, with what was heard, while
+        // the contact is looked up; the next question replaces it.
+        prompts?.ask(question, ownerKind: "messages", ownerId: d.id, field: "recipient", hold: true) { [weak self] said in
             guard let self, self.draftUI === d else { return }
             guard let said, !said.isEmpty else { self.ui(d, "cancelled", "Message cancelled."); return }
+            self.prompts?.note("\(Self.fit(said, units: 40)) · looking up…")
             // "my wife", a nickname, a number not in Contacts (Recipients).
             Recipients.find(said, claude: self.claude) { [weak self] match in
                 guard let self, self.draftUI === d else { return }
@@ -452,6 +455,7 @@ final class Messages: VoiceCommand {
                         self.askRecipient(d, question: "I can't find \(Self.fit(said, units: 40)) in your contacts. Who should I text?",
                                           tries: tries - 1)
                     } else {
+                        self.prompts?.cancel("no contact matched")
                         self.ui(d, "failed", "No contact matched \(said).")
                         self.finish("No contact matched \(said).")
                     }

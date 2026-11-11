@@ -121,8 +121,13 @@ enum Recipients {
 
     // MARK: - Finding who was meant
 
-    /// On the main queue: the match, or nil (the caller says it found no one).
-    static func find(_ said: String, claude: ClaudeLink, completion: @escaping @MainActor (Match?) -> Void) {
+    /// On the main queue, once, within `seconds`: the match, or nil (the
+    /// caller says it found no one). Bounded because the glasses wait on it
+    /// (2026-11-11: a new message stopped after the name). Nothing had a
+    /// time limit: Claude's request allows 90 s, and the on-device model
+    /// is rate limited for an app in the background.
+    static func find(_ said: String, claude: ClaudeLink, seconds: Double = 12,
+                     completion: @escaping @MainActor (Match?) -> Void) {
         let words = said.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: ".,!?"))
         guard !words.isEmpty else { Task { @MainActor in completion(nil) }; return }
@@ -135,35 +140,99 @@ enum Recipients {
             Task { @MainActor in completion(Match(label: words, handle: words)) }
             return
         }
+        let once = Once(completion)
+        let started = Date()
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            once.fire(nil, why: "no match in \(Int(seconds)) s")
+        }
         Task.detached(priority: .userInitiated) {
             let all = everyone()
             let lower = words.lowercased()
             let exact = all.filter { e in e.names.contains { $0.lowercased() == lower } }
             if exact.count == 1 {
                 Log.add("recipient: exact name")
-                await completion(Match(label: exact[0].label, handle: exact[0].handle))
+                await once.fire(Match(label: exact[0].label, handle: exact[0].handle))
                 return
+            }
+            // One contact has every word said: a first or a last name
+            // ("Mike" for Mike Johnson), with no model to wait for.
+            let spoken = nameWords(lower)
+            if !spoken.isEmpty {
+                let byWords = all.filter { e in e.names.contains { spoken.isSubset(of: nameWords($0.lowercased())) } }
+                if byWords.count == 1 {
+                    Log.add("recipient: name words")
+                    await once.fire(Match(label: byWords[0].label, handle: byWords[0].handle))
+                    return
+                }
             }
             guard !all.isEmpty else {
                 Log.add("recipient: no contacts to choose from (allowed: \(contactsAllowed))")
-                await completion(nil)
+                await once.fire(nil)
                 return
             }
-            // A model picks: on device first, Claude when it cannot.
+            // A model picks: on device first (rate limited for an app in the
+            // background on battery, Apple DTS forums 793787), Claude when it
+            // cannot.
             let shortlist = Array(ranked(all, for: lower).prefix(300))
-            if let i = await onDevicePick(words, shortlist), shortlist.indices.contains(i) {
+            if let i = await within(4, { await onDevicePick(words, shortlist) }), shortlist.indices.contains(i) {
                 Log.add("recipient: on-device pick")
-                await completion(Match(label: shortlist[i].label, handle: shortlist[i].handle))
+                await once.fire(Match(label: shortlist[i].label, handle: shortlist[i].handle))
                 return
             }
             let wide = Array(ranked(all, for: lower).prefix(1500))
             if claude.configured, let i = await claudePick(words, wide, claude: claude), wide.indices.contains(i) {
-                Log.add("recipient: Claude pick")
-                await completion(Match(label: wide[i].label, handle: wide[i].handle))
+                Log.add("recipient: Claude pick (\(Int(Date().timeIntervalSince(started))) s)")
+                await once.fire(Match(label: wide[i].label, handle: wide[i].handle))
                 return
             }
             Log.add("recipient: no match for \(words.count) chars")
-            await completion(nil)
+            await once.fire(nil)
+        }
+    }
+
+    /// The letters-and-digits words of a name or of what was said.
+    private static func nameWords(_ text: String) -> Set<String> {
+        Set(text.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init).filter { $0.count >= 2 })
+    }
+
+    /// `work`'s answer, or nil after `seconds`; a late answer is dropped.
+    private static func within<T: Sendable>(_ seconds: Double, _ work: @escaping @Sendable () async -> T?) async -> T? {
+        await withCheckedContinuation { (cont: CheckedContinuation<T?, Never>) in
+            let resume = ResumeOnce(cont)
+            Task.detached { resume.fire(await work()) }
+            Task.detached {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                if resume.fire(nil) { Log.add("recipient: on-device model gave no answer in \(Int(seconds)) s") }
+            }
+        }
+    }
+
+    private final class ResumeOnce<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cont: CheckedContinuation<T?, Never>?
+        init(_ cont: CheckedContinuation<T?, Never>) { self.cont = cont }
+        /// True when this call resumed it.
+        @discardableResult func fire(_ value: T?) -> Bool {
+            lock.lock()
+            let c = cont
+            cont = nil
+            lock.unlock()
+            c?.resume(returning: value)
+            return c != nil
+        }
+    }
+
+    /// The first answer wins; one after the time limit is dropped.
+    private final class Once: @unchecked Sendable {
+        private var completion: (@MainActor (Match?) -> Void)?
+        init(_ completion: @escaping @MainActor (Match?) -> Void) { self.completion = completion }
+
+        @MainActor func fire(_ match: Match?, why: String? = nil) {
+            guard let c = completion else { return }
+            completion = nil
+            if let why { Log.add("recipient: \(why)") }
+            c(match)
         }
     }
 

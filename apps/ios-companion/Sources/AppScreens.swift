@@ -229,7 +229,7 @@ struct NotesView: View {
                                         Image(systemName: n.page == true ? "pencil.and.scribble" : "waveform")
                                     }
                                     Text(n.summary ?? n.paragraphs.first
-                                         ?? (Notebook.reading.contains(n.id) ? "Reading your handwriting…" : ""))
+                                         ?? (Notebook.reading.contains(n.id) ? "Reading your page…" : ""))
                                         .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                                     Text(n.updated.formatted(date: .abbreviated, time: .shortened))
                                         .font(.caption2).foregroundStyle(.tertiary)
@@ -263,9 +263,15 @@ struct NotesView: View {
             .onReceive(NotificationCenter.default.publisher(for: Notebook.debugOpen)) { _ in newPage = true }
             #endif
             .navigationDestination(for: String.self) { id in NoteDetailView(noteId: id, model: model) }
-            .onAppear { model.reload() }
-            .refreshable { model.reload() }
+            .onAppear { recoverAndReload() }
+            .refreshable { recoverAndReload() }
         }
+    }
+
+    /// A page whose editor went away without Done or Cancel is saved first.
+    private func recoverAndReload() {
+        if let quickNotes = JOATRuntime.shared.brain?.quickNotes { Notebook.recoverIfClosed(quickNotes: quickNotes) }
+        model.reload()
     }
 }
 
@@ -282,6 +288,7 @@ struct NoteDetailView: View {
     @State private var summarizing = false
     @State private var message = ""
     @State private var editing = false
+    @State private var choosingPrep = false
     @Environment(\.colorScheme) private var colorScheme
 
     private var note: QuickNotes.VoiceNote? { model.voice.first { $0.id == noteId } }
@@ -339,37 +346,55 @@ struct NoteDetailView: View {
             .fullScreenCover(isPresented: $editing) {
                 PageEditorView(noteId: n.id, typed: n.typed ?? "", drawing: PageStore.load(n.id)) { _ in model.reload() }
             }
+            .sheet(isPresented: $choosingPrep) {
+                PrepTargetPicker(what: n.title.isEmpty ? "this page" : "“\(n.title)”") { target in addToPrep(n, target) }
+            }
         } else {
             ContentUnavailableView("This note is gone", systemImage: "note.text")
         }
     }
 
-    /// A notebook page: its ink, Edit, reading the handwriting again, and
-    /// using it as the prep notes the AI cues answer from.
+    /// A notebook page: its ink and pasted images, Edit, reading it again,
+    /// and using it as the prep notes the AI cues answer from.
     @ViewBuilder
     private func pageSection(_ n: QuickNotes.VoiceNote) -> some View {
+        let ink = PageStore.hasInk(n.id)
+        let pasted = PageStore.images(n.id)
         Section {
             if let image = PageStore.preview(PageStore.load(n.id), dark: colorScheme == .dark) {
                 Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 420)
             }
+            ForEach(Array(pasted.enumerated()), id: \.offset) { _, image in
+                Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 420)
+                    .accessibilityLabel("Pasted image")
+            }
             Button { editing = true } label: { Label("Edit page", systemImage: "square.and.pencil") }
-            if PageStore.hasInk(n.id), n.handwriting == nil {
+            if ink || !pasted.isEmpty, n.handwriting == nil {
                 if Notebook.reading.contains(n.id) {
-                    Label("Reading your handwriting…", systemImage: "hourglass")
+                    Label("Reading your page…", systemImage: "hourglass")
                 } else if let quickNotes {
                     Button {
                         Notebook.read(n.id, PageStore.load(n.id), quickNotes: quickNotes)
                         model.reload()
-                    } label: { Label("Read my handwriting", systemImage: "text.viewfinder") }
+                    } label: {
+                        Label(ink ? "Read my handwriting" : "Read the pasted images", systemImage: "text.viewfinder")
+                    }
                 }
             }
             Button {
-                let text = n.paragraphs.joined(separator: "\n")
-                guard !text.isEmpty else { message = "This page has no text to use yet."; return }
-                JOATRuntime.shared.prep.addText(text, title: n.title.isEmpty ? "Page" : n.title, source: "Notebook page")
-                message = "Added to Prep notes: the AI cues use it now."
-            } label: { Label("Use as prep notes", systemImage: "doc.text.magnifyingglass") }
+                guard !n.paragraphs.joined().isEmpty else { message = "This page has no text to use yet."; return }
+                choosingPrep = true
+            } label: { Label("Add to a prep note…", systemImage: "doc.text.magnifyingglass") }
         }
+    }
+
+    /// Notes › a page › Add to a prep note…: which one, or a new one.
+    private func addToPrep(_ n: QuickNotes.VoiceNote, _ target: String?) {
+        let prep = JOATRuntime.shared.prep
+        prep.addText(n.paragraphs.joined(separator: "\n"), title: n.title.isEmpty ? "Page" : n.title,
+                     source: "Notebook page", to: target)
+        let name = target.flatMap { id in prep.notes.first { $0.id == id }?.title } ?? "a new prep note"
+        message = "Added to \(name): the AI cues use it when that prep note is in use."
     }
 
     private func findReminders() {
@@ -447,73 +472,179 @@ struct ReminderReviewSheet: View {
 
 // MARK: - Prep
 
+/// Prep notes, as Even's Conversate has them: each one a folder of typed
+/// notes, files, links and notebook pages. The one ticked is in use; the
+/// glasses can pick another when a QuickNote starts.
 struct PrepView: View {
     @ObservedObject private var prep = JOATRuntime.shared.prep
     @AppStorage(Cues.enabledKey) private var cuesOn = true
+    @State private var path: [String] = []
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            List {
+                Section {
+                    Button { path = [prep.create()] } label: { Label("New prep note", systemImage: "folder.badge.plus") }
+                    if !prep.status.isEmpty {
+                        Text(prep.status).font(.caption).foregroundStyle(.secondary)
+                    }
+                } footer: {
+                    Text("A prep note holds everything for one conversation: typed notes, files, links and notebook pages. "
+                         + "Share a PDF or text file to JOAT Brain from any app to add it to one.")
+                }
+                if !prep.notes.isEmpty {
+                    Section {
+                        ForEach(prep.notes) { note in
+                            HStack(alignment: .top, spacing: 12) {
+                                Button { prep.select(note.id) } label: {
+                                    Image(systemName: note.id == prep.active?.id ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(note.id == prep.active?.id ? .green : .secondary)
+                                        .font(.title3)
+                                }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel(note.id == prep.active?.id ? "In use" : "Use \(note.title)")
+                                NavigationLink(value: note.id) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Label(note.title, systemImage: "folder").foregroundStyle(.primary)
+                                        Text(note.summary).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                        .onDelete { offsets in offsets.map { prep.notes[$0].id }.forEach { prep.remove($0) } }
+                    } header: {
+                        Text("In use: the ticked one")
+                    } footer: {
+                        Text("On the glasses, + Create new note asks which prep note to use, or Skip & start. "
+                             + "On an open QuickNote, new AI cues pop up for a few seconds; tap the note to see the prep and every cue.")
+                    }
+                }
+                Section { Toggle("AI cues during QuickNotes", isOn: $cuesOn) }
+            }
+            .navigationTitle("Prep")
+            .navigationDestination(for: String.self) { id in PrepNoteView(noteId: id) }
+        }
+    }
+}
+
+/// One prep note: its name, what's in it, and its talking points.
+struct PrepNoteView: View {
+    let noteId: String
+    @ObservedObject private var prep = JOATRuntime.shared.prep
     @State private var importing = false
     @State private var typing = false
     @State private var typed = ""
+    @State private var name = ""
+
+    private var note: Prep.Note? { prep.notes.first { $0.id == noteId } }
 
     var body: some View {
-        NavigationStack {
+        if let note {
             List {
                 Section {
-                    Button { importing = true } label: { Label("Add a file…", systemImage: "doc.badge.plus") }
+                    // Unnamed: the name it has for now shows as the prompt.
+                    TextField("Name", text: $name, prompt: Text(note.title))
+                        .font(.headline)
+                        .accessibilityIdentifier("Name")
+                        .onSubmit { prep.rename(noteId, to: name) }
+                    if note.id == prep.active?.id {
+                        Label("In use", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                    } else {
+                        Button { prep.select(noteId) } label: { Label("Use for conversations", systemImage: "circle") }
+                    }
+                }
+                Section {
+                    Button { importing = true } label: { Label("Add files…", systemImage: "doc.badge.plus") }
                     PasteButton(payloadType: String.self) { strings in
-                        DispatchQueue.main.async { prep.paste(strings.first, url: nil) }
+                        DispatchQueue.main.async { prep.paste(strings.first, url: nil, to: noteId) }
                     }
                     Button { typing = true } label: { Label("Type notes…", systemImage: "square.and.pencil") }
                     if !prep.status.isEmpty {
                         Text(prep.status).font(.caption).foregroundStyle(.secondary)
                     }
                 } footer: {
-                    Text("Or share a PDF or text file to JOAT Brain from any app. Paste takes a link (the page is read) or text.")
+                    Text("Paste takes a link (the page is read) or text. Notebook pages: open the page in Notes › Add to a prep note.")
                 }
-                if !prep.docs.isEmpty {
-                    Section {
-                        ForEach(prep.docs) { doc in
-                            Button { prep.select(doc.id) } label: {
-                                HStack(alignment: .top) {
-                                    Image(systemName: doc.id == prep.active?.id ? "checkmark.circle.fill" : "circle")
-                                        .foregroundStyle(doc.id == prep.active?.id ? .green : .secondary)
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(doc.title).foregroundStyle(.primary)
-                                        Text("\(doc.source) · \(doc.points.isEmpty ? "no talking points yet" : "\(doc.points.count) talking points")")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                        if doc.id == prep.active?.id {
-                                            ForEach(doc.points, id: \.self) { Text("– \($0)").font(.caption) }
-                                        }
-                                    }
-                                }
-                            }
+                Section("In this prep note") {
+                    if note.items.isEmpty {
+                        Text("Nothing yet.").foregroundStyle(.secondary)
+                    }
+                    ForEach(note.items) { item in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(item.title)
+                            Text("\(item.source) · \(item.text.count.formatted()) characters").font(.caption).foregroundStyle(.secondary)
                         }
-                        .onDelete { offsets in offsets.map { prep.docs[$0].id }.forEach { prep.remove($0) } }
-                    } header: {
-                        Text("In use: the ticked one")
-                    } footer: {
-                        Text("On an open QuickNote, new AI cues pop up for a few seconds. Tap the note (or use its menu) to see the prep and every cue.")
+                    }
+                    .onDelete { offsets in offsets.map { note.items[$0].id }.forEach { prep.removeItem($0, from: noteId) } }
+                }
+                if !note.points.isEmpty {
+                    Section("Talking points, from all of it") {
+                        ForEach(note.points, id: \.self) { Text("– \($0)").font(.callout) }
                     }
                 }
-                Section { Toggle("AI cues during QuickNotes", isOn: $cuesOn) }
             }
-            .navigationTitle("Prep")
-            .fileImporter(isPresented: $importing, allowedContentTypes: [.pdf, .text, .html, .rtf]) { result in
-                if case .success(let url) = result { prep.addFile(url) }
+            .navigationTitle(note.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear { name = note.named ? note.title : "" }
+            .onChange(of: note.title) { _, new in if note.named { name = new } }
+            .onDisappear { if !name.isEmpty, name != note.title { prep.rename(noteId, to: name) } }
+            .fileImporter(isPresented: $importing, allowedContentTypes: [.pdf, .text, .html, .rtf], allowsMultipleSelection: true) { result in
+                if case .success(let urls) = result { urls.forEach { prep.addFile($0, to: noteId) } }
             }
             .sheet(isPresented: $typing) {
                 NavigationStack {
                     TextEditor(text: $typed)
                         .padding()
-                        .navigationTitle("Prep notes")
+                        .navigationTitle("Type notes")
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { typing = false } }
                             ToolbarItem(placement: .confirmationAction) {
-                                Button("Add") { prep.addText(typed); typed = ""; typing = false }
+                                Button("Add") { prep.addText(typed, to: noteId); typed = ""; typing = false }
                                     .disabled(typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             }
                         }
                 }
+            }
+        } else {
+            ContentUnavailableView("This prep note is gone", systemImage: "folder")
+        }
+    }
+}
+
+/// Which prep note something goes into (a shared file, a notebook page):
+/// one of them, or a new one. `chose(nil)`: a new prep note.
+struct PrepTargetPicker: View {
+    let what: String
+    var cancelled: () -> Void = {}
+    let chose: (String?) -> Void
+    @ObservedObject private var prep = JOATRuntime.shared.prep
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button { chose(nil); dismiss() } label: { Label("New prep note", systemImage: "folder.badge.plus") }
+                }
+                if !prep.notes.isEmpty {
+                    Section("Prep notes") {
+                        ForEach(prep.notes) { note in
+                            Button { chose(note.id); dismiss() } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Label(note.title, systemImage: note.id == prep.active?.id ? "folder.fill" : "folder")
+                                    Text(note.id == prep.active?.id ? "In use · \(note.summary)" : note.summary)
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Add \(what) to")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { cancelled(); dismiss() } }
             }
         }
     }
@@ -649,7 +780,11 @@ struct MessagesView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(t.outgoing ? "You → \(t.from)" : t.from).font(.caption.weight(.semibold))
                                 Text(t.body)
-                                Text(t.at.formatted(date: .omitted, time: .shortened))
+                                // A date too, unless it came today (2026-11-11: three-day-old
+                                // texts looked like today's).
+                                Text(Calendar.current.isDateInToday(t.at)
+                                     ? t.at.formatted(date: .omitted, time: .shortened)
+                                     : t.at.formatted(date: .abbreviated, time: .shortened))
                                     .font(.caption2).foregroundStyle(.tertiary)
                             }
                         }
