@@ -1,0 +1,63 @@
+import Foundation
+import os
+
+/// In-memory log mirrored to the unified log (subsystem com.joatlabs.joatbrain, category spike).
+/// Stream it from the Mac with:  log stream --device --predicate 'subsystem == "com.joatlabs.joatbrain"'
+@MainActor
+final class Log: ObservableObject {
+    static let shared = Log()
+    static let os = Logger(subsystem: "com.joatlabs.joatbrain", category: "spike")
+
+    @Published private(set) var lines: [String] = []
+    private let stamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
+
+    /// Documents/brain.log on the phone. Pull it with
+    /// `xcrun devicectl device copy from --domain-type appDataContainer
+    ///  --domain-identifier com.joat.brain --source Documents/brain.log ...`
+    nonisolated static let fileURL = FileManager.default
+        .urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("brain.log")
+    nonisolated private static let fileQueue = DispatchQueue(label: "com.joatlabs.joatbrain.logfile")
+    nonisolated private static let fileStamp: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    nonisolated private static func appendToFile(_ message: String) {
+        fileQueue.async {
+            let line = "\(fileStamp.string(from: Date())) \(message)\n"
+            let fm = FileManager.default
+            // Keep one run's worth: start over past 8 MB.
+            if let size = (try? fm.attributesOfItem(atPath: fileURL.path))?[.size] as? Int, size > 8_000_000 {
+                try? fm.removeItem(at: fileURL)
+            }
+            if !fm.fileExists(atPath: fileURL.path) { fm.createFile(atPath: fileURL.path, contents: nil) }
+            // The throwing calls: the old seekToEndOfFile()/write(_:) raise
+            // an Objective-C exception on a full disk, which crashes the app.
+            if let h = try? FileHandle(forWritingTo: fileURL) {
+                _ = try? h.seekToEnd()
+                try? h.write(contentsOf: Data(line.utf8))
+                try? h.close()
+            }
+        }
+    }
+
+    nonisolated static func add(_ message: String) {
+        os.info("\(message, privacy: .public)")
+        appendToFile(message)
+        // stderr is unbuffered: `xcrun devicectl device process launch --console`
+        // streams it to the Mac over the cable, no root needed.
+        FileHandle.standardError.write(Data("[brain] \(message)\n".utf8))
+        Task { @MainActor in
+            let line = "\(shared.stamp.string(from: Date()))  \(message)"
+            shared.lines.append(line)
+            if shared.lines.count > 400 { shared.lines.removeFirst(shared.lines.count - 400) }
+        }
+    }
+
+    func clear() { lines.removeAll() }
+}

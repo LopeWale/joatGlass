@@ -1,0 +1,73 @@
+# XcodeGen spec for JOAT Brain, the iPhone-as-brain lab app (see
+# docs in the project: iphone-as-brain-feasibility-2026-10-21).
+#
+# Like apps/mac/JOATShell, the .xcodeproj is GENERATED from this file and
+# gitignored; scripts/build_ios.sh regenerates it every build. Signing uses
+# the builder's own team through JOAT_TEAM_ID, as the Mac app does.
+
+name: JOATBrain
+
+options:
+  bundleIdPrefix: com.joat
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "26.0"
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: ${JOAT_TEAM_ID}
+    CODE_SIGN_STYLE: Automatic
+    # 1.0 is the version App Store Connect already holds (TestFlight).
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1"
+
+targets:
+  JOATBrain:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      # One catalog for the engine, the Mac app's News page and the phone.
+      - path: ../mac/joat/services/news_sources.json
+        buildPhase: resources
+      # Build-time copies of the wearer's Mac settings (build_ios.sh), ignored by git.
+      - path: Generated
+        optional: true
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.joat.brain
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # iPhone only, here and not just at project level: XcodeGen's iOS
+        # app defaults set "1,2", and App Store Connect then refused the
+        # portrait-only upload as an iPad app (2026-10-24).
+        TARGETED_DEVICE_FAMILY: "1"
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: JOAT Brain
+        # From the build settings, so `--testflight` can number each upload
+        # (XcodeGen otherwise writes a fixed "1").
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        # HTTPS only (exempt): TestFlight skips the export-compliance question.
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        # The `audio` background mode is what keeps the brain running while
+        # the Even app is in front and the screen is locked (Spike 2).
+        UIBackgroundModes: [audio]
+        NSMicrophoneUsageDescription: JOAT Brain keeps an audio session open so it can keep working while the Even app is in front.
+        NSSpeechRecognitionUsageDescription: JOAT Brain turns what you say to the glasses into text, on this phone.
+        NSRemindersFullAccessUsageDescription: JOAT Brain creates, lists and completes your reminders when you ask through the glasses.
+        NSContactsUsageDescription: JOAT Brain finds the number of the person you text or reply to from the glasses.
+        # Share › JOAT Brain on a PDF or text file: prep notes for the AI
+        # cues (Prep.swift). A copy lands in Documents/Inbox.
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Prep notes
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.adobe.pdf, public.plain-text, public.rtf, public.html, net.daringfireball.markdown, public.text]
+        LSSupportsOpeningDocumentsInPlace: false

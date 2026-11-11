@@ -61,3 +61,5 @@ build/
 
 # Personal plugin builds (each build carries its builder's own Mac addresses)
 apps/hub-plugin/*.ehpk
+apps/ios-companion/*.xcodeproj
+apps/ios-companion/Generated/
