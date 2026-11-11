@@ -1,5 +1,5 @@
 import {
-  afterEach, beforeEach, describe, expect, it, vi,
+  describe, expect, it, vi,
 } from 'vitest';
 import { OsEventTypeList, type RebuildPageContainer } from '@evenrealities/even_hub_sdk';
 import { CapabilityMenu, isActionLifecycleTitle } from './CapabilityMenu';
@@ -191,6 +191,29 @@ describe('Brainstorm surface ownership', () => {
     expect(menu.mayPresentBrainstorm(explicitReplay)).toBe(true);
   });
 
+  it('the Reminders page carries its next-up card to the presenter, and a tap names REMINDERS', async () => {
+    const { menu, listOptions, sent } = rig();
+    const card = { title: 'Pick up cake', dueUnixMs: 1_800_000_000_000, allDay: false,
+      late: 1, today: 2, tomorrow: 0, later: 0, undated: 0 };
+    expect(await menu.presentList(
+      'REMINDERS · 3 OPEN', ['[Late] Pay the bill', '[3:00 PM] Pick up cake', '[Today] Gym'],
+      'voice-reminders-1', true, 'tap: done · 2x tap: back', card,
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ nativeFirmwareList: true, reminderCard: card });
+    menu.handleList(click(1));
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'capdata', selectedName: 'REMINDERS', selectedIndex: 1, requestId: 'voice-reminders-1',
+    });
+  });
+
+  it('adopts a Mac brain voice page titled PLANNING as the Reminders visit', async () => {
+    const { menu, listOptions } = rig();
+    expect(await menu.presentList(
+      'PLANNING · PLAN · OCTOBER 2026', ['Week 1', 'Week 2'], 'voice-planning-1', true,
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'PLANNING · PLAN · OCTOBER 2026', nativeFirmwareList: true });
+  });
+
   it('does not retire Brainstorm for a rejected stale list', async () => {
     const { menu } = rig();
     const visit = menu.captureBrainstormVisit();
@@ -295,7 +318,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, listOptions, sent } = rig();
-      await menu.openFromContextualMenu(1); // Planning
+      await menu.openFromContextualMenu(1); // Reminders
       await vi.advanceTimersByTimeAsync(0);
       const requestId = latestRequestId(sent);
       expect(requestId).toMatch(/^hud-request-/);
@@ -303,10 +326,10 @@ describe('CapabilityMenu', () => {
       await vi.advanceTimersByTimeAsync(12_000);
       expect(lists[1]).toEqual([
         'No response from the Mac yet.',
-        'Return to Overview, then open Planning to retry.',
+        'Return to Overview, then open Reminders to retry.',
       ]);
       expect(listOptions[1]).toMatchObject({
-        title: 'PLANNING · RETRY', hint: '2x tap: back',
+        title: 'REMINDERS · RETRY', hint: '2x tap: back',
       });
 
       expect(await menu.presentList(
@@ -436,7 +459,7 @@ describe('CapabilityMenu', () => {
       let finishRetryPaint: ((shown: boolean) => void) | undefined;
       const retryPaint = new Promise<boolean>((resolve) => { finishRetryPaint = resolve; });
       const { menu, sent } = rig([true, retryPaint, true]);
-      await menu.openFromContextualMenu(1); // Planning
+      await menu.openFromContextualMenu(1); // Reminders
       await vi.advanceTimersByTimeAsync(0);
       const requestId = latestRequestId(sent);
 
@@ -456,7 +479,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, sent } = rig();
-      await menu.openFromContextualMenu(1); // Planning
+      await menu.openFromContextualMenu(1); // Reminders
       await vi.advanceTimersByTimeAsync(0);
       expect(await menu.presentList(
         'PLANNING · PLAN · AUGUST 2026', rows(2), latestRequestId(sent), true,
@@ -464,7 +487,7 @@ describe('CapabilityMenu', () => {
 
       await vi.advanceTimersByTimeAsync(12_000);
       expect(lists).toEqual([
-        ['Loading recent planning…'],
+        ['Loading recent reminders…'],
         rows(2),
       ]);
     } finally {
@@ -499,7 +522,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, listOptions, sent } = rig();
-      await menu.openFromContextualMenu(1); // Planning, via the firmware menu
+      await menu.openFromContextualMenu(1); // Reminders, via the firmware menu
       await vi.advanceTimersByTimeAsync(0);
       const requestId = latestRequestId(sent);
       expect(await menu.presentList(
@@ -510,11 +533,11 @@ describe('CapabilityMenu', () => {
       expect(menu.handleList(click(1))).toBe(true);
       expect(sent[sent.length - 1]).toMatchObject({
         kind: 'input',
-        event: { containerName: 'capdata', selectedName: 'PLANNING', requestId },
+        event: { containerName: 'capdata', selectedName: 'REMINDERS', requestId },
       });
       await vi.advanceTimersByTimeAsync(12_000);
       expect(listOptions[listOptions.length - 1]).toMatchObject({
-        title: 'PLANNING · RETRY', hint: '2x tap: back',
+        title: 'REMINDERS · RETRY', hint: '2x tap: back',
       });
 
       // A late matching week frame still lands, and — because the timeout
@@ -528,7 +551,7 @@ describe('CapabilityMenu', () => {
       expect(sent.length).toBe(before + 1);
       expect(sent[sent.length - 1]).toMatchObject({
         kind: 'input',
-        event: { containerName: 'capdata', selectedName: 'PLANNING' },
+        event: { containerName: 'capdata', selectedName: 'REMINDERS' },
       });
     } finally {
       vi.useRealTimers();
@@ -539,7 +562,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, sent, defaultsCount } = rig();
-      await menu.openFromContextualMenu(1); // Planning, via the firmware menu
+      await menu.openFromContextualMenu(1); // Reminders, via the firmware menu
       await vi.advanceTimersByTimeAsync(0);
       expect(lists).toHaveLength(1);
       expect(menu.isOpen()).toBe(true);
@@ -599,7 +622,7 @@ describe('CapabilityMenu', () => {
       },
     });
   });
-  it('hands every list to the firmware list; only the month grid is the image dashboard', async () => {
+  it('hands every list to the firmware list, a month-titled Reminders page included', async () => {
     const { menu, listOptions, sent } = rig();
     await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
@@ -613,12 +636,10 @@ describe('CapabilityMenu', () => {
     expect(await menu.presentList('ACTIVITY', rows(2), latestRequestId(sent), true)).toBe(true);
     expect(listOptions[3]).toMatchObject({ title: 'ACTIVITY', nativeFirmwareList: true });
 
-    await menu.openFromContextualMenu(1); // Planning
+    await menu.openFromContextualMenu(1); // Reminders
     await vi.waitFor(() => expect(sent.filter((m) => (m.event as { containerName?: string }).containerName === 'capmenu')).toHaveLength(3));
-    // The loading page is a firmware list; so is a month that arrives
-    // without its grid. Only the grid itself, a page with no Even template,
-    // is the image dashboard.
-    expect(listOptions[4]).toMatchObject({ title: 'PLANNING', nativeFirmwareList: true });
+    // The loading page is a firmware list; so is the Mac's month page.
+    expect(listOptions[4]).toMatchObject({ title: 'REMINDERS', nativeFirmwareList: true });
     expect(await menu.presentList('PLANNING · PLAN · AUGUST 2026', rows(2), latestRequestId(sent), true)).toBe(true);
     expect(listOptions[5]).toMatchObject({ title: 'PLANNING · PLAN · AUGUST 2026', nativeFirmwareList: true });
   });
@@ -670,7 +691,7 @@ describe('CapabilityMenu', () => {
     const { menu, listOptions, sent } = rig();
     // As the presenter answers: the page about to be shown by its opt-in,
     // the page on the glass by what was shown last.
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Planning'));
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders'));
     await vi.waitFor(() => expect(latestRequestId(sent)).not.toBe(''));
     const requestId = latestRequestId(sent);
     const week = [
@@ -688,7 +709,7 @@ describe('CapabilityMenu', () => {
     sent.length = 0;
     expect(menu.handleList(click(2))).toBe(true);
     expect(sent[sent.length - 1]).toMatchObject({
-      kind: 'input', event: { containerName: 'capdata', selectedName: 'PLANNING', selectedIndex: 2, requestId },
+      kind: 'input', event: { containerName: 'capdata', selectedName: 'REMINDERS', selectedIndex: 2, requestId },
     });
     const day = ['[09:00] Standup', '[16:30] □ Call the dentist', '‹ TUE OCT 6', 'THU OCT 8 ›', '○ VIEW · MONTH', '○ VIEW · WEEK', '● VIEW · DAY'];
     expect(await menu.presentList(
@@ -723,7 +744,7 @@ describe('CapabilityMenu', () => {
 
     await menu.toggle();
     sent.length = 0;
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Planning'));
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders'));
     await vi.waitFor(() => expect(latestRequestId(sent)).not.toBe(''));
     const planning = latestRequestId(sent);
     expect(await menu.presentList('PLANNING', ['14:00 · Design review'], planning, true, 'tap: open')).toBe(true);
@@ -971,7 +992,7 @@ describe('CapabilityMenu', () => {
 
   it('opens a firmware list with the cursor on row one, whatever row the Mac remembers', async () => {
     const { menu, sent } = rig();
-    await menu.openFromContextualMenu(1); // Planning
+    await menu.openFromContextualMenu(1); // Reminders
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList(
@@ -1127,6 +1148,39 @@ describe('CapabilityMenu', () => {
     expect(sent[sent.length - 1]).toEqual({ kind: 'input', event: {
       containerName: 'capability-lifecycle', selectedName: 'quicknotes-back', requestId,
     } });
+  });
+
+  it("an open note's AI cues, a cue and the prep notes go back through the brain (2026-10-30)", async () => {
+    const { menu, sent } = rig();
+    const requestId = 'voice-notes-cues';
+    await menu.presentList('QUICKNOTES · NEW NOTE', ['We ship Friday.'], requestId,
+      true, '00:05 · hold: talk · tap: AI cues');
+    // The menu's AI cues and Prep notes: the brain opens them.
+    expect(menu.sendQuickNotesMenu('cues')).toBe(true);
+    expect(sent[sent.length - 1]).toEqual({ kind: 'input', event: {
+      containerName: 'capability-lifecycle', selectedName: 'quicknotes-cues', requestId,
+    } });
+    expect(menu.sendQuickNotesMenu('prep')).toBe(true);
+    expect(sent[sent.length - 1]).toMatchObject({ event: { selectedName: 'quicknotes-prep' } });
+
+    await menu.presentList('QUICKNOTES · AI CUES', ['Prep notes · Q3 review', 'Answer · Delivery date'],
+      requestId, true, 'tap: open · left x2: back');
+    expect(menu.sendQuickNotesMenu('cues')).toBe(false); // only on the note itself
+    menu.handleList(click(1));
+    expect(sent[sent.length - 1]).toMatchObject({ event: {
+      containerName: 'capdata', selectedName: 'QUICKNOTES', selectedIndex: 1, requestId,
+    } });
+    await menu.presentList('QUICKNOTES · CUE', [], requestId, false, 'left x2: back');
+    await menu.toggle();
+    expect(sent[sent.length - 1]).toEqual({ kind: 'input', event: {
+      containerName: 'capability-lifecycle', selectedName: 'quicknotes-back', requestId,
+    } });
+    expect(menu.isOpen()).toBe(true); // the note is still open: never Home
+    await menu.presentList('QUICKNOTES · AI CUES', ['Prep notes · Q3 review', 'Answer · Delivery date'],
+      requestId, true, 'tap: open · left x2: back');
+    await menu.toggle();
+    expect(sent[sent.length - 1]).toMatchObject({ event: { selectedName: 'quicknotes-back' } });
+    expect(menu.isOpen()).toBe(true);
   });
 
   it('turns a held touchpad on the live note into hold events', async () => {
@@ -1357,7 +1411,7 @@ describe('CapabilityMenu', () => {
 
   it('routes non-Messages data clicks as capability detail selections', async () => {
     const { menu, sent } = rig();
-    await menu.openFromContextualMenu(1); // Planning // Planning capability
+    await menu.openFromContextualMenu(1); // Reminders
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList(
       'PLANNING', rows(2), latestRequestId(sent), true,
@@ -1369,34 +1423,34 @@ describe('CapabilityMenu', () => {
       event: {
         containerName: 'capdata',
         selectedIndex: 0,
-        selectedName: 'PLANNING',
+        selectedName: 'REMINDERS',
       },
     });
   });
 
   it('returns a Planning drill-down to the live planner instead of Home', async () => {
     const { menu, sent } = rig();
-    await menu.openFromContextualMenu(1); // Planning
+    await menu.openFromContextualMenu(1); // Reminders
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     await menu.presentList('PLANNING', rows(2), latestRequestId(sent), true);
 
     menu.handleClick();
     expect(sent[1]).toMatchObject({
       kind: 'input',
-      event: { containerName: 'capdata', selectedName: 'PLANNING', selectedIndex: 0 },
+      event: { containerName: 'capdata', selectedName: 'REMINDERS', selectedIndex: 0 },
     });
 
     await menu.toggle();
     await vi.waitFor(() => expect(sent).toHaveLength(3));
     expect(sent[2]).toMatchObject({
       kind: 'input',
-      event: { containerName: 'capmenu', selectedName: 'Planning', selectedIndex: 1 },
+      event: { containerName: 'capmenu', selectedName: 'Reminders', selectedIndex: 1 },
     });
   });
 
   it('keeps setup and action lifecycle lists read-only', async () => {
     const { menu, sent } = rig();
-    await menu.openFromContextualMenu(1); // Planning
+    await menu.openFromContextualMenu(1); // Reminders
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList(
       'PLANNING · PLAN · SETUP', rows(2), latestRequestId(sent), false,
@@ -1443,11 +1497,11 @@ describe('CapabilityMenu', () => {
 
     await menu.toggle();
     await vi.waitFor(() => expect(sent).toHaveLength(1));
-    expect(lists[0]).toEqual(['Loading recent planning…']);
+    expect(lists[0]).toEqual(['Loading recent reminders…']);
     expect(sent[0]).toMatchObject({
       kind: 'input',
       event: {
-        containerName: 'capmenu', selectedIndex: 1, selectedName: 'Planning',
+        containerName: 'capmenu', selectedIndex: 1, selectedName: 'Reminders',
         planningAnchorUnixMs: 1_788_274_200_000,
       },
     });
@@ -1483,7 +1537,7 @@ describe('CapabilityMenu', () => {
     expect(sent[0]).toMatchObject({
       kind: 'input',
       event: {
-        containerName: 'capmenu', selectedIndex: 1, selectedName: 'Planning',
+        containerName: 'capmenu', selectedIndex: 1, selectedName: 'Reminders',
         planningAnchorUnixMs: 1_788_274_200_000,
       },
     });
@@ -1595,7 +1649,7 @@ describe('CapabilityMenu', () => {
         kind: 'input',
         event: {
           containerName: 'capmenu',
-          selectedName: 'Planning',
+          selectedName: 'Reminders',
           planningAnchorUnixMs: 1_788_274_200_000,
         },
       });
@@ -1635,7 +1689,7 @@ describe('CapabilityMenu', () => {
         event: {
           containerName: 'capmenu',
           selectedIndex: 1,
-          selectedName: 'Planning',
+          selectedName: 'Reminders',
           planningAnchorUnixMs,
         },
       });
@@ -1683,7 +1737,7 @@ describe('CapabilityMenu', () => {
         event: {
           containerName: 'capmenu',
           selectedIndex: 1,
-          selectedName: 'Planning',
+          selectedName: 'Reminders',
           planningAnchorUnixMs,
         },
       });
@@ -1709,14 +1763,14 @@ describe('CapabilityMenu', () => {
 
     await menu.openPlanning();
 
-    expect(lists).toEqual([['Loading recent planning…']]);
+    expect(lists).toEqual([['Loading recent reminders…']]);
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({
       kind: 'input',
       event: {
         containerName: 'capmenu',
         selectedIndex: 1,
-        selectedName: 'Planning',
+        selectedName: 'Reminders',
         planningAnchorUnixMs: 1_788_274_200_000,
       },
     });
@@ -1746,7 +1800,7 @@ describe('CapabilityMenu', () => {
       expect(sent).toHaveLength(1);
       expect(sent[0]).toMatchObject({
         kind: 'input',
-        event: { containerName: 'capmenu', selectedName: 'Planning', planningAnchorUnixMs },
+        event: { containerName: 'capmenu', selectedName: 'Reminders', planningAnchorUnixMs },
       });
 
       // The monitoring receipt waits for the agenda, not for a clock.
@@ -1861,7 +1915,7 @@ describe('CapabilityMenu', () => {
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const event = sent[0]?.event as Record<string, unknown>;
     expect(event).toMatchObject({
-      containerName: 'capmenu', selectedName: 'Planning',
+      containerName: 'capmenu', selectedName: 'Reminders',
     });
     expect(event).not.toHaveProperty('planningAnchorUnixMs');
   });
@@ -2015,7 +2069,7 @@ describe('CapabilityMenu', () => {
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const oldRequest = latestRequestId(sent);
     await menu.toggle(); // back: data -> Home (also retires reply consent)
-    await menu.openFromContextualMenu(1); // Planning, a NEW generation
+    await menu.openFromContextualMenu(1); // Reminders, a NEW generation
     await vi.waitFor(() => expect(sent).toHaveLength(3));
     const newRequest = latestRequestId(sent);
 
@@ -2192,169 +2246,6 @@ describe('CapabilityMenu', () => {
     await menu.toggle();
     expect(menu.isOpen()).toBe(false);
     expect(defaultsCount()).toBe(1);
-  });
-});
-
-describe('Planning split dashboard', () => {
-  // The hover start reads the WALL CLOCK ("today when the month shows it,
-  // else the first in-month day"). Left unpinned, these tests silently
-  // change meaning on 1 September: they passed for a year by exercising the
-  // fallback, then broke the day the calendar walked into the fixture's own
-  // month. Pin it, and cover both branches on purpose instead.
-  //
-  // A LOCAL date — the code compares against toLocaleDateString('en-CA'),
-  // so a UTC midnight would resolve to the previous day west of Greenwich.
-  const OUTSIDE_THE_GRID = new Date(2026, 5, 17, 12, 0, 0); // 17 Jun 2026
-
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(OUTSIDE_THE_GRID);
-  });
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  function dashboardRig() {
-    const panes: Array<{ dateIndex: number; focused: boolean; itemIndex: number }> = [];
-    const sent: Array<Record<string, unknown>> = [];
-    const hud = {
-      showSidebar: vi.fn(async () => true),
-      showList: vi.fn(async () => true),
-      setStatus: vi.fn(async () => true),
-      updatePlanningPane: vi.fn(async (pane: { dateIndex: number; focused: boolean; itemIndex: number }) => {
-        panes.push({ ...pane });
-        return true;
-      }),
-      showProductivity: vi.fn(async () => true),
-      isProductivityVisible: vi.fn(() => true),
-      showDefault: vi.fn(async () => true),
-    } as unknown as HudPresenter;
-    const link = { send: (m: Record<string, unknown>) => sent.push(m) } as unknown as MacLink;
-    const menu = new CapabilityMenu(hud, new Settings(), link);
-    return { menu, panes, sent };
-  }
-
-  function monthGrid() {
-    // Sep 2026 grid: Monday Aug 31 leads, 42 cells. Sep 1 (index 1) carries
-    // two entries; every other day is free.
-    return Array.from({ length: 42 }, (_, index) => {
-      const day = new Date(Date.UTC(2026, 7, 31 + index));
-      const iso = day.toISOString().slice(0, 10);
-      const busy = index === 1;
-      return {
-        day: iso,
-        eventCount: busy ? 1 : 0,
-        reminderCount: busy ? 1 : 0,
-        inMonth: day.getUTCMonth() === 8,
-        ...(busy ? {
-          entries: [
-            { time: '09:30', kind: 'event' as const, title: 'Design review' },
-            { time: '18:00', kind: 'reminder' as const, title: 'Buy filters' },
-          ],
-        } : {}),
-      };
-    });
-  }
-
-  async function openDashboard() {
-    const rigParts = dashboardRig();
-    const { menu, sent } = rigParts;
-    await menu.openFromContextualMenu(1); // Planning, via the firmware menu
-    await vi.waitFor(() => expect(sent.length).toBeGreaterThan(0));
-    const requestId = latestRequestId(sent);
-    expect(await menu.presentList(
-      'PLANNING · PLAN · SEPTEMBER 2026', rows(11), requestId, true,
-      undefined, monthGrid() as never,
-    )).toBe(true);
-    return { ...rigParts, requestId };
-  }
-
-  // Dashboard input is queued behind the previous pane paint
-  // (queueDashboardInteraction: a gesture binds to the month it was made on
-  // and follows visible paints), so each gesture lands a microtask later.
-  const painted = () => vi.advanceTimersByTimeAsync(0);
-
-  it('scroll hovers dates, tap hands focus to the pane, tap opens the entry', async () => {
-    const { menu, panes, sent, requestId } = await openDashboard();
-
-    // Hover moves locally — no Mac traffic, one repaint per move.
-    const before = sent.length;
-    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    await painted();
-    expect(sent.length).toBe(before);
-    expect(panes).toHaveLength(1);
-    expect(panes[panes.length - 1]).toMatchObject({ dateIndex: 2, focused: false });
-
-    // Return to Sep 1. Today is pinned outside this month, so hover starts
-    // on the first in-month day, index 1; the scroll above moved it to 2.
-    menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT);
-    await painted();
-    expect(panes[panes.length - 1]).toMatchObject({ dateIndex: 1, focused: false });
-
-    // First tap: the pane takes input. Second tap: the entry opens via the
-    // date+position wire, no identifiers.
-    menu.handleClick();
-    await painted();
-    expect(panes[panes.length - 1]).toMatchObject({ focused: true, itemIndex: 0 });
-    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT);
-    await painted();
-    expect(panes[panes.length - 1]).toMatchObject({ focused: true, itemIndex: 1 });
-    menu.handleClick();
-    await painted();
-    const grid = sent[sent.length - 1] as { event: Record<string, unknown> };
-    expect(grid.event.containerName).toBe('capgrid');
-    expect(grid.event.selectedIndex).toBe(1);
-    expect(grid.event.requestId).toBe(requestId);
-    expect(grid.event.planningDay).toBe('2026-09-01');
-    expect(grid.event).not.toHaveProperty('planningAnchorUnixMs');
-  });
-
-  it('hover starts on today when the shown month contains it', async () => {
-    // The other branch of the same line of code. Sep 1 is index 1 in this
-    // grid (Mon 31 Aug leads), and it is the only day carrying entries — so
-    // landing there is observable through the pane, not just the index.
-    vi.setSystemTime(new Date(2026, 8, 1, 9, 0, 0)); // 1 Sep 2026, local
-    const { menu, panes } = await openDashboard();
-    menu.handleClick(); // the pane takes focus only if today has entries
-    await painted();
-    expect(panes[panes.length - 1]).toMatchObject({ dateIndex: 1, focused: true });
-  });
-
-  it('Back walks pane to grid before leaving the dashboard', async () => {
-    const { menu, panes } = await openDashboard();
-    menu.handleClick(); // pane focus
-    await painted();
-    expect(panes[panes.length - 1]).toMatchObject({ focused: true });
-    await menu.toggle(); // Back: pane -> grid, still on the dashboard
-    expect(panes[panes.length - 1]).toMatchObject({ focused: false });
-    expect(menu.isOpen()).toBe(true);
-  });
-
-  it('scrolling past the month edge asks the Mac for the neighbour month', async () => {
-    const { menu, sent } = await openDashboard();
-    // Walk hover to date 0, then one more up crosses the edge.
-    for (let i = 0; i < 42; i += 1) menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT);
-    await painted();
-    const monthFlip = sent[sent.length - 1] as { event: Record<string, unknown> };
-    expect(monthFlip.event.containerName).toBe('capdata');
-    expect(monthFlip.event.selectedIndex).toBe(6); // the month list's ‹ previous row
-    // One request per edge crossing, however many swipes queued behind it.
-    expect(sent.filter((m) => (m.event as { containerName?: string }).containerName === 'capdata')).toHaveLength(1);
-  });
-
-  it('a tap on a free day focuses the pane on its Open day row', async () => {
-    // Empty dates also have Open day (dashboardTap), so the pane takes
-    // focus on every date; the one row to land on is index 0. The old
-    // version of this test asserted the opposite without awaiting the
-    // queued paint, so it passed vacuously.
-    const { menu, panes } = await openDashboard();
-    menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT); // a free day
-    await painted();
-    const before = panes.length;
-    menu.handleClick();
-    await painted();
-    expect(panes.length).toBe(before + 1);
-    expect(panes[panes.length - 1]).toMatchObject({ focused: true, itemIndex: 0 });
   });
 });
 

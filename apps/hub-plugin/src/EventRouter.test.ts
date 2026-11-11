@@ -6,7 +6,9 @@ import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
 import type { ImuMonitor } from './ImuMonitor';
 import { CapabilityMenu } from './CapabilityMenu';
-import { NOTIFICATIONS_MENU_ID, QUICKNOTES_UNDO_MENU_ID } from './types';
+import {
+  QUICKNOTES_CUES_MENU_ID, QUICKNOTES_PREP_MENU_ID, QUICKNOTES_UNDO_MENU_ID,
+} from './types';
 import { Settings } from './Settings';
 import type { HudPresenter } from './HudPresenter';
 import { CAPABILITY_MENU_ID_BASE, type UplinkMessage } from './types';
@@ -54,7 +56,6 @@ function make(
     // exactly when the overview click-to-notifications drill-in must NOT fire.
     isOpen: vi.fn(() => menuConsumesLists),
     openNotifications: vi.fn(async () => {}),
-    openNotificationsFromMenu: vi.fn(async () => {}),
     openActiveTab: vi.fn(async () => {}),
     // The overview's tab rail: a resting swipe is consumed only when the
     // menu is closed, and long-press-release refreshes only inside an
@@ -1147,14 +1148,6 @@ describe('EventRouter — long tap never touches the mic (2026-10-12)', () => {
     expect(r.menu.openPlanning).toHaveBeenCalledTimes(1);
   });
 
-  it("opens Notifications from the overview menu's first row, and does not relay it to the Mac", () => {
-    const r = make();
-    r.fire({ menuItemClickEvent: { itemID: NOTIFICATIONS_MENU_ID } });
-    expect(r.menu.openNotificationsFromMenu).toHaveBeenCalledTimes(1);
-    expect(r.menu.openFromContextualMenu).not.toHaveBeenCalled();
-    expect(r.sent).toEqual([]);
-  });
-
   it('classifies the delivered gesture without forwarding source or content', () => {
     const events: unknown[] = [];
     const r = make(false, { record: (event) => events.push(event) });
@@ -1478,6 +1471,16 @@ describe('EventRouter — a long press held on an open QuickNote talks into it (
     r.fire({ menuItemClickEvent: { itemID: QUICKNOTES_UNDO_MENU_ID } });
     expect(r.undos).toEqual([1]);
     expect(r.audio.stop).not.toHaveBeenCalled();
+  });
+
+  it("the glasses menu's AI cues and Prep notes reach the open note (Even's Conversate)", () => {
+    const r = liveNote();
+    const picked: string[] = [];
+    Object.assign(r.menu, { sendQuickNotesMenu: vi.fn((item: string) => { picked.push(item); return true; }) });
+    r.fire({ menuItemClickEvent: { itemID: QUICKNOTES_CUES_MENU_ID } });
+    r.fire({ menuItemClickEvent: { itemID: QUICKNOTES_PREP_MENU_ID } });
+    expect(picked).toEqual(['cues', 'prep']);
+    expect(r.undos).toEqual([]);
   });
 
   it('elsewhere a long press does nothing: no hold, and no mic toggle (2026-10-12)', () => {

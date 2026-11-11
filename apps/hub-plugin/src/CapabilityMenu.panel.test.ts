@@ -106,18 +106,18 @@ describe('CapabilityMenu — the overview tab rail', () => {
     expect(steps).toEqual([-1, 1]);
   });
 
-  it("the menu's Notifications row, with unread, opens the newest card over the page, not the list", async () => {
-    const { menu, hud, lists, requests } = rig();
+  it("a tap on the Notifications tab, with unread, opens the newest card over the page, not the list", async () => {
+    const { menu, hud, lists, requests } = rig('notifications');
     hud.unread = [{ id: 'a'.repeat(32) }];
-    await menu.openNotificationsFromMenu();
+    await menu.openActiveTab();
     expect(hud.browseNotifications).toHaveBeenCalledTimes(1);
     expect(lists).toHaveLength(0);
     expect(requests()).toEqual([]);
   });
 
-  it("the menu's Notifications row, with nothing unread, asks the Mac for the list as the tab did", async () => {
-    const { menu, hud, lists, sent } = rig();
-    await menu.openNotificationsFromMenu();
+  it("a tap on the Notifications tab, with nothing unread, asks the brain for the list", async () => {
+    const { menu, hud, lists, sent } = rig('notifications');
+    await menu.openActiveTab();
     expect(hud.browseNotifications).not.toHaveBeenCalled();
     expect(lists[0]?.options?.title).toBe('NOTIFICATIONS');
     expect(sent.some((m) => (m.event as { containerName?: string }).containerName === 'capmenu')).toBe(true);
@@ -126,11 +126,11 @@ describe('CapabilityMenu — the overview tab rail', () => {
   it("a click on the Planner tab opens Planning; on News it expands the cache", async () => {
     const { menu, rail, lists, sent, requests, hud } = rig();
     await menu.openActiveTab();
-    // Planning, from the Mac — not Notifications, which left the rail.
+    // Reminders, from the brain — not Notifications, the first tab.
     expect(hud.browseNotifications).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(sent.some((m) => {
       const event = (m as { event?: { containerName?: string; selectedName?: string } }).event;
-      return event?.containerName === 'capmenu' && event.selectedName === 'Planning';
+      return event?.containerName === 'capmenu' && event.selectedName === 'Reminders';
     })).toBe(true));
     expect(lists.some((list) => list.options?.title === 'NOTIFICATIONS')).toBe(false);
 

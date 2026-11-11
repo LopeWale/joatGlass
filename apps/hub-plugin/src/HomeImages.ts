@@ -44,7 +44,7 @@ export interface HomeColumnView {
 export function homeColumnView(view: OverviewTextView, weather: string, unread: number): HomeColumnView {
   return {
     info: { date: view.info[0] ?? '', weather, unread },
-    tabs: view.tabs.map((tab, index) => ({ tab: PANEL_TABS[index] ?? 'planner', ...tab })),
+    tabs: view.tabs.map((tab, index) => ({ tab: PANEL_TABS[index] ?? 'notifications', ...tab })),
   };
 }
 

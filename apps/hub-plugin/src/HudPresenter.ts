@@ -24,6 +24,14 @@ import { OVERLAY_GAP, cardTop, overlayConversation } from './ConversationOverlay
 import { paginateEven, readerParagraphs, type EvenReaderLine } from './EvenFont';
 import { hasImageHeader, withImageHeader } from './HeaderImage';
 import { hasHomeImages, homeColumnView, withHomeImages, type HomeColumnView } from './HomeImages';
+import {
+  hasReminderCard,
+  normalizeReminderCard,
+  reminderCardView,
+  withReminderCard,
+  type ReminderCard,
+  type ReminderCardView,
+} from './ReminderCard';
 import { ASSISTANT_ANSWER_PAGE, READER_TEXT_PAGE, confirmationLabels, fitHeader } from './HudPageBuilder';
 import { type HudStatusModel, hudStatusLabel, nativeStatusLine } from './HudStatus';
 import { composeOverviewText, type OverviewTextView } from './OverviewText';
@@ -53,10 +61,13 @@ import {
   type HudNotificationCard,
   type PanelContentTab,
   type PanelTab,
-  type PlanningGridCell,
   type PromptOwnerKind,
   type ProductivityHudModel,
   QUICKNOTES_NOTE_TITLE,
+  QUICKNOTES_CUES_MENU_ID,
+  QUICKNOTES_CUES_MENU_LABEL,
+  QUICKNOTES_PREP_MENU_ID,
+  QUICKNOTES_PREP_MENU_LABEL,
   QUICKNOTES_UNDO_MENU_ID,
   QUICKNOTES_UNDO_MENU_LABEL,
 } from './types';
@@ -100,54 +111,6 @@ function numericMap<T>(
   return map;
 }
 
-function normalizePlanningEntries(
-  entries: PlanningGridCell['entries'],
-): PlanningGridCell['entries'] {
-  if (!Array.isArray(entries)) return undefined;
-  const kept = entries
-    .filter((entry) => (
-      typeof entry === 'object' && entry !== null
-      && typeof entry.time === 'string' && entry.time.length <= 8
-      && (entry.kind === 'event' || entry.kind === 'reminder')
-      && typeof entry.title === 'string' && entry.title.length > 0
-    ))
-    .slice(0, 6)
-    .map((entry) => ({
-      time: entry.time,
-      kind: entry.kind,
-      title: entry.title.slice(0, 64),
-    }));
-  return kept.length > 0 ? kept : undefined;
-}
-
-function normalizePlanningGrid(
-  planningGrid: readonly PlanningGridCell[] | undefined,
-): PlanningGridCell[] | undefined {
-  if (!planningGrid || planningGrid.length !== 42) return undefined;
-  const normalized = planningGrid.map((cell) => {
-    const entries = normalizePlanningEntries(cell.entries);
-    return {
-      day: cell.day,
-      eventCount: cell.eventCount,
-      reminderCount: cell.reminderCount,
-      inMonth: cell.inMonth,
-      ...(entries ? { entries } : {}),
-    };
-  });
-  const isValid = normalized.every((cell) => (
-    typeof cell.day === 'string'
-    && /^\d{4}-\d{2}-\d{2}$/.test(cell.day)
-    && Number.isInteger(cell.eventCount)
-    && cell.eventCount >= 0
-    && cell.eventCount <= 99
-    && Number.isInteger(cell.reminderCount)
-    && cell.reminderCount >= 0
-    && cell.reminderCount <= 99
-    && typeof cell.inMonth === 'boolean'
-  ));
-  return isValid ? normalized : undefined;
-}
-
 const DEFAULT_BRIGHTNESS: Readonly<Record<number, number>> = {
   [ContainerId.StatusBar]: 2,
   [ContainerId.Main]: 4,
@@ -155,15 +118,6 @@ const DEFAULT_BRIGHTNESS: Readonly<Record<number, number>> = {
   [ContainerId.Tray]: 2,
   [ContainerId.Hint]: 1,
 };
-
-/** Plugin-local dashboard focus: which date is hovered, whether the right
- * pane owns input, and which of its rows is hovered. Never crosses the wire —
- * a hover must not cost a Mac round trip on the serialized lane. */
-export interface PlanningPaneState {
-  dateIndex: number;
-  focused: boolean;
-  itemIndex: number;
-}
 
 export interface ListSurfaceOptions {
   /** A matching terminal Planning refresh keeps its independently expiring receipt. */
@@ -176,8 +130,8 @@ export interface ListSurfaceOptions {
   selectable?: boolean;
   /** Plugin-local initial cursor, applied in the first custom frame only. */
   initialSelectedIndex?: number;
-  planningGrid?: readonly PlanningGridCell[];
-  planningPane?: PlanningPaneState;
+  /** The Reminders page: the next reminder as an image card beside the list. */
+  reminderCard?: ReminderCard;
   /** This list is an expanded panel tab: keep its rail lit on the left. */
   railTab?: PanelContentTab;
   /** Opt into the firmware-owned list and its native gesture cursor. */
@@ -197,8 +151,7 @@ interface ResolvedListSurfaceOptions {
   planningEntries?: Array<{ time: string; kind: "event" | "reminder"; title: string } | null>;
   hint: string;
   selectable: boolean;
-  planningGrid?: readonly PlanningGridCell[];
-  planningPane?: PlanningPaneState;
+  reminderCard?: ReminderCard;
   railTab?: PanelContentTab;
   /** This page is intentionally rendered by the G2 firmware list. */
   nativeFirmwareList?: boolean;
@@ -262,7 +215,7 @@ const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', QUICKNOTES_NOTE_TITLE,
  * (2026-10-16). */
 const SCROLL_BOX_READERS = new Set([
   'NEWS · ARTICLE', 'SEARCH · RESULT', 'MESSAGES · CONVERSATION', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
-  'BRAINSTORM · ROOM',
+  'QUICKNOTES · CUE', 'QUICKNOTES · PREP', 'BRAINSTORM · ROOM',
 ]);
 function scrollsInBox(title: string): boolean {
   return SCROLL_BOX_READERS.has(title.trim().toUpperCase());
@@ -287,7 +240,11 @@ function speakerPaged(title: string): boolean {
 function isQuickNotesNote(title: string): boolean {
   return title.trim().toUpperCase() === QUICKNOTES_NOTE_TITLE;
 }
-const QUICKNOTES_NOTE_MENU = [{ id: QUICKNOTES_UNDO_MENU_ID, name: QUICKNOTES_UNDO_MENU_LABEL }] as const;
+const QUICKNOTES_NOTE_MENU = [
+  { id: QUICKNOTES_UNDO_MENU_ID, name: QUICKNOTES_UNDO_MENU_LABEL },
+  { id: QUICKNOTES_CUES_MENU_ID, name: QUICKNOTES_CUES_MENU_LABEL },
+  { id: QUICKNOTES_PREP_MENU_ID, name: QUICKNOTES_PREP_MENU_LABEL },
+] as const;
 /**
  * A Messages page scrolls on the glass instead of turning seven-line pages
  * (the wearer's ruling, 2026-10-11). The firmware scrolls an overflowing
@@ -376,6 +333,9 @@ interface NativeTextPageState {
   box?: ScrollBox;
   /** A stretch is being written: the glass answers the swipe that asked. */
   boxBusy?: boolean;
+  /** An open note's newer rows, held back while the wearer reads earlier
+   * words: a swipe past the held page's end shows them. */
+  behind?: string[];
 }
 
 /** The swipe promises a Mac reader writes for its own pages, formatted. */
@@ -440,13 +400,12 @@ function textPageHint(page: number, count: number, macHint: string, review = fal
   return [`${page + 1}/${count}`, ...(swipe ? [swipe] : []), ...rest].join(' · ');
 }
 
-/** Every list is Even's own list unless it is a reader (a text page) or
- * carries the Planning month's grid, the one list drawn as an image. A
+/** Every list is Even's own list unless it is a reader (a text page). A
  * caller that forgets the flag still gets a firmware list, never an empty
- * image page: the renderer draws no other list. */
+ * image page: the renderer draws no list. */
 function isFirmwareList(options: ListSurfaceOptions, visual: boolean): boolean {
   if (options.nativeFirmwareList === true) return true;
-  return visual && options.nativeTextPage !== true && normalizePlanningGrid(options.planningGrid) === undefined;
+  return visual && options.nativeTextPage !== true;
 }
 
 /** An answer, a reader or a question as firmware pages: the firmware wraps
@@ -625,6 +584,8 @@ export class HudPresenter {
   private readonly assistantConversation: AssistantConversationSurface;
   /** The page on the glass carries the two header images. */
   private imageHeaderShown = false;
+  /** The Reminders card is on the plain page: it follows the clock. */
+  private reminderCardShown = false;
   private readonly nativeTerminal: NativeTerminalSurface;
   private restoringAssistantConversation = false;
   /** Which set of SDK containers currently exists on the lenses. Content
@@ -744,6 +705,7 @@ export class HudPresenter {
         this.readerUnderBox = undefined;
         this.paintReaderUnderBox(page);
         this.paintHomeColumnUnderBox(page);
+        this.paintReminderCardOn(page, owner);
       }
       return replaced && displayCurrent();
     } catch {
@@ -772,6 +734,7 @@ export class HudPresenter {
       this.pageOwner = 'visual';
       this.overviewText = undefined;
       this.imageHeaderShown = false;
+      this.reminderCardShown = false;
       this.readerUnderBox = undefined;
       return true;
     } catch {
@@ -948,6 +911,38 @@ export class HudPresenter {
     if (!visual?.paintHomeColumn) return Promise.resolve(false);
     return visual.paintHomeColumn(view, current).catch(() => false);
   }
+
+  /** The Reminders card's words now, from the list on the glass. */
+  private reminderCardNow(): ReminderCardView | undefined {
+    const card = this.surface.kind === 'list' ? this.surface.options.reminderCard : undefined;
+    return card ? reminderCardView(card, Date.now()) : undefined;
+  }
+
+  /** A page carrying the Reminders card was just rebuilt: its image is
+   * blank, so it is painted, with nothing under JOAT's box when one stands
+   * over it. A notification card paints it itself (dimmed, below the card). */
+  private paintReminderCardOn(page: RebuildPageContainer, owner: DisplayPageOwner): void {
+    this.reminderCardShown = false;
+    if (!hasReminderCard(page) || owner === 'notification-native') return;
+    const top = cardTop(page);
+    const current = this.captureDisplayGuard();
+    // After the caller has recorded the page's surface, as the header does:
+    // the card's words come from it.
+    setTimeout(() => {
+      const view = this.reminderCardNow();
+      if (!view || !current()) return;
+      // Only the plain page follows the clock; under a box it stays as drawn.
+      this.reminderCardShown = top === undefined;
+      void this.paintReminderCard(top === undefined ? view : { ...view, clipBottom: top - OVERLAY_GAP }, current);
+    }, 0);
+  }
+
+  private paintReminderCard(view: ReminderCardView, current: () => boolean): Promise<boolean> {
+    const visual = this.visual;
+    if (!visual?.paintReminderCard) return Promise.resolve(false);
+    return visual.paintReminderCard(view, current).catch(() => false);
+  }
+
 
   /** A firmware page with the image spine in place of its status line. */
   private withHeader(page: RebuildPageContainer): RebuildPageContainer {
@@ -1620,10 +1615,14 @@ export class HudPresenter {
   /** The firmware list page for a native list surface, carrying the live
    * status line: `paint()` is a no-op while the firmware owns the page. */
   private nativeListLayout(surface: Extract<HudSurface, { kind: 'list' }>): RebuildPageContainer {
-    return this.layouts.listLayout(surface.items, {
+    const layout = this.layouts.listLayout(surface.items, {
       ...surface.options,
       status: this.nativeHeader(surface.options.title),
     });
+    // The Reminders page: the list on the right, the next-up card on the
+    // left, where the painter can draw it.
+    return surface.options.reminderCard && this.visual?.paintReminderCard && this.visual.canPaintReminderCard?.()
+      ? withReminderCard(layout) : layout;
   }
 
   private async replaceWithNativeTerminalList(page: RebuildPageContainer): Promise<boolean> {
@@ -1863,10 +1862,11 @@ export class HudPresenter {
       void this.paintNotificationCard();
       return;
     }
-    // Home no longer lists the unread cards: Notifications is the menu's
-    // first row on the overview (2026-10-15), so the resting pane has nothing
-    // to keep current here. The unread count in Home's info column arrives as
-    // an ambient push.
+    // Home's Notifications tab lists the unread cards: keep it current. A
+    // repaint that changes nothing sends nothing (paintOverviewAsText).
+    if (!shown && nativeOverviewEnabled && this.rail.active() === 'notifications') {
+      void this.repaintRestingPane();
+    }
   }
 
   /** Unread cards, newest first, that the wearer has not marked read here. */
@@ -1937,6 +1937,12 @@ export class HudPresenter {
     const shown = await this.replaceNativePage(page, 'notification-native');
     if (!shown || this.notificationCard !== state) return false;
     const bottom = notificationCardBottom(page);
+    const reminders = this.reminderCardNow();
+    if (bottom !== undefined && hasReminderCard(page) && reminders) {
+      void this.paintReminderCard(
+        { ...reminders, clipTop: bottom + NOTIFICATION_CARD.gap, dim: true }, this.captureDisplayGuard(),
+      );
+    }
     if (bottom !== undefined && hasHomeImages(page) && this.surface.kind === 'default') {
       const frame = this.visualFrame();
       if (frame.kind === 'overview') {
@@ -2116,6 +2122,10 @@ export class HudPresenter {
       // One header on every firmware page: redraw the spine and send only
       // the half that changed.
       this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
+      // The Reminders card's "in 1 h 20 min" moves with the clock; the lane
+      // sends it only when a word changed.
+      const card = this.reminderCardShown ? this.reminderCardNow() : undefined;
+      if (card) void this.paintReminderCard(card, this.captureDisplayGuard());
       return this.paintImageHeader();
     }
     if (this.readerUnderBox !== undefined && this.visual && this.evenFontReaderRetained()) {
@@ -2168,7 +2178,7 @@ export class HudPresenter {
     switch (this.surface.kind) {
       case 'list': return this.surface.options.title;
       case 'navigation': return 'NAVIGATION';
-      case 'productivity': return 'PLANNING';
+      case 'productivity': return 'REMINDERS';
       case 'brainstorm':
         return this.surface.brainstorm.screen === 'agent_terminal' ? 'AGENT TERMINAL' : 'BRAINSTORM';
       default: return undefined;
@@ -2356,12 +2366,24 @@ export class HudPresenter {
       || surface.kind !== 'list' || surface.options.title !== options.title
       || !this.usesNativeTextPage(surface.options)) return false;
     const displayCurrent = this.captureDisplayGuard();
+    const macHint = options.hint ?? '';
+    // The wearer swiped back to read earlier words: the page holds still and
+    // only its footer moves (the clock ticks every second while recording).
+    // Back on the last page, newer words follow again.
+    if (state.page < state.pages.length - 1) {
+      const held = liveNoteHint(state.page, state.pages.length, macHint);
+      const before = state.hint;
+      this.surface = { ...surface, items: [...items], options: { ...surface.options, hint: macHint } };
+      this.nativeTextPage = { ...state, hint: held, behind: [...items] };
+      this.streams.set(ContainerId.Hint, macHint);
+      const ok = before === held || await this.upgradeNativeText(ContainerId.Hint, 'hint', held, before);
+      return ok && displayCurrent();
+    }
     const pages = paginateFromEnd(
       readerParagraphs(items).join('\n'), READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity,
     );
     const page = Math.max(0, pages.length - 1);
     const body = pages[page] ?? ' ';
-    const macHint = options.hint ?? '';
     const hint = liveNoteHint(page, pages.length, macHint);
     const previous = { body: state.body, hint: state.hint };
     this.surface = { ...surface, items: [...items], options: { ...surface.options, hint: macHint } };
@@ -2416,6 +2438,14 @@ export class HudPresenter {
       return true;
     }
     const page = direction === 'down' ? state.page + 1 : state.page - 1;
+    if (direction === 'down' && page >= state.pages.length && state.behind
+      && this.surface.kind === 'list') {
+      // Past the end of an open note held still for reading: its newest words.
+      const behind = state.behind;
+      state.behind = undefined;
+      void this.updateLiveTextPage(behind, { title: this.surface.options.title, hint: macHint });
+      return true;
+    }
     if (page < 0 || page >= state.pages.length) return false;
     if (evenFont) {
       // The image page repaints; only the tiles whose pixels changed are sent.
@@ -2835,7 +2865,7 @@ export class HudPresenter {
     const macHint = productivityActionHint(model);
     const hint = textPageHint(page, pages.length, macHint);
     const ok = await this.replaceNativePage(
-      this.layouts.textPageLayout(body, { status: this.nativeHeader('PLANNING'), hint }), 'text-page-native',
+      this.layouts.textPageLayout(body, { status: this.nativeHeader('REMINDERS'), hint }), 'text-page-native',
     );
     if (!ok || !displayCurrent()) {
       this.recordPageTransition(from, 'list', 'show_list', 'failed');
@@ -2934,31 +2964,6 @@ export class HudPresenter {
     }
     if (this.surface.kind !== 'productivity') return false;
     return sameProductivity(this.surface.productivity, productivity);
-  }
-
-  /** Repaint the Planning dashboard with a new hover/pane focus. Local-only
-   * state: no Mac request, one visual paint, and the unchanged-tile skip
-   * keeps a hover move to the tiles whose pixels actually differ. */
-  async updatePlanningPane(pane: PlanningPaneState): Promise<boolean> {
-    const displayCurrent = this.captureDisplayGuard();
-    const current = this.surface;
-    const foregroundAvailable = () => !this.confirmation && !this.promptQuestion
-      && !this.assistantConversation.isActive();
-    if (!displayCurrent() || current.kind !== 'list' || !current.options.planningGrid
-      || !foregroundAvailable() || !this.visual) return false;
-    const surface: HudSurface = {
-      ...current,
-      options: { ...current.options, planningPane: { ...pane } },
-    };
-    this.surface = surface;
-    const painted = await this.paintVisual();
-    if (!displayCurrent()) return false;
-    if (!painted && this.surface === surface && foregroundAvailable()) {
-      this.surface = current;
-      // One bounded rollback; never overwrite a newer foreground owner.
-      await this.visual.paint(this.visualFrame());
-    }
-    return painted && this.surface === surface && foregroundAvailable();
   }
 
   private async renderNavigation(
@@ -3396,7 +3401,7 @@ export class HudPresenter {
     // question it answered, then the wearer's exact words, then the gestures.
     const layout = draft
       ? overlayConversation(this.layouts.assistantConversationLayout(replyDraftView([
-        { role: 'assistant', text: `What do you want to say back to ${draft.recipient}?` },
+        { role: 'assistant', text: `What do you want to say to ${draft.recipient}?` },
         { role: 'user', text: draft.body },
       ], undefined, REPLY_REVIEW_HINT), header), this.conversationUnderlay())
       : this.layouts.confirmationLayout(current.prompt, header, current.purpose);
@@ -3839,7 +3844,7 @@ export class HudPresenter {
   }
 
   private resolveListOptions(options: ListSurfaceOptions): ResolvedListSurfaceOptions {
-    const planningGrid = normalizePlanningGrid(options.planningGrid);
+    const reminderCard = normalizeReminderCard(options.reminderCard);
     const planningEntries = Array.isArray(options.planningEntries)
       ? options.planningEntries.slice(0, 20).map(entry => entry && typeof entry.title === 'string'
         && typeof entry.time === 'string' && (entry.kind === 'event' || entry.kind === 'reminder')
@@ -3860,13 +3865,8 @@ export class HudPresenter {
       ...(options.nativeTextPage && options.nativeTextPageFromEnd ? { nativeTextPageFromEnd: true } : {}),
       ...(options.nativeTextPage && options.reviewTapOnLastPage ? { reviewTapOnLastPage: true } : {}),
       ...(options.railTab ? { railTab: options.railTab } : {}),
-      ...(planningGrid ? { planningGrid } : {}),
+      ...(reminderCard ? { reminderCard } : {}),
       ...(planningEntries ? { planningEntries } : {}),
-      // The pane rides only with a valid grid: hover state without dates
-      // would put the renderer on the dashboard path with nothing to draw.
-      ...(planningGrid && options.planningPane
-        ? { planningPane: { ...options.planningPane } }
-        : {}),
     };
   }
 
@@ -3907,8 +3907,6 @@ export class HudPresenter {
         selectedIndex: this.surface.selectedIndex,
         selectable: this.surface.options.selectable,
         hint: this.surface.options.hint,
-        planningGrid: this.surface.options.planningGrid,
-        planningPane: this.surface.options.planningPane,
         ...(railTab ? { rail: this.rail.visualFor(railTab) } : {}),
       });
     }
@@ -4235,9 +4233,7 @@ export class HudPresenter {
       items: [...surface.items],
       options: {
         ...surface.options,
-        ...(surface.options.planningGrid
-          ? { planningGrid: surface.options.planningGrid.map((cell) => ({ ...cell })) }
-          : {}),
+        ...(surface.options.reminderCard ? { reminderCard: { ...surface.options.reminderCard } } : {}),
       },
       selectedIndex: surface.selectedIndex,
     };

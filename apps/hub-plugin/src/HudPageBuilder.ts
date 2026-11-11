@@ -21,8 +21,6 @@ import {
   CAPABILITIES,
   CAPABILITY_MENU_ID_BASE,
   ContainerId,
-  NOTIFICATIONS_MENU_ID,
-  NOTIFICATIONS_MENU_LABEL,
   VisualContainerName,
   type ConfirmationPurpose,
   HomePaneLabelId,
@@ -83,21 +81,23 @@ const REGION_TEXT_WIDTH = CANVAS.width - 2 * REGION_PAD;
  * lines in a 40 px row, over the row below (the wearer's report,
  * 2026-10-06). */
 const LIST_ROW_TEXT_WIDTH = CANVAS.width - 2 * 8 - 2 * 12 - 12;
+/** The same for the Reminders page's half-width list (ReminderCard.ts). */
+export const REMINDER_LIST_ROW_TEXT_WIDTH = CANVAS.width / 2 - 2 * 8 - 2 * 12 - 12;
 
 /** One list row on one line: any line break or run of whitespace becomes a
  * single space (pretext measures a line break as 0 px, but the firmware
  * breaks the row there), then the row is cut to the measured width. */
-export function fitListRow(row: string): string {
+export function fitListRow(row: string, width = LIST_ROW_TEXT_WIDTH): string {
   const flat = row.replace(/\s+/gu, ' ').trim();
   // The byte cap has the last word. `pxTruncate` appends "..." (3 bytes)
   // after it cuts to the width, so a row clamped to 63 bytes came back at
   // 64 and the firmware refused the WHOLE page: the News tab did nothing on
   // a tap whenever two headlines carried a "…" or an accent (2026-10-12).
   let budget = LIST_ROW_MAX_UTF8_BYTES;
-  let fitted = pxTruncate(clampUtf8Bytes(flat, budget), LIST_ROW_TEXT_WIDTH);
+  let fitted = pxTruncate(clampUtf8Bytes(flat, budget), width);
   while (utf8ByteLength(fitted) > LIST_ROW_MAX_UTF8_BYTES && budget > 0) {
     budget -= 1;
-    fitted = pxTruncate(clampUtf8Bytes(flat, budget), LIST_ROW_TEXT_WIDTH);
+    fitted = pxTruncate(clampUtf8Bytes(flat, budget), width);
   }
   return fitted;
 }
@@ -147,13 +147,6 @@ export interface MenuLeadItem {
   id: number;
   name: string;
 }
-
-/** The overview's own menu row: Notifications first, as the wearer asked
- * (2026-10-15). It is carried by the overview page alone, so it is on the
- * menu "while on the overview" and gone from every other page's menu. */
-const OVERVIEW_MENU_LEAD: readonly MenuLeadItem[] = [
-  { id: NOTIFICATIONS_MENU_ID, name: NOTIFICATIONS_MENU_LABEL },
-];
 
 /** A reader's firmware text page (a News article): the answer page's
  * lines, inset so no glyph is drawn within 16 px of either side, the edge
@@ -403,7 +396,7 @@ export class HudPageBuilder {
     });
     return new RebuildPageContainer({
       containerTotalNum: 7,
-      ...this.menuConfig(OVERVIEW_MENU_LEAD),
+      ...this.menuConfig(),
       textObject: [
         text(ContainerId.StatusBar, 'status', g.header, 1, 2, fitBand([view.header], g.header)),
         text(ContainerId.Context, 'info', g.info, 2, 3, fitBand(view.info, g.info)),
@@ -680,7 +673,7 @@ export class HudPageBuilder {
     items: string[],
     chrome: { title?: string; hint?: string; status?: string } = {},
   ): RebuildPageContainer {
-    const capped = items.slice(0, 20).map(fitListRow);
+    const capped = items.slice(0, 20).map((row) => fitListRow(row));
     // The presenter composes the header with the page's name in it; a bare
     // title here is the no-status fallback, so the page is never nameless.
     const header = (chrome.status?.trim() || chrome.title?.trim() || 'JOAT').slice(0, 64);

@@ -2,6 +2,7 @@
  * Shared types for the Hub plugin ⇄ Mac brain protocol.
  * Keep this file in sync with apps/mac/joat/core (the Python mirror).
  */
+import type { ReminderCard } from './ReminderCard';
 
 /** RFC 6455 private-use close code: another authenticated display took over. */
 export const PLUGIN_REPLACED_CLOSE_CODE = 4409;
@@ -62,6 +63,7 @@ export const VisualContainerName: Readonly<Record<number, string>> = {
   18: 'home-top',
   19: 'home-bot',
   17: 'hdr-right',
+  21: 'rem-card',
 };
 
 /** The one header every firmware page carries: the image spine's two
@@ -72,6 +74,8 @@ export const HomeColumnId = { Top: 18, Bottom: 19 } as const;
 /** Home's pane label column (OverviewText.ts): the grid's left column,
  * beside the value column that is ContainerId.Main. Page-local. */
 export const HomePaneLabelId = 20;
+/** The Reminders page's next-up card image (ReminderCard.ts). Page-local. */
+export const ReminderCardId = 21;
 
 /** Canvas constants from the SDK. Never hardcode these elsewhere. */
 export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;
@@ -270,29 +274,6 @@ export type ConfirmationPurpose = 'terminal_input';
  * state is only what the native bridge is doing or established afterward. */
 export type ProductivityHudDomain = 'calendar' | 'reminders';
 
-/** A redacted source-backed count for one fixed Planning month cell. Labels,
- * native identifiers, and times stay in the Week/Day drill-down payload. */
-/** One entry inside a Planning day, for the dashboard's right pane. */
-export interface PlanningGridEntry {
-  /** Local clock label the Mac already formatted ("16:30", "ALL DAY"). */
-  time: string;
-  kind: 'event' | 'reminder';
-  title: string;
-}
-
-export interface PlanningGridCell {
-  day: string;
-  eventCount: number;
-  reminderCount: number;
-  inMonth: boolean;
-  /**
-   * The day's entries, so hovering a date can repaint the right pane from
-   * local state. Asking the Mac per hover would put a round trip on the
-   * serialized BLE lane for every scroll tick; the month arrives once over
-   * the websocket instead, and only the changed tiles are transferred.
-   */
-  entries?: PlanningGridEntry[];
-}
 export type ProductivityHudPhase =
   | 'verifying'
   | 'saved'
@@ -680,7 +661,10 @@ export type DownlinkMessage =
     hint?: string;
     requestId?: string;
     selectable?: boolean;
-    planningGrid?: PlanningGridCell[];
+    /** The Reminders page's next-up card (ReminderCard.ts): the next
+     * reminder not yet late and the open counts. JOAT Brain counterpart:
+     * Reminders.listPage. */
+    reminderCard?: ReminderCard;
     planningNavigation?: { canGoBack: boolean; selectedIndex: number };
     /** Row indices of the "newer"/"older" paging rows a Messages conversation
      * carries. Present (even empty) means paging travels as rows, so the
@@ -778,8 +762,6 @@ export type DownlinkMessage =
 
 export interface InputEventPayload {
   quickNotesPageIndex?: number;
-  /** Exact civil date from the Mac's current Planning grid. */
-  planningDay?: string;
   containerId?: number;
   containerName?: string;
   eventType?: number;
@@ -812,7 +794,9 @@ export type Unsubscribe = () => void;
  * is a page, a request, and a round trip spent on nothing (the wearer's ruling).
  */
 export const CAPABILITIES = [
-  'Messages', 'Planning', 'Navigation', 'Brainstorm',
+  // Reminders replaced Planning and its calendar (2026-10-24); a Mac
+  // brain answers it with its Planning pages (capabilities.py).
+  'Messages', 'Reminders', 'Navigation', 'Brainstorm',
   // Search took QuickNotes' place (2026-10-11): QuickNotes moved onto the
   // overview's rail, and Search opens its page from here.
   'Search', 'Agent Terminal', 'Activity', 'Settings',
@@ -830,24 +814,25 @@ export const QUICKNOTES_NOTE_TITLE = 'QUICKNOTES · NEW NOTE';
  * QuickNote menu). Id 6: 1-5 are retired controls, 10+ the capabilities. */
 export const QUICKNOTES_UNDO_MENU_ID = 6;
 export const QUICKNOTES_UNDO_MENU_LABEL = 'Undo last input';
-/** "Notifications" as the FIRST row of the glasses' menu while the overview
- * is up (the wearer, 2026-10-15: "remove the notification from the overview
- * and put it on the menu as the first option while on the overview"). It
- * left the overview's rail for the Planner. Id 7: 1-5 are retired controls,
- * 6 is the QuickNote undo, 10+ the capabilities. */
-export const NOTIFICATIONS_MENU_ID = 7;
-export const NOTIFICATIONS_MENU_LABEL = 'Notifications';
+/** "AI cues" and "Prep notes" after it on the same menu (Even's Conversate
+ * cues and Prep Notes, 2026-10-30): the brain draws the page. Ids 8 and 9,
+ * the last free ones below the capabilities. */
+export const QUICKNOTES_CUES_MENU_ID = 8;
+export const QUICKNOTES_CUES_MENU_LABEL = 'AI cues';
+export const QUICKNOTES_PREP_MENU_ID = 9;
+export const QUICKNOTES_PREP_MENU_LABEL = 'Prep notes';
 
 /**
  * The overview's right panel is a vertical rail of tabs. Order is the rail
- * order, top to bottom; the Planner (the open reminders) is first because it
- * is what the resting screen shows, and the tab every reopen lands on.
- * Notifications was first until 2026-10-15: it is now the first row of the
- * menu while the overview is up (NOTIFICATIONS_MENU_ID). These are NOT
- * sidebar capabilities: the rail is reached by swiping on the overview.
- * Mac counterpart: PANEL_TABS in apps/mac/joat/core/protocol.py.
+ * order, top to bottom; Notifications is first because it is what the
+ * resting screen shows, and the tab every reopen lands on; Reminders (the
+ * planner) is second. The wearer, 2026-11-09: "instead of having the
+ * reminder as the first item … make it the notification as the first item".
+ * (From 2026-10-15 to then, Notifications was a menu row and the planner
+ * led.) These are NOT sidebar capabilities: the rail is reached by swiping
+ * on the overview. Mac counterpart: PANEL_TABS in apps/mac/joat/core/protocol.py.
  */
-export const PANEL_TABS = ['planner', 'news', 'pomodoro', 'quicknotes'] as const;
+export const PANEL_TABS = ['notifications', 'planner', 'news', 'pomodoro', 'quicknotes'] as const;
 export type PanelTab = (typeof PANEL_TABS)[number];
 /** The tabs whose content the Mac pushes as `hud.panel`: the rail's, and
  * Search, whose page the menu opens. QuickNotes replaced Search on the rail

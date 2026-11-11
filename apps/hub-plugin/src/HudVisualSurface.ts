@@ -7,6 +7,7 @@ import type { G2DiagnosticTrace, TraceTileContainer } from './G2DiagnosticTrace'
 import type { HudStatusModel } from './HudStatus';
 import type { EvenReaderLine } from './EvenFont';
 import type { HomeColumnView } from './HomeImages';
+import type { ReminderCardView } from './ReminderCard';
 import { isNavigationSetupStatus, type NavigationHudModel } from './NavigationHud';
 import type { PanelRailVisual } from './PanelRail';
 import {
@@ -14,7 +15,6 @@ import {
   ContainerId,
   VisualContainerName,
   type HudContentKind,
-  type PlanningGridCell,
   type ProductivityHudModel,
 } from './types';
 
@@ -46,9 +46,8 @@ export interface AssistantOverlayVisual {
   revision?: number;
 }
 
-/** The pages that are pixels: the dashboard, the Planning month (a
- * calendar grid has no firmware template) and live guidance with its map.
- * Every other page is a firmware text page or list (HudPresenter). */
+/** The pages that are pixels: the dashboard and live guidance with its
+ * map. Every other page is a firmware text page or list (HudPresenter). */
 type HudVisualBaseFrame =
   | {
     kind: 'overview';
@@ -78,8 +77,6 @@ type HudVisualBaseFrame =
     selectedIndex: number;
     selectable: boolean;
     hint: string;
-    planningGrid?: readonly PlanningGridCell[];
-    planningPane?: { dateIndex: number; focused: boolean; itemIndex: number };
     /** Present when this list is an expanded panel tab: the rail stays on
      * the left so the wearer can see where they are. */
     rail?: PanelRailVisual;
@@ -125,6 +122,8 @@ export interface HudFrameRenderer {
   readonly drawsReaders?: boolean;
   /** Home's left column as its two images (HomeImages.ts). */
   renderHomeColumn?(view: HomeColumnView, model?: HudStatusModel): Promise<readonly HudImageTile[]>;
+  /** The Reminders page's next-up card as its one image (ReminderCard.ts). */
+  renderReminderCard?(view: ReminderCardView): Promise<readonly HudImageTile[]>;
 }
 
 /** A header repaint queued on the same single image lane as frames. */
@@ -161,6 +160,9 @@ export interface HudFramePainter {
   /** Paint Home's left column images; only a tile whose pixels changed is sent. */
   paintHomeColumn?(view: HomeColumnView, isCurrent: () => boolean): Promise<boolean>;
   canPaintHomeColumn?(): boolean;
+  /** Paint the Reminders page's card; sent only when its pixels changed. */
+  paintReminderCard?(view: ReminderCardView, isCurrent: () => boolean): Promise<boolean>;
+  canPaintReminderCard?(): boolean;
   /** Whether this painter draws a reader page in Even's font. A
    * painter without it keeps readers as firmware text pages. */
   canPaintReader?(): boolean;
@@ -474,6 +476,20 @@ export class HudVisualSurface implements HudFramePainter {
 
   paintHomeColumn(view: HomeColumnView, isCurrent: () => boolean): Promise<boolean> {
     const render = this.renderer.renderHomeColumn;
+    if (!render || this.pagePartsDisabled) return Promise.resolve(false);
+    const pageRevision = this.pageRevision;
+    return this.enqueue(
+      { kind: 'strip', render: () => render.call(this.renderer, view) },
+      () => pageRevision === this.pageRevision && isCurrent(),
+    );
+  }
+
+  canPaintReminderCard(): boolean {
+    return !this.pagePartsDisabled && this.renderer.renderReminderCard !== undefined;
+  }
+
+  paintReminderCard(view: ReminderCardView, isCurrent: () => boolean): Promise<boolean> {
+    const render = this.renderer.renderReminderCard;
     if (!render || this.pagePartsDisabled) return Promise.resolve(false);
     const pageRevision = this.pageRevision;
     return this.enqueue(

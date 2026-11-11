@@ -199,14 +199,13 @@ const BROWSER_VISUAL_PREVIEW = import.meta.env.DEV
  * normal authenticated Mac link alive and merely opens the same sidebar a
  * left-temple double press would open. It lets the official simulator prove
  * a live capability request even though it hardcodes right-temple input. */
-const LIVE_MENU_ACCEPTANCE = ((): CapabilityName | 'Notifications' | undefined => {
+const LIVE_MENU_ACCEPTANCE = ((): CapabilityName | undefined => {
   if (!import.meta.env.DEV) return undefined;
   const requested = new URLSearchParams(window.location.search).get('joatTestOpenMenu');
-  // `1` keeps the historical Planning entry; a capability name opens that
-  // row, so an acceptance run can start on Messages without a sidebar.
-  if (requested === '1') return 'Planning';
-  // The overview's first menu row (NOTIFICATIONS_MENU_ID): not a capability.
-  if (requested === 'Notifications') return 'Notifications';
+  // `1` keeps the historical second row (Reminders, once Planning); a
+  // capability name opens that row, so an acceptance run can start on
+  // Messages without a sidebar.
+  if (requested === '1') return 'Reminders';
   return CAPABILITIES.find((name) => name === requested);
 })();
 
@@ -928,7 +927,7 @@ async function boot(): Promise<void> {
           msg.requestId,
           msg.selectable ?? false,
           msg.hint,
-          msg.planningGrid,
+          msg.reminderCard,
           msg.contextLabel,
           msg.controlStartIndex,
           msg.planningEntries,
@@ -1207,9 +1206,7 @@ async function boot(): Promise<void> {
   // strips this bounded acceptance-only delay from a package.
   if (LIVE_MENU_ACCEPTANCE) {
     await new Promise<void>((resolve) => setTimeout(resolve, 750));
-    // The same method EventRouter calls for the overview's first menu row.
-    if (LIVE_MENU_ACCEPTANCE === 'Notifications') await menu.openNotificationsFromMenu();
-    else await menu.openFromContextualMenu(CAPABILITIES.indexOf(LIVE_MENU_ACCEPTANCE));
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf(LIVE_MENU_ACCEPTANCE));
     console.info(`[joat] live menu acceptance opened=${menu.isOpen()}`);
   }
 
@@ -1494,35 +1491,16 @@ async function renderVisualState(
 
   if (isProductivityVisualState(state)) {
     const fixture = visualListFixture(state);
-    // The Planning fixture demonstrates the split dashboard: month grid
-    // left, the hovered day's items right, pane focused on the second row.
-    if (state === 'calendar') {
-      const grid = Array.from({ length: 42 }, (_, index) => {
-        const day = new Date(Date.UTC(2026, 7, 31 + index));
-        const busy = index === 1 || index === 10 || index === 17;
-        return {
-          day: day.toISOString().slice(0, 10),
-          eventCount: busy ? 2 : 0,
-          reminderCount: busy ? 1 : 0,
-          inMonth: day.getUTCMonth() === 8,
-          ...(busy ? {
-            entries: [
-              { time: '09:30', kind: 'event' as const, title: 'Design review' },
-              { time: '16:30', kind: 'event' as const, title: 'Site walk with Adaeze' },
-              { time: '18:00', kind: 'reminder' as const, title: 'Buy filters' },
-            ],
-          } : {}),
-        };
-      });
-      // Through the REAL voice-adoption path: arms CapabilityMenu's dashboard
-      // state machine so simulator-injected gestures drive hover/pane live.
+    // The Reminders page: the next-up card left, the list right, through
+    // the real voice-adoption path with the card JOAT Brain sends (a
+    // reminder 80 minutes from now, so the card's countdown is live).
+    if (state === 'reminders') {
       await menu.presentList(
-        'PLANNING · PLAN · SEPTEMBER 2026',
-        fixture.items,
-        'voice-fixture-calendar',
-        true,
-        'tap: choose · swipe: move · 2x tap: back',
-        grid,
+        fixture.title, fixture.items, 'voice-fixture-reminders', true, fixture.hint,
+        {
+          title: 'Pick up the cake from the bakery', dueUnixMs: Date.now() + 80 * 60_000,
+          allDay: false, late: 1, today: 3, tomorrow: 1, later: 2, undated: 1,
+        },
       );
       return;
     }
@@ -1644,7 +1622,7 @@ function productivityLifecycleFixture(
   const nativeApp = calendar ? 'Calendar' : 'Reminders';
   // The production workflow returns to one live, mixed planner (not stale
   // app-specific lists) after every terminal status.
-  const returnHint = '2x tap: Planning';
+  const returnHint = '2x tap: Reminders';
   switch (state) {
     case 'calendar-verifying':
     case 'reminders-verifying':
@@ -1697,7 +1675,7 @@ function productivityLifecycleFixture(
       return {
         domain, phase: 'due', title,
         primary: 'Due now', secondary: 'This reminder is still incomplete.',
-        hint: 'tap: complete · 2x tap: Planning',
+        hint: 'tap: complete · 2x tap: Reminders',
       };
   }
 }

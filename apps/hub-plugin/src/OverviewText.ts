@@ -53,8 +53,10 @@ const band = (lines: number): number => lines * OVERVIEW_LINE + 2 * OVERVIEW_PAD
  */
 export const OVERVIEW_TEXT_GEOMETRY = {
   header: { x: 0, y: 0, width: CANVAS.width, height: band(1) },
-  info: { x: 0, y: band(1), width: 150, height: band(4) },
-  tabs: { x: 0, y: band(1) + band(4), width: 150, height: band(4) },
+  // Date, weather, unread: three lines. The rail: five tabs since
+  // Notifications came back first (2026-11-09).
+  info: { x: 0, y: band(1), width: 150, height: band(3) },
+  tabs: { x: 0, y: band(1) + band(3), width: 150, height: band(5) },
   paneLabels: { x: 158, y: band(1), width: 96, height: band(8) },
   pane: { x: 254, y: band(1), width: CANVAS.width - 254, height: band(8) },
   rule: { x: 153, y: band(1) + OVERVIEW_PAD, width: 2, height: band(8) - 2 * OVERVIEW_PAD },
@@ -204,8 +206,7 @@ export interface OverviewTextOptions {
  * the same priorities (resolveHudOverview): a link state first, then a
  * reply or a calendar line (until the wearer swipes), then the lit tab's
  * card. A notification never heads the pane: its card over the page showed
- * it, and the menu's first row on the overview opens it (the Notifications
- * tab left the rail for the Planner, 2026-10-15).
+ * it, and the Notifications tab lists it while it is unread.
  */
 export function composeOverviewText(
   frame: Extract<HudVisualFrame, { kind: 'overview' }>,
@@ -247,7 +248,7 @@ export function composeOverviewText(
         // A tap opens Planning, which has the days and the calendar.
         if (!content) return [['', 'Waiting for JOAT on your Mac…']];
         if (content.rows.length === 0) {
-          return [['', content.empty ?? 'Nothing due this week.'], ['', 'tap: open planning']];
+          return [['', content.empty ?? 'Nothing due this week.'], ['', 'tap: open reminders']];
         }
         return content.rows.map(listRow);
       case 'quicknotes':
@@ -257,9 +258,9 @@ export function composeOverviewText(
         if (content.rows.length === 0) return [['', content.empty ?? 'No notes yet.'], ['', 'tap: open']];
         return content.rows.map(listRow);
       default:
-        // No rail on this frame: the unread cards, newest first, the app
-        // in the label column, as the overview listed them before the
-        // Planner took the first tab.
+        // Notifications (or no rail on this frame): the unread cards, newest
+        // first, the app in the label column; a tap opens the newest as its
+        // card.
         if (unreadCards.length > 0) {
           return [
             ...unreadCards.slice(0, PANE_LINES - 1).map((card): PaneRow => {

@@ -50,6 +50,19 @@ test('keeps multiple selected WSS origins explicit and preserves other permissio
   );
 });
 
+test('a lab package lists the phone-local brain first, then the builder\'s Macs', () => {
+  const release = buildReleaseManifest(
+    'ws://127.0.0.1:8787/glasses,wss://home-mac.example-tailnet.ts.net/glasses',
+    'com.yourname.joat',
+    sourceManifest,
+    { allowLoopback: true },
+  );
+  assert.deepEqual(networkWhitelist(release), [
+    'ws://127.0.0.1:8787',
+    'wss://home-mac.example-tailnet.ts.net',
+  ]);
+});
+
 test('refuses the placeholder package id or a plain-WS candidate', () => {
   assert.throws(
     () => buildReleaseManifest('wss://home-mac.example-tailnet.ts.net/glasses', 'com.example.joat', sourceManifest),

@@ -4,7 +4,7 @@ import { LIST_ROW_MAX_UTF8_BYTES, clampUtf8Bytes, fitHeader, fitListRow, HudPage
 import { measureTextWrap } from '@evenrealities/pretext';
 import { firmwareLineCount } from './FirmwareText';
 import {
-  CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId, NOTIFICATIONS_MENU_ID, NOTIFICATIONS_MENU_LABEL,
+  CANVAS, CAPABILITIES, CAPABILITY_MENU_ID_BASE, ContainerId,
 } from './types';
 
 type Page = {
@@ -81,8 +81,8 @@ describe('HudPageBuilder invariants', () => {
     const startup = builder.visualStartup() as Page;
     expect(startup.containerTotalNum).toBe(5);
     expect(startup.menuObject?.menuItems).toContainEqual({
-      itemID: CAPABILITY_MENU_ID_BASE + CAPABILITIES.indexOf('Planning'),
-      itemName: 'Planning',
+      itemID: CAPABILITY_MENU_ID_BASE + CAPABILITIES.indexOf('Reminders'),
+      itemName: 'Reminders',
     });
     expect(startup.imageObject).toHaveLength(4);
     expect(startup.textObject).toHaveLength(1);
@@ -183,7 +183,7 @@ describe('HudPageBuilder invariants', () => {
     expect((builder.visualLayout() as Page).menuObject?.menuItems).toEqual(expected);
   });
 
-  it("puts Notifications first in the menu on the overview, and only there", () => {
+  it("gives the overview the same menu as every page: Notifications is the overview's first tab, not a row", () => {
     const capabilityRows = CAPABILITIES.map((name, index) => ({
       itemID: CAPABILITY_MENU_ID_BASE + index,
       itemName: name,
@@ -192,27 +192,20 @@ describe('HudPageBuilder invariants', () => {
       header: '9:41 · JOAT',
       info: ['Tue, Oct 6'],
       tabs: [
-        { label: 'PLANNER', active: true },
+        { label: 'NOTIFICATIONS', active: true },
+        { label: 'REMINDERS', active: false },
         { label: 'NEWS', active: false },
         { label: 'POMODORO', active: false },
         { label: 'QUICKNOTES', active: false },
       ],
       paneLabels: [''],
-      pane: ['Nothing due this week.'],
+      pane: ['No new notifications'],
       paneBrightness: 4,
       hint: 'tap: open',
     }) as Page;
-    expect(overview.menuObject?.menuItems).toEqual([
-      { itemID: NOTIFICATIONS_MENU_ID, itemName: NOTIFICATIONS_MENU_LABEL },
-      ...capabilityRows,
-    ]);
-    expect(NOTIFICATIONS_MENU_LABEL).toBe('Notifications');
-    // Within the firmware's ten entries, and clear of every other id.
-    expect(overview.menuObject?.menuItems?.length).toBeLessThanOrEqual(10);
-    expect(NOTIFICATIONS_MENU_ID).toBeLessThan(CAPABILITY_MENU_ID_BASE);
-    expect([1, 2, 3, 4, 5, 6]).not.toContain(NOTIFICATIONS_MENU_ID);
-    // Every other page's menu is the capabilities alone: leaving the
-    // overview takes the row away.
+    expect(overview.menuObject?.menuItems).toEqual(capabilityRows);
+    expect(overview.menuObject?.menuItems?.some((item) => item.itemName === 'Notifications')).toBe(false);
+    // Every other page's menu is the capabilities alone too.
     for (const page of [
       builder.defaultLayout(), builder.visualLayout(), builder.listLayout(['a', 'b']),
       builder.confirmationLayout('Send reply?'),

@@ -19,11 +19,11 @@ function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-export function buildReleaseManifest(value, packageId, manifest) {
+export function buildReleaseManifest(value, packageId, manifest, options = {}) {
   if (!isRecord(manifest) || !Array.isArray(manifest.permissions)) {
     throw new Error('app manifest must declare permissions');
   }
-  const candidates = validateReleaseCandidates(value);
+  const candidates = validateReleaseCandidates(value, options);
   const releaseManifest = JSON.parse(JSON.stringify(manifest));
   releaseManifest.package_id = validatePackageId(packageId);
   const network = releaseManifest.permissions.find((permission) => (
@@ -57,9 +57,10 @@ if (isDirectExecution()) {
     process.exitCode = 64;
   } else {
     try {
-      const manifest = buildReleaseManifest(rawCandidates, packageId, readManifest(sourcePath));
+      const allowLoopback = process.env.JOAT_RELEASE_ALLOW_LOOPBACK === '1';
+      const manifest = buildReleaseManifest(rawCandidates, packageId, readManifest(sourcePath), { allowLoopback });
       writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
-      console.log(`wrote release manifest for ${manifest.package_id} with selected private WSS origins`);
+      console.log(`wrote release manifest for ${manifest.package_id} with selected private ${allowLoopback ? 'WSS/loopback' : 'WSS'} origins`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error';
       console.error(`release manifest generation failed: ${message}`);

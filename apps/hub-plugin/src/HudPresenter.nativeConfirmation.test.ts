@@ -205,7 +205,8 @@ describe('HudPresenter Messages reply in the conversation card', () => {
     const gate = r.rebuilds[r.rebuilds.length - 1];
     expect(gate?.imageObject ?? []).toHaveLength(0);
     expect(gate?.textObject?.map((c) => c.containerName)).toEqual(CARD);
-    expect(text(gate, 'joat-turns')).toContain('What do you want to say back to Adele?');
+    // The same card confirms a new message, so it does not say "back".
+    expect(text(gate, 'joat-turns')).toContain('What do you want to say to Adele?');
     expect(text(gate, 'joat-turns')).not.toContain('On my way.');
     expect(text(gate, 'wearer-turns')).toContain('On my way.');
     expect(text(gate, 'wearer-turns')).not.toContain('(reviewed)');

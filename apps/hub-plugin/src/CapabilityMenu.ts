@@ -5,8 +5,8 @@ import type { MacLink } from './MacLink';
 import {
   PANEL_EXPANDED_HINT,
   POMODORO_EXPANDED_HINT,
-  parsePlanningMonthTitle,
 } from './HudCanvasRenderer';
+import type { ReminderCard } from './ReminderCard';
 import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
 import { PANEL_TAB_TITLES, panelTabForTitle, pomodoroBlockLabel, pomodoroRemainingMs, type PanelPageTab } from './PanelRail';
 
@@ -16,6 +16,7 @@ import { PANEL_TAB_TITLES, panelTabForTitle, pomodoroBlockLabel, pomodoroRemaini
  * a reader's "tap: continue" / "tap: confirm"). */
 const TEXT_PAGE_TITLES = new Set([
   'MESSAGES · CONVERSATION', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL', QUICKNOTES_NOTE_TITLE,
+  'QUICKNOTES · CUE', 'QUICKNOTES · PREP',
   'NOTIFICATIONS · DETAIL', 'NAVIGATION', 'NEWS · ARTICLE', 'SEARCH · RESULT',
   'MESSAGES · REVIEW', 'MESSAGES · COMPOSE', 'MESSAGES · SETUP', 'MESSAGES · ACCESS',
   'MESSAGES · RETRY', 'MESSAGES · SENT', 'MESSAGES · FAILED', 'MESSAGES · CANCELLED',
@@ -51,29 +52,35 @@ function usesTextPage(normalized: string): boolean {
     || /^(PLANNING|CALENDAR|TASKS) · (EVENT|REMINDER)$/u.test(normalized);
 }
 
-/** Every list is Even's own list except the Planning month, whose calendar
- * grid has no firmware template, and a reader, which is a text page. */
+/** Every list is Even's own list except a reader, which is a text page. */
 export function usesFirmwareList(
-  surface: { title: string; planningGrid?: readonly unknown[]; selectable: boolean; nativeTextPage?: boolean },
+  surface: { title: string; selectable: boolean; nativeTextPage?: boolean },
 ): boolean {
-  return !isImageMonth(surface.title, surface.planningGrid, surface.selectable)
-    && !(surface.nativeTextPage ?? usesTextPage(surface.title.trim().toUpperCase()));
+  return !(surface.nativeTextPage ?? usesTextPage(surface.title.trim().toUpperCase()));
 }
 
-/** The Planning month drawn as the image dashboard: a month title, its full
- * six-week grid, and rows the wearer can choose. Anything else is a list. */
-function isImageMonth(title: string, grid: readonly unknown[] | undefined, selectable: boolean): boolean {
-  return parsePlanningMonthTitle(title) !== undefined && grid?.length === 42 && selectable;
+/** The menu's Reminders page (it replaced Planning and its calendar,
+ * 2026-10-24). A Mac brain still titles its pages PLANNING, so both names
+ * are the same visit. */
+export const REMINDERS_TITLE = 'REMINDERS';
+function isRemindersTitle(title: string | undefined): boolean {
+  return title === REMINDERS_TITLE || title === 'PLANNING';
 }
 
 /** An open QuickNote (FEAT-002), Even's "New note" page: its words as they
  * are heard, a text page the Mac repaints in place. A long press held on it
- * talks a paragraph, a tap records or pauses, 2x tap opens Save / Discard /
- * Cancel, and the glasses' menu carries Undo last input. */
+ * talks a paragraph, a swipe reads back through it, 2x tap opens Save /
+ * Discard / Cancel, and the glasses' menu carries Undo last input (and, from
+ * the phone brain, AI cues and Prep notes). The brain decides what a tap
+ * does: the Mac records or pauses, the phone opens the AI cues. */
 const LIVE_NOTE_TITLE = QUICKNOTES_NOTE_TITLE;
 /** The rows 2x tap leaves through to the open note: the finish question and
  * the discard confirmation. 2x tap on them returns to the note. */
 const NOTE_QUESTION_TITLES = new Set(['QUICKNOTES · DISCARD?', 'QUICKNOTES · FINISH']);
+/** Pages of an open note the phone brain draws (Even's Conversate): the AI
+ * cues & prep list, one cue, the prep notes. 2x tap asks the brain, which
+ * goes back to the list or the note: the note is still open. */
+const NOTE_VIEW_TITLES = new Set(['QUICKNOTES · AI CUES', 'QUICKNOTES · CUE', 'QUICKNOTES · PREP']);
 
 /** The QuickNotes reader pages: a note the Mac pages, shown as a text page. */
 function isQuickNotesReaderTitle(title: string): boolean {
@@ -92,7 +99,6 @@ import {
   type BrainstormHudModel,
   type HudPanelPomodoro,
   type PanelContentTab,
-  type PlanningGridCell,
   type ProductivityHudModel,
 } from './types';
 
@@ -123,8 +129,7 @@ interface DataSurfaceSnapshot {
   items: string[];
   selectable: boolean;
   hint?: string;
-  planningGrid?: PlanningGridCell[];
-  planningPane?: { dateIndex: number; focused: boolean; itemIndex: number };
+  reminderCard?: ReminderCard;
   selectedIndex: number;
   messagesRetry: boolean;
   messagesScreen?: MessagesScreen;
@@ -232,8 +237,6 @@ export class CapabilityMenu {
   private dataItemCount = 0;
   private dataRowsSelectable = false;
   private dataSelectionPending = false;
-  private dashboardSelectionPaint?: Promise<boolean>;
-  private dashboardFailedPaint?: object;
   private messagesRetry = false;
   /** The Mac owns conversation pagination. The Hub only forwards a boundary
    * gesture when the currently visible, Mac-authored hint says that page exists. */
@@ -264,7 +267,7 @@ export class CapabilityMenu {
   private messageLifecycleBinding?: TerminalOpeningBinding;
   private messagePaintRevision = 0;
   private responseTimeout?: ReturnType<typeof setTimeout>;
-  private productivityReturn?: 'Planning';
+  private productivityReturn?: 'Reminders';
   private productivityAnchorUnixMs?: number;
   private productivityReturnTimer?: ReturnType<typeof setTimeout>;
   private productivityReturnEpoch = 0;
@@ -280,14 +283,6 @@ export class CapabilityMenu {
   /** Rows the plugin put above the Mac's on an expanded tab (the Pomodoro
    * countdown); a tap below them maps back to the Mac's own index. */
   private panelRowOffset = 0;
-  /** The split Planning dashboard: hovered date, and whether the right pane
-   * owns input. Plugin-local — a hover never costs a Mac round trip. */
-  private dashboard?: {
-    grid: PlanningGridCell[];
-    dateIndex: number;
-    paneFocused: boolean;
-    paneIndex: number;
-  };
   private transitionId = 0;
   private brainstormVisit = 0;
   private brainstormOwnsSurface = false;
@@ -635,7 +630,6 @@ export class CapabilityMenu {
     this.retireQuickNotesReader('home');
     this.leaveMessages();
     this.clearResponseTimeout();
-    this.dashboard = undefined;
     this.clearProductivityReturn();
     this.transitionId += 1;
     this.view = 'closed';
@@ -685,7 +679,7 @@ export class CapabilityMenu {
    */
   async openPlanning(): Promise<void> {
     const anchor = this.view === 'productivity' ? this.productivityAnchorUnixMs : undefined;
-    await this.openCapability('Planning', CAPABILITIES.indexOf('Planning'), anchor);
+    await this.openCapability('Reminders', CAPABILITIES.indexOf('Reminders'), anchor);
   }
 
   /** Match, paint, then activate one capability response. Row actions remain
@@ -696,7 +690,7 @@ export class CapabilityMenu {
     requestId?: string,
     selectable = false,
     hint?: string,
-    planningGrid?: PlanningGridCell[],
+    reminderCard?: ReminderCard,
     contextLabel?: string,
     controlStartIndex?: number,
     planningEntries?: Array<{ time: string; kind: "event" | "reminder"; title: string } | null>,
@@ -743,7 +737,10 @@ export class CapabilityMenu {
     if (!this.pendingRequestId || requestId !== this.pendingRequestId) return false;
     const normalized = title.trim().toUpperCase();
     const matches = normalized === this.pendingTitle
-      || normalized.startsWith(`${this.pendingTitle} ·`);
+      || normalized.startsWith(`${this.pendingTitle} ·`)
+      // A Mac brain answers Reminders with its PLANNING pages.
+      || (this.pendingTitle === REMINDERS_TITLE
+        && (normalized === 'PLANNING' || normalized.startsWith('PLANNING ·')));
     if (!matches) return false;
     if (normalized === LIVE_NOTE_TITLE && this.view === 'data'
       && this.dataSurface?.title.trim().toUpperCase() === LIVE_NOTE_TITLE
@@ -807,24 +804,6 @@ export class CapabilityMenu {
 
     this.clearResponseTimeout();
     this.messagesRetry = messagesState?.rowAction === 'retry';
-    // A month with a full grid becomes the split dashboard: grid left, the
-    // hovered day's items right. Hover starts on today when the month shows
-    // it, else the first in-month day.
-    if (planningGrid && isImageMonth(title, planningGrid, effectiveSelectable)) {
-      const todayIso = new Date().toLocaleDateString('en-CA');
-      let dateIndex = planningGrid.findIndex(
-        (cell) => cell.inMonth && cell.day === todayIso,
-      );
-      if (dateIndex < 0) {
-        dateIndex = Math.max(0, planningGrid.findIndex((cell) => cell.inMonth));
-      }
-      if (planningOwner) dateIndex = planningOwner.selectedIndex;
-      this.dashboard = {
-        grid: [...planningGrid], dateIndex, paneFocused: false, paneIndex: 0,
-      };
-    } else {
-      this.dashboard = undefined;
-    }
     const expectedRequestId = this.pendingRequestId;
     const receiptRefresh = this.planningReceiptRefresh?.requestId === expectedRequestId
       ? this.planningReceiptRefresh : undefined;
@@ -843,12 +822,10 @@ export class CapabilityMenu {
     // the page about to be shown, not the (possibly firmware-owned) one that
     // is still on the glass.
     // Every list is Even's own list and every reader Even's own text page.
-    // The one exception is the Planning month: a calendar grid has no
-    // firmware template, so it stays the image dashboard (grid left, the
-    // hovered day's items right). A thread or an archive that pages by
-    // tappable rows (`pageControls`) is a firmware list like any other.
+    // A thread or an archive that pages by tappable rows (`pageControls`)
+    // is a firmware list like any other.
     const nativeTextPage = usesTextPage(normalized);
-    const firmwareList = !this.dashboard && !nativeTextPage;
+    const firmwareList = !nativeTextPage;
     // The Mac answered a swipe up with its previous page: open on its last
     // local page, as the raster prose pager did.
     const textPageFromEnd = nativeTextPage && ((this.messagePageDirection < 0
@@ -882,7 +859,7 @@ export class CapabilityMenu {
     const previousArchivePage = this.dataSurface?.quickNotesPage;
     const archiveSelection = archivePage && previousArchivePage && this.dataPagePending
       && archivePage.index < previousArchivePage.index ? Math.max(0, items.length - 1) : undefined;
-    const authoritativePlanningIndex = planningOwner && !this.dashboard
+    const authoritativePlanningIndex = planningOwner
       ? Math.max(0, Math.min(planningOwner.selectedIndex, items.length - 1)) : undefined;
     // A firmware list always opens with row one highlighted (the firmware has
     // no cursor-setting API), so the menu's cursor starts there too: a tap
@@ -900,8 +877,7 @@ export class CapabilityMenu {
       retainProductivityReceipt: receiptRefresh !== undefined,
       hint: effectiveHint,
       selectable: effectiveSelectable,
-      planningGrid,
-      planningPane: this.dashboardPane(),
+      ...(reminderCard ? { reminderCard } : {}),
       ...(initialSelection > 0 ? { initialSelectedIndex: initialSelection } : {}),
       ...(railTab ? { railTab } : {}),
       ...(firmwareList ? { nativeFirmwareList: true } : {}),
@@ -941,7 +917,7 @@ export class CapabilityMenu {
       items: [...items],
       selectable: effectiveSelectable,
       hint: effectiveHint,
-      planningGrid: planningGrid ? [...planningGrid] : undefined,
+      ...(reminderCard ? { reminderCard: { ...reminderCard } } : {}),
       selectedIndex: initialSelection,
       messagesRetry: this.messagesRetry,
       messagesScreen: this.messagesScreen,
@@ -991,7 +967,7 @@ export class CapabilityMenu {
     onVisible?: () => void,
   ): Promise<boolean> {
     if (this.view !== 'productivity') {
-      this.productivitySelection = this.pendingTitle === 'PLANNING' && this.dataSurface
+      this.productivitySelection = isRemindersTitle(this.pendingTitle) && this.dataSurface
         && this.selectedIndex < this.dataSurface.items.length
         ? { contextLabel: this.dataSurface.contextLabel,
           item: this.dataSurface.items[this.selectedIndex]!, index: this.selectedIndex }
@@ -1040,7 +1016,7 @@ export class CapabilityMenu {
     }
     this.view = 'productivity';
     this.productivityShown = productivity;
-    this.productivityReturn = 'Planning';
+    this.productivityReturn = 'Reminders';
     this.productivityAnchorUnixMs = isPlanningAnchor(productivity.planningAnchorUnixMs)
       ? productivity.planningAnchorUnixMs
       : undefined;
@@ -1060,11 +1036,6 @@ export class CapabilityMenu {
    * firmware contextual menu (tap, then long-press); this gesture never
    * draws a second one. On the overview there is no level left to leave. */
   async toggle(): Promise<void> {
-    if (this.dashboardSelectionPaint) {
-      const dashboard = this.dashboard;
-      await this.dashboardSelectionPaint;
-      if (this.dashboard !== dashboard || this.view !== 'data') return;
-    }
     this.terminalPreludeRevision += 1;
     if (this.view === 'closed') {
       if (this.terminalOpening) {
@@ -1084,14 +1055,7 @@ export class CapabilityMenu {
         CAPABILITIES.indexOf(capability),
         this.productivityAnchorUnixMs,
       );
-    } else if (this.view === 'data' && this.dashboard?.paneFocused) {
-      // Keep Back ordered with any unfinished pane selection paint.
-      await this.queueDashboardInteraction(async () => {
-        this.dashboard!.paneFocused = false;
-        this.dashboard!.paneIndex = 0;
-        return this.hud.updatePlanningPane(this.dashboardPane()!);
-      });
-    } else if (this.view === 'data' && this.pendingTitle === 'PLANNING'
+    } else if (this.view === 'data' && isRemindersTitle(this.pendingTitle)
       && this.dataSurface?.planningNavigation) {
       if (this.planningBackPending) return;
       if (!this.dataSurface.planningNavigation.canGoBack) {
@@ -1106,10 +1070,10 @@ export class CapabilityMenu {
         containerName: 'capability-lifecycle', selectedName: 'planning-back',
         requestId: this.pendingRequestId,
       } });
-      this.armResponseTimeout('PLANNING', this.pendingRequestId);
+      this.armResponseTimeout(this.pendingTitle ?? REMINDERS_TITLE, this.pendingRequestId);
     } else if (
       this.view === 'data'
-      && this.pendingTitle === 'PLANNING'
+      && isRemindersTitle(this.pendingTitle)
       && this.planningDrillDown
     ) {
       this.planningDrillDown = false;
@@ -1124,7 +1088,7 @@ export class CapabilityMenu {
         this.dataSelectionPending = false;
         await this.returnToDataSurface();
       } else {
-        await this.openCapability('Planning', CAPABILITIES.indexOf('Planning'));
+        await this.openCapability('Reminders', CAPABILITIES.indexOf('Reminders'));
       }
     } else if (
       this.view === 'data'
@@ -1151,7 +1115,8 @@ export class CapabilityMenu {
     } else if (
       this.view === 'data'
       && this.pendingTitle === 'QUICKNOTES'
-      && NOTE_QUESTION_TITLES.has(this.dataSurface?.title.trim().toUpperCase() ?? '')
+      && (NOTE_QUESTION_TITLES.has(this.dataSurface?.title.trim().toUpperCase() ?? '')
+        || NOTE_VIEW_TITLES.has(this.dataSurface?.title.trim().toUpperCase() ?? ''))
       && this.pendingRequestId
     ) {
       if (this.dataSelectionPending) return;
@@ -1188,15 +1153,6 @@ export class CapabilityMenu {
 
     if (this.view === 'data') {
       const eventType = list.eventType ?? 0;
-      if (this.dashboard) {
-        if (eventType === OsEventTypeList.CLICK_EVENT) return this.selectDataRow();
-        this.dashboardScroll(
-          eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT
-            ? 1
-            : eventType === OsEventTypeList.SCROLL_TOP_EVENT ? -1 : 0,
-        );
-        return true;
-      }
       if (this.dataSurface?.quickNotesPage && this.dataPagePending) return true;
       const maximum = this.messagesRetry ? 0 : Math.max(0, this.dataItemCount - 1);
       if (eventType !== OsEventTypeList.CLICK_EVENT) {
@@ -1283,10 +1239,6 @@ export class CapabilityMenu {
         this.requestReaderPage(eventType);
         return true;
       }
-      if (this.dashboard) {
-        this.dashboardScroll(delta);
-        return true;
-      }
       // Every remaining page is a firmware list, which moves its own
       // highlight and reports it with the tap.
       return true;
@@ -1314,110 +1266,7 @@ export class CapabilityMenu {
     return this.select(this.selectedIndex);
   }
 
-  private dashboardPane():
-  { dateIndex: number; focused: boolean; itemIndex: number } | undefined {
-    return this.dashboard
-      ? {
-        dateIndex: this.dashboard.dateIndex,
-        focused: this.dashboard.paneFocused,
-        itemIndex: this.dashboard.paneIndex,
-      }
-      : undefined;
-  }
-
-  private dashboardEntryCount(): number {
-    const cell = this.dashboard?.grid[this.dashboard.dateIndex];
-    return cell?.entries?.length ?? 0;
-  }
-
-  /** Input stays bound to one published month and follows visible paints.
-   * A failed selection paint retires already queued taps; the next gesture
-   * starts from the last committed selection. */
-  private queueDashboardInteraction(action: () => Promise<boolean>): Promise<boolean> {
-    const dashboard = this.dashboard;
-    const request = this.pendingRequestId;
-    const previous = this.dashboardSelectionPaint ?? Promise.resolve(true);
-    const paint = previous.then(async ok => {
-      if (!ok || !dashboard || this.dashboard !== dashboard || this.view !== 'data'
-        || this.pendingRequestId !== request || this.dataSelectionPending) return false;
-      if (this.dashboardFailedPaint === dashboard) {
-        if (!await this.hud.updatePlanningPane(this.dashboardPane()!)) return false;
-        if (this.dashboard !== dashboard || this.view !== 'data' || this.pendingRequestId !== request) return false;
-        this.dashboardFailedPaint = undefined;
-      }
-      const prior = { dateIndex: dashboard.dateIndex, paneFocused: dashboard.paneFocused, paneIndex: dashboard.paneIndex };
-      let painted = false;
-      try { painted = await action(); } catch { /* Retain the last visible binding. */ }
-      if (!painted && this.dashboard === dashboard) {
-        Object.assign(dashboard, prior);
-        this.dashboardFailedPaint = dashboard;
-      }
-      return painted;
-    }).catch(() => false);
-    this.dashboardSelectionPaint = paint;
-    void paint.then(() => {
-      if (this.dashboardSelectionPaint === paint) this.dashboardSelectionPaint = undefined;
-    });
-    return paint;
-  }
-
-  /** Dates own grid scrolling; the pane includes its entries and Open day.
-   * Month edges use the existing previous/next Mac action rows. */
-  private dashboardScroll(delta: number): void {
-    if (!this.dashboard || delta === 0) return;
-    void this.queueDashboardInteraction(async () => {
-      const dashboard = this.dashboard!;
-      if (dashboard.paneFocused) {
-        dashboard.paneIndex = Math.max(0, Math.min(this.dashboardEntryCount(), dashboard.paneIndex + delta));
-        return this.hud.updatePlanningPane(this.dashboardPane()!);
-      }
-      const next = dashboard.dateIndex + delta;
-      if (next < 0 || next >= dashboard.grid.length) {
-        if (!this.pendingTitle || !this.pendingRequestId) return false;
-        this.dataSelectionPending = true;
-        this.link.send({ kind: 'input', event: {
-          containerName: 'capdata', selectedIndex: next < 0 ? 6 : 7,
-          selectedName: this.pendingTitle, requestId: this.pendingRequestId,
-        } });
-        this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
-        return true;
-      }
-      dashboard.dateIndex = next;
-      dashboard.paneIndex = 0;
-      return this.hud.updatePlanningPane(this.dashboardPane()!);
-    });
-  }
-
-  /** Empty dates also have Open day. Item taps retain the Mac's published
-   * day/index identity binding; Open day exposes the complete paginated list. */
-  private dashboardTap(): void {
-    if (!this.dashboard) return;
-    void this.queueDashboardInteraction(async () => {
-      const dashboard = this.dashboard!;
-      if (!dashboard.paneFocused) {
-        dashboard.paneFocused = true;
-        dashboard.paneIndex = 0;
-        return this.hud.updatePlanningPane(this.dashboardPane()!);
-      }
-      const cell = dashboard.grid[dashboard.dateIndex];
-      if (!cell || !this.pendingTitle || !this.pendingRequestId) return false;
-      this.planningDrillDown = true;
-      this.dataSelectionPending = true;
-      this.link.send({ kind: 'input', event: {
-        containerName: 'capgrid', selectedIndex: dashboard.paneIndex,
-        selectedName: this.pendingTitle, requestId: this.pendingRequestId,
-        planningDay: cell.day,
-      } });
-      this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
-      return true;
-    });
-  }
-
   private selectDataRow(): true {
-    if (this.dashboard) {
-      this.dashboardTap();
-      return true;
-    }
     if (this.messagesRetry) {
       this.messagesRetry = false;
       void this.openCapability('Messages', 0);
@@ -1465,7 +1314,7 @@ export class CapabilityMenu {
       } });
       return true;
     }
-    if (this.pendingTitle === 'PLANNING') this.planningDrillDown = true;
+    if (isRemindersTitle(this.pendingTitle)) this.planningDrillDown = true;
     // A plugin-authored row above the Mac's (the Pomodoro countdown) is inert.
     const panelOffset = this.isPanelExpanded() ? this.panelRowOffset : 0;
     if (panelOffset > 0 && this.selectedIndex < panelOffset) {
@@ -1547,8 +1396,8 @@ export class CapabilityMenu {
       await this.openPanelTab('search');
       return;
     }
-    if (picked === 'Planning' && this.view === 'data'
-      && this.pendingTitle === 'PLANNING' && this.dataSurface && this.dataRowsSelectable) {
+    if (picked === 'Reminders' && this.view === 'data'
+      && isRemindersTitle(this.pendingTitle) && this.dataSurface && this.dataRowsSelectable) {
       // Reopening the current agenda refreshes its data without first
       // replacing it with a four-tile Loading page. Keep the visible focus
       // bound to the refreshed rows through the same outcome-return path.
@@ -1566,24 +1415,19 @@ export class CapabilityMenu {
    * A single click on the resting overview opens the tray it is already
    * showing.
    *
-   * Notifications was the overview's first tab and not a menu row (the
-   * dashboard showed the cards themselves). The wearer moved it, 2026-10-15:
-   * "put it on the menu as the first option while on the overview". It is
-   * now the first row of the menu on the overview (openNotificationsFromMenu)
-   * and opens exactly as the tab did.
+   * Notifications is the overview's first tab, not a menu row (the wearer,
+   * 2026-11-09; it was the overview's first menu row from 2026-10-15).
    */
   async openNotifications(selectedIndex = 0): Promise<void> {
     await this.openCapability('Notifications', CAPABILITIES.length, undefined, undefined, selectedIndex);
   }
 
-  /** The menu's first row on the overview. The unread cards themselves,
+  /** A tap on the overview's Notifications tab. The unread cards themselves,
    * newest first, over the page they were opened from, as Even's menu opens
    * them: a tap reads one and shows the next. The list page remains for
-   * when nothing is unread (and for "show notifications"). This is what a
-   * tap on the overview's Notifications tab did before 2026-10-15, moved
-   * and otherwise unchanged. */
-  async openNotificationsFromMenu(): Promise<void> {
-    // A wearer's choice, as every menu row is: an older queued prelude is stale.
+   * when nothing is unread (and for "show notifications"). */
+  async openNotificationsTab(): Promise<void> {
+    // A wearer's choice: an older queued prelude is stale.
     this.terminalPreludeRevision += 1;
     if (this.hud.unreadNotifications().length > 0 && await this.hud.browseNotifications()) return;
     await this.openNotifications();
@@ -1595,14 +1439,18 @@ export class CapabilityMenu {
    * paints once, with no "Loading…" frame in between. */
   async openActiveTab(): Promise<void> {
     const tab = this.hud.activeTab();
+    if (tab === 'notifications') {
+      await this.openNotificationsTab();
+      return;
+    }
     if (tab === 'quicknotes') {
       // Even's QuickNote widget on its Dashboard: a tap opens QuickNotes.
       await this.openQuickNotes();
       return;
     }
     if (tab === 'planner') {
-      // The tab lists the open reminders; Planning has the days and the
-      // calendar they sit in (the same page the menu's Planning row opens).
+      // The tab lists the open reminders; a tap opens the menu's Reminders
+      // page (the next-up card and every open reminder).
       this.terminalPreludeRevision += 1;
       await this.openPlanning();
       return;
@@ -1676,7 +1524,6 @@ export class CapabilityMenu {
     else this.retireBrainstormSurface();
     this.leaveMessages();
     this.retireQuickNotesReader('home');
-    this.dashboard = undefined;
     this.clearResponseTimeout();
     this.messagesRetry = false;
     const transition = this.beginTransition();
@@ -1833,6 +1680,21 @@ export class CapabilityMenu {
     return true;
   }
 
+  /** "AI cues" or "Prep notes", chosen in the glasses' menu on an open note:
+   * the brain opens that page. */
+  sendQuickNotesMenu(item: 'cues' | 'prep'): boolean {
+    if (!this.isQuickNotesLive()) return false;
+    this.link.send({
+      kind: 'input',
+      event: {
+        containerName: 'capability-lifecycle',
+        selectedName: `quicknotes-${item}`,
+        requestId: this.pendingRequestId,
+      },
+    });
+    return true;
+  }
+
   private isQuickNotesReader(): boolean {
     return this.view === 'data' && this.pendingTitle === 'QUICKNOTES'
       && this.dataSurface !== undefined
@@ -1925,8 +1787,7 @@ export class CapabilityMenu {
     // There is no selected conversation or draft requiring a second Home.
     if (picked !== 'Messages' || this.messageLifecycleBinding) this.leaveMessages();
     this.retireQuickNotesReader('home');
-    if (picked === 'Planning') this.planningDrillDown = false;
-    this.dashboard = undefined;
+    if (picked === 'Reminders') this.planningDrillDown = false;
     this.clearResponseTimeout();
     this.messagesRetry = false;
     const transition = this.beginTransition();
@@ -1972,7 +1833,7 @@ export class CapabilityMenu {
       selectedName: picked,
       requestId,
     };
-    if (picked === 'Planning' && isPlanningAnchor(planningAnchorUnixMs)) {
+    if (picked === 'Reminders' && isPlanningAnchor(planningAnchorUnixMs)) {
       event.planningAnchorUnixMs = planningAnchorUnixMs;
     }
     this.link.send({
@@ -1991,7 +1852,9 @@ export class CapabilityMenu {
    * presentList path then paints and activates it. An unknown title family
    * leaves state untouched so the ordinary guards drop the frame. */
   private adoptVoiceGeneration(title: string, requestId: string): void {
-    const family = (title.split('·')[0] ?? '').trim().toUpperCase();
+    const said = (title.split('·')[0] ?? '').trim().toUpperCase();
+    // A Mac brain opens Reminders by voice under its PLANNING title.
+    const family = said === 'PLANNING' ? REMINDERS_TITLE : said;
     // Notifications and QuickNotes are pages the Mac opens (by voice, or
     // QuickNotes from the overview's rail) without being menu rows; Search
     // is a menu row whose page is a panel tab, not a Mac capability page.
@@ -2156,8 +2019,7 @@ export class CapabilityMenu {
     return {
       ...this.dataSurface,
       items: [...this.dataSurface.items],
-      planningGrid: this.dataSurface.planningGrid ? [...this.dataSurface.planningGrid] : undefined,
-      planningPane: this.dashboardPane(),
+      ...(this.dataSurface.reminderCard ? { reminderCard: { ...this.dataSurface.reminderCard } } : {}),
       selectedIndex: this.selectedIndex,
     };
   }
@@ -2201,23 +2063,13 @@ export class CapabilityMenu {
     this.dataGrandparent = undefined;
     this.clearResponseTimeout();
     const transition = this.beginTransition();
-    if (parent.planningGrid?.length === 42 && parent.planningPane) {
-      // Back from an entry lands on the dashboard with the same date
-      // hovered and the GRID owning input again.
-      this.dashboard = {
-        grid: [...parent.planningGrid],
-        dateIndex: parent.planningPane.dateIndex,
-        paneFocused: false,
-        paneIndex: 0,
-      };
-    }
     // Back lands on the parent as the page type it was shown as: a firmware
     // list (the Messages thread, Activity) or a text page keeps that type,
     // or the return would redraw it as four image tiles.
     const parentFirmwareList = usesFirmwareList(parent);
     const shown = await this.hud.showList(parent.items, {
       title: parent.title,
-      initialSelectedIndex: this.dashboard ? 0 : parent.selectedIndex,
+      initialSelectedIndex: parent.selectedIndex,
       ...(parentFirmwareList ? { nativeFirmwareList: true } : {}),
       ...(parent.nativeTextPage ? { nativeTextPage: true } : {}),
       contextLabel: parent.contextLabel,
@@ -2225,8 +2077,7 @@ export class CapabilityMenu {
       planningEntries: parent.planningEntries,
       hint: parent.hint,
       selectable: parent.selectable,
-      planningGrid: parent.planningGrid,
-      planningPane: this.dashboardPane(),
+      ...(parent.reminderCard ? { reminderCard: parent.reminderCard } : {}),
       ...(parent.railTab ? { railTab: parent.railTab } : {}),
     });
     if (!this.isCurrentTransition(transition)) return;
@@ -2259,7 +2110,7 @@ export class CapabilityMenu {
     if (!isTerminalProductivityOutcome(phase) || !this.productivityReturn) return;
     if (phase === 'saved' || phase === 'completed' || phase === 'monitoring') {
       void this.openCapability(
-        'Planning', CAPABILITIES.indexOf('Planning'), this.productivityAnchorUnixMs,
+        'Reminders', CAPABILITIES.indexOf('Reminders'), this.productivityAnchorUnixMs,
         { selection: this.productivitySelection },
       );
       return;
@@ -2270,11 +2121,11 @@ export class CapabilityMenu {
       if (
         this.productivityReturnEpoch !== epoch
         || this.view !== 'productivity'
-        || this.productivityReturn !== 'Planning'
+        || this.productivityReturn !== 'Reminders'
       ) return;
       void this.openCapability(
-        'Planning',
-        CAPABILITIES.indexOf('Planning'),
+        'Reminders',
+        CAPABILITIES.indexOf('Reminders'),
         this.productivityAnchorUnixMs,
         { selection: this.productivitySelection },
       );
@@ -2286,7 +2137,7 @@ export class CapabilityMenu {
   private scheduleReminderMonitoring(saved: ProductivityHudModel): void {
     if (!this.productivityReturn) return;
     void this.openCapability(
-      'Planning', CAPABILITIES.indexOf('Planning'), saved.planningAnchorUnixMs,
+      'Reminders', CAPABILITIES.indexOf('Reminders'), saved.planningAnchorUnixMs,
       { monitoring: saved, selection: this.productivitySelection },
     );
   }
@@ -2299,7 +2150,7 @@ export class CapabilityMenu {
       if (
         this.productivityReturnEpoch !== epoch
         || this.view !== 'data'
-        || this.pendingTitle !== 'PLANNING'
+        || !isRemindersTitle(this.pendingTitle)
         || this.pendingRequestId !== requestId
         || this.contextualMenuOpen
       ) return;
@@ -2337,7 +2188,6 @@ export class CapabilityMenu {
     this.retireTerminalOpening();
     this.retireQuickNotesReader('home');
     this.leaveMessages();
-    this.dashboard = undefined;
     this.clearResponseTimeout();
     this.clearProductivityReturn();
     this.transitionId += 1;

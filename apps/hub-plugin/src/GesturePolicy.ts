@@ -57,7 +57,7 @@ export class GesturePolicy {
    * Authored forms still in the repo or on an older Mac, and what they become:
    *   double-click / double tap / left x2 / x2 → 2x tap
    *   long-press / hold                         → long tap
-   *   Back: double-click to Planning            → 2x tap: Planning
+   *   Back: double-click to Reminders           → 2x tap: Reminders
    *   up previous · down more → swipe: page; down more → swipe: more;
    *   up previous → swipe: previous; down older → swipe: older
    */

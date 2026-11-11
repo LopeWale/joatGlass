@@ -47,7 +47,7 @@ describe('visual fixtures', () => {
 
   it('covers every productivity collection and durable write receipt', () => {
     expect(visualListFixture('notifications').title).toBe('NOTIFICATIONS');
-    expect(visualListFixture('calendar').title).toBe('CALENDAR · 7 DAYS');
+    expect(visualListFixture('reminders').title).toBe('REMINDERS · 8 OPEN');
     expect(visualListFixture('tasks').title).toBe('TASKS');
     expect(visualListFixture('quicknotes').title).toBe('QUICKNOTES');
     expect(visualListFixture('activity').title).toBe('ACTIVITY');
@@ -59,8 +59,8 @@ describe('visual fixtures', () => {
     });
     expect(visualListFixture('messages').selectable).toBe(true);
     expect(visualListFixture('notification-detail').selectable).toBe(false);
-    expect(visualListFixture('calendar-detail').title).toBe('CALENDAR · DETAIL');
-    expect(visualListFixture('task-detail').title).toBe('TASKS · DETAIL');
+    expect(visualListFixture('calendar-detail')).toMatchObject({ title: 'CALENDAR · DETAIL', hint: 'left x2 Reminders' });
+    expect(visualListFixture('task-detail')).toMatchObject({ title: 'TASKS · DETAIL', hint: 'left x2 Reminders' });
     expect(visualListFixture('quicknote-detail').title).toBe('QUICKNOTES · NOTE');
     // A recording's note page is one document, its sections in order.
     const note = visualListFixture('quicknote-detail').items.join('\n');

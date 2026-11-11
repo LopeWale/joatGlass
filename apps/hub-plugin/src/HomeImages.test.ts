@@ -12,13 +12,14 @@ const VIEW: OverviewTextView = {
   header: '9:41 · JOAT',
   info: ['Tue, Oct 6', '72f clear', '2 unread'],
   tabs: [
-    { label: 'PLANNER', active: true },
+    { label: 'NOTIFICATIONS', active: true },
+    { label: 'REMINDERS', active: false },
     { label: 'NEWS', active: false },
     { label: 'POMODORO', active: false },
     { label: 'QUICKNOTES', active: false },
   ],
   paneLabels: ['', ''],
-  pane: ['Nothing due this week.', 'tap: open planning'],
+  pane: ['No new notifications', 'tap: open notifications'],
   paneBrightness: 4,
   hint: 'tap: open · swipe: tabs',
 };
@@ -82,10 +83,10 @@ describe('Home column images', () => {
     expect(marks.filter((mark) => mark.tile === 0 && mark.text).map((mark) => mark.text))
       .toEqual(['Tue, Oct 6', '72f clear', '2 unread']);
     const rail = marks.filter((mark) => mark.tile === 1 && mark.text);
-    expect(rail.map((mark) => mark.text)).toEqual(['PLANNER', 'NEWS', 'POMODORO', 'QUICKNOTES']);
+    expect(rail.map((mark) => mark.text)).toEqual(['NOTIFICATIONS', 'REMINDERS', 'NEWS', 'POMODORO', 'QUICKNOTES']);
     expect(rail[0]!.alpha).toBeGreaterThan(rail[1]!.alpha);
     expect(marks.filter((mark) => mark.tile === 1 && mark.icon).map((mark) => mark.icon))
-      .toEqual(['planner', 'news', 'pomodoro', 'quicknotes']);
+      .toEqual(['notifications', 'planner', 'news', 'pomodoro', 'quicknotes']);
   });
 
   it('underlines the lit tab, and the underline moves with a swipe', () => {
@@ -101,9 +102,9 @@ describe('Home column images', () => {
       expect(bar.y).toBeGreaterThanOrEqual(label!.y + evenLineHeight());
       return { y: bar.y, label: label!.text };
     };
-    expect(underline(0).label).toBe('PLANNER');
-    expect(underline(1).label).toBe('NEWS');
-    expect(underline(3).label).toBe('QUICKNOTES');
+    expect(underline(0).label).toBe('NOTIFICATIONS');
+    expect(underline(1).label).toBe('REMINDERS');
+    expect(underline(4).label).toBe('QUICKNOTES');
     expect(underline(1).y).toBeGreaterThan(underline(0).y);
   });
 
@@ -119,7 +120,7 @@ describe('Home column images', () => {
     // The first rows of the rail sit above the box; the last ones are gone, not cut.
     expect(rail.length).toBeGreaterThan(0);
     expect(rail.length).toBeLessThan(4);
-    expect(rail[0]).toBe('PLANNER');
+    expect(rail[0]).toBe('NOTIFICATIONS');
   });
 
   it('under a notification card, shows only the rows below it, dimmed', () => {

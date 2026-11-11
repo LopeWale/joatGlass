@@ -36,12 +36,27 @@ export function validatePackageId(value) {
   return value;
 }
 
+/** The brain on the phone itself: JOAT Brain (apps/ios-companion) listens on
+ * ws://127.0.0.1:8787/glasses, the same loopback origin the simulator uses. */
+export const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost']);
+
+function isLoopbackCandidate(url) {
+  return url.protocol === 'ws:' && LOOPBACK_HOSTS.has(url.hostname);
+}
+
 /**
  * A production Glasses package must explicitly choose one or more TLS
  * origins. The /glasses path is the only public JOAT gateway route; raw dev
  * URLs and arbitrary paths cannot leak into it.
+ *
+ * One exception, opt-in: with `allowLoopback` (JOAT_RELEASE_ALLOW_LOOPBACK=1)
+ * a plain-ws loopback candidate is accepted for the iPhone-as-brain lab,
+ * where the brain is a native app on the SAME phone as the Even app. Plain
+ * ws is right there: nothing off the phone can reach 127.0.0.1, and TLS
+ * would need a certificate the Even app's WebView trusts. Any other plain-ws
+ * host is still refused, flag or not.
  */
-export function validateReleaseCandidates(value) {
+export function validateReleaseCandidates(value, { allowLoopback = false } = {}) {
   const seen = new Set();
   return releaseCandidateUrls(value).map((candidate) => {
     let url;
@@ -52,7 +67,11 @@ export function validateReleaseCandidates(value) {
       // a pasted credential-bearing URL must not be copied into a build log.
       throw new Error('release candidate is not a URL');
     }
-    if (url.protocol !== 'wss:') {
+    if (isLoopbackCandidate(url)) {
+      if (!allowLoopback) {
+        throw new Error('release candidate must use wss (a phone-local ws://127.0.0.1 brain needs JOAT_RELEASE_ALLOW_LOOPBACK=1)');
+      }
+    } else if (url.protocol !== 'wss:') {
       throw new Error('release candidate must use wss');
     }
     if (url.pathname !== '/glasses' || url.search || url.hash || url.username || url.password) {
@@ -78,8 +97,9 @@ if (isDirectExecution()) {
     process.exitCode = 64;
   } else {
     try {
-      const candidates = validateReleaseCandidates(rawCandidates);
-      console.log(`validated ${candidates.length} private release candidate(s)`);
+      const allowLoopback = process.env.JOAT_RELEASE_ALLOW_LOOPBACK === '1';
+      const candidates = validateReleaseCandidates(rawCandidates, { allowLoopback });
+      console.log(`validated ${candidates.length} private release candidate(s)${allowLoopback ? ' (loopback allowed: phone-local brain)' : ''}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error';
       console.error(`release candidate validation failed: ${message}`);

@@ -49,11 +49,11 @@ afterEach(() => {
 });
 
 describe('HudPresenter — the tab rail', () => {
-  it('every overview frame names the active tab, the Planner first', async () => {
+  it('every overview frame names the active tab, Notifications first', async () => {
     const { hud, frames } = presenter();
     await hud.showText('9:41   JOAT ready', ContainerId.StatusBar);
     expect(frames[frames.length - 1]).toMatchObject({
-      kind: 'overview', rail: { activeTab: 'planner' },
+      kind: 'overview', rail: { activeTab: 'notifications' },
     });
   });
 
@@ -61,11 +61,11 @@ describe('HudPresenter — the tab rail', () => {
     const { hud, frames } = presenter();
     await hud.showText('home', ContainerId.Main);
     const before = frames.length;
-    expect(await hud.stepTab(1)).toBe('news');
+    expect(await hud.stepTab(1)).toBe('planner');
     expect(frames).toHaveLength(before + 1);
-    expect(frames[frames.length - 1]).toMatchObject({ kind: 'overview', rail: { activeTab: 'news' } });
+    expect(frames[frames.length - 1]).toMatchObject({ kind: 'overview', rail: { activeTab: 'planner' } });
     // At the end of the rail nothing changes, so nothing is painted.
-    expect(await hud.stepTab(-1)).toBe('planner');
+    expect(await hud.stepTab(-1)).toBe('notifications');
     expect(await hud.stepTab(-1)).toBeUndefined();
     expect(frames).toHaveLength(before + 2);
   });

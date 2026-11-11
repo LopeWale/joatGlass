@@ -8,7 +8,8 @@ import type { CapabilityMenu } from './CapabilityMenu';
 import type { G2DiagnosticTrace, G2TraceEvent } from './G2DiagnosticTrace';
 import {
   CAPABILITY_MENU_ID_BASE,
-  NOTIFICATIONS_MENU_ID,
+  QUICKNOTES_CUES_MENU_ID,
+  QUICKNOTES_PREP_MENU_ID,
   QUICKNOTES_UNDO_MENU_ID,
   type BrainstormAction,
   type BrainstormHudScreen,
@@ -741,10 +742,10 @@ export class EventRouter {
     // page, including this one, and cancel stays on double-click.
 
     // On the resting overview a click drills into the tab the rail has
-    // selected: the Planner opens Planning, QuickNotes opens QuickNotes, and
-    // the other tabs expand from the content the Mac last pushed. The next
-    // click opens the row the wearer stopped on. (Notifications is the
-    // menu's first row on the overview now, not a tab.)
+    // selected: Notifications opens the unread cards, the Planner opens
+    // Planning, QuickNotes opens QuickNotes, and the other tabs expand from
+    // the content the Mac last pushed. The next click opens the row the
+    // wearer stopped on.
     // Any visible card was already dismissed above, so this only fires on
     // a settled overview.
     if (
@@ -781,17 +782,15 @@ export class EventRouter {
       void this.menu.openFromContextualMenu(itemID - CAPABILITY_MENU_ID_BASE);
       return;
     }
-    if (itemID === NOTIFICATIONS_MENU_ID) {
-      // The overview's first menu row: the notifications that used to be its
-      // first tab. Only the overview's own page carries it, so a cached row
-      // anywhere else cannot arrive here.
-      void this.menu.openNotificationsFromMenu();
-      return;
-    }
     if (itemID === QUICKNOTES_UNDO_MENU_ID) {
       // An open note's "Undo last input" (Even's QuickNote menu). Anywhere
       // else a cached row of it does nothing.
       this.menu.sendQuickNotesUndo?.();
+      return;
+    }
+    if (itemID === QUICKNOTES_CUES_MENU_ID || itemID === QUICKNOTES_PREP_MENU_ID) {
+      // The open note's "AI cues" and "Prep notes": the brain opens them.
+      this.menu.sendQuickNotesMenu?.(itemID === QUICKNOTES_CUES_MENU_ID ? 'cues' : 'prep');
       return;
     }
     switch (itemID) {

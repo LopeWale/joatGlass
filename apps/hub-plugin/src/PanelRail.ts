@@ -8,9 +8,9 @@
  * behind planner, news, pomodoro and quicknotes (and Search, which the menu
  * opens), pushed as `hud.panel` and cached here so a swipe onto a tab paints
  * from memory. A tap on QuickNotes opens QuickNotes itself; a tap on the
- * Planner (the open reminders, the first tab) opens Planning. Notifications
- * was the first tab until 2026-10-15; it is now the menu's first row on the
- * overview, so every tab has a cache.
+ * Planner (the open reminders, the second tab) opens Planning.
+ * Notifications, the first tab, has no cache of its own: it is the unread
+ * cards JOAT already sent (`hud.notifications`).
  *
  * Every push carries a `revision`. A row tap echoes it (`panelRequestId`),
  * so a tap that lands after a refresh is refused by the Mac rather than
@@ -46,8 +46,8 @@ export interface PanelContent {
 export interface PanelRailVisual {
   /** A rail tab, or Search's own page (opened from the menu). */
   activeTab: PanelTab | PanelContentTab;
-  /** The active tab's cached content; absent before the Mac has pushed
-   * anything for that tab. */
+  /** The active tab's cached content; absent for Notifications, or before
+   * the Mac has pushed anything for that tab. */
   content?: PanelContent;
 }
 
@@ -55,7 +55,8 @@ export interface PanelRailVisual {
  * with a `hud.list` whose title extends this ("NEWS · ARTICLE"), which is
  * how CapabilityMenu's existing two-deep Back knows the parent. */
 export const PANEL_TAB_TITLES: Readonly<Record<PanelTab | PanelContentTab, string>> = {
-  planner: 'PLANNER',
+  notifications: 'NOTIFICATIONS',
+  planner: 'REMINDERS',
   news: 'NEWS',
   pomodoro: 'POMODORO',
   quicknotes: 'QUICKNOTES',
@@ -155,7 +156,7 @@ export function freshnessLabel(receivedAtMs: number, nowMs: number): string {
 }
 
 export class PanelRail {
-  private activeTab: PanelTab = 'planner';
+  private activeTab: PanelTab = 'notifications';
   private readonly contents = new Map<PanelContentTab, PanelContent>();
 
   active(): PanelTab {
@@ -181,7 +182,7 @@ export class PanelRail {
 
   /** The resting screen's default. A fresh brain connection lands here. */
   reset(): void {
-    this.activeTab = 'planner';
+    this.activeTab = 'notifications';
   }
 
   content(tab: PanelContentTab): PanelContent | undefined {
@@ -216,7 +217,7 @@ export class PanelRail {
   /** The rail as it looks with `tab` highlighted — an expanded page keeps
    * its own tab lit whatever the overview's active tab is. */
   visualFor(tab: PanelTab | PanelContentTab): PanelRailVisual {
-    const content = this.contents.get(tab);
+    const content = tab === 'notifications' ? undefined : this.contents.get(tab);
     return content ? { activeTab: tab, content: cloneContent(content) } : { activeTab: tab };
   }
 

@@ -57,9 +57,6 @@ export const TYPE = {
   hint: prose(10),
   /** Dense annotations: chips, speaker tags, overflow counts. */
   micro: prose(9),
-  /** Dense NUMERIC annotations that must column-align (time chips,
-   * calendar markers, week counters). */
-  microMono: mono(9),
   /** Status spine clock. */
   statusClock: mono(11),
   /** Status spine label (and the low-battery number). */
@@ -76,19 +73,6 @@ export const LEAD = {
   tight: 16,
   /** 10px meta wraps. */
   meta: 14,
-} as const;
-
-/**
- * Row pitches: the vertical step from one row's baseline to the next.
- * Distinct from LEAD (the step between WRAPPED lines of one row). Values are
- * unchanged from the surfaces they came from — naming them is the point, so
- * a pitch can never again be a bare number nobody can trace.
- */
-export const PITCH = {
-  /** A calendar week band. */
-  week: 22,
-  /** A month-grid band on the full-page planning calendar. */
-  monthBand: 26,
 } as const;
 
 /** Every footer hint sits on this baseline, middle-aligned, centered. */

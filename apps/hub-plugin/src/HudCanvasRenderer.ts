@@ -1,5 +1,6 @@
 import { GesturePolicy } from './GesturePolicy';
 import { HOME_COLUMN, type HomeColumnView } from './HomeImages';
+import { REMINDER_CARD, reminderCardLayout, type ReminderCardView } from './ReminderCard';
 import {
   EVEN_READER, drawEvenText, evenLineHeight, evenTextWidth, fitOneLineEven, loadEvenFont, readerHint,
   readerLineTops,
@@ -43,11 +44,11 @@ import {
   HeaderImageId,
   HomeColumnId,
   PANEL_TABS,
+  ReminderCardId,
   SPINE_LABEL_BOX,
   type HudContentKind,
   type PanelContentTab,
   type PanelTab,
-  type PlanningGridCell,
   type ProductivityHudModel,
 } from './types';
 import {
@@ -71,7 +72,6 @@ import {
   mono,
   HINT_BASELINE_Y,
   upper,
-  PITCH,
 } from './HudTypography';
 
 const BRIGHT = 238;
@@ -166,9 +166,9 @@ export const PANEL_RAIL = {
   /** Icon left edge on the resting overview: just past the seam at 288. */
   x: 290,
   iconSize: 14,
-  /** Icon TOP for each of the four slots, evenly spaced between the spine
+  /** Icon TOP for each of the five slots, evenly spaced between the spine
    * and the footer; the icon's centre is 7px lower. */
-  slotY: [70, 118, 166, 214],
+  slotY: [70, 106, 142, 178, 214],
 } as const;
 
 /** What a swipe, a tap and a hold do on a panel tab. Truthful: all wired.
@@ -345,8 +345,13 @@ export function homeColumnLayout(view: HomeColumnView): HomeColumnMark[] {
     icon(0, y, 'messages', 1);
     words(0, COLUMN_TEXT_X, y, `${view.info.unread} unread`, 1);
   }
+  // 26 px rows fit four tabs in the 116 px tile; five (Notifications came
+  // back first, 2026-11-09) take 22 px rows from 6 px, the last underline
+  // ending at 115.
+  const pitch = Math.min(26, Math.floor((HOME_COLUMN.tileHeight - 28) / Math.max(1, view.tabs.length - 1)));
+  const railTop = pitch < 26 ? 6 : 8;
   view.tabs.forEach((tab, index) => {
-    const rowY = 8 + index * 26;
+    const rowY = railTop + index * pitch;
     const alpha = tab.active ? 1 : DIM_WORDS;
     icon(1, rowY, tab.tab, alpha);
     words(1, COLUMN_TEXT_X, rowY, tab.label, alpha);
@@ -416,43 +421,6 @@ function readerRuns(lines: readonly EvenReaderLine[], hint: string): ReaderRun[]
   return runs;
 }
 
-/**
- * The footer every firmware page carries. Even's hint region
- * (HudPageBuilder: `region(ContainerId.Hint, ...)`, y 253, 35 high, 4 px of
- * padding) holds one line of the firmware font at its own size, left-aligned,
- * at firmware brightness 1. A page drawn as a picture (the Planning month)
- * draws the same run from the glyph atlas, so its footer is that footer, not
- * a second style. Brightness 1 is the fourth of sixteen image levels, the
- * gray QUIET (68): on the simulator both light pixels at alpha 179 from
- * x = 4. (DIM_WORDS, 179 of 255, is that alpha read back as an image gray;
- * a gray of 179 lit at full alpha in the same capture, so it is not this
- * level.)
- */
-export const FOOTER_HINT = {
-  x: 4,
-  /** The cell top: the band's 253 plus the region's 4 px of padding. */
-  top: 257,
-  /** The band less its padding both sides, the width a native hint is cut to. */
-  maxWidth: 568,
-  scale: 1,
-  /** Full size is the firmware's own spacing; the extra gap is for the smaller scales. */
-  wordSpace: 0,
-  alpha: QUIET / 255,
-} as const;
-
-/** The footer's one run, shortened with "…" where the line is too long. */
-export function footerHintRun(hint: string): ReaderRun | undefined {
-  const text = fitOneLineEven(
-    hint.trim(), FOOTER_HINT.maxWidth, FOOTER_HINT.scale, '', FOOTER_HINT.wordSpace,
-  );
-  if (text.length === 0) return undefined;
-  return {
-    text, x: FOOTER_HINT.x, y: FOOTER_HINT.top,
-    width: evenTextWidth(text, FOOTER_HINT.scale, FOOTER_HINT.wordSpace),
-    alpha: FOOTER_HINT.alpha,
-  };
-}
-
 export type HudIconName =
   | 'messages'
   | 'notifications'
@@ -504,159 +472,6 @@ const ICON_SOURCES: Readonly<Record<HudIconName, string>> = {
   pomodoro: timerSvg,
   search: magnifyingGlassSvg,
 };
-
-/** A month is intentionally a real six-row grid on the lens, rather than a
- * web-calendar imitation. The Mac still owns the selected week/action row;
- * this parser only recognizes its established, source-backed title. */
-export interface PlanningMonth {
-  year: number;
-  month: number;
-  label: string;
-}
-
-const PLANNING_MONTHS = [
-  'JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
-  'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER',
-] as const;
-
-/**
- * Parse only the native Planning month title. Compatibility aliases remain
- * renderable because an older installed package may still send CALENDAR or
- * TASKS while the Mac service converges them on the same plan.
- */
-export function parsePlanningMonthTitle(title: string): PlanningMonth | undefined {
-  const match = title.trim().toUpperCase().match(
-    /^(?:PLANNING|CALENDAR|TASKS) · PLAN · ([A-Z]+) (\d{4})$/,
-  );
-  if (!match) return undefined;
-  const label = match[1] ?? '';
-  const year = Number(match[2]);
-  const month = PLANNING_MONTHS.indexOf(label as (typeof PLANNING_MONTHS)[number]);
-  // Date.UTC maps 0…99 to 1900…1999. EventKit can still render those dates
-  // in a normal list, but a month grid must never silently map them to a
-  // different century.
-  if (month < 0 || !Number.isInteger(year) || year < 100 || year > 9999) return undefined;
-  return { year, month, label };
-}
-
-export interface PlanningMonthDay {
-  day: number;
-  inMonth: boolean;
-}
-
-/** A fixed Monday-first 6 × 7 grid keeps the optical layout stable month to
- * month. UTC operations avoid a wearer time-zone or daylight-saving shift
- * changing the grid geometry in the renderer. */
-export function planningMonthDays(month: PlanningMonth): readonly PlanningMonthDay[] {
-  const first = planningMonthDateAt(month, 0);
-  const mondayOffset = (first.getUTCDay() + 6) % 7;
-  return Array.from({ length: 42 }, (_, offset) => {
-    const value = planningMonthDateAt(month, offset - mondayOffset);
-    return { day: value.getUTCDate(), inMonth: value.getUTCMonth() === month.month };
-  });
-}
-
-function planningMonthDateAt(month: PlanningMonth, dayOffset: number): Date {
-  return new Date(Date.UTC(month.year, month.month, 1 + dayOffset));
-}
-
-function isoUtcDay(value: Date): string {
-  return [
-    String(value.getUTCFullYear()).padStart(4, '0'),
-    String(value.getUTCMonth() + 1).padStart(2, '0'),
-    String(value.getUTCDate()).padStart(2, '0'),
-  ].join('-');
-}
-
-/** Accept the graphical treatment only when all bounded, redacted cells name
- * exactly the Month already shown in the title. A malformed/stale payload
- * safely uses the normal list rather than drawing misleading counts. */
-export function planningGridMatchesMonth(
-  month: PlanningMonth,
-  planningGrid: readonly PlanningGridCell[] | undefined,
-): planningGrid is readonly PlanningGridCell[] {
-  if (!planningGrid || planningGrid.length !== 42) return false;
-  const first = planningMonthDateAt(month, 0);
-  const mondayOffset = (first.getUTCDay() + 6) % 7;
-  return planningGrid.every((cell, offset) => {
-    const expected = planningMonthDateAt(month, offset - mondayOffset);
-    return cell.day === isoUtcDay(expected)
-      && cell.inMonth === (expected.getUTCMonth() === month.month);
-  });
-}
-
-/** Compact count labels preserve the Calendar/Reminders distinction without
- * exposing titles or identifiers on the month overview. */
-export function planningGridMarker(cell: PlanningGridCell): string {
-  const marker = [];
-  if (cell.eventCount > 0) marker.push(`E${cell.eventCount}`);
-  if (cell.reminderCount > 0) marker.push(`R${cell.reminderCount}`);
-  return marker.join(' ');
-}
-
-/** A selected calendar week needs a signal, not a seven-cell outline. */
-export function planningMonthSelectionRail(selectedWeek: number): {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-} {
-  const week = Math.min(5, Math.max(0, Math.floor(selectedWeek)));
-  return { x: 28, y: 75 + week * PITCH.week, width: 3, height: PITCH.week };
-}
-
-/** The graphical calendar owns only the six week action rows. Month controls
- * remain an ordinary list once selected, so they are never hidden behind the
- * grid or given an invented local interaction. */
-export function canRenderPlanningMonthGrid(
-  month: PlanningMonth | undefined,
-  planningGrid: readonly PlanningGridCell[] | undefined,
-  selectable: boolean,
-  selectedIndex: number,
-  itemCount: number,
-): boolean {
-  return month !== undefined
-    && planningGridMatchesMonth(month, planningGrid)
-    && selectable
-    && selectedIndex >= 0
-    && selectedIndex < 6
-    && itemCount >= 6;
-}
-
-/** Split Planning dashboard geometry: month grid left, day items right. */
-export const PLANNING_DASHBOARD = {
-  gridLeft: 10,
-  gridRight: 262,
-  headerBaselineY: 46,
-  firstRowCenterY: 70,
-  rowPitch: PITCH.monthBand,
-  dividerX: 276.5,
-  paneLeft: 292,
-  paneRight: 556,
-  paneHeadingY: 46,
-  paneFirstRowY: 72,
-} as const;
-
-/** Center of one date cell on the dashboard grid, index 0..41 Monday-first. */
-export function planningDashboardDateCell(index: number): { x: number; y: number } {
-  const column = ((index % 7) + 7) % 7;
-  const row = Math.max(0, Math.min(5, Math.floor(index / 7)));
-  const cellWidth = (PLANNING_DASHBOARD.gridRight - PLANNING_DASHBOARD.gridLeft) / 7;
-  return {
-    x: PLANNING_DASHBOARD.gridLeft + cellWidth * (column + 0.5),
-    y: PLANNING_DASHBOARD.firstRowCenterY + row * PLANNING_DASHBOARD.rowPitch,
-  };
-}
-
-/** The pane heading for a hovered ISO date, without timezone math. */
-export function planningDashboardHeading(dayIso: string): string {
-  const parsed = new Date(`${dayIso}T12:00:00Z`);
-  if (Number.isNaN(parsed.getTime())) return dayIso;
-  const weekdays = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
-  const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
-    'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
-  return `${weekdays[parsed.getUTCDay()]} ${months[parsed.getUTCMonth()]} ${parsed.getUTCDate()}`;
-}
 
 /** Transient receipts are a strip over the live page; failed/check/due stay full pages. */
 export function usesActionPillLayout(phase: ProductivityHudModel['phase']): boolean {
@@ -710,9 +525,9 @@ export function productivityPhaseLabel(phase: ProductivityHudModel['phase']): st
  * cancels an in-flight native write nor claims an unavailable post-save undo.
  */
 export function productivityActionHint(model: Pick<ProductivityHudModel, 'phase' | 'monitoringArmed'>): string {
-  if (model.phase === 'due') return 'tap: complete · 2x tap: Planning';
+  if (model.phase === 'due') return 'tap: complete · 2x tap: Reminders';
   if (model.phase === 'saved' && model.monitoringArmed) {
-    return '2x tap: Planning · monitoring next';
+    return '2x tap: Reminders · monitoring next';
   }
   if (
     model.phase === 'saved'
@@ -723,9 +538,9 @@ export function productivityActionHint(model: Pick<ProductivityHudModel, 'phase'
     || model.phase === 'cancelled'
     || model.phase === 'not_saved'
   ) {
-    return '2x tap: Planning · auto in 5s';
+    return '2x tap: Reminders · auto in 5s';
   }
-  return '2x tap: Planning';
+  return '2x tap: Reminders';
 }
 
 function gray(level: number): string {
@@ -1166,7 +981,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
         this.drawOverview(context, frame, icons);
         break;
       case 'list':
-        this.drawList(context, frame, await loadEvenFont());
+        // Every list is a firmware list (CapabilityMenu): a list frame draws
+        // only the shell.
         break;
       case 'navigation':
         this.drawNavigation(context, frame.navigation);
@@ -1241,6 +1057,40 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       }
       return { containerId, pixels, width, height };
     });
+  }
+
+  /** The Reminders page's next-up card as its one image (ReminderCard.ts). */
+  async renderReminderCard(view: ReminderCardView): Promise<readonly HudImageTile[]> {
+    const atlas = await loadEvenFont();
+    const width = REMINDER_CARD.width;
+    const height = REMINDER_CARD.height;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) throw new Error('2D canvas is unavailable');
+    context.fillStyle = '#000000';
+    context.fillRect(0, 0, width, height);
+    context.imageSmoothingEnabled = true;
+    for (const mark of reminderCardLayout(view)) {
+      if (mark.frame) {
+        context.strokeStyle = gray(mark.alpha * 255);
+        context.lineWidth = 2;
+        roundedRect(context, mark.x + 1, mark.y + 1, mark.width - 2, mark.height - 2, 10);
+        context.stroke();
+      } else if (mark.text) {
+        drawEvenText(context, atlas, mark.text, mark.x, mark.y, {
+          alpha: mark.alpha, fallbackFont: TYPE.statusMeta,
+          ...(mark.scale === undefined ? {} : { scale: mark.scale }),
+        });
+      }
+    }
+    const rgba = context.getImageData(0, 0, width, height).data;
+    const pixels = new Uint8Array(width * height);
+    for (let source = 0, target = 0; source < rgba.length; source += 4, target += 1) {
+      pixels[target] = Math.max(rgba[source] ?? 0, rgba[source + 1] ?? 0, rgba[source + 2] ?? 0);
+    }
+    return [{ containerId: ReminderCardId, pixels, width, height }];
   }
 
   /** The spine alone, as the two 288x24 halves of a firmware page's image
@@ -1444,14 +1294,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const paneX = layout.paneX;
     const paneWidth = layout.paneWidth;
 
-    // The tab rail, and the tab it has selected. Every tab draws its cached
-    // push, except that JOAT's own streams (a reply, a link state) take the
-    // first tab's pane while they have something to say — the way the text
-    // overview pins them until the wearer swipes.
+    // The tab rail, and the tab it has selected. Notifications IS the
+    // resting pane below; the other tabs draw their cached push instead.
     if (frame.rail) {
       this.drawTabRail(context, frame.rail.activeTab, icons);
-      const streams = overview.kind === 'content' ? Boolean(overview.main) : overview.title !== 'Ready';
-      if (frame.rail.activeTab !== 'planner' || !streams) {
+      if (frame.rail.activeTab !== 'notifications') {
         this.drawPanelPane(context, frame.rail, icons);
         context.fillStyle = gray(QUIET);
         context.font = TYPE.hint;
@@ -1597,6 +1444,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     const rail = PANEL_RAIL;
     const x = rail.x;
     const iconFor: Record<PanelTab, HTMLImageElement> = {
+      notifications: icons.notifications,
       planner: icons.planner,
       news: icons.news,
       pomodoro: icons.pomodoro,
@@ -1684,7 +1532,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     if (rail.activeTab === 'search' || rail.activeTab === 'quicknotes' || rail.activeTab === 'planner') {
       const planner = rail.activeTab === 'planner';
       const notes = rail.activeTab === 'quicknotes';
-      label(planner ? 'PLANNER' : notes ? 'QUICKNOTES' : 'SEARCH');
+      label(planner ? 'REMINDERS' : notes ? 'QUICKNOTES' : 'SEARCH');
       if (!content || (!content.headline && content.rows.length === 0)) {
         quiet([
           content?.empty
@@ -1748,277 +1596,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       );
       y += lines * LEAD.tight + 10;
     }
-  }
-
-  /** The Planning month is the one list that is pixels: a calendar grid has
-   * no firmware template. Alone it is the month grid; with the hovered day's
-   * items beside it, the split dashboard. Every other list is a firmware
-   * list (CapabilityMenu), so a frame without the month's grid draws only
-   * the shell. */
-  private drawList(
-    context: CanvasRenderingContext2D,
-    frame: Extract<HudVisualFrame, { kind: 'list' }>,
-    atlas: HTMLImageElement | undefined,
-  ): void {
-    const planningMonth = parsePlanningMonthTitle(frame.title);
-    const planningGrid = planningMonth && planningGridMatchesMonth(planningMonth, frame.planningGrid)
-      ? frame.planningGrid
-      : undefined;
-    if (!planningMonth || !planningGrid) return;
-    if (frame.planningPane) {
-      this.drawPlanningDashboard(context, frame, planningMonth, planningGrid, frame.planningPane, atlas);
-      return;
-    }
-    if (canRenderPlanningMonthGrid(
-      planningMonth, planningGrid, frame.selectable, frame.selectedIndex, frame.items.length,
-    )) {
-      this.drawPlanningMonth(context, frame, planningMonth, planningGrid, atlas);
-    }
-  }
-
-  /**
-   * Calendar is the one Planning surface that benefits from a dense spatial
-   * map. Each horizontal band is also one existing selectable week row, so
-   * TAP still follows the real Mac-owned action contract (month → week), not
-   * a local visual approximation with a second selection model.
-   */
-  private drawPlanningMonth(
-    context: CanvasRenderingContext2D,
-    frame: Extract<HudVisualFrame, { kind: 'list' }>,
-    month: PlanningMonth,
-    planningGrid: readonly PlanningGridCell[],
-    atlas: HTMLImageElement | undefined,
-  ): void {
-    const gridLeft = 37;
-    const gridRight = 539;
-    const cellWidth = (gridRight - gridLeft) / 7;
-    const gridTop = 84;
-    const rowHeight = PITCH.week;
-    const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-    const selectedWeek = frame.selectedIndex;
-
-    // The header's own words name the page; the month needs no title of its own.
-    context.textBaseline = 'middle';
-    context.textAlign = 'right';
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.meta;
-    context.fillText(`${month.label.slice(0, 3)} ${month.year} · E EVENT · R REMINDER`, 540, 48);
-
-    context.textAlign = 'center';
-    context.fillStyle = gray(CHROME);
-    context.font = TYPE.meta;
-    weekdays.forEach((weekday, column) => {
-      context.fillText(weekday, gridLeft + cellWidth * (column + 0.5), 68);
-    });
-    context.strokeStyle = gray(HAIRLINE);
-    context.lineWidth = 1;
-    context.beginPath();
-    context.moveTo(gridLeft, 75.5);
-    context.lineTo(gridRight, 75.5);
-    context.stroke();
-
-    const days = planningMonthDays(month);
-    for (let row = 0; row < 6; row += 1) {
-      const top = gridTop + row * rowHeight;
-      if (row === selectedWeek) {
-        const rail = planningMonthSelectionRail(selectedWeek);
-        context.fillStyle = gray(BRIGHT);
-        context.fillRect(rail.x, rail.y, rail.width, rail.height);
-      } else {
-        context.strokeStyle = gray(HAIRLINE);
-        context.lineWidth = 0.7;
-        context.beginPath();
-        context.moveTo(gridLeft, top + 10.5);
-        context.lineTo(gridRight, top + 10.5);
-        context.stroke();
-      }
-      for (let column = 0; column < 7; column += 1) {
-        const day = days[row * 7 + column];
-        if (!day) continue;
-        const cell = planningGrid[row * 7 + column];
-        const level = day.inMonth
-          ? row === selectedWeek ? BRIGHT : SUPPORT
-          : QUIET;
-        context.fillStyle = gray(level);
-        context.font = mono(day.inMonth ? 13 : 11);
-        const x = gridLeft + cellWidth * (column + 0.5);
-        context.fillText(String(day.day), x, top - 1);
-        const marker = cell ? planningGridMarker(cell) : '';
-        if (marker) {
-          context.fillStyle = gray(row === selectedWeek ? BRIGHT : SUPPORT);
-          context.font = TYPE.microMono;
-          context.fillText(marker, x, top + 9);
-        }
-      }
-    }
-
-    const selectedSummary = frame.items[selectedWeek]?.replace(/^.*? · /, '') ?? '';
-    context.fillStyle = gray(SUPPORT);
-    context.font = TYPE.label;
-    context.fillText(
-      selectedSummary ? `TAP WEEK · ${upper(selectedSummary)}` : 'TAP WEEK · AGENDA',
-      288,
-      243,
-    );
-    const nextMonth = upper(frame.items[7]?.replace(/^[‹›\s]+/, '') ?? 'MONTH CONTROLS');
-    context.fillStyle = gray(CHROME);
-    context.font = TYPE.microMono;
-    this.fitText(context, `WEEK ${selectedWeek + 1}/6 · NEXT ${nextMonth}`, 288, 257, 500);
-    this.drawFooterHint(context, atlas, frame.hint);
-  }
-
-  /**
-   * One screen instead of the month -> week -> day chain: the grid owns the
-   * left half, the hovered day's real items own the right, and a tap hands
-   * input focus across the divider. Hover is plugin-local — repainting from
-   * the entries that arrived WITH the month is what makes scrolling dates
-   * feel instant on a serialized BLE lane.
-   */
-  private drawPlanningDashboard(
-    context: CanvasRenderingContext2D,
-    frame: Extract<HudVisualFrame, { kind: 'list' }>,
-    month: PlanningMonth,
-    planningGrid: readonly PlanningGridCell[],
-    pane: { dateIndex: number; focused: boolean; itemIndex: number },
-    atlas: HTMLImageElement | undefined,
-  ): void {
-    const geometry = PLANNING_DASHBOARD;
-    const cellWidth = (geometry.gridRight - geometry.gridLeft) / 7;
-    const dateIndex = Math.max(0, Math.min(41, pane.dateIndex));
-    const hovered = planningGrid[dateIndex];
-
-    // The header's own words name the page; the month needs no title of its own.
-    context.textBaseline = 'middle';
-    context.textAlign = 'right';
-    context.fillStyle = gray(CHROME);
-    context.font = TYPE.meta;
-    context.fillText(
-      `${month.label.slice(0, 3)} ${month.year}`,
-      geometry.gridRight,
-      geometry.headerBaselineY - 14,
-    );
-
-    context.textAlign = 'center';
-    context.fillStyle = gray(CHROME);
-    context.font = TYPE.meta;
-    const weekdays = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-    weekdays.forEach((weekday, column) => {
-      context.fillText(
-        weekday, geometry.gridLeft + cellWidth * (column + 0.5), geometry.headerBaselineY,
-      );
-    });
-
-    const days = planningMonthDays(month);
-    for (let index = 0; index < 42; index += 1) {
-      const day = days[index];
-      const cell = planningGrid[index];
-      if (!day || !cell) continue;
-      const center = planningDashboardDateCell(index);
-      const isHovered = index === dateIndex;
-      if (isHovered) {
-        // The hover outline dims while the right pane owns input, so exactly
-        // one place on the glass reads as "yours" at a time.
-        context.strokeStyle = gray(pane.focused ? CHROME : BRIGHT);
-        context.lineWidth = 1;
-        roundedRect(context, center.x - 15, center.y - 11, 30, 22, 5);
-        context.stroke();
-      }
-      const busy = cell.eventCount + cell.reminderCount > 0;
-      context.fillStyle = gray(
-        isHovered ? BRIGHT : day.inMonth ? (busy ? SUPPORT : CHROME) : QUIET,
-      );
-      context.font = mono(day.inMonth ? 13 : 11);
-      context.fillText(String(day.day), center.x, center.y);
-    }
-
-    context.strokeStyle = gray(HAIRLINE);
-    context.lineWidth = 1;
-    context.beginPath();
-    context.moveTo(geometry.dividerX, 36);
-    context.lineTo(geometry.dividerX, 250);
-    context.stroke();
-
-    // RIGHT pane: the hovered day's items from the month payload.
-    const paneWidth = geometry.paneRight - geometry.paneLeft;
-    context.textAlign = 'left';
-    context.fillStyle = gray(pane.focused ? BRIGHT : SUPPORT);
-    context.font = TYPE.label;
-    context.fillText(
-      hovered ? planningDashboardHeading(hovered.day) : '',
-      geometry.paneLeft,
-      geometry.paneHeadingY,
-    );
-
-    const entries = hovered?.entries ?? [];
-    // The final choice is always reachable, even on empty dates or dates
-    // whose payload only previews the first six entries.
-    const choices = [...entries, undefined];
-    const capacity = frame.actionOverlay ? 2 : 3;
-    const start = Math.max(0, Math.min(pane.itemIndex - 1, choices.length - capacity));
-    choices.slice(start, start + capacity).forEach((entry, offset) => {
-      const index = start + offset;
-      const y = geometry.paneFirstRowY + offset * 52;
-      const selected = pane.focused && index === pane.itemIndex;
-      if (selected) {
-        context.strokeStyle = gray(BRIGHT);
-        context.lineWidth = 1;
-        roundedRect(context, geometry.paneLeft - 7, y - 11, paneWidth + 7, 49, 4);
-        context.stroke();
-      }
-      if (!entry) {
-        context.font = selected ? TYPE.assistant : TYPE.body;
-        context.fillStyle = gray(selected ? BRIGHT : CHROME);
-        context.fillText('Open day', geometry.paneLeft + 12, y);
-        context.font = TYPE.meta;
-        context.fillStyle = gray(CHROME);
-        context.fillText(entries.length ? 'Full schedule & views' : 'Free · schedule & views', geometry.paneLeft + 12, y + 18);
-        return;
-      }
-      const x = geometry.paneLeft + 12;
-      if (entry.kind === 'reminder') {
-        context.strokeStyle = gray(selected ? BRIGHT : CHROME);
-        context.lineWidth = 1;
-        context.beginPath();
-        context.arc(geometry.paneLeft + 3, y, 3, 0, Math.PI * 2);
-        context.stroke();
-      }
-      context.font = selected ? TYPE.assistant : TYPE.body;
-      context.fillStyle = gray(selected ? BRIGHT : CHROME);
-      const lines = wrapHudText(entry.title, geometry.paneRight - x - 4, value => context.measureText(value).width);
-      lines.slice(0, 2).forEach((line, i) => {
-        this.fitText(context, i === 1 && lines.length > 2 ? `${line}…` : line, x, y + i * LEAD.body, geometry.paneRight - x - 4);
-      });
-      context.font = TYPE.meta;
-      context.fillStyle = gray(CHROME);
-      context.fillText(entry.time, x, y + (Math.min(2, lines.length) - 1) * LEAD.body + 16);
-    });
-    const total = (hovered?.eventCount ?? 0) + (hovered?.reminderCount ?? 0);
-    if (choices.length > capacity) {
-      context.fillStyle = gray(CHROME);
-      context.font = TYPE.micro;
-      context.fillText(`${start + 1}–${Math.min(choices.length, start + capacity)} of ${choices.length}`, geometry.paneLeft, 247);
-    } else if (total > entries.length) {
-      context.fillStyle = gray(CHROME);
-      context.font = TYPE.micro;
-      context.fillText(`+${total - entries.length} more`, geometry.paneLeft, 247);
-    }
-
-    this.drawFooterHint(context, atlas, frame.hint);
-    void paneWidth;
-  }
-
-  /** The footer every firmware page carries, drawn from the glyph atlas (FOOTER_HINT). */
-  private drawFooterHint(
-    context: CanvasRenderingContext2D,
-    atlas: HTMLImageElement | undefined,
-    hint: string,
-  ): void {
-    const run = footerHintRun(hint);
-    if (!run) return;
-    drawEvenText(context, atlas, run.text, run.x, run.y, {
-      alpha: run.alpha, fallbackFont: TYPE.hint, scale: FOOTER_HINT.scale,
-      wordSpace: FOOTER_HINT.wordSpace,
-    });
   }
 
   /** Strip over the live page; black-fills its own rect so rows beneath can't bleed through. */

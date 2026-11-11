@@ -126,12 +126,15 @@ describe('Home as firmware text', () => {
     const { hud, pages, upgrades, canvas } = harness();
     await hud.acceptPanel({ kind: 'hud.panel', tab: 'news', revision: 1, rows: ['[1m] Fresh headline · BBC'] });
     await hud.setStatusModel(status('9:41'));
+    expect(await hud.stepTab(1)).toBe('planner');
+    upgrades.length = 0;
     const rebuilds = pages.length;
     expect(await hud.stepTab(1)).toBe('news');
     expect(pages).toHaveLength(rebuilds);
     expect(upgrades.map((u) => u.containerName).sort()).toEqual(['pane', 'pane-l', 'tabs']);
     const rail = upgrades.find((u) => u.containerName === 'tabs')!.content!.split('\n');
-    expect(rail[1]).toBe('> NEWS');
+    expect(rail).toHaveLength(5);
+    expect(rail[2]).toBe('> NEWS');
     // Proportional font: every label starts at the same x.
     const indent = (row: string) => getTextWidth(row.slice(0, row.length - row.trimStart().replace(/^> /, '').length));
     expect(new Set(rail.map(indent)).size).toBe(1);
@@ -170,14 +173,16 @@ describe('Home as firmware text', () => {
     // lit tab (CapabilityMenu.openActiveTab).
     expect(h.hud.hasVisibleNotification()).toBe(false);
     expect(h.hud.visibleNotificationId()).toBeUndefined();
+    expect(await h.hud.stepTab(1)).toBe('planner');
     expect(await h.hud.stepTab(1)).toBe('news');
     expect(pane(h)).toContain('Headline one');
     expect(h.hud.activeTab()).toBe('news');
   });
 
-  it('the first tab is the Planner: the open reminders, the time or day in the label column', async () => {
+  it('the second tab is Reminders: the open reminders, the time or day in the label column', async () => {
     const h = harness();
     await h.hud.setStatusModel(status('9:41'));
+    expect(await h.hud.stepTab(1)).toBe('planner');
     // Before the Mac has pushed anything the tab says so, rather than going blank.
     expect(pane(h).split('\n')[0]).toBe('Waiting for JOAT on your Mac…');
     await h.hud.acceptPanel({
@@ -189,22 +194,25 @@ describe('Home as firmware text', () => {
       'Send the Q3 invoice', 'Call the bank', 'Run the alarm history script', '+2 more',
     ]);
     expect(pane(h, 'pane-l').split('\n').slice(0, 3)).toEqual(['Late', '09:00', 'Tmrw']);
-    // An empty list says what it means and how to open Planning.
+    // An empty list says what it means and how to open Reminders.
     await h.hud.acceptPanel({
       kind: 'hud.panel', tab: 'planner', revision: 2, rows: [], empty: 'Nothing due this week.',
     });
-    expect(pane(h).split('\n').slice(0, 2)).toEqual(['Nothing due this week.', 'tap: open planning']);
+    expect(pane(h).split('\n').slice(0, 2)).toEqual(['Nothing due this week.', 'tap: open reminders']);
   });
 
-  it('unread notifications no longer list on the overview: they live in the menu now', async () => {
+  it('the first tab is Notifications: the unread cards, newest first, the app in the label column', async () => {
     const h = harness();
     h.hud.acceptNotifications([
       { id: 'a'.repeat(32), app: 'Messages', sender: 'Fixture One', body: 'First unread\nbody', at: 2, urgent: false },
       { id: 'b'.repeat(32), app: 'Mail', sender: 'Fixture Two', body: 'Second unread body', at: 1, urgent: false },
     ]);
     await h.hud.setStatusModel(status('9:41'));
-    expect(pane(h)).not.toContain('Fixture One');
-    expect(pane(h)).not.toContain('tap: read');
+    expect(h.hud.activeTab()).toBe('notifications');
+    expect(pane(h).split('\n').slice(0, 3)).toEqual([
+      'Fixture One: First unread body', 'Fixture Two: Second unread body', 'tap: read',
+    ]);
+    expect(pane(h, 'pane-l').split('\n').slice(0, 2)).toEqual(['Messages', 'Mail']);
     // The unread count still shows in Home's info column, from the ambient push.
     await h.hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
     expect(h.shown('info')).toContain('2 unread');
@@ -218,6 +226,7 @@ describe('Home as firmware text', () => {
     // A swipe up on the first tab moves nothing on the rail, yet shows the tab.
     expect(await h.hud.stepTab(-1)).toBeUndefined();
     expect(pane(h)).not.toContain('Meeting');
+    expect(await h.hud.stepTab(1)).toBe('planner');
     expect(await h.hud.stepTab(1)).toBe('news');
     expect(pane(h)).toContain('Headline one');
     // New Main content heads the pane again.
@@ -242,6 +251,7 @@ describe('Home as firmware text', () => {
     await hud.acceptPanel({ kind: 'hud.panel', tab: 'pomodoro', revision: 1, rows: [],
       pomodoro: { phase: 'focus', running: true, endsAtUnixMs: now + 10 * 60_000, remainingMs: 10 * 60_000,
         lengthMs: 25 * 60_000, completed: 1 } });
+    await hud.stepTab(1);
     await hud.stepTab(1);
     expect(await hud.stepTab(1)).toBe('pomodoro');
     const pane = (upgrades.filter((u) => u.containerName === 'pane').pop()?.content
@@ -323,13 +333,13 @@ describe('Home with its column as images (HomeImages.ts)', () => {
     const rebuilds = pages.length;
     order.length = 0;
 
-    expect(await hud.stepTab(1)).toBe('news');
+    expect(await hud.stepTab(1)).toBe('planner');
     await vi.runAllTimersAsync();
     expect(pages).toHaveLength(rebuilds);
     expect(order.indexOf('upgrade:pane')).toBeGreaterThanOrEqual(0);
     expect(order.indexOf('column')).toBeGreaterThan(order.indexOf('upgrade:pane'));
     const view = columns[columns.length - 1] as { tabs: { tab: string; active: boolean }[] };
-    expect(view.tabs.find((tab) => tab.active)?.tab).toBe('news');
+    expect(view.tabs.find((tab) => tab.active)?.tab).toBe('planner');
   });
 
   it('opens JOAT\'s box over Home as drawn: the column stays beneath and is repainted above the box', async () => {

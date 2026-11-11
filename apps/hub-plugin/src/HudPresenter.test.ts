@@ -733,41 +733,22 @@ describe('HudPresenter modal surfaces', () => {
     expect(frames[frames.length - 1]).toMatchObject({ micOn: true });
   });
 
-  it('passes an exact redacted Planning grid to the visual list; a partial grid is a firmware list', async () => {
+  it('draws a month-titled Planning list as a firmware list, never a visual list', async () => {
     const frames: HudVisualFrame[] = [];
     const visual = {
       paint: async (frame: HudVisualFrame) => { frames.push(frame); return true; },
       withPageTransition: async (replace: () => Promise<boolean>) => replace(),
     } as HudFramePainter;
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
-    const planningGrid = Array.from({ length: 42 }, (_, index) => {
-      const value = new Date(Date.UTC(2026, 7, 31 + index));
-      return {
-        day: value.toISOString().slice(0, 10),
-        eventCount: index === 1 ? 1 : 0,
-        reminderCount: index === 1 ? 1 : 0,
-        inMonth: value.getUTCMonth() === 8,
-      };
-    });
 
     await hud.showList(['AUG 31–SEP 6 · 2 planned'], {
       title: 'PLANNING · PLAN · SEPTEMBER 2026',
       selectable: true,
-      planningGrid,
     });
-    const complete = frames[frames.length - 1]!;
-    expect(complete.kind).toBe('list');
-    if (complete.kind === 'list') {
-      expect(complete.planningGrid).toEqual(planningGrid);
-    }
-
-    await hud.showList(['AUG 31–SEP 6 · 2 planned'], {
-      title: 'PLANNING · PLAN · SEPTEMBER 2026',
-      selectable: true,
-      planningGrid: planningGrid.slice(0, 41),
-    });
-    // Without a whole grid there is nothing to draw: the page is Even's list.
-    expect(frames[frames.length - 1]).toBe(complete);
+    // The month calendar is gone: there is nothing to draw, the page is Even's list.
+    expect(frames.some((frame) => frame.kind === 'list')).toBe(false);
+    const page = rebuiltPages[rebuiltPages.length - 1] as { listObject?: unknown[] };
+    expect(page.listObject ?? []).toHaveLength(1);
   });
 
   it('keeps a plain Mac reply and its appended stream in the visual overview frame', async () => {

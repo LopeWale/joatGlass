@@ -4,7 +4,9 @@ import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder, READER_TEXT_PAGE } from './HudPageBuilder';
 import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
 import type { HudVisualFrame } from './HudVisualSurface';
-import { QUICKNOTES_UNDO_MENU_ID, type ProductivityHudModel } from './types';
+import {
+  QUICKNOTES_CUES_MENU_ID, QUICKNOTES_PREP_MENU_ID, QUICKNOTES_UNDO_MENU_ID, type ProductivityHudModel,
+} from './types';
 
 // These tests pin the IMAGE overview (VITE_NATIVE_OVERVIEW=0). The text
 // overview, which is Home by default, has its own: HudPresenter.textOverview.test.ts.
@@ -254,11 +256,46 @@ describe('the page of an open QuickNote — Even\'s "New note" (FEAT-002)', () =
     expect(rows[rows.length - 1]).toContain('word40 and more words');
   });
 
+  it('holds the page still while the wearer reads back, then follows the newest words again', async () => {
+    const r = rig();
+    expect(await r.hud.showList(['Listening…'], live)).toBe(true);
+    const many = Array.from({ length: 30 }, (_, i) => `Sentence number ${i + 1} of a long meeting.\n`);
+    expect(await r.hud.updateLiveTextPage(many, live)).toBe(true);
+    const state = () => (r.hud as unknown as {
+      nativeTextPage?: { page: number; pages: string[]; body: string; hint: string };
+    }).nativeTextPage!;
+    const last = state().pages.length - 1;
+    r.reset();
+    expect(r.hud.scrollTextPage('up')).toBe(true);
+    await vi.waitFor(() => expect(r.writes()).toEqual(['upgrade:main', 'upgrade:hint']));
+    expect(state().page).toBe(last - 1);
+    const reading = state().body;
+    r.reset();
+
+    // The clock ticks and new words land: only the footer moves.
+    const more = [...many, 'A brand new sentence at the very end.\n'];
+    expect(await r.hud.updateLiveTextPage(more, { ...live, hint: '● REC 00:09 · tap: AI cues · left x2: finish' }))
+      .toBe(true);
+    expect(r.writes()).toEqual(['upgrade:hint']);
+    expect(state().page).toBe(last - 1);
+    expect(state().body).toBe(reading);
+
+    // Down to the held page's end, then one more swipe: the newest words.
+    expect(r.hud.scrollTextPage('down')).toBe(true);
+    await vi.waitFor(() => expect(state().page).toBe(last));
+    expect(r.hud.scrollTextPage('down')).toBe(true);
+    await vi.waitFor(() => expect(state().body).toContain('A brand new sentence at the very end.'));
+    expect(state().page).toBe(state().pages.length - 1);
+  });
+
   it("carries Undo last input first in the glasses' menu (Even's QuickNote menu)", async () => {
     const r = rig();
     expect(await r.hud.showList(['Listening…'], live)).toBe(true);
     const items = r.rebuilds[r.rebuilds.length - 1]?.menuObject?.menuItems ?? [];
     expect(items[0]).toMatchObject({ itemID: QUICKNOTES_UNDO_MENU_ID, itemName: 'Undo last input' });
+    // Then Conversate's AI cues and Prep notes (2026-10-30).
+    expect(items[1]).toMatchObject({ itemID: QUICKNOTES_CUES_MENU_ID, itemName: 'AI cues' });
+    expect(items[2]).toMatchObject({ itemID: QUICKNOTES_PREP_MENU_ID, itemName: 'Prep notes' });
     expect(items.map((item: { itemName?: string }) => item.itemName)).toContain('Search');
 
     // Any other page keeps the plain capability menu.

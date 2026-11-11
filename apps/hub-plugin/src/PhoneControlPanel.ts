@@ -63,7 +63,9 @@ export class PhoneControlPanel {
       ? 'Reconnect here to make this phone display active again.'
       : state === 'connected'
         ? 'The Mac connection is authenticated. AI and feature availability still depend on the services configured in that Mac’s JOAT app.'
-        : 'Open JOAT on the Mac shown here and keep it awake. For a Tailscale connection, connect both devices to Tailscale. Check pairing approval in the Mac app, then reconnect.');
+        : isPhoneBrain(link.activeUrl)
+          ? 'Open JOAT Brain on this iPhone, then reconnect.'
+          : 'Open JOAT on the Mac shown here and keep it awake. For a Tailscale connection, connect both devices to Tailscale. Check pairing approval in the Mac app, then reconnect.');
     if (this.connect) this.connect.disabled = this.switching || !this.options.canReconnect();
     if (this.connect) this.connect.textContent = this.switching ? 'Connecting…'
       : this.brain?.value === link.activeUrl && state === 'connected' ? 'Reconnect' : 'Connect';
@@ -113,7 +115,17 @@ export class PhoneControlPanel {
   }
 }
 
+/** JOAT Brain on the phone itself (apps/ios-companion), the lab packages'
+ * loopback candidate. */
+function isPhoneBrain(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'ws:' && (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost');
+  } catch { return false; }
+}
+
 function brainLabel(url: string): string {
+  if (isPhoneBrain(url)) return 'This iPhone · JOAT Brain';
   try {
     const parsed = new URL(url);
     const host = parsed.hostname;

@@ -27,7 +27,7 @@ SIM = str(Path.home() / ".local/bin/evenhub-simulator")
 BASE = "http://127.0.0.1:9898"
 DEV = "http://localhost:5190/"
 DEFAULT_STATES = [
-    "calendar",            # the split Planning dashboard
+    "reminders",           # next-up card left, native list right
     "calendar-saved",      # outcome pill, calendar domain
     "reminders-saved",     # outcome pill, reminders domain
     "quicknotes",

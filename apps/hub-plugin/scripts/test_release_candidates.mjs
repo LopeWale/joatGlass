@@ -26,6 +26,37 @@ test('rejects raw development transport', () => {
   );
 });
 
+test('a phone-local loopback brain is accepted only when allowed, and only on /glasses', () => {
+  // Without the flag the loopback candidate is refused like any plain ws,
+  // and the message says which setting a lab pack needs.
+  assert.throws(
+    () => validateReleaseCandidates('ws://127.0.0.1:8787/glasses'),
+    /must use wss.*JOAT_RELEASE_ALLOW_LOOPBACK/,
+  );
+  // With it, loopback rides alongside the builder's Macs, in the order given.
+  assert.deepEqual(
+    validateReleaseCandidates(
+      'ws://127.0.0.1:8787/glasses,wss://home-mac.example-tailnet.ts.net/glasses',
+      { allowLoopback: true },
+    ),
+    ['ws://127.0.0.1:8787/glasses', 'wss://home-mac.example-tailnet.ts.net/glasses'],
+  );
+  assert.deepEqual(
+    validateReleaseCandidates('ws://localhost:8787/glasses', { allowLoopback: true }),
+    ['ws://localhost:8787/glasses'],
+  );
+  // The flag opens loopback only: a LAN host in plain ws is still refused,
+  // and the path rule still applies.
+  assert.throws(
+    () => validateReleaseCandidates('ws://laptop-mac.local:8787/glasses', { allowLoopback: true }),
+    /must use wss/,
+  );
+  assert.throws(
+    () => validateReleaseCandidates('ws://127.0.0.1:8787/other', { allowLoopback: true }),
+    /origin-local \/glasses URL/,
+  );
+});
+
 test('rejects an alternate path or a duplicate endpoint', () => {
   assert.throws(
     () => validateReleaseCandidates('wss://home-mac.example-tailnet.ts.net/other'),

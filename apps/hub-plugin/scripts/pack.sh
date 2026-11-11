@@ -82,6 +82,20 @@ fi
 # VITE_MAC_WS_URL route.
 JOAT_PACKAGE_ID=$(release_setting JOAT_PACKAGE_ID)
 JOAT_RELEASE_WS_URLS=$(release_setting JOAT_RELEASE_WS_URLS)
+# iPhone-as-brain lab: a ws://127.0.0.1:8787/glasses candidate names JOAT
+# Brain on the phone itself (apps/ios-companion). Opt-in per pack, so a
+# release never carries a plain-ws origin by accident.
+export JOAT_RELEASE_ALLOW_LOOPBACK=$(release_setting JOAT_RELEASE_ALLOW_LOOPBACK)
+if [[ "$JOAT_RELEASE_ALLOW_LOOPBACK" == "1" ]]; then
+  print -u2 "WARNING: lab package — a phone-local ws://127.0.0.1 brain is allowed in the allowlist"
+  # A lab package always offers JOAT Brain on the phone itself, first: 0.1.140
+  # was packed with the flag but only the Macs in JOAT_RELEASE_WS_URLS, so
+  # the phone's brain was not a choice at all (2026-10-29).
+  loopback_brain='ws://127.0.0.1:8787/glasses'
+  if [[ ",$JOAT_RELEASE_WS_URLS," != *",$loopback_brain,"* ]]; then
+    JOAT_RELEASE_WS_URLS="$loopback_brain,$JOAT_RELEASE_WS_URLS"
+  fi
+fi
 if [[ -z "$JOAT_PACKAGE_ID" || -z "$JOAT_RELEASE_WS_URLS" ]]; then
   print -u2 "set JOAT_PACKAGE_ID and JOAT_RELEASE_WS_URLS in apps/hub-plugin/.env (see .env.example), for example:"
   print -u2 "  JOAT_PACKAGE_ID=com.yourname.joat"

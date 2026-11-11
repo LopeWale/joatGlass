@@ -21,23 +21,24 @@ const news = (revision: number, rows: string[]): HudPanelMessage => ({
 });
 
 describe('PanelRail', () => {
-  it('starts on the Planner, the tab the resting screen shows (Notifications moved to the menu)', () => {
-    expect(new PanelRail().active()).toBe('planner');
-    expect(PANEL_TABS[0]).toBe('planner');
-    expect(PANEL_TABS).not.toContain('notifications');
+  it('starts on Notifications, the tab the resting screen shows; Reminders is second', () => {
+    expect(new PanelRail().active()).toBe('notifications');
+    expect(PANEL_TABS[0]).toBe('notifications');
+    expect(PANEL_TABS[1]).toBe('planner');
   });
 
   it('steps along the rail and clamps at both ends instead of wrapping', () => {
     const rail = new PanelRail();
     expect(rail.step(-1)).toBeUndefined();
-    expect(rail.active()).toBe('planner');
+    expect(rail.active()).toBe('notifications');
+    expect(rail.step(1)).toBe('planner');
     expect(rail.step(1)).toBe('news');
     expect(rail.step(1)).toBe('pomodoro');
     expect(rail.step(1)).toBe('quicknotes');
     expect(rail.step(1)).toBeUndefined();
     expect(rail.active()).toBe('quicknotes');
     rail.reset();
-    expect(rail.active()).toBe('planner');
+    expect(rail.active()).toBe('notifications');
   });
 
   it('caches the newest push per tab and mints the revision a tap must echo', () => {
@@ -58,7 +59,7 @@ describe('PanelRail', () => {
   it('describes the active tab for the renderer without leaking other tabs', () => {
     const rail = new PanelRail();
     rail.accept(news(1, ['[2m] First · BBC']));
-    expect(rail.visual()).toEqual({ activeTab: 'planner' });
+    expect(rail.visual()).toEqual({ activeTab: 'notifications' });
     rail.setActive('news');
     expect(rail.visual()).toMatchObject({
       activeTab: 'news', content: { tab: 'news', rows: ['[2m] First · BBC'] },

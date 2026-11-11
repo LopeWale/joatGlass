@@ -12,11 +12,6 @@ import {
   hudDisplayTitle,
   parseHudLabeledValue,
   parseHudListItem,
-  canRenderPlanningMonthGrid,
-  planningGridMarker,
-  planningGridMatchesMonth,
-  parsePlanningMonthTitle,
-  planningMonthDays,
   productivityActionHint,
   resolveHudOverview,
 } from './HudCanvasRenderer';
@@ -34,15 +29,15 @@ describe('productivity escape copy', () => {
   // GesturePolicy routes a double-click as Back on every source (temple or
   // ring), so the escape is named by the gesture, not by a hand.
   it.each([
-    [{ phase: 'verifying', monitoringArmed: false }, '2x tap: Planning'],
-    [{ phase: 'saved', monitoringArmed: true }, '2x tap: Planning · monitoring next'],
-    [{ phase: 'monitoring', monitoringArmed: false }, '2x tap: Planning · auto in 5s'],
-    [{ phase: 'completed', monitoringArmed: false }, '2x tap: Planning · auto in 5s'],
-    [{ phase: 'failed', monitoringArmed: false }, '2x tap: Planning · auto in 5s'],
-    [{ phase: 'check', monitoringArmed: false }, '2x tap: Planning · auto in 5s'],
-    [{ phase: 'cancelled', monitoringArmed: false }, '2x tap: Planning · auto in 5s'],
-    [{ phase: 'not_saved', monitoringArmed: false }, '2x tap: Planning · auto in 5s'],
-    [{ phase: 'due', monitoringArmed: false }, 'tap: complete · 2x tap: Planning'],
+    [{ phase: 'verifying', monitoringArmed: false }, '2x tap: Reminders'],
+    [{ phase: 'saved', monitoringArmed: true }, '2x tap: Reminders · monitoring next'],
+    [{ phase: 'monitoring', monitoringArmed: false }, '2x tap: Reminders · auto in 5s'],
+    [{ phase: 'completed', monitoringArmed: false }, '2x tap: Reminders · auto in 5s'],
+    [{ phase: 'failed', monitoringArmed: false }, '2x tap: Reminders · auto in 5s'],
+    [{ phase: 'check', monitoringArmed: false }, '2x tap: Reminders · auto in 5s'],
+    [{ phase: 'cancelled', monitoringArmed: false }, '2x tap: Reminders · auto in 5s'],
+    [{ phase: 'not_saved', monitoringArmed: false }, '2x tap: Reminders · auto in 5s'],
+    [{ phase: 'due', monitoringArmed: false }, 'tap: complete · 2x tap: Reminders'],
   ] as const)('keeps %o visibly escapable', (model, hint) => {
     expect(productivityActionHint(model)).toBe(hint);
   });
@@ -73,155 +68,6 @@ describe('selected visual geometry', () => {
     expect(hudDisplayTitle('PLANNING · PLAN · TUE SEP 1')).toBe('Planning · Day · Tue Sep 1');
     expect(hudDisplayTitle('PLANNING · PLAN · SETUP')).toBe('Planning · Setup');
     expect(hudDisplayTitle('Already Mixed')).toBe('Already Mixed');
-  });
-});
-
-describe('Planning month geometry', () => {
-  it('recognizes the native Planning month title and creates a stable Monday-first grid', () => {
-    const month = parsePlanningMonthTitle('PLANNING · PLAN · SEPTEMBER 2026');
-
-    expect(month).toEqual({ year: 2026, month: 8, label: 'SEPTEMBER' });
-    expect(planningMonthDays(month!).slice(0, 7)).toEqual([
-      { day: 31, inMonth: false },
-      { day: 1, inMonth: true },
-      { day: 2, inMonth: true },
-      { day: 3, inMonth: true },
-      { day: 4, inMonth: true },
-      { day: 5, inMonth: true },
-      { day: 6, inMonth: true },
-    ]);
-    expect(planningMonthDays(month!)).toHaveLength(42);
-    const days = planningMonthDays(month!);
-    expect(days[days.length - 1]).toEqual({ day: 11, inMonth: false });
-
-    const planningGrid = Array.from({ length: 42 }, (_, index) => {
-      const value = new Date(Date.UTC(2026, 7, 31 + index));
-      return {
-        day: value.toISOString().slice(0, 10),
-        eventCount: index === 1 ? 1 : 0,
-        reminderCount: index === 1 ? 1 : 0,
-        inMonth: value.getUTCMonth() === 8,
-      };
-    });
-    expect(planningGridMatchesMonth(month!, planningGrid)).toBe(true);
-    expect(planningGridMarker(planningGrid[1]!)).toBe('E1 R1');
-    expect(planningGridMarker(planningGrid[0]!)).toBe('');
-    expect(canRenderPlanningMonthGrid(month, planningGrid, true, 0, 11)).toBe(true);
-    expect(canRenderPlanningMonthGrid(month, planningGrid, true, 5, 11)).toBe(true);
-    expect(canRenderPlanningMonthGrid(month, planningGrid, true, 6, 11)).toBe(false);
-    expect(planningGridMatchesMonth(month!, [
-      ...planningGrid.slice(0, 1),
-      { ...planningGrid[1]!, day: '2026-09-02' },
-      ...planningGrid.slice(2),
-    ])).toBe(false);
-  });
-
-  it('does not mistake a week, day, or arbitrary list for a calendar month', () => {
-    expect(parsePlanningMonthTitle('PLANNING · PLAN · SEP 1–7')).toBeUndefined();
-    expect(parsePlanningMonthTitle('PLANNING · PLAN · TUE SEP 1')).toBeUndefined();
-    expect(parsePlanningMonthTitle('SEPTEMBER 2026')).toBeUndefined();
-    expect(parsePlanningMonthTitle('PLANNING · PLAN · JANUARY 0099')).toBeUndefined();
-  });
-
-  it('marks the selected month week with a slim rail instead of an enclosing box', () => {
-    expect(HudCanvas.planningMonthSelectionRail(3)).toEqual({
-      x: 28,
-      y: 141,
-      width: 3,
-      height: 22,
-    });
-  });
-});
-
-/** A 2D context that records the text drawn and does nothing else. */
-function recordingContext(): {
-  context: CanvasRenderingContext2D;
-  texts: Array<{ text: string; x: number; y: number; align: string }>;
-} {
-  const texts: Array<{ text: string; x: number; y: number; align: string }> = [];
-  const state: Record<string, unknown> = { font: '', textAlign: 'left', fillStyle: '' };
-  const context = new Proxy(state, {
-    get(target, key: string) {
-      if (key === 'fillText') {
-        return (text: string, x: number, y: number) => {
-          texts.push({ text, x, y, align: String(target['textAlign']) });
-        };
-      }
-      if (key === 'measureText') return (value: string) => ({ width: value.length * 6 });
-      if (key in target) return target[key];
-      return () => undefined;
-    },
-    set(target, key: string, value) {
-      target[key] = value;
-      return true;
-    },
-  }) as unknown as CanvasRenderingContext2D;
-  return { context, texts };
-}
-
-describe('the footer a page drawn as a picture shares with every firmware page', () => {
-  const HINT = 'tap: choose · swipe: move · 2x tap: back';
-
-  it('is the firmware hint line: 4 px in, one dim line of the firmware font', () => {
-    const run = HudCanvas.footerHintRun(HINT)!;
-
-    // Firmware brightness 1 is image gray 68 (the fourth of sixteen levels).
-    expect(run).toMatchObject({ text: HINT, x: 4, y: 257, alpha: 68 / 255 });
-    // The firmware's own line of these words lit x = 4 to 339 on the simulator:
-    // its advances at full size, with no extra gap at the spaces.
-    expect(run.width).toBeGreaterThan(336);
-    expect(run.width).toBeLessThan(344);
-  });
-
-  it('is cut with an ellipsis where the band is too narrow, and not drawn when empty', () => {
-    const run = HudCanvas.footerHintRun(`${HINT} · ${HINT} · ${HINT}`)!;
-
-    expect(run.text.endsWith('…')).toBe(true);
-    expect(run.width).toBeLessThanOrEqual(HudCanvas.FOOTER_HINT.maxWidth);
-    expect(HudCanvas.footerHintRun('   ')).toBeUndefined();
-  });
-
-  describe('on the Planning month dashboard', () => {
-    const month = parsePlanningMonthTitle('PLANNING · PLAN · SEPTEMBER 2026')!;
-    const grid = Array.from({ length: 42 }, (_, index) => {
-      const value = new Date(Date.UTC(2026, 7, 31 + index));
-      return {
-        day: value.toISOString().slice(0, 10),
-        eventCount: 0,
-        reminderCount: 0,
-        inMonth: value.getUTCMonth() === 8,
-        entries: [],
-      };
-    });
-
-    function drawDashboard(): ReturnType<typeof recordingContext>['texts'] {
-      const { context, texts } = recordingContext();
-      const renderer = Object.create(HudCanvasRenderer.prototype) as unknown as {
-        drawPlanningDashboard: (...args: unknown[]) => void;
-      };
-      renderer.drawPlanningDashboard(
-        context, { hint: HINT, items: [], selectedIndex: 0 }, month, grid,
-        { dateIndex: 1, focused: false, itemIndex: 0 }, undefined,
-      );
-      return texts;
-    }
-
-    it('draws no "Planning" title beside the month and year', () => {
-      const texts = drawDashboard().map((entry) => entry.text);
-
-      expect(texts).not.toContain('Planning');
-      expect(texts).toContain('SEP 2026');
-    });
-
-    it('draws its footer where the other pages do, not centred above the bottom edge', () => {
-      const drawn = drawDashboard();
-      // With no glyph atlas each character is drawn on its own.
-      const footer = drawn.filter((entry) => entry.text.length === 1 && entry.y > 253);
-
-      expect(footer.map((entry) => entry.text).join('')).toBe(HINT.replace(/\s+/gu, ''));
-      expect(footer[0]!.x).toBe(4);
-      expect(drawn.some((entry) => entry.align === 'center' && entry.y === 267)).toBe(false);
-    });
   });
 });
 
