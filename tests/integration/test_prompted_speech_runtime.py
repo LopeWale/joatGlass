@@ -24,7 +24,7 @@ from joat.audio.vad import RmsVad
 from joat.ble.hub_gateway import HubGatewayTransport
 from joat.core.interfaces import AudioFrame, AudioFrameCallback, AudioFrameSource, GlassesTransport, Transcript
 from joat.core.pairing import PairingStore
-from joat.core.protocol import AudioSource, BrainstormAction, Device, DownlinkMessage
+from joat.core.protocol import AudioSource, Device, DownlinkMessage
 from joat.services.agent_terminal import AgentTerminalCommands, AgentTerminalRoster, TerminalCapture
 from joat.services.hud import HudWriter
 from joat.services.message_prompts import ActivatePrompt, PromptPresentationAck
@@ -32,7 +32,7 @@ from joat.services.message_reply import MessageActionStatus, MessageReplyControl
 from joat.services.orchestrator import VoiceOrchestrator
 from joat.services.prompted_input import PromptTicket, UtteranceProvenance
 from joat.services.prompted_speech import PromptedSpeechRuntime
-from joat.services.session import Session, SessionManager, TopicCapture
+from joat.services.session import Session, SessionManager
 
 
 async def until(predicate: Callable[[], bool]) -> None:
@@ -138,7 +138,6 @@ class Rig:
         self.review_release = asyncio.Event()
         self.session_release = asyncio.Event()
         self.topics: list[str] = []
-        self.factory_owners: list[TopicCapture | None] = []
         self.calls: list[asyncio.Task[Any]] = []
 
         async def confirm(_action: str, text: str, _timeout: float, **_binding: Any) -> bool:
@@ -168,17 +167,7 @@ class Rig:
                 rig.session_release.set()
 
         self.session = HeldSession()
-
-        def factory(topic: str) -> Session:
-            self.factory_owners.append(self.sessions.current_topic_capture)
-            self.topics.append(topic)
-            return self.session
-
-        self.sessions = SessionManager(
-            self.hud, factory, brainstorm_available=lambda: True,
-            publish_topic_capture=self.runtime.publish_topic_capture,
-            monotonic=lambda: self.now,
-        )
+        self.sessions = SessionManager(self.hud)
 
     def _fence(self) -> int:
         self.fences += 1
@@ -188,12 +177,6 @@ class Rig:
         task = asyncio.create_task(coroutine)
         self.calls.append(task)
         return task
-
-    def begin_topic(self) -> TopicCapture:
-        self.sessions.handle_brainstorm_action(BrainstormAction("begin_topic_capture"))
-        capture = self.sessions.current_topic_capture
-        assert capture is not None
-        return capture
 
     async def message(self, *, action_id: str = "runtime-message", recipient: str | None = "Sam") -> MessageActionStatus:
         status = await self.replies.prepare_new_message(
@@ -288,7 +271,7 @@ def receipt(ticket: PromptTicket) -> UtteranceProvenance:
     )
 
 
-@pytest.mark.parametrize("owner", ["brainstorm", "terminal", "messages"])
+@pytest.mark.parametrize("owner", ["terminal", "messages"])
 @pytest.mark.parametrize("selected", [None, "phone"])
 async def test_prompt_audio_source_is_frozen_for_each_owned_question(
     owner: str, selected: AudioSource | None,
@@ -299,9 +282,7 @@ async def test_prompt_audio_source_is_frozen_for_each_owned_question(
     assert isinstance(hud, ControlledHud)
     release = hud.hold = asyncio.Event()
     try:
-        if owner == "brainstorm":
-            fixture.begin_topic()
-        elif owner == "terminal":
+        if owner == "terminal":
             capture = fixture.begin_terminal()
             fixture.launch(fixture.publish_terminal(capture))
         else:
@@ -325,9 +306,7 @@ async def test_prompt_audio_source_is_frozen_for_each_owned_question(
         assert await fixture.runtime.dispatcher.dispatch(
             Transcript(literal, True), replace(receipt(ticket), source=expected),
         )
-        if owner == "brainstorm":
-            assert fixture.topics == [literal]
-        elif owner == "terminal":
+        if owner == "terminal":
             await until(lambda: not fixture.roster.busy)
             assert fixture.work.scoped == [(literal, 1)] and fixture.work.unscoped == []
         else:
@@ -356,87 +335,20 @@ async def test_message_questions_share_runtime_and_keep_exact_body(rig: Rig) -> 
     assert first.prompt_id in hud.cancellations and rig.fences == 2
 
 
-async def test_consumed_brainstorm_survives_retirement_until_owner_consumes(rig: Rig) -> None:
+async def test_matching_transport_revocation_disarms_without_inventing_send_failure(rig: Rig) -> None:
     hud = rig.hud
     assert isinstance(hud, ControlledHud)
-    capture = rig.begin_topic()
-    await until(lambda: rig.runtime.dispatcher.is_armed)
-    ticket = rig.runtime.dispatcher.current_ticket
-    assert ticket is not None and ticket.owner_id == capture.capture_id and ticket.field == "topic"
-    topic = "  Stop?!\nShould JOAT open News or keep brainstorming?  "
-    assert await rig.runtime.dispatcher.dispatch(Transcript(topic, True), receipt(ticket))
-    assert rig.topics == [topic] and rig.factory_owners == [None]
-    assert rig.sessions.active_session is rig.session
-    assert not rig.sessions.topic_capture_armed
-    await until(lambda: ticket.prompt_id in hud.cancellations)
-    assert not await rig.runtime.dispatcher.dispatch(Transcript(topic, True), receipt(ticket))
-
-
-async def test_replacement_clears_only_displaced_brainstorm_and_allows_a_fresh_tap(rig: Rig) -> None:
-    hud = rig.hud
-    assert isinstance(hud, ControlledHud)
-    old_capture = rig.begin_topic()
-    await until(lambda: rig.runtime.dispatcher.is_armed)
-    old = rig.runtime.dispatcher.current_ticket
-    assert old is not None
-    await rig.message()
-    message_ticket = rig.runtime.dispatcher.current_ticket
-    assert message_ticket is not None and message_ticket.owner_kind == "messages"
-    assert rig.sessions.current_topic_capture is None
-    new_capture = rig.begin_topic()
-    assert new_capture.capture_id != old_capture.capture_id
-    await until(lambda: (
-        rig.runtime.dispatcher.current_ticket is not None
-        and rig.runtime.dispatcher.current_ticket.owner_id == new_capture.capture_id
-        and rig.runtime.dispatcher.is_armed
-    ))
-    current = rig.runtime.dispatcher.current_ticket
-    for publication in hud.publications[:-1]:
-        publication.revoke(publication.ticket.prompt_id)
-    await asyncio.sleep(0)
-    assert rig.runtime.dispatcher.current_ticket is current
-    assert rig.sessions.current_topic_capture is new_capture
-    assert rig.topics == []
-
-
-@pytest.mark.parametrize("owner", ["messages", "brainstorm"])
-async def test_matching_transport_revocation_disarms_without_inventing_send_failure(rig: Rig, owner: str) -> None:
-    hud = rig.hud
-    assert isinstance(hud, ControlledHud)
-    if owner == "messages":
-        status = await rig.message()
-    else:
-        rig.begin_topic()
-        await until(lambda: rig.runtime.dispatcher.is_armed)
+    status = await rig.message()
     ticket = rig.runtime.dispatcher.current_ticket
     assert ticket is not None
     hud.publications[-1].revoke(ticket.prompt_id)
     assert rig.runtime.dispatcher.current_ticket is None
-    assert rig.sessions.current_topic_capture is None
     assert not await rig.runtime.dispatcher.dispatch(Transcript("late input", True), receipt(ticket))
-    if owner == "messages":
-        assert rig.replies.message_action_status(status.action_id).state == "awaiting_input"
+    assert rig.replies.message_action_status(status.action_id).state == "awaiting_input"
 
 
-@pytest.mark.parametrize("reason", ["explicit", "expired", "owner_invalid"])
-async def test_brainstorm_retirement_clears_capture_without_starting_session(rig: Rig, reason: str) -> None:
-    capture = rig.begin_topic()
-    await until(lambda: rig.runtime.dispatcher.is_armed)
-    if reason == "explicit":
-        rig.runtime.revoke_current()
-    elif reason == "expired":
-        rig.now = capture.expires_at
-        assert rig.runtime.dispatcher.current_ticket is None
-    else:
-        rig.sessions.clear_topic_capture()
-        assert rig.runtime.dispatcher.current_ticket is None
-    assert rig.sessions.current_topic_capture is None
-    assert rig.runtime.dispatcher.current_ticket is None and rig.topics == []
-
-
-@pytest.mark.parametrize("owner", ["messages", "brainstorm"])
 @pytest.mark.parametrize("blocked", ["closed", "recording", "no_generation"])
-async def test_unavailable_runtime_never_publishes_or_arms(rig: Rig, owner: str, blocked: str) -> None:
+async def test_unavailable_runtime_never_publishes_or_arms(rig: Rig, blocked: str) -> None:
     hud = rig.hud
     assert isinstance(hud, ControlledHud)
     if blocked == "closed":
@@ -445,12 +357,8 @@ async def test_unavailable_runtime_never_publishes_or_arms(rig: Rig, owner: str,
         rig.capturing = True
     else:
         rig.generation = None
-    if owner == "messages":
-        status = await rig.message()
-        assert status.state == "awaiting_input"
-    else:
-        rig.begin_topic()
-        await until(lambda: rig.sessions.current_topic_capture is None)
+    status = await rig.message()
+    assert status.state == "awaiting_input"
     assert hud.publications == [] and rig.runtime.dispatcher.current_ticket is None
 
 
@@ -482,29 +390,6 @@ async def test_duplicate_message_step_never_renews_or_repaints(rig: Rig) -> None
     rig.now += 5
     await rig.runtime.after_message_input(status)
     assert rig.runtime.dispatcher.current_ticket is ticket and len(hud.publications) == 1
-
-
-async def test_late_cancelled_brainstorm_paint_cannot_revoke_message_successor(rig: Rig) -> None:
-    hud = rig.hud
-    assert isinstance(hud, ControlledHud)
-    release = hud.hold = asyncio.Event()
-    hud.ignore_cancel = True
-    rig.begin_topic()
-    await until(lambda: len(hud.publications) == 1)
-    old = hud.publications[0]
-    hud.hold = None
-    hud.ignore_cancel = False
-    try:
-        await rig.message()
-        current = rig.runtime.dispatcher.current_ticket
-        assert current is not None and current.owner_kind == "messages"
-        release.set()
-        await asyncio.wait_for(old.finished.wait(), 1)
-        assert old.activated is False
-        assert rig.runtime.dispatcher.current_ticket is current and rig.runtime.dispatcher.is_armed
-        assert rig.sessions.current_topic_capture is None
-    finally:
-        release.set()
 
 
 async def test_shutdown_joins_owned_publication_without_cancelling_foreign_caller(rig: Rig) -> None:
@@ -786,46 +671,6 @@ async def test_terminal_runtime_revokes_capture_before_publication_starts(
     assert fixture.work.scoped == [] and fixture.work.unscoped == []
 
 
-@pytest.mark.parametrize("event", ["recording", "shutdown"])
-async def test_prepublication_brainstorm_capture_is_retired_before_publication(event: str) -> None:
-    """A real SessionManager tap creates ownership before its task can run."""
-    class FrameSource(AudioFrameSource):
-        def on_audio_frame(self, callback: AudioFrameCallback) -> None:
-            self.callback = callback
-
-    audio = AudioRouter(
-        FrameSource(), on_capture_started=lambda: fixture.runtime.revoke_current(),
-    )
-    fixture = Rig(capturing=lambda: audio.capturing)
-    hud = fixture.hud
-    assert isinstance(hud, ControlledHud)
-    try:
-        capture = fixture.begin_topic()
-        assert fixture.sessions.current_topic_capture is capture
-        assert fixture.runtime.dispatcher.current_ticket is None
-        assert hud.publications == []
-        # No await between the tap and lifecycle change: its publication task
-        # has not run, so there is no dispatcher ticket to retire yet.
-        if event == "recording":
-            recorded: list[AudioFrame] = []
-            receive = recorded.append
-            audio.begin_capture(receive, exclusive=True)
-            audio.end_capture(receive)
-            assert audio.capturing is False
-        else:
-            fixture.runtime.begin_shutdown()
-        assert fixture.sessions.current_topic_capture is None
-        # The old caller can still finish; it must not recreate its question
-        # after recording ends or publish while shutdown is in progress.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        assert hud.publications == [] and fixture.fences == 0
-        assert fixture.runtime.dispatcher.current_ticket is None
-        assert fixture.topics == [] and fixture.reviewed == []
-    finally:
-        await fixture.aclose()
-
-
 class Stt:
     def __init__(self, texts: list[str]) -> None:
         self.texts = deque(texts)
@@ -840,14 +685,9 @@ class Stt:
         self.reset_calls += 1
 
 
-@pytest.mark.parametrize("owner", ["messages", "brainstorm", "terminal"])
+@pytest.mark.parametrize("owner", ["messages", "terminal"])
 async def test_recording_start_retires_prompt_before_held_completed_stt_returns(owner: str) -> None:
-    """A short recording cannot restore an earlier answer lease after it ends.
-
-    The old PCM was already a complete utterance and must finish STT normally.
-    Capture start retires its owner admission, even when no one polls prompt
-    validity while the exclusive route is held. No transcript is sent anywhere.
-    """
+    """A short recording cannot restore an earlier answer lease after it ends."""
     class FrameTransport(Transport, AudioFrameSource):
         callback: AudioFrameCallback | None = None
 
@@ -892,12 +732,9 @@ async def test_recording_start_retires_prompt_before_held_completed_stt_returns(
     try:
         if owner == "messages":
             await fixture.message()
-        elif owner == "terminal":
+        else:
             assert isinstance(fixture, TerminalRig)
             assert await fixture.publish_terminal(fixture.begin_terminal())
-        else:
-            fixture.begin_topic()
-            await until(lambda: fixture.runtime.dispatcher.is_armed)
         ticket = fixture.runtime.dispatcher.current_ticket
         assert ticket is not None and fixture.runtime.dispatcher.is_armed
         transport.utterance(ticket)
@@ -909,23 +746,18 @@ async def test_recording_start_retires_prompt_before_held_completed_stt_returns(
         capture = captured.append
         audio.begin_capture(capture, exclusive=True)
         audio.end_capture(capture)
-        # Deliberately do not access dispatcher state until after recording
-        # ends and the completed utterance returns from the real voice worker.
         assert audio.capturing is False
         stt.release.set()
         await asyncio.wait_for(asyncio.shield(worker), 1)
 
         assert stt.calls == 1, "Recording must not cancel completed STT"
-        assert fixture.reviewed == [] and fixture.topics == [], (
-            "A retired question must not consume the completed pre-recording answer"
-        )
+        assert fixture.reviewed == [] and fixture.topics == []
         assert fixture.runtime.dispatcher.current_ticket is None
-        assert fixture.sessions.current_topic_capture is None
-        assert len(hud.publications) == 1, "Recording end must not republish the old question"
+        assert len(hud.publications) == 1
         await until(lambda: ticket.prompt_id in hud.cancellations)
         if owner == "messages":
             assert fixture.replies.message_action_status("runtime-message").state == "awaiting_input"
-        elif owner == "terminal":
+        else:
             assert isinstance(fixture, TerminalRig)
             assert fixture.terminal.current_capture is None and not fixture.terminal.armed
             assert fixture.work.scoped == [] and fixture.work.unscoped == []
@@ -960,7 +792,7 @@ async def test_scoped_mic_stop_preserves_the_successor_at_gateway_and_runtime(
     unused_tcp_port: int, stop: str,
 ) -> None:
     gateway = HubGatewayTransport(host="127.0.0.1", port=unused_tcp_port)
-    fixture = Rig(hud=HudWriter(gateway), generation=lambda: gateway.audio_connection_generation)
+    fixture = TerminalRig(hud=HudWriter(gateway), generation=lambda: gateway.audio_connection_generation)
     devices: list[Device] = []
     gateway.on_device(fixture.runtime.handle_device)
     gateway.on_device(devices.append)
@@ -973,11 +805,9 @@ async def test_scoped_mic_stop_preserves_the_successor_at_gateway_and_runtime(
             old = await read_question(socket)
             await acknowledge(socket, old)
             await asyncio.wait_for(preparation, 1)
-            fixture.begin_topic()
+            fixture.launch(fixture.publish_terminal(fixture.begin_terminal()))
             successor = await read_question(socket)
             assert successor["promptId"] != old["promptId"]
-            # The Hub releases A after observing B. Its real mic is off, but
-            # that old release must not revoke B's pending paint/owner.
             await socket.send(json.dumps({"kind": "device", "connect": "connected",
                                           "mic": False, "micSource": old["source"],
                                           "micPromptId": old["promptId"]}))
@@ -997,41 +827,36 @@ async def test_scoped_mic_stop_preserves_the_successor_at_gateway_and_runtime(
             await socket.send(json.dumps(ending))
             await until(lambda: len(devices) == 2)
             assert fixture.runtime.dispatcher.current_ticket is None
-            assert fixture.sessions.current_topic_capture is None
+            assert fixture.terminal.current_capture is None
             assert not fixture.runtime.dispatcher.is_armed
     finally:
         await fixture.aclose()
         await gateway.stop()
 
 
-@pytest.mark.parametrize("owner", ["brainstorm", "terminal"])
-async def test_scoped_mic_stop_cannot_clear_an_unpublished_successor(owner: str) -> None:
+async def test_scoped_mic_stop_cannot_clear_an_unpublished_successor() -> None:
     fixture = TerminalRig()
     try:
-        fixture.begin_topic()
+        first_pub = fixture.launch(fixture.publish_terminal(fixture.begin_terminal()))
         await until(lambda: fixture.runtime.dispatcher.is_armed)
+        await asyncio.wait_for(first_pub, 1)
         previous = fixture.runtime.dispatcher.current_ticket
         assert previous is not None
         fixture.runtime.revoke_current()
-        capture = fixture.begin_topic() if owner == "brainstorm" else fixture.begin_terminal()
-        # No await: the wearer already bound this owner, but it has no ticket.
+        capture = fixture.begin_terminal()
         assert fixture.runtime.dispatcher.current_ticket is None
         fixture.runtime.handle_device(Device(
             connect="connected", mic=False, mic_prompt_id=previous.prompt_id,
         ))
-        current = (fixture.sessions.current_topic_capture if owner == "brainstorm"
-                   else fixture.terminal.current_capture)
-        assert current is capture
+        assert fixture.terminal.current_capture is capture
         fixture.runtime.handle_device(Device(connect="connected", mic=False))
-        assert fixture.sessions.current_topic_capture is None
         assert fixture.terminal.current_capture is None
     finally:
         await fixture.aclose()
 
 
-@pytest.mark.parametrize("owner", ["messages", "brainstorm"])
 async def test_real_runtime_activates_inside_ack_before_immediately_following_pcm(
-    tmp_path: Path, unused_tcp_port: int, owner: str,
+    tmp_path: Path, unused_tcp_port: int,
 ) -> None:
     pairing = PairingStore(tmp_path / "pairing.json")
     token = PairingStore.mint()
@@ -1041,7 +866,7 @@ async def test_real_runtime_activates_inside_ack_before_immediately_following_pc
     )
     fixture = Rig(hud=HudWriter(gateway), generation=lambda: gateway.audio_connection_generation)
     literal = "  Stop?!\nOpen News, but keep these words literal.  "
-    stt = Stt(["Sam", literal] if owner == "messages" else [literal])
+    stt = Stt(["Sam", literal])
     commands: list[str] = []
     voice = VoiceOrchestrator(
         gateway, stt, frames=AudioRouter(gateway), sessions=fixture.sessions,
@@ -1056,20 +881,14 @@ async def test_real_runtime_activates_inside_ack_before_immediately_following_pc
         async with websockets.connect(f"ws://127.0.0.1:{unused_tcp_port}") as socket:
             await socket.send(json.dumps({"kind": "auth", "token": token}))
             assert json.loads(await socket.recv())["kind"] == "auth.accepted"
-            if owner == "messages":
-                preparation = fixture.launch(fixture.message(recipient="my wife"))
-                fields = ("recipient", "body")
-            else:
-                fixture.begin_topic()
-                preparation = None
-                fields = ("topic",)
+            preparation = fixture.launch(fixture.message(recipient="my wife"))
+            fields = ("recipient", "body")
             seq = 0
             for field in fields:
                 question = await read_question(socket)
-                assert question["ownerKind"] == owner and question["field"] == field
+                assert question["ownerKind"] == "messages" and question["field"] == field
                 assert not fixture.runtime.dispatcher.is_armed
                 await acknowledge(socket, question)
-                # No yield/barrier after receipt beyond ordered socket sends.
                 for amplitude in (8000, 8000, 0, 0):
                     await socket.send(json.dumps({
                         "kind": "audio", "source": "glasses", "seq": seq,
@@ -1077,13 +896,9 @@ async def test_real_runtime_activates_inside_ack_before_immediately_following_pc
                         "audioEpoch": question["promptId"],
                     }))
                     seq += 1
-            if preparation is not None:
-                await asyncio.wait_for(preparation, 1)
-                await until(lambda: bool(fixture.reviewed))
-                assert fixture.reviewed == [f"Send to Sam? “{literal}”"]
-            else:
-                await until(lambda: bool(fixture.topics))
-                assert fixture.topics == [literal] and fixture.factory_owners == [None]
+            await asyncio.wait_for(preparation, 1)
+            await until(lambda: bool(fixture.reviewed))
+            assert fixture.reviewed == [f"Send to Sam? “{literal}”"]
             assert commands == [] and stt.calls == len(fields)
             assert fixture.runtime.dispatcher.current_ticket is None
     finally:
@@ -1091,53 +906,6 @@ async def test_real_runtime_activates_inside_ack_before_immediately_following_pc
         if worker is not None:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
-        await fixture.aclose()
-        await gateway.stop()
-
-
-@pytest.mark.parametrize("event", ["back", "mute", "expiry", "disconnect"])
-async def test_authenticated_lifecycle_revokes_brainstorm_and_allows_a_new_capture(
-    tmp_path: Path, unused_tcp_port: int, event: str,
-) -> None:
-    pairing = PairingStore(tmp_path / "pairing.json")
-    token = PairingStore.mint()
-    pairing.confirm(token)
-    gateway = HubGatewayTransport(
-        host="127.0.0.1", port=unused_tcp_port, pairing=pairing, trust_loopback=False,
-    )
-    fixture = Rig(hud=HudWriter(gateway), generation=lambda: gateway.audio_connection_generation)
-    await gateway.start()
-    try:
-        async with websockets.connect(f"ws://127.0.0.1:{unused_tcp_port}") as socket:
-            await socket.send(json.dumps({"kind": "auth", "token": token}))
-            assert json.loads(await socket.recv())["kind"] == "auth.accepted"
-            capture = fixture.begin_topic()
-            question = await read_question(socket)
-            await acknowledge(socket, question)
-            await until(lambda: fixture.runtime.dispatcher.is_armed)
-            if event == "back":
-                await socket.send(json.dumps({
-                    "kind": "prompt.cancel", "promptId": question["promptId"],
-                    "connectionGeneration": question["connectionGeneration"],
-                }))
-            elif event == "mute":
-                await socket.send(json.dumps({"kind": "device", "mic": False}))
-            elif event == "expiry":
-                fixture.now = capture.expires_at
-            else:
-                await socket.close()
-            await until(lambda: fixture.runtime.dispatcher.current_ticket is None)
-            assert fixture.sessions.current_topic_capture is None and fixture.topics == []
-            if event in ("back", "mute"):
-                # The new matching presentation receipt is authoritative even
-                # if gateway.device retains an earlier mic=False observation.
-                fresh = fixture.begin_topic()
-                assert fresh.capture_id != capture.capture_id
-                next_question = await read_question(socket)
-                await acknowledge(socket, next_question)
-                await until(lambda: fixture.runtime.dispatcher.is_armed)
-                assert fixture.runtime.dispatcher.current_ticket.owner_id == fresh.capture_id
-    finally:
         await fixture.aclose()
         await gateway.stop()
 

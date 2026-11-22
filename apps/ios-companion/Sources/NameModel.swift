@@ -27,7 +27,7 @@ enum NameModel {
         ("Hey JOAT what time is it", 60), ("JOAT what time is it", 60),
         ("Hey JOAT what is my location", 60), ("JOAT what is my current location", 60),
         ("Hey JOAT remind me to", 60), ("JOAT remind me to", 100), ("JOAT remind me to call", 60),
-        ("Hey JOAT open quick notes", 10), ("JOAT start a brainstorm", 10),
+        ("Hey JOAT open quick notes", 10), ("JOAT open agent terminal", 10),
         ("JOAT what's on my calendar today", 10), ("Hey JOAT read my messages", 10),
     ]
 

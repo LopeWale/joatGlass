@@ -2,7 +2,7 @@ import { OsEventTypeList, EventSourceType, type EvenHubEvent } from '@evenrealit
 
 /** The physical G2 input a system envelope names. Back means the same on
  * every one of them; the name survives only so an explicitly armed
- * diagnostic can prove which input started it (BrainstormInputOwner). */
+ * diagnostic can prove which input started it (TerminalInputOwner). */
 export type GestureSource = 'left' | 'right' | 'ring';
 
 /** Product meaning belongs here, independently of the SDK envelope or hand.

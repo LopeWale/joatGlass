@@ -27,7 +27,7 @@ DEFAULT_PATH = Path(
 ).expanduser()
 
 _RESERVED_SAFE_PROJECTIONS = frozenset({
-    "openclaw", "agent_terminal", "brainstorm", "personal_data", "a2a_connections",
+    "openclaw", "agent_terminal", "personal_data", "a2a_connections",
 })
 _OPENCLAW_STATES = frozenset({
     "not_configured",
@@ -44,18 +44,6 @@ _AGENT_TERMINAL_STATES = frozenset({
     "ready",
     "running",
     "blocked",
-})
-_BRAINSTORM_STATES = frozenset({
-    "unavailable", "ready", "running", "settled", "cancelled", "failed",
-})
-_BRAINSTORM_PHASES = frozenset({
-    "idle", "opening", "closing",
-    # Per phase: the blind first round, the cross-review rounds, and the
-    # room waiting for the wearer's move between rounds. (meta_review and
-    # synthesis belonged to the judge JOAT no longer runs; they stay valid
-    # so an older record still reads.)
-    "independent", "cross_review", "waiting", "meta_review", "synthesis",
-    "turn",  # legacy single-phase label; kept so old callers stay valid
 })
 _PERSONAL_DATA_STATES = frozenset({
     "checking",
@@ -102,7 +90,6 @@ class StatusPublisher:
             "notifications": "off",
             "stt": "off",
             "llm": "off",
-            "debate": "off",
             "openclaw": {
                 "state": "not_configured",
                 "endpoint_host": "",
@@ -112,11 +99,6 @@ class StatusPublisher:
             "agent_terminal": {
                 "state": "unavailable",
                 "reason": "gateway_not_ready",
-            },
-            "brainstorm": {
-                "state": "unavailable",
-                "seat_count": 0,
-                "phase": "idle",
             },
             # EventKit TCC and the app-owned engine bridge are independent
             # facts. This fixed-state projection deliberately carries no
@@ -206,33 +188,6 @@ class StatusPublisher:
         connections[profile_id] = {"state": state, "reason": safe_reason}
         self._state["a2a_connections"] = connections
         self.flush()
-
-    def set_brainstorm(self, *, state: str, seat_count: int, phase: str) -> None:
-        """Publish lifecycle metadata, never prompt or transcript content."""
-
-        if state not in _BRAINSTORM_STATES:
-            raise ValueError("invalid Brainstorm state")
-        if isinstance(seat_count, bool) or not 0 <= seat_count <= 16:
-            raise ValueError("invalid Brainstorm seat count")
-        if phase not in _BRAINSTORM_PHASES:
-            raise ValueError("invalid Brainstorm phase")
-        self._state["brainstorm"] = {
-            "state": state,
-            "seat_count": seat_count,
-            "phase": phase,
-        }
-        self.flush()
-
-    def brainstorm_projection(self) -> dict[str, str | int]:
-        """The lifecycle metadata set_brainstorm published, for the phone."""
-        brainstorm = self._state.get("brainstorm")
-        if not isinstance(brainstorm, dict):
-            return {"state": "unavailable", "seat_count": 0, "phase": "idle"}
-        return {
-            "state": str(brainstorm.get("state", "unavailable")),
-            "seat_count": int(brainstorm.get("seat_count", 0)),
-            "phase": str(brainstorm.get("phase", "idle")),
-        }
 
     def set_personal_data(self, *, state: str) -> None:
         """Publish only the EventKit bridge state needed by the Mac shell.

@@ -36,6 +36,7 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         var page: Bool? = nil
         var typed: String? = nil
         var handwriting: String? = nil
+        var paperTemplate: String? = nil
     }
 
     struct TextNote: Codable {
@@ -168,6 +169,8 @@ final class QuickNotes: VoiceCommand, PanelProvider {
     private var micReopened = false
 
     var active: Bool { openIndex != nil }
+    var hasOpenNote: Bool { openIndex != nil }
+    var openVoiceNoteSnapshot: VoiceNote? { note }
     private var note: VoiceNote? { openIndex.map { stored.voice[$0] } }
 
     /// Silence this long inside a continuous recording starts a new paragraph
@@ -191,8 +194,13 @@ final class QuickNotes: VoiceCommand, PanelProvider {
 
     var laneOpen: Bool { active && (rec == .recording || finalizing) }
 
-    func audioFrame() {
+    /// The glasses' audio while a note records: its level in the log, and
+    /// the audio itself when Diagnostics › Save note audio is on.
+    let audioCheck = AudioCheck()
+
+    func audioFrame(_ samples: [Int16]) {
         lastAudioAt = Date()
+        audioCheck.frame(samples, note: rec == .recording ? note?.id : nil)
         guard rec == .recording else { return }
         if micReopened { micReopened = false; changed() }
     }
@@ -244,6 +252,7 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         rec = .paused
         laneClosedAt = Date()
         partial = ""
+        audioCheck.laneClosed()
     }
 
     private var recordedSeconds: Int {
@@ -277,7 +286,7 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         if hold {
             rec = .paused
             changed()
-            return "Opened QuickNote: \(raw). Hold the touchpad to talk."
+            return "Opened QuickNote: \(raw). Tap to record, or hold the touchpad to talk."
         }
         openLane()
         changed()
@@ -312,6 +321,21 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         holding = true
         openLane()
         changed()
+        return true
+    }
+
+    /// The last tap on the open note: when, and whether it was recording.
+    private var lastTap: (at: Date, wasRecording: Bool)?
+
+    /// The glasses' menu opens with a tap, then a long press, and that tap
+    /// reached the note first: put the recording back as it was.
+    private func undoMenuTap() -> Bool {
+        guard let tap = lastTap, Date().timeIntervalSince(tap.at) < 3, active, !discardPending else { return false }
+        lastTap = nil
+        if tap.wasRecording, rec == .paused { _ = resume() }
+        else if !tap.wasRecording, rec == .recording { _ = pause() }
+        else { return false }
+        Log.add("quicknotes: that tap opened the glasses' menu; recording \(tap.wasRecording ? "carries on" : "stays paused")")
         return true
     }
 
@@ -427,6 +451,7 @@ final class QuickNotes: VoiceCommand, PanelProvider {
     }
 
     private func clearOpen() {
+        audioCheck.noteEnded()
         openIndex = nil
         rec = .paused; holding = false; holdInput = nil; laneClosedAt = nil
         inputs = []; growing = nil; partial = ""; discardPending = false; resumeAfterKeep = false
@@ -671,7 +696,7 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         readerFrom = .live
     }
 
-    /// Tap on the open note, or "AI cues" in its menu: the prep notes, then
+    /// "AI cues" in the open note's menu: the prep notes, then
     /// the cues, newest first. Tap one to read it; 2x tap goes back to the note.
     private func showCues() {
         guard active else { return }
@@ -681,7 +706,7 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         list += given.indices.reversed().map { .cue($0) }
         var labels = list.map(label)
         if given.isEmpty {
-            if let cues, !cues.available { labels.append("AI cues need Claude on this phone.") }
+            if let cues, !cues.available { labels.append("AI cues need Gemini or Claude on this phone.") }
             else if let cues, !cues.enabled { labels.append("AI cues are off. Turn them on in JOAT Brain.") }
             else { labels.append("No AI cues yet. They pop up as you talk.") }
             list.append(.control(labels.last!, "cues"))
@@ -746,17 +771,17 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         var notice: String?
         if capturing, silentFor >= 3 { notice = "No audio from the mic — check the glasses." }
         else if !partial.isEmpty { lines.append(partial) }
-        if lines.isEmpty, notice == nil { notice = capturing ? "Listening…" : "Long-press to talk." }
+        if lines.isEmpty, notice == nil { notice = capturing ? "Listening…" : "Tap to record, or hold to talk." }
         let body = (lines + (notice.map { [$0] } ?? [])).joined(separator: "\n")
         let rowsOut = Array(ReaderText.rows(body).suffix(Self.liveRows))
         let s = recordedSeconds
         let clock = String(format: "%02d:%02d", s / 60, s % 60)
         let hint = holding ? "● Listening \(clock) · let go: done"
-            : capturing ? "● REC \(clock) · tap: AI cues · left x2: finish"
-            : "\(clock) · hold: talk · tap: AI cues"
+            : capturing ? "● REC \(clock) · tap: pause · left x2: finish"
+            : "\(clock) · tap: record · hold: talk"
         let key = "\(rowsOut)|\(capturing)|\(holding)"
         if !force, key == liveKey, page == .live { return }
-        rows = [.control("live", "cues")]
+        rows = [.control("live", "toggle")]
         page = .live
         liveKey = key
         liveClock = s
@@ -852,9 +877,21 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         case let pick where pick.hasPrefix("start_prep:"):
             prep?.select(String(pick.dropFirst("start_prep:".count)))
             receipt = startHeld(usePrep: true)
+        case "toggle":
+            // A tap on the open note records or pauses; a long press talks one
+            // paragraph; AI cues and Prep notes are in the note's menu (the
+            // wearer, 2026-10-29 and again 2026-11-12: tap had been changed
+            // to open the AI cues, which left hold-to-talk the only way to
+            // record from the glasses).
+            if active, !holding, !discardPending {
+                lastTap = (Date(), rec == .recording)
+                let receipt = rec == .recording ? pause() : resume()
+                Log.add("quicknotes: tap: \(receipt)")
+            }
+            showLive()
+            return
         case "cues":
-            // A tap on the open note (only a long press records, as Even's
-            // QuickNote), or on the cues page's status row.
+            // The cues page's status row.
             showCues()
             return
         case "back_to_live":
@@ -941,7 +978,11 @@ final class QuickNotes: VoiceCommand, PanelProvider {
             // A release always ends a hold, even if the page moved on.
             if holdEnd(), page == .live { paintLive(force: true) }
         case "quicknotes-hold-cancel":
-            if holdCancel(), page == .live { paintLive(force: true) }
+            // The glasses' menu opened (tap, then long press): nothing of the
+            // press is kept, and the tap before it changes nothing either.
+            let dropped = holdCancel()
+            let undone = undoMenuTap()
+            if dropped || undone, page == .live { paintLive(force: true) }
         case "quicknotes-undo":
             guard page == .live else { return }
             let r = undo()
@@ -1043,8 +1084,8 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         if let g = Grammar.match(Self.startRe, normalized, groups: ["title"]) {
             return reflect(start(title: g["title"], hold: false))
         }
-        if Self.pauseSet.contains(lowered) { return reflect(pause()) }
-        if Self.resumeSet.contains(lowered) { return reflect(resume()) }
+        if Self.pauseSet.contains(lowered) || (active && lowered == "pause") { return reflect(pause()) }
+        if Self.resumeSet.contains(lowered) || (active && (lowered == "resume" || lowered == "continue")) { return reflect(resume()) }
         if Self.discardSet.contains(lowered) { return reflect(requestDiscard()) }
         if Self.confirmSet.contains(lowered) { return reflect(confirmDiscard()) }
         if Self.keepSet.contains(lowered) { return reflect(keep()) }
@@ -1116,6 +1157,72 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         return "Saved QuickNote: \(preview)"
     }
 
+    // MARK: - Assistant Tool Belt Hooks
+
+    @MainActor
+    func saveTextFromTool(_ rawText: String) -> PhoneToolOutcome {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !rawText.contains("\u{0}") else {
+            return PhoneToolOutcome("error: text must be non-empty UTF-8 text without null characters.", claimsLens: false)
+        }
+        let receipt = saveText(trimmed)
+        menu?.openByVoice("QuickNotes")
+        hud.receipt(receipt)
+        return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: receipt)
+    }
+
+    @MainActor
+    func controlVoiceNoteFromTool(
+        action rawAction: String,
+        title rawTitle: String?,
+        dismissConversation: @MainActor () -> Void
+    ) async -> PhoneToolOutcome {
+        let action = rawAction.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch action {
+        case "start":
+            dismissConversation()
+            let cleanTitle = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedTitle = (cleanTitle?.isEmpty == false) ? cleanTitle! : Self.clockTitle()
+            let receipt = start(title: resolvedTitle, hold: false)
+            menu?.openByVoice("QuickNotes")
+            hud.receipt(receipt)
+            return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: receipt)
+
+        case "pause":
+            let receipt = pause()
+            return PhoneToolOutcome(receipt, claimsLens: false)
+
+        case "resume":
+            let receipt = resume()
+            return PhoneToolOutcome(receipt, claimsLens: false)
+
+        case "stop":
+            dismissConversation()
+            let receipt: String = await withCheckedContinuation { cont in
+                stop { result in
+                    cont.resume(returning: result)
+                }
+            }
+            menu?.openByVoice("QuickNotes")
+            hud.receipt(receipt)
+            return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: receipt)
+
+        case "summarize_last":
+            let receipt: String = await withCheckedContinuation { cont in
+                summarizeLast { result in
+                    cont.resume(returning: result)
+                }
+            }
+            return PhoneToolOutcome(receipt, claimsLens: false)
+
+        default:
+            return PhoneToolOutcome(
+                "error: action must be one of start, pause, resume, stop, or summarize_last.",
+                claimsLens: false
+            )
+        }
+    }
+
     private func search(_ query: String) -> String {
         let q = query.lowercased()
         let matches = activeText.filter { $0.text.lowercased().contains(q) }.prefix(5)
@@ -1171,6 +1278,7 @@ extension QuickNotes.VoiceNote {
         page = try c.decodeIfPresent(Bool.self, forKey: .page)
         typed = try c.decodeIfPresent(String.self, forKey: .typed)
         handwriting = try c.decodeIfPresent(String.self, forKey: .handwriting)
+        paperTemplate = try c.decodeIfPresent(String.self, forKey: .paperTemplate)
     }
 }
 
@@ -1256,9 +1364,9 @@ extension QuickNotes {
         summarize(latest.id, completion)
     }
 
-    /// note_insights.summarize, on the Mac's assistant.
+    /// note_insights.summarize, via OnPhoneAI (Gemini / Claude) or the Mac.
     func summarize(_ id: String, _ completion: @escaping (String) -> Void) {
-        guard let link = macLink, link.configured else { completion("Summaries need Claude or the Mac, and neither is set up on this phone."); return }
+        guard let link = macLink, link.configured else { completion("Summaries need Gemini, Claude, or the Mac, and none is set up on this phone."); return }
         guard let n = stored.voice.first(where: { $0.id == id }) else { completion("That note no longer exists."); return }
         let title = n.title.isEmpty ? "Untitled" : n.title
         let text = transcript(n)
@@ -1300,7 +1408,7 @@ extension QuickNotes {
     /// note_insights.ask_last
     func askLast(_ question: String, _ completion: @escaping (String) -> Void) {
         guard let n = retained.first else { completion("There is no retained note to ask about."); return }
-        guard let link = macLink, link.configured else { completion("Asking a note needs Claude or the Mac, and neither is set up on this phone."); return }
+        guard let link = macLink, link.configured else { completion("Asking a note needs Gemini, Claude, or the Mac, and none is set up on this phone."); return }
         let cleaned = question.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         guard !cleaned.isEmpty else { completion("Say the question after: ask the last note."); return }
         let title = n.title.isEmpty ? "Untitled" : n.title
@@ -1553,7 +1661,7 @@ extension QuickNotes {
     func proposeReminders(_ id: String, _ completion: @escaping (ReminderOffer?, String) -> Void) {
         guard let reminders else { completion(nil, "Reminders are unavailable on this phone."); return }
         guard let link = macLink, link.configured else {
-            completion(nil, "Finding reminders in a note needs Claude or the Mac, and neither is set up on this phone.")
+            completion(nil, "Finding reminders in a note needs Gemini, Claude, or the Mac, and none is set up on this phone.")
             return
         }
         guard let n = stored.voice.first(where: { $0.id == id }) else { completion(nil, "That note no longer exists."); return }
@@ -1683,49 +1791,162 @@ extension QuickNotes {
 // MARK: - Notebook pages (Notebook.swift; the wearer, 2026-11-09)
 
 extension QuickNotes {
+    static func pageClockTitle(_ date: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "'Page' HH:mm"
+        return f.string(from: date)
+    }
+
+    func renameNote(_ id: String, to title: String) {
+        let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, let i = stored.voice.firstIndex(where: { $0.id == id }) else { return }
+        let capped = String(cleaned.prefix(120))
+        guard stored.voice[i].title != capped else { return }
+        stored.voice[i].title = capped
+        stored.voice[i].updated = Date()
+        persist()
+        publishPanel?()
+    }
+
+    func renameNote(_ id: String, title: String) {
+        renameNote(id, to: title)
+    }
+
+    func setPaperTemplate(_ id: String, template: String) {
+        guard let i = stored.voice.firstIndex(where: { $0.id == id }) else { return }
+        guard stored.voice[i].paperTemplate != template else { return }
+        stored.voice[i].paperTemplate = template
+        stored.voice[i].updated = Date()
+        persist()
+    }
+
+    @discardableResult
+    func createBlankPage(paperTemplate: String = "ruled") -> String {
+        let now = Date()
+        let id = UUID().uuidString.lowercased()
+        stored.voice.append(VoiceNote(
+            id: id,
+            title: Self.pageClockTitle(now),
+            state: "saved",
+            created: now,
+            updated: now,
+            paragraphs: [],
+            page: true,
+            typed: "",
+            handwriting: nil,
+            paperTemplate: paperTemplate
+        ))
+        persist()
+        publishPanel?()
+        Log.add("notebook: created blank page \(id.prefix(6)) (\(paperTemplate))")
+        return id
+    }
+
+    @discardableResult
+    func ensureBlankPage(id: String, paperTemplate: String = "ruled") -> String {
+        if stored.voice.contains(where: { $0.id == id }) { return id }
+        let now = Date()
+        stored.voice.append(VoiceNote(
+            id: id,
+            title: Self.pageClockTitle(now),
+            state: "saved",
+            created: now,
+            updated: now,
+            paragraphs: [],
+            page: true,
+            typed: "",
+            handwriting: nil,
+            paperTemplate: paperTemplate
+        ))
+        persist()
+        publishPanel?()
+        Log.add("notebook: ensured blank page \(id.prefix(6)) (\(paperTemplate))")
+        return id
+    }
+
+    func deleteNote(_ id: String) {
+        var changed = false
+        if let i = stored.voice.firstIndex(where: { $0.id == id && $0.state != "open" }) {
+            let wasPage = stored.voice[i].page == true
+            stored.voice.remove(at: i)
+            if wasPage { PageStore.deleteFiles(id) }
+            changed = true
+        } else if let t = stored.text.firstIndex(where: { $0.id == id && !$0.deleted }) {
+            stored.text[t].deleted = true
+            stored.text[t].updated = Date()
+            lastDeletedTextId = id
+            changed = true
+        }
+        if changed {
+            persist()
+            publishPanel?()
+            Log.add("quicknotes: deleted note \(id.prefix(6))")
+        }
+    }
+
+    func deleteEmptyPageIfUntouched(_ id: String) {
+        guard let n = stored.voice.first(where: { $0.id == id }),
+              n.page == true,
+              n.paragraphs.isEmpty,
+              (n.typed ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !PageStore.hasInk(id),
+              PageStore.imageNames(id).isEmpty else { return }
+        deleteNote(id)
+    }
+
     /// A page from JOAT Brain's notebook joins the one list of notes (the
-    /// wearer's choice): the glasses list and read it, Claude summarizes it,
+    /// wearer's choice): the glasses list and read it, OnPhoneAI summarizes it,
     /// and its next steps are offered as reminders, as after a voice note.
-    /// Its text is the typed words, then the handwriting as Claude read it.
+    /// Its text is the typed words, then the handwriting as read by vision OCR.
     /// `inkChanged`: the handwriting is read again (Notebook.read).
     @discardableResult
-    func savePage(id: String?, typed: String, inkChanged: Bool) -> String {
+    func savePage(id: String?, typed: String, inkChanged: Bool, paperTemplate: String? = nil) -> String {
         let now = Date()
         if let id, let i = stored.voice.firstIndex(where: { $0.id == id }) {
+            let previousTyped = stored.voice[i].typed ?? ""
+            let typedChanged = previousTyped != typed
+            stored.voice[i].page = true
             stored.voice[i].typed = typed
-            if inkChanged { stored.voice[i].handwriting = nil }
+            if let paperTemplate {
+                stored.voice[i].paperTemplate = paperTemplate
+            }
+            if inkChanged {
+                stored.voice[i].handwriting = nil
+            }
             stored.voice[i].paragraphs = Self.pageParagraphs(typed: typed, handwriting: stored.voice[i].handwriting)
-            // The words changed: the summary and next steps are made again.
-            stored.voice[i].summary = nil
-            stored.voice[i].keyPoints = []
-            stored.voice[i].todos = []
+            if typedChanged || inkChanged {
+                insightsGaveUp.remove(id)
+                stored.voice[i].summary = nil
+                stored.voice[i].keyPoints = []
+                stored.voice[i].todos = []
+            }
             stored.voice[i].updated = now
             persist()
             publishPanel?()
-            Log.add("notebook: page \(id.prefix(6)) changed (\(typed.count) typed chars)")
+            Log.add("notebook: page \(id.prefix(6)) auto-saved (\(typed.count) typed chars)")
             return id
         }
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "HH:mm"
         let newId = id ?? UUID().uuidString.lowercased()
-        stored.voice.append(VoiceNote(id: newId, title: "Page \(f.string(from: now))", state: "saved",
+        stored.voice.append(VoiceNote(id: newId, title: Self.pageClockTitle(now), state: "saved",
                                       created: now, updated: now,
                                       paragraphs: Self.pageParagraphs(typed: typed, handwriting: nil),
-                                      page: true, typed: typed))
+                                      page: true, typed: typed,
+                                      paperTemplate: paperTemplate ?? "ruled"))
         persist()
         publishPanel?()
         Log.add("notebook: page \(newId.prefix(6)) saved (\(typed.count) typed chars)")
         return newId
     }
 
-    /// The handwriting as Claude read it ("NONE": no words on the page).
+    /// The handwriting as read by vision OCR ("NONE": no words on the page).
     func pageRead(_ id: String, handwriting raw: String) {
         guard let i = stored.voice.firstIndex(where: { $0.id == id }) else { return }
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         stored.voice[i].handwriting = text.uppercased() == "NONE" ? "" : text
         stored.voice[i].paragraphs = Self.pageParagraphs(typed: stored.voice[i].typed ?? "",
                                                          handwriting: stored.voice[i].handwriting)
+        insightsGaveUp.remove(id)
         stored.voice[i].updated = Date()
         persist()
         publishPanel?()

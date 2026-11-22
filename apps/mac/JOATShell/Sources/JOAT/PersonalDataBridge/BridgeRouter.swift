@@ -3,6 +3,7 @@ import Foundation
 
 actor BridgeRouter {
     private let eventKit: EventKitService
+    private let contacts = ContactsService()
     private let openClawCredentials: any OpenClawCredentialServicing
     private let a2aCredentials: any A2ATokenServicing
 
@@ -28,6 +29,14 @@ actor BridgeRouter {
         entity: String
     ) async throws -> EventKitAuthorizationSnapshot {
         try await eventKit.requestFullAccess(entity: entity)
+    }
+
+    func contactsStatus() async -> ContactsStatusDTO {
+        await contacts.status()
+    }
+
+    func requestContactsAccessFromMacUI() async throws -> ContactsStatusDTO {
+        try await contacts.requestAccessFromMacUI()
     }
 
     func handle(_ request: BridgeRequest) async -> BridgeResponse {
@@ -77,6 +86,13 @@ actor BridgeRouter {
             case "reminders.query":
                 let body = try BridgeContract.decode(ReminderQueryRequest.self, from: request.body)
                 result = try await BridgeContract.encode(eventKit.queryReminders(body))
+                commitPhase = "read_only"
+            case "contacts.status":
+                result = try await BridgeContract.encode(contacts.status())
+                commitPhase = "read_only"
+            case "contacts.search":
+                let body = try BridgeContract.decode(ContactsSearchRequest.self, from: request.body)
+                result = try await BridgeContract.encode(contacts.search(body))
                 commitPhase = "read_only"
             case "calendar.query":
                 let body = try BridgeContract.decode(CalendarQueryRequest.self, from: request.body)

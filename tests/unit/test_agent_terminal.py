@@ -701,12 +701,7 @@ class TestSidebarOpensTheRoster:
 
 
 class TestSpokenCapabilityOpeners:
-    """The glasses are voice-first: both features open by asking.
-
-    The capability-open grammar covered Messages, Planning, Notifications
-    and friends but neither Brainstorm nor Agent Terminal — the two
-    surfaces this work owns were reachable only by tapping a sidebar row.
-    """
+    """Spoken capability openers resolve Agent Terminal and reject removed Brainstorm."""
 
     def _resolve(self, said: str) -> str | None:
         from joat.services.capabilities import (
@@ -715,22 +710,17 @@ class TestSpokenCapabilityOpeners:
         match = _OPEN_CAPABILITY.fullmatch(" ".join(said.split()).rstrip(".,!?"))
         if match is None:
             return None
-        return _SPOKEN_CAPABILITY[" ".join(match.group("name").lower().split())]
+        return _SPOKEN_CAPABILITY.get(" ".join(match.group("name").lower().split()))
 
-    def test_both_features_have_spoken_openers(self) -> None:
-        assert self._resolve("open brainstorm") == "Brainstorm"
-        assert self._resolve("show my brainstorm") == "Brainstorm"
+    def test_agent_terminal_has_spoken_openers_and_brainstorm_is_gone(self) -> None:
         assert self._resolve("open agent terminal") == "Agent Terminal"
         assert self._resolve("show the terminal") == "Agent Terminal"
-
-    def test_they_remain_different_features(self) -> None:
-        # Nothing in the opener maps one onto the other.
-        assert self._resolve("open debate") == "Brainstorm"
         assert self._resolve("open terminal") == "Agent Terminal"
+        assert self._resolve("open brainstorm") is None
+        assert self._resolve("show my brainstorm") is None
+        assert self._resolve("open debate") is None
 
     def test_the_terminal_command_grammar_is_not_shadowed(self) -> None:
-        # 'terminal sessions' must still reach AgentTerminalCommands rather
-        # than being swallowed as a surface-open request.
         assert self._resolve("terminal sessions") is None
         assert self._resolve("terminal cancel") is None
 
@@ -738,72 +728,6 @@ class TestSpokenCapabilityOpeners:
         for said in ("open the door", "show me the weather",
                      "navigate to the park", "open a new tab"):
             assert self._resolve(said) is None
-
-
-class TestBrainstormRowIsNotGatedOnHermes:
-    """Opening Brainstorm must not send the wearer to fix a daemon.
-
-    _show_brainstorm refused unless the Hermes terminal was ready and
-    seated Hermes beside Codex and Claude — both contradict the boundary.
-    Hermes/OpenClaw are Agent Terminal workers; they neither participate
-    in a Brainstorm nor gate one.
-    """
-
-    def _router(self, recap=None):
-        from joat.services.capabilities import CapabilityRouter
-        from joat.services.hud import HudWriter
-        from joat.channels.cards import CardLog
-        from tests.unit.test_session import SinkTransport
-
-        transport = SinkTransport()
-
-        class Status:
-            def agent_terminal_projection(self):
-                # The worst case: Hermes entirely unavailable.
-                return {"state": "unavailable", "reason": "endpoint_missing",
-                        "endpoint_host": "", "no_tools_checked": False}
-
-        return CapabilityRouter(
-            hud=HudWriter(transport), transport=transport, status=Status(),
-            messages=None, cards=CardLog(),
-            brainstorm_recap=recap,
-        ), transport
-
-    def _frames(self, transport):
-        from joat.core.protocol import AgentTerminalHudView, BrainstormHudView  # noqa: F401
-        return [m for m in transport.sent
-                if type(m).__name__ == "BrainstormHudView"]
-
-    async def test_it_opens_even_with_hermes_unavailable(self) -> None:
-        router, transport = self._router()
-        await router.open("Brainstorm")
-        frames = self._frames(transport)
-        assert frames, "Brainstorm did not open at all"
-        frame = frames[-1]
-        assert "Hermes" not in frame.activity
-        assert "Hermes" not in frame.collaborators
-
-    async def test_the_seats_are_codex_and_claude(self) -> None:
-        router, transport = self._router()
-        await router.open("Brainstorm")
-        assert self._frames(transport)[-1].collaborators == ["Codex", "Claude"]
-
-    async def test_a_finished_session_is_re_readable(self) -> None:
-        from joat.services.sinks import DebateStateSink
-
-        sink = DebateStateSink()
-        await sink.open("cold-start latency", ["codex", "claude"])
-        await sink.turn("CODEX (proposer)")
-        await sink.chunk("keep the weights resident")
-        await sink.close("converged 0.91")
-
-        router, transport = self._router(recap=lambda: sink.snapshot)
-        await router.open("Brainstorm")
-        frame = self._frames(transport)[-1]
-        # The synthesis the wearer walked away with, still there.
-        assert "cold-start latency" in frame.topic
-        assert "keep the weights resident" in frame.activity
-        assert frame.state == "settled"
 
 
 class TestWatchingConcurrentWork:
@@ -899,7 +823,7 @@ class TestTheFrameAlwaysFitsTheWire:
     ]
 
     def test_verbose_agent_output_still_makes_a_legal_frame(self) -> None:
-        from joat.core.protocol import BrainstormHudView
+        from joat.core.protocol import AgentTerminalHudView
         from joat.services.agent_terminal import (
             AgentTerminalRoster, HUD_COLUMNS,
         )
@@ -919,7 +843,7 @@ class TestTheFrameAlwaysFitsTheWire:
 
     def test_a_gateway_session_key_cannot_overflow_a_lane_chip(self) -> None:
         """Roster lanes are named by GATEWAY keys, which we do not choose."""
-        from joat.core.protocol import BrainstormHudView
+        from joat.core.protocol import AgentTerminalHudView
         from joat.services.agent_terminal import (
             AgentTerminalRoster, HUD_LANE_COLUMNS,
         )
@@ -936,20 +860,20 @@ class TestTheFrameAlwaysFitsTheWire:
         ).to_wire()
 
     def test_the_shipped_scrollback_fits_the_wire_bound(self) -> None:
-        from joat.core.protocol import BRAINSTORM_ACTIVITY_MAX
+        from joat.core.protocol import TERMINAL_ACTIVITY_MAX
         from joat.services.agent_terminal import HUD_COLUMNS, HUD_LINES
 
         # Rows, their columns, AND the newlines that separate them. The
         # bound is scrollback depth now — the wearer swipes a 12-row
         # window over it — so shipped rows must FIT, not equal.
         assert (HUD_LINES * HUD_COLUMNS + (HUD_LINES - 1)
-                <= BRAINSTORM_ACTIVITY_MAX), (
+                <= TERMINAL_ACTIVITY_MAX), (
             "the terminal ships more scrollback than the wire admits"
         )
 
     def test_a_full_frame_uses_every_row_and_still_fits(self) -> None:
         """The worst case the geometry allows must be a legal frame."""
-        from joat.core.protocol import BrainstormHudView
+        from joat.core.protocol import AgentTerminalHudView
         from joat.services.agent_terminal import (
             AgentTerminalRoster, HUD_COLUMNS, HUD_LINES,
         )
@@ -997,7 +921,7 @@ class TestTheFrameAlwaysFitsTheWire:
         A newline in one reached `collaborators`, a field the renderer
         draws on a single line as the LANES row.
         """
-        from joat.core.protocol import BrainstormHudView
+        from joat.core.protocol import AgentTerminalHudView
         from joat.services.agent_terminal import (
             AgentTerminalRoster, HUD_LANE_COLUMNS,
         )
@@ -1212,32 +1136,18 @@ class TestTheTerminalReportsItsOwnLane:
 
 
 class TestAReplyReachesHermesForReal:
-    """The wearer's headline: "take the last response from claude or codex
-    and send it to the hermes in the Agent Terminal".
-
-    Covered until now with a fake snapshot on one end and a fake agent on
-    the other. Fakes on both ends is how the routing shipped broken once
-    already — consume_transcript returning False where every real session
-    returns True.
-    """
-
     async def test_the_whole_reply_arrives_in_the_lane(self) -> None:
         from joat.services.agent_terminal import (
             AgentTerminalCommands, AgentTerminalRoster,
         )
-        from joat.services.sinks import DebateStateSink
 
         reply = ("Key the cache on the session id AND the generation, or a "
                  "lens handoff replays a round the wearer already read.")
-
-        # A real settled session through the real sink.
-        snapshot = DebateStateSink()
-        await snapshot.open("caching", ["codex (proposer)", "claude (critic)"])
-        await snapshot.turn("CODEX (proposer)")
-        await snapshot.chunk("cache on session id")
-        await snapshot.turn("CLAUDE (critic)")
-        await snapshot.chunk(reply)
-        await snapshot.close("done — converged")
+        settled = {
+            "codex": ("CODEX", "cache on session id"),
+            "claude": ("CLAUDE", reply),
+            None: ("CLAUDE", reply),
+        }
 
         seen: list[str] = []
 
@@ -1248,7 +1158,7 @@ class TestAReplyReachesHermesForReal:
 
         roster = AgentTerminalRoster([("hermes", Recording())])
         commands = AgentTerminalCommands(
-            roster, last_reply=lambda who: snapshot.snapshot.last_reply(who))
+            roster, last_reply=lambda who: settled.get(who))
 
         receipt = await commands.route_reply("claude", None)
         for _ in range(40):
@@ -1258,24 +1168,20 @@ class TestAReplyReachesHermesForReal:
 
         assert "CLAUDE" in receipt
         assert seen, "the reply must actually reach the lane"
-        # The WHOLE answer, not the collapsed row the panel draws.
         assert reply in seen[0]
 
     async def test_a_seat_that_never_spoke_routes_nothing(self) -> None:
         from joat.services.agent_terminal import (
             AgentTerminalCommands, AgentTerminalRoster,
         )
-        from joat.services.sinks import DebateStateSink
 
-        snapshot = DebateStateSink()
-        await snapshot.open("caching", ["codex (proposer)"])
-        await snapshot.turn("CODEX (proposer)")
-        await snapshot.chunk("only codex spoke")
-        await snapshot.close("done")
-
+        settled = {
+            "codex": ("CODEX", "only codex spoke"),
+            None: ("CODEX", "only codex spoke"),
+        }
         roster = AgentTerminalRoster([("hermes", FakeAgent())])
         commands = AgentTerminalCommands(
-            roster, last_reply=lambda who: snapshot.snapshot.last_reply(who))
+            roster, last_reply=lambda who: settled.get(who))
         answer = await commands.route_reply("claude", None)
         assert "No reply from Claude" in answer
 
@@ -1552,7 +1458,7 @@ class TestBrainstormMaterialReachesABusyLane:
             roster, last_reply=lambda who: replies.get(who),
         )
         manager = SessionManager(
-            HudWriter(SinkTransport()), lambda t: None,
+            HudWriter(SinkTransport()),
             route_reply=lambda who, lane: commands.route_reply(who, lane),
             last_reply=lambda who: replies.get(who),
         )
@@ -2840,3 +2746,87 @@ class TestStopAndProgressOwnership:
                 assert not r.lane('OpenClaw').last_error
         assert r.frame().history_truncated
         assert len(r.frame().messages) <= 64
+
+
+class TestUniformAgentPickerAndLaneSessions:
+    async def test_picker_rows_emit_clean_agent_names_and_never_model_names(self) -> None:
+        gate = asyncio.Event()
+
+        class ProviderAgent(FakeAgent):
+            def __init__(self, provider: str, model: str, *, gate: asyncio.Event | None = None):
+                super().__init__(gate=gate)
+                self.provider = provider
+                self.model = model
+
+        claude = ProviderAgent("claude-code", "claude-opus-4-6")
+        codex = ProviderAgent("codex", "gpt-5.3-codex", gate=gate)
+        antigravity = ProviderAgent("antigravity", "gemini-2.5-pro")
+
+        r = AgentTerminalRoster(
+            [("claude", claude), ("codex", codex), ("antigravity", antigravity)],
+            visible_lanes=("claude", "codex", "antigravity"),
+        )
+        await r.send("run tests", name="codex")
+        r.note_approval("antigravity", "req-1", "exec", "rm -rf build")
+
+        rows = r.picker_rows()
+        assert rows == [
+            ("claude", "Claude · idle"),
+            ("codex", "Codex · working"),
+            ("antigravity", "Antigravity · approval needed"),
+        ]
+        rendered = " ".join(label for _, label in rows).lower()
+        for forbidden in ("opus", "gpt-5", "gemini", "2.5-pro", "▸"):
+            assert forbidden not in rendered
+
+        gate.set()
+        if r.lane("codex").task is not None:
+            await r.lane("codex").task
+
+    async def test_lane_session_list_resume_new_session_and_active_summary(
+        self, tmp_path,
+    ) -> None:
+        from joat.agents.antigravity_terminal import AntigravityTerminalAgent
+        from test_antigravity_terminal import FakeSdk
+
+        ag = AntigravityTerminalAgent(
+            "antigravity",
+            str(tmp_path),
+            api_key=lambda: "fake-key",
+            sdk=FakeSdk(),
+            state_dir=tmp_path / "ag-state",
+        )
+        ag._record_session("conv-alpha", "Refactor BLE transport")
+        ag._record_session("conv-beta", "Wire 3-level session picker")
+        ag._conversation_id = "conv-beta"
+
+        r = AgentTerminalRoster(
+            [("antigravity", ag)],
+            visible_lanes=("antigravity",),
+        )
+        assert r.lane_active_summary("antigravity") is None
+
+        sessions = await r.list_lane_sessions("antigravity")
+        assert [s["key"] for s in sessions] == ["conv-beta", "conv-alpha"]
+        assert [s["label"] for s in sessions] == [
+            "Wire 3-level session picker",
+            "Refactor BLE transport",
+        ]
+
+        # Record a message so active summary appears
+        lane = r.lane("antigravity")
+        assert lane is not None
+        lane.conversation.append("assistant", "All 75 tests passed.")
+        assert r.lane_active_summary("antigravity") is not None
+
+        # Start new session clears lane conversation & active conv_id WITHOUT erasing sessions.json
+        assert await r.start_new_lane_session("antigravity") is True
+        assert ag.conversation_id is None
+        assert r.lane_active_summary("antigravity") is None
+        still_saved = await r.list_lane_sessions("antigravity")
+        assert [s["key"] for s in still_saved] == ["conv-beta", "conv-alpha"]
+
+        # Resume session restores conversation_id
+        assert await r.resume_lane_session("antigravity", "conv-alpha") is True
+        assert ag.conversation_id == "conv-alpha"
+

@@ -83,7 +83,7 @@ const longMessage = Array.from({ length: 24 }, (_, index) => (
 const READER = { title: 'MESSAGES · MESSAGE', hint: 'swipe: more · say reply · 2x tap: back', selectable: false, nativeTextPage: true };
 
 describe('HudPresenter native text page for a Mac-paged reader', () => {
-  it('shows a Messages thread as firmware text, the Mac\'s slices joined back into sentences', async () => {
+  it.each(['MESSAGES · CONVERSATION', 'MAIL · CONVERSATION'] as const)('shows a %s thread as firmware text, the slices joined back into speaker-indented sentences', async (title) => {
     const r = rig();
     expect(await r.hud.showList([
       '1/1 · Adele',
@@ -91,7 +91,7 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
       'want to walk Marcus through the onboarding flow first.\n',
       'You: Exporting them now.\n',
     ], {
-      title: 'MESSAGES · CONVERSATION', hint: 'tap: reply · 2x tap: back', selectable: true, nativeTextPage: true,
+      title, hint: 'tap: reply · 2x tap: back', selectable: true, nativeTextPage: true,
     })).toBe(true);
     expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
     const page = r.rebuilds[r.rebuilds.length - 1];
@@ -110,6 +110,7 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     // The wrapped row starts where the words after "Adele: " start.
     const lead = getTextWidth(/^ */u.exec(lines[2]!)![0]);
     expect(Math.abs(lead - getTextWidth('Adele: '))).toBeLessThanOrEqual(getTextWidth(' ') / 2);
+    expect(text(page, 'hint')).toBe('tap: reply · swipe: scroll · 2x tap: back');
   });
 
   it('shows the reader as one text page with the live status and no image tiles', async () => {
@@ -233,7 +234,7 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     );
     // The Mac's promises need not sit side by side to count.
     expect(await r.hud.showList(longMessage, {
-      ...READER, title: 'BRAINSTORM · SAVED', hint: 'up previous · tap: continue · down more · 2x tap: back',
+      ...READER, title: 'AGENT TERMINAL · CHECK', hint: 'up previous · tap: continue · down more · 2x tap: back',
     })).toBe(true);
     expect(text(r.rebuilds[r.rebuilds.length - 1], 'hint'))
       .toBe(`1/${pages.length} · tap: continue · swipe: page · 2x tap: back`);
@@ -502,27 +503,6 @@ describe('HudPresenter Messages and QuickNotes in the glasses\' scroll box', () 
     expect(reopened.some((line) => line.startsWith('Dele: Message 0 '))).toBe(true);
   });
 
-  it('reopens a Brainstorm room on the wearer\'s move and the new answers, wherever they had stopped reading', async () => {
-    const ROOM = { title: 'BRAINSTORM · ROOM', hint: 'speak: your move', selectable: true, nativeTextPage: true };
-    const round = (speaker: string, count: number) => (
-      `${speaker} > ${Array.from({ length: count }, (_, i) => `Point ${i + 1} of the answer, said at some length so it wraps.`).join(' ')}`
-    );
-    const roundOne = [round('CLAUDE-B', 150), round('CLAUDE', 150)].join('\n\n');
-    const r = rig();
-    await r.hud.showList(readerRows([], roundOne), ROOM);
-    await settle();
-    // The wearer read a screen or two of round one, then spoke.
-    for (let swipe = 0; swipe < 2; swipe += 1) {
-      r.hud.scrollTextPage('down');
-      await settle();
-    }
-    expect(r.hud.isTextPageAtEnd()).toBe(false);
-    const grown = `${roundOne}\n\nYOU > Okay, now a step by step plan.\n\n${round('CLAUDE-B', 150)}`;
-    expect(await r.hud.showList(readerRows([], grown), ROOM)).toBe(true);
-    const reopened = (text(r.rebuilds[r.rebuilds.length - 1], 'main') ?? '').split('\n');
-    expect(reopened[0]).toBe('YOU > Okay, now a step by step plan.');
-  });
-
   it('opens a thread that changed at its top (a sent reply) at the top', async () => {
     const r = rig();
     await r.hud.showList(thread(20), THREAD);
@@ -535,8 +515,8 @@ describe('HudPresenter Messages and QuickNotes in the glasses\' scroll box', () 
     expect(text(r.rebuilds[r.rebuilds.length - 1], 'main')?.startsWith('Dele\n\nYou: On my way ▶')).toBe(true);
   });
 
-  it('scrolls a saved QuickNote, its exact text and the Brainstorm conversation the same way', async () => {
-    for (const title of ['QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL', 'BRAINSTORM · ROOM']) {
+  it('scrolls a saved QuickNote and its exact text the same way', async () => {
+    for (const title of ['QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL']) {
       const r = rig();
       const note = readerRows([], [
         'Standup notes', 'Recording · 2 transcript sections', '',

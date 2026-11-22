@@ -16,16 +16,11 @@ struct IntelligenceView: View {
                 ServiceRow(title: "Language model", symbol: "sparkle",
                            value: readiness.value(status.llm), detail: "Produces JOAT’s answers",
                            healthy: readiness.isLive && status.llm == "ready")
-                Divider()
-                ServiceRow(title: "Brainstorm", symbol: "person.2",
-                           value: brainstormValue,
-                           detail: "Collaborators work together when you start Brainstorm on the glasses.",
-                           healthy: readiness.isLive && ["ready", "running", "settled"].contains(status.brainstorm.state))
             }
-            GroupBox("Agent Terminal · OpenClaw and Hermes") {
+            GroupBox("Agents") {
                 A2AConnectionSettings(engine: engine).padding(10)
             }
-            GroupBox("OpenClaw session Gateway") {
+            GroupBox("Agent Gateway (advanced)") {
                 VStack(alignment: .leading, spacing: 0) {
                     ServiceRow(title: "Gateway", symbol: "network", value: gatewayValue,
                                healthy: readiness.isLive && ["connected_read_only", "connected_operator"].contains(status.openClaw.state))
@@ -38,7 +33,7 @@ struct IntelligenceView: View {
                     }
                     if let help = connectionHelp { WorkspaceNotice(text: help).padding(.bottom, 12) }
                     LocalCommandView(commands: engine.commands, action: .serviceRetry,
-                                     title: "Retry Service", detail: "Check the saved Hermes / OpenClaw session.")
+                                     title: "Retry Service", detail: "Check the saved Gateway connection.")
                         .disabled(engine.isPreview || engine.isTransitioning)
                         .padding(.bottom, 16)
                     Divider().padding(.bottom, 16)
@@ -46,19 +41,6 @@ struct IntelligenceView: View {
                 }.padding(10)
             }
         }
-    }
-
-    private var brainstormValue: String {
-        guard readiness.isLive else { return "Not reporting" }
-        if status.brainstorm.state == "running" {
-            let phase = ["opening": "Opening", "independent": "Independent work", "cross_review": "Cross-review",
-                         "meta_review": "Reviewing", "synthesis": "Synthesizing", "closing": "Closing", "turn": "Collaborating"]
-            return phase[status.brainstorm.phase] ?? "Working"
-        }
-        if ["ready", "settled"].contains(status.brainstorm.state) {
-            return "\(status.brainstorm.state.capitalized) · \(status.brainstorm.seatCount) collaborators"
-        }
-        return status.brainstorm.state.capitalized
     }
 
     private var gatewayValue: String {
@@ -99,15 +81,21 @@ struct HermesConnectionSettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Agent Gateways").font(.headline)
-            Text("These agent services are used by this Mac. The phone’s Mac selector lists JOAT hosts separately.")
+            Text("Gateways").font(.headline)
+            Text("The Gateways this Mac connects to. The phone’s Mac selector lists JOAT hosts separately.")
                 .font(.caption).foregroundStyle(.secondary)
             ForEach($model.drafts) { $draft in
                 HStack {
-                    TextField("OpenClaw Gateway URL", text: $draft.gatewayURL,
+                    TextField("Name", text: $draft.name, prompt: Text("Name"))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 150)
+                        .accessibilityLabel("Gateway name")
+                        .help("What the glasses call this Gateway.")
+                        .onSubmit { model.save() }
+                    TextField("Gateway URL", text: $draft.gatewayURL,
                               prompt: Text("wss://your-mac-mini.tailnet.ts.net"))
                         .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("OpenClaw Gateway URL")
+                        .accessibilityLabel("Gateway URL")
                         .onSubmit { model.save() }
                     if model.drafts.count > 1 {
                         Button("Remove Gateway", systemImage: "minus.circle") { model.removeHost(id: draft.id) }
@@ -116,7 +104,7 @@ struct HermesConnectionSettings: View {
                     }
                 }
             }
-            Text("Connect to the OpenClaw Gateway for JOAT’s dedicated Hermes agent session. The first Gateway supplies the status above; additional Gateways are used when their Agent Terminal lanes are opened.")
+            Text("Optional. A Gateway gives Agent Terminal its built-in Work, Hermes and Calendar sessions; they use the Gateway agent with the ID hermes. JOAT connects to Gateways that use the OpenClaw Gateway protocol. The name is what the glasses call that Gateway. The first Gateway supplies the status above; additional Gateways are used when their Agent Terminal lanes are opened.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Add Gateway", systemImage: "plus") { model.addHost() }
@@ -126,7 +114,7 @@ struct HermesConnectionSettings: View {
                 Button("Save Connections") { model.save() }.disabled(!model.canSave)
             }
             if model.configurations == nil && model.drafts.contains(where: { !$0.gatewayURL.isEmpty }) {
-                WorkspaceNotice(text: "Use distinct wss:// Gateway addresses without a path, password, or token. Port 9443 is the Hermes dashboard, not its Gateway.", isError: true)
+                WorkspaceNotice(text: "Give each Gateway a name, and use distinct wss:// addresses without a path, password, or token. Port 9443 is the Hermes dashboard, not a Gateway.", isError: true)
             }
             if let notice = model.notice { WorkspaceNotice(text: notice, isError: model.failed) }
             if model.loadFailed {

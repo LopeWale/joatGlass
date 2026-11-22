@@ -13,29 +13,34 @@ struct OpenClawRuntimeConfiguration: Equatable, Sendable {
         case unsafeDestination
         case writeFailed
         case invalidHostList
+        case invalidName
 
         var errorDescription: String? {
             switch self {
             case .invalidGatewayOrigin:
                 "Enter a WebSocket Gateway origin with no path, query, or credentials."
             case .remoteGatewayRequiresTLS:
-                "A remote Hermes Gateway must use wss://."
+                "A remote Gateway must use wss://."
             case .hermesDashboard:
-                "Port 9443 is Hermes’s control dashboard, not the authenticated Gateway."
+                "Port 9443 is Hermes’s control dashboard, not a Gateway."
             case .invalidFile:
-                "The existing Hermes Gateway configuration is invalid."
+                "The existing Gateway configuration is invalid."
             case .unsafeDestination:
                 "JOAT will not overwrite a non-file or symbolic-link configuration."
             case .writeFailed:
-                "JOAT could not save the Hermes Gateway configuration."
+                "JOAT could not save the Gateway configuration."
             case .invalidHostList:
                 "Configure between one and sixteen distinct Gateways."
+            case .invalidName:
+                "Give each Gateway a name of up to 32 characters."
             }
         }
     }
 
     static let hermesAgentID = "hermes"
     static let hermesControlDashboardPort = 9443
+    /// What the glasses call a Gateway that has not been given a name.
+    static let defaultName = "OpenClaw"
 
     static var defaultURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -45,10 +50,18 @@ struct OpenClawRuntimeConfiguration: Equatable, Sendable {
 
     let gatewayURL: String
     let agentID: String
+    /// What the glasses call this Gateway.
+    let name: String
 
-    init(gatewayURL: String) throws {
+    init(gatewayURL: String, name: String = defaultName) throws {
         self.gatewayURL = try Self.canonicalGatewayURL(gatewayURL)
         self.agentID = Self.hermesAgentID
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1...32).contains(trimmed.count),
+              !trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw ConfigurationError.invalidName
+        }
+        self.name = trimmed
     }
 
     static func load(
@@ -88,14 +101,15 @@ struct OpenClawRuntimeConfiguration: Equatable, Sendable {
         let entries: [[String: Any]]
         if Set(raw.keys) == ["hosts"], let hosts = raw["hosts"] as? [[String: Any]] {
             entries = hosts
-        } else if Set(raw.keys) == ["gateway_url", "agent_id"] {
+        } else if Set(raw.keys).subtracting(["name"]) == ["gateway_url", "agent_id"] {
             entries = [raw]
         } else { throw ConfigurationError.invalidFile }
         let configurations = try entries.map { entry in
-            guard Set(entry.keys) == ["gateway_url", "agent_id"],
+            guard Set(entry.keys).subtracting(["name"]) == ["gateway_url", "agent_id"],
                   entry["agent_id"] as? String == hermesAgentID,
-                  let gatewayURL = entry["gateway_url"] as? String else { throw ConfigurationError.invalidFile }
-            return try OpenClawRuntimeConfiguration(gatewayURL: gatewayURL)
+                  let gatewayURL = entry["gateway_url"] as? String,
+                  entry["name"] == nil || entry["name"] is String else { throw ConfigurationError.invalidFile }
+            return try OpenClawRuntimeConfiguration(gatewayURL: gatewayURL, name: entry["name"] as? String ?? defaultName)
         }
         try validateHosts(configurations)
         return configurations
@@ -143,7 +157,12 @@ struct OpenClawRuntimeConfiguration: Equatable, Sendable {
             }
         }
 
-        let entries = configurations.map { ["gateway_url": $0.gatewayURL, "agent_id": $0.agentID] }
+        let entries = configurations.map { configuration -> [String: String] in
+            var entry = ["gateway_url": configuration.gatewayURL, "agent_id": configuration.agentID]
+            // The default name stays implicit, so an unnamed Gateway saves exactly as before.
+            if configuration.name != defaultName { entry["name"] = configuration.name }
+            return entry
+        }
         let payload: [String: Any] = entries.count == 1 ? entries[0] : ["hosts": entries]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         let temporaryURL = directory.appendingPathComponent(

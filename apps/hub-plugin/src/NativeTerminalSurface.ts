@@ -1,98 +1,91 @@
 import {
   TextContainerUpgrade,
+  utf8ByteLength,
   type RebuildPageContainer,
 } from '@evenrealities/even_hub_sdk';
-import { pxTruncate } from '@evenrealities/pretext';
-import { firmwareLineWidth } from './FirmwareText';
+import { getTextWidth, pxTruncate } from '@evenrealities/pretext';
 import type { BridgeClient } from './BridgeClient';
-import { TerminalConversationViewport } from './TerminalConversation';
 import { TEXT_CONTAINER_MAX_BYTES, fitUtf8 } from './FirmwareLimits';
+import { firmwareLineWidth } from './FirmwareText';
+import {
+  TerminalConversationViewport,
+  type TerminalLayeredLine,
+} from './TerminalConversation';
 import { wrapTerminalParagraph } from './TerminalText';
-import { ContainerId, type BrainstormHudModel, type TerminalConversationMessage } from './types';
+import {
+  ContainerId,
+  type AgentTerminalHudModel,
+  type TerminalConversationMessage,
+  type TerminalHudState,
+} from './types';
 
-/** Page-local identities. The layout callback must use these exact values so
- * every update addresses the same native container created on entry.
+/** Page-local container identities for the 5-container framed Agent Terminal.
  *
- * The head is the page's status line, so it takes the StatusBar id: that is
- * how withImageHeader (HeaderImage.ts) finds the line to swap for the image
- * spine every other firmware page carries. With ids 16/17 the terminal was
- * the one page left drawing "9:41 · BRAINSTORM · ● · ■" in firmware text,
- * and 17 would have collided with the spine's right half (HeaderImageId). */
+ * - Head (`StatusBar = 1`): live status bar (or swapped for image spine 16/17).
+ * - Card (`12`): rounded card frame (`borderWidth: 1, borderColor: 8, borderRadius: 4`) + sole event capture owner.
+ * - Dim (`13`): 7-row dim layer (`textColor: 2`) for `> ` user turns, `>> ` tool calls, `! ` notices, and dimmed context above approvals.
+ * - Bright (`14`): 7-row bright layer (`textColor: 4`) for full-width assistant prose, live `> ` speech, and the Unicode approval box.
+ * - Foot (`Hint = 7`): 1-line dim footer (`textColor: 2`) for state + truthful gestures.
+ */
 export const NativeTerminalContainer = {
   Head: { id: ContainerId.StatusBar, name: 'terminal-head' },
-  Body: { id: 14, name: 'terminal-body' },
+  Card: { id: 12, name: 'terminal-card' },
+  Dim: { id: 13, name: 'terminal-dim' },
+  Bright: { id: 14, name: 'terminal-bright' },
+  Foot: { id: ContainerId.Hint, name: 'terminal-foot' },
 } as const;
 
-/** The fixed page fits one firmware line above nine body lines on 576x288.
- * Inner dimensions subtract the four-pixel padding on both sides. */
 export const NATIVE_TERMINAL_GEOMETRY = {
   width: 576,
+  headX: 0,
   headY: 0,
-  headHeight: 35,
-  bodyY: 35,
-  bodyHeight: 253,
-  padding: 4,
-  bodyTextWidth: 568,
-  bodyLineCapacity: 9,
+  headWidth: 576,
+  headHeight: 32,
+  headPadding: 2,
+  headTextWidth: 572,
+  cardX: 12,
+  cardY: 34,
+  cardWidth: 552,
+  cardHeight: 214,
+  cardBorderWidth: 1,
+  cardBorderColor: 8,
+  cardBorderRadius: 4,
+  bodyX: 24,
+  bodyY: 42,
+  bodyWidth: 528,
+  bodyHeight: 198,
+  bodyTextWidth: 528,
+  bodyLineCapacity: 7,
   lineHeight: 27,
+  footX: 12,
+  footY: 252,
+  footWidth: 552,
+  footHeight: 34,
+  footTextWidth: 552,
 } as const;
 
-const BODY_FIXED_ROWS = 2; // provider/state + truthful gesture footer
-const MAX_PROMPT_ROWS = NATIVE_TERMINAL_GEOMETRY.bodyLineCapacity - BODY_FIXED_ROWS - 1;
+export const TERMINAL_WORKING_SPINNERS = ['◐', '◓', '◑', '◒'] as const;
+
+const MAX_PROMPT_ROWS = 4;
 const MAX_LINE_UNITS = 190;
-const MAX_UPGRADE_UNITS = 2_000;
-const HEAD_TEXT = 'JOAT · AGENT TERMINAL';
-const BRAINSTORM_HEAD_TEXT = 'JOAT · BRAINSTORM';
-/** HudSink's silence marker (core sinks.py THINKING_MARKER): the row a seat
- * shows before its first token. The elapsed counter is drawn locally. */
-const THINKING_MARKER = 'Thinking…';
+const USER_PREFIX = '> ';
+const USER_INDENT = '  ';
+const NOTICE_PREFIX = '! ';
+const NOTICE_INDENT = '  ';
 
-/** Brainstorm (Codex proposes, Claude critiques) shares this page with the
- * Agent Terminal: one head line, a status row, the transcript, a footer
- * naming the gestures the BrainstormController accepts. */
-function isBrainstorm(model: Pick<BrainstormHudModel, 'screen'>): boolean {
-  return model.screen === 'brainstorm';
-}
-
-function headTextFor(model: Pick<BrainstormHudModel, 'screen'>): string {
-  return isBrainstorm(model) ? BRAINSTORM_HEAD_TEXT : HEAD_TEXT;
-}
-
-/** The gestures BrainstormController accepts in each state, in the raster
- * footer's words but measured for the firmware font: the raster running
- * hint also named the spoken "send that to hermes" verb and does not fit
- * one firmware line. Scrolled up, the row says how far from the live tail
- * the wearer is and what the double-press does there. */
-function brainstormFooter(model: BrainstormHudModel, newer: number): string {
-  if (newer > 0) {
-    return `▼ ${newer} newer · swipe down · 2x tap: ${model.state === 'running' ? 'cancel' : 'menu'}`;
-  }
-  switch (model.state) {
-    case 'running': return 'swipe: scroll · tap: terminal · 2x tap: cancel';
-    case 'topic_capture': return 'speak your question · 2x tap: cancel';
-    case 'ready': return 'tap: speak · 2x tap: menu';
-    // The phone page's Brainstorm tab resets the room and switches accounts.
-    case 'unavailable': return 'fix on phone: JOAT › Brainstorm · 2x tap: menu';
-    default: return 'swipe: scroll · 2x tap: menu';
-  }
-}
-
-/** The Brainstorm status row: its state, then who is speaking and the round
- * cost while it runs, else the question it is about. */
-function brainstormStatusRow(model: BrainstormHudModel): string {
-  const live = model.state === 'running' && model.activeSpeaker?.trim()
-    ? model.activeSpeaker.trim()
-    : model.topic.replace(/\s+/gu, ' ').trim();
-  return live ? `${stateName(model)} · ${live}` : stateName(model);
-}
+const MODEL_ID_PATTERN = /\b(?:gemini-[\w.-]+|claude-(?:sonnet|opus|haiku|3|4)[\w.-]*|sonnet-[\w.-]+|opus-[\w.-]+|haiku-[\w.-]+|gpt-[\w.-]+|o[134]-[\w.-]+)\b/giu;
 
 export interface NativeTerminalPage {
   headText: string;
-  bodyText: string;
+  dimLines: readonly string[];
+  brightLines: readonly string[];
+  dimText: string;
+  brightText: string;
+  footText: string;
   conversationKey: string;
   older: number;
   newer: number;
-  state: BrainstormHudModel['state'];
+  state: TerminalHudState;
   promptId?: string;
 }
 
@@ -117,12 +110,14 @@ interface TerminalPrompt {
   id: string;
   question: string;
   isCurrent: () => boolean;
+  partial?: string;
+  transcribing?: boolean;
 }
 
 interface DesiredTerminal {
   visit: number;
   token: number;
-  model: BrainstormHudModel;
+  model: AgentTerminalHudModel;
   status?: string;
   isCurrent: () => boolean;
 }
@@ -137,51 +132,45 @@ function current(check: () => boolean): boolean {
   try { return check(); } catch { return false; }
 }
 
-function copyModel(model: BrainstormHudModel): BrainstormHudModel {
+function copyModel(model: AgentTerminalHudModel): AgentTerminalHudModel {
   return {
     ...model,
-    collaborators: [...model.collaborators],
+    lanes: [...model.lanes],
     messages: model.messages?.map((message) => ({ ...message })),
-    terminalPrompt: model.terminalPrompt ? { ...model.terminalPrompt } : undefined,
   };
 }
 
-function focusName(topic: string): string {
-  return ((topic.split(' · ')[0] ?? '').replace(/\s+/gu, ' ').trim() || 'AGENT').toUpperCase();
+/** Remove raw model IDs from HUD strings so model names never clutter 576x288 lenses. */
+export function stripTerminalModelIds(value: string): string {
+  return value
+    .replace(/\(\s*(?:gemini|claude|gpt|sonnet|opus|haiku|o[134])[^)]*\)/giu, '')
+    .replace(MODEL_ID_PATTERN, '')
+    .replace(/\s*·\s*·\s*/gu, ' · ')
+    .replace(/\s+/gu, ' ')
+    .trim();
 }
 
-function stateName(model: BrainstormHudModel): string {
-  if (model.taskRecovery) return 'CHECK TASK';
-  if (model.inputRequired) return 'REPLY NEEDED';
-  switch (model.state) {
-    case 'unavailable': return 'UNAVAILABLE';
-    case 'approval_required': return 'APPROVAL REQUIRED';
-    case 'ready': return 'READY';
-    case 'topic_capture': return 'LISTENING';
-    case 'running': return 'WORKING';
-    case 'settled': return 'COMPLETE';
-    case 'cancelled': return 'CANCELLED';
-    case 'failed': return 'FAILED';
-    case 'blocked': return 'BLOCKED';
-  }
+/** Clean title-cased agent display name from `model.focus` (never a model ID). */
+export function terminalAgentTitle(focus: string): string {
+  const head = (focus.split(' · ')[0] ?? '')
+    .replace(/\([^)]*\)/gu, ' ')
+    .replace(MODEL_ID_PATTERN, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  const lower = head.toLowerCase();
+  if (lower.startsWith('claude')) return 'Claude';
+  if (lower.startsWith('codex')) return 'Codex';
+  if (lower.startsWith('antigravity')) return 'Antigravity';
+  if (lower.startsWith('openclaw')) return 'OpenClaw';
+  if (lower.startsWith('hermes')) return 'Hermes';
+  if (!head) return 'Agent';
+  return head.charAt(0).toUpperCase() + head.slice(1);
 }
 
-/** The Brainstorm transcript as ONE status message: rows are already
- * speaker-prefixed ("CODEX > gist", the live turn in full, "JOAT > verdict"),
- * and separate messages would cost a blank separator row each out of seven. */
-function brainstormMessages(model: BrainstormHudModel): TerminalConversationMessage[] {
-  const text = model.activity
-    .split('\n')
-    .map((row) => row.replace(/\s+$/u, ''))
-    .filter((row) => row.trim().length > 0)
-    .join('\n');
-  return text ? [{ id: 'brainstorm-room', role: 'status', text }] : [];
-}
-
-export function isBrainstormThinking(model: BrainstormHudModel | undefined): boolean {
-  if (model?.screen !== 'brainstorm' || model.state !== 'running') return false;
-  const rows = model.activity.trimEnd().split('\n');
-  return (rows[rows.length - 1] ?? '').endsWith(THINKING_MARKER);
+/** Uppercase header token for `terminal-head` (`3:45 · CLAUDE · ● · ▇`). */
+export function terminalHeadTitle(focus: string): string {
+  const title = terminalAgentTitle(focus);
+  return title === 'Agent' ? 'AGENT TERMINAL' : title.toUpperCase();
 }
 
 function validQuestion(id: string, question: string): boolean {
@@ -197,114 +186,401 @@ function validQuestion(id: string, question: string): boolean {
   return true;
 }
 
-/** Metric wrapping also caps code units per line. The cap keeps pathological
- * zero-width sequences within the SDK's 2,000-character upgrade limit while
- * preserving them across subsequent rows. */
-function wrapWithMetrics(
+function combinedMeasure(custom: (text: string) => number): (text: string) => number {
+  if (custom === firmwareLineWidth) {
+    return (text: string) => Math.max(firmwareLineWidth(text), getTextWidth(text));
+  }
+  return (text: string) => Math.max(custom(text), firmwareLineWidth(text));
+}
+
+function wrapToWidth(
   text: string,
+  maxWidth: number,
   measureTextWidth: (text: string) => number,
 ): string[] {
+  const measure = combinedMeasure(measureTextWidth);
   return wrapTerminalParagraph(
     text,
-    NATIVE_TERMINAL_GEOMETRY.bodyTextWidth,
-    (candidate) => candidate.length > MAX_LINE_UNITS
-      ? NATIVE_TERMINAL_GEOMETRY.bodyTextWidth + 1
-      : measureTextWidth(candidate),
-  );
+    maxWidth,
+    (candidate) => (candidate.length > MAX_LINE_UNITS ? maxWidth + 1 : measure(candidate)),
+  ).map((line) => line.replace(/\s+$/u, '') || ' ');
 }
 
-function oneMeasuredLine(
+export function oneMeasuredTerminalLine(
   text: string,
-  measureTextWidth: (text: string) => number,
+  maxWidth: number,
+  measureTextWidth: (text: string) => number = firmwareLineWidth,
 ): string {
-  const codepointBounded = Array.from(text).slice(0, MAX_LINE_UNITS).join('');
-  if (measureTextWidth(codepointBounded) <= NATIVE_TERMINAL_GEOMETRY.bodyTextWidth) {
-    return codepointBounded;
+  const measure = combinedMeasure(measureTextWidth);
+  const compact = Array.from(text.replace(/\s+/gu, ' ').trim()).slice(0, MAX_LINE_UNITS).join('');
+  if (!compact) return ' ';
+  if (measure(compact) <= maxWidth) return compact;
+  let candidate = pxTruncate(compact, maxWidth);
+  if (measure(candidate) <= maxWidth) return candidate;
+  const points = Array.from(compact);
+  while (points.length > 1) {
+    points.pop();
+    candidate = `${points.join('').trimEnd()}…`;
+    if (measure(candidate) <= maxWidth) return candidate;
   }
-  return pxTruncate(codepointBounded, NATIVE_TERMINAL_GEOMETRY.bodyTextWidth);
+  return '…';
 }
 
-function promptRows(
+function wrapPrefixedBlock(
+  text: string,
+  firstPrefix: string,
+  hangingPrefix: string,
+  maxWidth: number,
+  measureTextWidth: (text: string) => number,
+): string[] {
+  const measure = combinedMeasure(measureTextWidth);
+  const prefixWidth = Math.max(measure(firstPrefix), measure(hangingPrefix));
+  const contentWidth = Math.max(48, maxWidth - prefixWidth);
+  const paragraphs = text.replace(/\r\n?/gu, '\n').split('\n');
+  const out: string[] = [];
+  let isFirst = true;
+  for (const raw of paragraphs) {
+    const clean = raw.replace(/\s+/gu, ' ').trim();
+    if (!clean) continue;
+    const wrapped = wrapToWidth(clean, contentWidth, measureTextWidth);
+    for (const segment of wrapped) {
+      const prefix = isFirst ? firstPrefix : hangingPrefix;
+      isFirst = false;
+      const candidate = `${prefix}${segment.trim()}`;
+      out.push(measure(candidate) <= maxWidth
+        ? candidate
+        : oneMeasuredTerminalLine(candidate, maxWidth, measureTextWidth));
+    }
+  }
+  return out;
+}
+
+/** Parse a `⏺ ` tool line from Claude Code, Codex, or Antigravity into a compact
+ * 1-line `>> <tool> · <detail>` row measured against `maxWidth`. */
+export function formatToolLine(
+  raw: string,
+  maxWidth: number = NATIVE_TERMINAL_GEOMETRY.bodyTextWidth,
+  measureTextWidth: (text: string) => number = firmwareLineWidth,
+): string {
+  const body = raw.replace(/^\s*⏺\s*/u, '').replace(/\s+/gu, ' ').trim();
+  if (!body) return '>> tool';
+  let formatted: string;
+  const callMatch = /^([A-Za-z0-9_./-]+)\((.*)\)$/u.exec(body);
+  if (callMatch) {
+    const tool = callMatch[1]!.trim();
+    const detail = callMatch[2]!.trim();
+    formatted = detail ? `>> ${tool} · ${detail}` : `>> ${tool}`;
+  } else {
+    const colonIndex = body.indexOf(':');
+    if (colonIndex > 0 && !body.slice(0, colonIndex).includes(' ')) {
+      const tool = body.slice(0, colonIndex).trim();
+      const detail = body.slice(colonIndex + 1).trim();
+      formatted = detail ? `>> ${tool} · ${detail}` : `>> ${tool}`;
+    } else {
+      formatted = `>> ${body}`;
+    }
+  }
+  return oneMeasuredTerminalLine(formatted, maxWidth, measureTextWidth);
+}
+
+function isApprovalLine(line: string): boolean {
+  return /^\s*\[approval\]/iu.test(line);
+}
+
+function parseApprovalSummaryFromText(raw: string): string | undefined {
+  const match = /^\s*\[approval\]\s*(.+?)(?:\s*[—-]\s*say\s+['"“]?terminal\s+approve.*)?$/iu.exec(raw.trim());
+  if (!match) return undefined;
+  const body = match[1]!.replace(/\s+/gu, ' ').trim();
+  if (!body) return undefined;
+  const colonIndex = body.indexOf(':');
+  if (colonIndex > 0 && !body.slice(0, colonIndex).includes(' ')) {
+    const kind = body.slice(0, colonIndex).trim();
+    const detail = body.slice(colonIndex + 1).trim();
+    return detail ? `${kind} · ${detail}` : kind;
+  }
+  return body;
+}
+
+function approvalSummaryFor(model: AgentTerminalHudModel): string {
+  const messages = model.messages ?? [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    const lines = message.text.replace(/\r\n?/gu, '\n').split('\n');
+    for (let lineIdx = lines.length - 1; lineIdx >= 0; lineIdx -= 1) {
+      const parsed = parseApprovalSummaryFromText(lines[lineIdx]!);
+      if (parsed) return parsed;
+    }
+  }
+  const activityLines = model.activity.replace(/\r\n?/gu, '\n').split('\n');
+  for (let index = activityLines.length - 1; index >= 0; index -= 1) {
+    const parsed = parseApprovalSummaryFromText(activityLines[index]!);
+    if (parsed) return parsed;
+  }
+  const fallback = stripTerminalModelIds(model.terminalReason ?? '')
+    || stripTerminalModelIds(model.activity);
+  return fallback && !/^ready$/iu.test(fallback) ? fallback : 'Tool execution requested';
+}
+
+/** Build a firmware-measured Unicode approval box (`<= maxWidth` on every row). */
+export function buildApprovalBox(
+  summary: string,
+  count = 1,
+  maxWidth: number = NATIVE_TERMINAL_GEOMETRY.bodyTextWidth,
+  measureTextWidth: (text: string) => number = firmwareLineWidth,
+): string[] {
+  const measure = combinedMeasure(measureTextWidth);
+  const title = count > 1 ? `Approve command (${count})` : 'Approve command';
+
+  let topDashes = 2;
+  let top = `╭── ${title} ──╮`;
+  if (measure(top) > maxWidth) {
+    top = oneMeasuredTerminalLine(`╭─ ${title} ─╮`, maxWidth, measureTextWidth);
+  } else {
+    while (topDashes < 64) {
+      const candidate = `╭── ${title} ${'─'.repeat(topDashes + 1)}╮`;
+      if (measure(candidate) > maxWidth) break;
+      topDashes += 1;
+      top = candidate;
+    }
+  }
+  const targetWidth = Math.min(maxWidth, measure(top));
+
+  let bottomDashes = 2;
+  let bottom = '╰──╯';
+  while (bottomDashes < 80) {
+    const candidate = `╰${'─'.repeat(bottomDashes + 1)}╯`;
+    if (measure(candidate) > targetWidth || measure(candidate) > maxWidth) break;
+    bottomDashes += 1;
+    bottom = candidate;
+  }
+
+  const barPrefix = '│ ';
+  const innerWidth = Math.max(48, maxWidth - measure(barPrefix));
+  const cleanSummary = summary.replace(/\s+/gu, ' ').trim() || 'Tool execution requested';
+  const wrapped = wrapToWidth(cleanSummary, innerWidth, measureTextWidth);
+  const contentRows: string[] = [];
+  if (wrapped.length <= 2) {
+    for (const row of wrapped) {
+      contentRows.push(oneMeasuredTerminalLine(`${barPrefix}${row}`, maxWidth, measureTextWidth));
+    }
+  } else {
+    contentRows.push(oneMeasuredTerminalLine(`${barPrefix}${wrapped[0]!}`, maxWidth, measureTextWidth));
+    const rest = wrapped.slice(1).join(' ');
+    contentRows.push(oneMeasuredTerminalLine(`${barPrefix}${rest}`, maxWidth, measureTextWidth));
+  }
+
+  return [top, ...contentRows, bottom];
+}
+
+/** Strip markdown link targets and U+0060 backticks (missing from G2 LVGL font). */
+export function cleanTerminalMarkdown(value: string): string {
+  return value
+    .replace(/\[([^\]\n]+)\]\((?:https?:\/\/|file:\/\/)[^)\s]*\)/giu, '$1')
+    .replace(/`+/gu, '');
+}
+
+function formatTerminalMessage(
+  message: TerminalConversationMessage,
+  _hideApprovals: boolean,
+  maxWidth: number,
+  measureTextWidth: (text: string) => number,
+): TerminalLayeredLine[] {
+  if (message.role === 'user') {
+    const cleaned = cleanTerminalMarkdown(message.text.replace(/^\s*(?:YOU\s*>\s*|>\s*)/iu, ''));
+    return wrapPrefixedBlock(cleaned, USER_PREFIX, USER_INDENT, maxWidth, measureTextWidth)
+      .map((text) => ({ layer: 'dim', text }));
+  }
+
+  if (message.role === 'status') {
+    const out: TerminalLayeredLine[] = [];
+    for (const rawLine of message.text.replace(/\r\n?/gu, '\n').split('\n')) {
+      const trimmed = rawLine.trim();
+      if (!trimmed) continue;
+      if (isApprovalLine(trimmed)) continue;
+      if (trimmed.startsWith('⏺')) {
+        out.push({ layer: 'dim', text: formatToolLine(cleanTerminalMarkdown(trimmed), maxWidth, measureTextWidth) });
+        continue;
+      }
+      const normalized = stripTerminalModelIds(cleanTerminalMarkdown(
+        trimmed
+          .replace(/^\[!\]\s*/u, '')
+          .replace(/^!\s*/u, '')
+          .replace(/^\[resumed\]\s*/iu, 'Resumed ')
+          .replace(/\s*[—-]\s*say\s+['"“]?terminal\s+approve.*$/iu, ''),
+      ));
+      if (!normalized) continue;
+      for (const line of wrapPrefixedBlock(normalized, NOTICE_PREFIX, NOTICE_INDENT, maxWidth, measureTextWidth)) {
+        out.push({ layer: 'dim', text: line });
+      }
+    }
+    return out;
+  }
+
+  // Assistant turn: prose on Bright (full width, NO `AGENT >` prefix), `⏺` tool calls on Dim.
+  const out: TerminalLayeredLine[] = [];
+  const rawLines = message.text
+    .replace(/^\s*AGENT\s*>\s*/iu, '')
+    .replace(/\r\n?/gu, '\n')
+    .split('\n');
+  for (const rawLine of rawLines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      if (out.length > 0 && out[out.length - 1]?.layer !== 'blank') {
+        out.push({ layer: 'blank', text: ' ' });
+      }
+      continue;
+    }
+    if (isApprovalLine(trimmed)) continue;
+    if (trimmed.startsWith('⏺')) {
+      if (out[out.length - 1]?.layer === 'blank') out.pop();
+      out.push({ layer: 'dim', text: formatToolLine(cleanTerminalMarkdown(trimmed), maxWidth, measureTextWidth) });
+      continue;
+    }
+    const cleanLine = cleanTerminalMarkdown(trimmed);
+    if (!cleanLine.trim()) continue;
+    for (const wrapped of wrapToWidth(cleanLine, maxWidth, measureTextWidth)) {
+      out.push({ layer: 'bright', text: wrapped });
+    }
+  }
+  while (out[out.length - 1]?.layer === 'blank') out.pop();
+  return out;
+}
+
+function messagesFor(model: AgentTerminalHudModel): readonly TerminalConversationMessage[] {
+  if (model.messages !== undefined && model.messages.length > 0) {
+    return model.messages;
+  }
+  if (model.state === 'ready' || model.state === 'settled') {
+    const activity = stripTerminalModelIds(model.activity);
+    if (model.messages !== undefined || !activity || /^ready\b/iu.test(activity)) {
+      return [];
+    }
+  }
+  const fallback = stripTerminalModelIds(model.terminalReason ?? '')
+    || stripTerminalModelIds(model.activity);
+  if (!fallback || /^ready$/iu.test(fallback)) return [];
+  return [{ id: '__activity', role: 'status', text: fallback }];
+}
+
+function promptBrightRows(
   prompt: TerminalPrompt | undefined,
+  maxWidth: number,
   measureTextWidth: (text: string) => number,
 ): string[] | undefined {
   if (!prompt) return [];
-  if (!validQuestion(prompt.id, prompt.question) || !current(prompt.isCurrent)) return;
-  const paragraphs = prompt.question.replace(/\r\n?/g, '\n').split('\n');
-  const rows: string[] = [];
-  paragraphs.forEach((paragraph, index) => {
-    const prefix = index === 0 ? 'QUESTION > ' : '';
-    rows.push(...wrapWithMetrics(`${prefix}${paragraph}`, measureTextWidth));
-  });
-  return rows.length <= MAX_PROMPT_ROWS ? rows : undefined;
+  if (!validQuestion(prompt.id, prompt.question) || !current(prompt.isCurrent)) return undefined;
+  const partial = prompt.partial?.replace(/\s+/gu, ' ').trim();
+  if (!partial) {
+    return [prompt.transcribing ? '> …' : '> Listening…'];
+  }
+  const wrapped = wrapPrefixedBlock(partial, USER_PREFIX, USER_INDENT, maxWidth, measureTextWidth);
+  if (wrapped.length <= MAX_PROMPT_ROWS) return wrapped;
+  return ['> …', ...wrapped.slice(-(MAX_PROMPT_ROWS - 1))];
 }
 
-function messagesFor(model: BrainstormHudModel): readonly TerminalConversationMessage[] {
-  if (model.screen === 'brainstorm') return brainstormMessages(model);
-  if (model.messages !== undefined) return model.messages;
-  const activity = model.activity.trim();
-  return activity ? [{ id: '__activity', role: 'status', text: activity }] : [];
-}
-
-function scrollHint(older: number, newer: number): string[] {
-  return [
-    ...(older > 0 ? ['up: older'] : []),
-    ...(newer > 0 ? ['down: newer'] : []),
-  ];
-}
-
-/** Every hint corresponds to an action the current EventRouter and
- * BrainstormController can actually accept. Scroll directions are included
- * only when TerminalConversationViewport can move that way. */
+/** Truthful 1-line footer for `terminal-foot` (`12, 252, 552, 34`, `textColor: 2`). */
 export function nativeTerminalFooter(
-  model: BrainstormHudModel,
+  model: AgentTerminalHudModel,
   older: number,
   newer: number,
-  promptVisible = false,
+  options: {
+    promptVisible?: boolean;
+    promptTranscribing?: boolean;
+    elapsedSeconds?: number;
+    spinnerIndex?: number;
+    measureTextWidth?: (text: string) => number;
+  } = {},
 ): string {
-  if (promptVisible) return 'Listening · speak your answer · 2x tap: cancel';
-  if ((model.approvals ?? 0) > 0) {
-    return 'tap: approve · swipe: deny · 2x tap: back';
+  const measure = options.measureTextWidth ?? firmwareLineWidth;
+  const maxWidth = NATIVE_TERMINAL_GEOMETRY.footTextWidth;
+
+  if (options.promptVisible) {
+    return oneMeasuredTerminalLine(
+      options.promptTranscribing
+        ? '◐ Transcribing… · 2x: cancel'
+        : '● Listening · tap: done · 2x: cancel',
+      maxWidth,
+      measure,
+    );
   }
 
-  let action: string | undefined;
-  if (model.taskRecovery) action = 'tap: check task status';
-  else if (model.state === 'approval_required'
-    || model.state === 'blocked'
-    || model.state === 'unavailable') action = 'tap: retry';
-  else if (model.state === 'ready') action = model.inputRequired ? 'tap: reply' : 'tap: speak';
-  // "terminal cancel" still works spoken; the hint names the gesture.
-  else if (model.state === 'running') action = 'long tap: cancel';
+  if ((model.approvals ?? 0) > 0) {
+    return oneMeasuredTerminalLine(
+      'tap: approve · swipe: deny · 2x: sessions',
+      maxWidth,
+      measure,
+    );
+  }
+
+  if (model.state === 'running') {
+    const spinner = TERMINAL_WORKING_SPINNERS[
+      Math.abs(options.spinnerIndex ?? 2) % TERMINAL_WORKING_SPINNERS.length
+    ]!;
+    const elapsed = options.elapsedSeconds !== undefined && options.elapsedSeconds >= 1
+      ? ` · ${options.elapsedSeconds}s`
+      : '';
+    const scrollCue = newer > 0 ? ` · ▼ ${newer}` : (older > 0 ? ' · swipe: scroll' : '');
+    const candidate = `${spinner} Working${elapsed}${scrollCue} · hold: stop · 2x: sessions`;
+    if (combinedMeasure(measure)(candidate) <= maxWidth) return candidate;
+    return oneMeasuredTerminalLine(
+      `${spinner} Working${elapsed} · hold: stop · 2x: sessions`,
+      maxWidth,
+      measure,
+    );
+  }
+
+  const primary = model.state === 'blocked'
+    || model.state === 'unavailable'
+    || model.state === 'approval_required'
+    ? 'tap: retry'
+    : 'tap: speak';
 
   const parts = [
-    ...(action ? [action] : []),
-    ...scrollHint(older, newer),
-    '2x tap: back',
+    ...(newer > 0 ? [`▼ ${newer} newer`] : []),
+    primary,
+    ...(older > 0 || newer > 0 ? ['swipe: scroll'] : []),
+    '2x: sessions',
   ];
-  return oneMeasuredLine(parts.join(' · '), firmwareLineWidth);
+  return oneMeasuredTerminalLine(parts.join(' · '), maxWidth, measure);
 }
 
 function validLayout(layout: RebuildPageContainer, page: NativeTerminalPage): boolean {
   const text = layout.textObject ?? [];
   const head = text.find((item) => item.containerID === NativeTerminalContainer.Head.id
     && item.containerName === NativeTerminalContainer.Head.name);
-  const body = text.find((item) => item.containerID === NativeTerminalContainer.Body.id
-    && item.containerName === NativeTerminalContainer.Body.name);
-  return layout.containerTotalNum === 2
-    && text.length === 2
+  const card = text.find((item) => item.containerID === NativeTerminalContainer.Card.id
+    && item.containerName === NativeTerminalContainer.Card.name);
+  const dim = text.find((item) => item.containerID === NativeTerminalContainer.Dim.id
+    && item.containerName === NativeTerminalContainer.Dim.name);
+  const bright = text.find((item) => item.containerID === NativeTerminalContainer.Bright.id
+    && item.containerName === NativeTerminalContainer.Bright.name);
+  const foot = text.find((item) => item.containerID === NativeTerminalContainer.Foot.id
+    && item.containerName === NativeTerminalContainer.Foot.name);
+  return layout.containerTotalNum === 5
+    && text.length === 5
     && (layout.imageObject?.length ?? 0) === 0
     && (layout.listObject?.length ?? 0) === 0
     && text.filter((item) => item.isEventCapture === 1).length === 1
     && head?.isEventCapture === 0
-    && body?.isEventCapture === 1
-    && head.content === page.headText
-    && body.content === page.bodyText;
+    && card?.isEventCapture === 1
+    && dim?.isEventCapture === 0
+    && bright?.isEventCapture === 0
+    && foot?.isEventCapture === 0
+    && card.content === ' '
+    && head.content === (page.headText || ' ')
+    && dim.content === (page.dimText || ' ')
+    && bright.content === (page.brightText || ' ')
+    && foot.content === (page.footText || ' ')
+    && [head, card, dim, bright, foot].every(
+      (item) => item !== undefined && utf8ByteLength(item.content ?? '') <= TEXT_CONTAINER_MAX_BYTES,
+    );
 }
 
 /**
- * Owns the native Agent Terminal document. A visit installs one fixed page;
- * every subsequent model, prompt, and scroll revision replaces the complete
- * body in one serialized TextContainerUpgrade.
+ * Owns the 5-container framed dual-brightness Agent Terminal surface.
+ * Installs the layout once per visit via `RebuildPageContainer` and uses
+ * selective `TextContainerUpgrade` writes on `Head`, `Dim`, `Bright`, and `Foot`
+ * for all streaming, speech-in-text, scrolling, spinner ticks, and approvals.
  */
 export class NativeTerminalSurface {
   private readonly viewport = new TerminalConversationViewport();
@@ -320,13 +596,13 @@ export class NativeTerminalSurface {
   private visit = 0;
   private renderedToken = 0;
   private renderedPromptId?: string;
-  /** Last body acknowledged by the bridge, including a superseded write. It
-   * remains the overwrite-length authority so stale tail text is cleared. */
-  private physicalBodyText = '';
-  /** Last head line acknowledged by the bridge, for the same reason. */
+  private committedPage?: NativeTerminalPage;
   private physicalHeadText = '';
-  /** When the live Brainstorm row started showing the silence marker. */
+  private physicalDimText = '';
+  private physicalBrightText = '';
+  private physicalFootText = '';
   private thinkingSince?: number;
+  private spinnerIndex = 2; // starts at '◑' on initial working frame, cycles ['◐', '◓', '◑', '◒'] on ticks
   private lastPaintSucceeded = false;
   private draining?: Promise<void>;
 
@@ -336,19 +612,16 @@ export class NativeTerminalSurface {
     private readonly replacePage: (page: RebuildPageContainer) => Promise<boolean>,
     options: NativeTerminalSurfaceOptions = {},
   ) {
-    // A row is one firmware line when the firmware's own measurement
-    // (leading spaces dropped, glyphs rounded one by one) fits the width.
     this.measureTextWidth = options.measureTextWidth ?? firmwareLineWidth;
     this.imageHeader = options.imageHeader ?? (() => false);
   }
 
   async present(
-    model: BrainstormHudModel,
+    model: AgentTerminalHudModel,
     status?: string,
     isCurrent: () => boolean = () => true,
   ): Promise<boolean> {
-    if ((model.screen !== 'agent_terminal' && !isBrainstorm(model))
-      || !current(isCurrent) || this.paused) return false;
+    if (!current(isCurrent) || this.paused) return false;
     const copy = copyModel(model);
     const key = this.conversationKey(copy);
     const entering = !this.active || this.desired === undefined;
@@ -356,10 +629,10 @@ export class NativeTerminalSurface {
       && this.desired !== undefined
       && this.conversationKey(this.desired.model) !== key;
     if (entering) this.visit += 1;
-    // The head line is the status header; a revision presented without one
-    // keeps the line it has rather than reverting to the bare page name.
     const retainedStatus = !entering ? this.desired?.status : undefined;
-    const nextStatus = status?.trim() ? status.replace(/\s+/gu, ' ').trim() : retainedStatus;
+    const nextStatus = status?.trim()
+      ? stripTerminalModelIds(status)
+      : retainedStatus;
     const desired: DesiredTerminal = {
       visit: this.visit,
       token: ++this.nextToken,
@@ -370,16 +643,29 @@ export class NativeTerminalSurface {
     this.desired = desired;
     this.active = true;
     this.paused = false;
-    if (isBrainstormThinking(copy)) this.thinkingSince ??= Date.now();
-    else this.thinkingSince = undefined;
+    if (entering || conversationChanged) {
+      this.thinkingSince = undefined;
+      this.spinnerIndex = 2;
+    }
+    const terminalWorking = copy.state === 'running' && (copy.approvals ?? 0) === 0;
+    if (terminalWorking) {
+      if (this.thinkingSince === undefined) {
+        this.thinkingSince = Date.now();
+        this.spinnerIndex = 2;
+      }
+    } else {
+      this.thinkingSince = undefined;
+      this.spinnerIndex = 2;
+    }
     if (entering) {
       this.pageMounted = false;
-      this.physicalBodyText = '';
+      this.physicalHeadText = '';
+      this.physicalDimText = '';
+      this.physicalBrightText = '';
+      this.physicalFootText = '';
       this.renderedPromptId = undefined;
       this.prompt = undefined;
     } else if (conversationChanged) {
-      // A prompt belongs to one conversation. The native document geometry is
-      // unchanged, so switching agents still needs only one body upgrade.
       this.prompt = undefined;
       this.renderedPromptId = undefined;
     }
@@ -396,7 +682,9 @@ export class NativeTerminalSurface {
   ): Promise<boolean> {
     if (!this.canInteract() || !validQuestion(id, question) || !current(isCurrent)) return false;
     const candidate: TerminalPrompt = { id, question, isCurrent };
-    if (promptRows(candidate, this.measureTextWidth) === undefined) return false;
+    if (promptBrightRows(candidate, NATIVE_TERMINAL_GEOMETRY.bodyTextWidth, this.measureTextWidth) === undefined) {
+      return false;
+    }
     const existing = this.prompt;
     if (existing?.id === id) {
       return existing.question === question && this.renderedPromptId === id
@@ -406,16 +694,56 @@ export class NativeTerminalSurface {
     this.dirty = true;
     this.bumpDesired();
     await this.ensureDrain();
-    return this.prompt === candidate && this.renderedPromptId === id
+    return this.prompt?.id === id && this.renderedPromptId === id
       && this.lastPaintSucceeded && current(isCurrent);
   }
 
-  /** The head line is the page's status header (clock · page · mic ·
-   * battery). A changed line is one head upgrade in the same serialized
-   * lane as the body, so the clock keeps moving on a long terminal visit. */
+  async showPromptPartial(id: string, text: string): Promise<boolean> {
+    const existing = this.prompt;
+    if (!this.canInteract() || existing?.id !== id || !current(existing.isCurrent)) return false;
+    if (text.length > 600 || text.includes('\0')) return false;
+    const clean = text.replace(/\s+/gu, ' ').trim();
+    const nextPartial = clean.length > 0 ? clean : undefined;
+    const nextTranscribing = clean.length > 0 ? existing.transcribing : false;
+    if (existing.partial === nextPartial && existing.transcribing === nextTranscribing) {
+      return this.renderedPromptId === id && this.lastPaintSucceeded && current(existing.isCurrent);
+    }
+    const updated: TerminalPrompt = {
+      id: existing.id,
+      question: existing.question,
+      isCurrent: existing.isCurrent,
+      ...(nextPartial !== undefined ? { partial: nextPartial } : {}),
+      ...(nextTranscribing ? { transcribing: true } : {}),
+    };
+    this.prompt = updated;
+    this.dirty = true;
+    this.bumpDesired();
+    await this.ensureDrain();
+    return this.prompt?.id === id && this.prompt.partial === nextPartial
+      && this.renderedPromptId === id && this.lastPaintSucceeded && current(updated.isCurrent);
+  }
+
+  async showPromptTranscribing(id: string): Promise<boolean> {
+    const existing = this.prompt;
+    if (!this.canInteract() || existing?.id !== id || !current(existing.isCurrent)) return false;
+    if (existing.transcribing === true) {
+      return this.renderedPromptId === id && this.lastPaintSucceeded && current(existing.isCurrent);
+    }
+    const updated: TerminalPrompt = {
+      ...existing,
+      transcribing: true,
+    };
+    this.prompt = updated;
+    this.dirty = true;
+    this.bumpDesired();
+    await this.ensureDrain();
+    return this.prompt?.id === id && this.prompt.transcribing === true
+      && this.renderedPromptId === id && this.lastPaintSucceeded && current(updated.isCurrent);
+  }
+
   async setStatus(status: string): Promise<boolean> {
     if (!this.canInteract() || !this.desired) return false;
-    const clean = status.replace(/\s+/gu, ' ').trim();
+    const clean = stripTerminalModelIds(status);
     if (!clean || clean === this.desired.status) return true;
     this.desired = { ...this.desired, status: clean, token: ++this.nextToken };
     this.dirty = true;
@@ -433,9 +761,6 @@ export class NativeTerminalSurface {
       && this.lastPaintSucceeded;
   }
 
-  /** Returns whether the logical viewport actually moved. The bridge write is
-   * serialized behind any in-flight revision and can be observed with
-   * whenIdle(). */
   scroll(direction: 'up' | 'down'): boolean {
     if (!this.canInteract() || this.prompt || (this.desired?.model.approvals ?? 0) > 0) return false;
     if (!this.viewport.scroll(direction)) return false;
@@ -448,19 +773,18 @@ export class NativeTerminalSurface {
 
   isActive(): boolean { return this.active; }
 
-  /** Which document is on the glass while active. */
-  screen(): BrainstormHudModel['screen'] | undefined {
-    return this.active ? this.desired?.model.screen : undefined;
+  renderedPage(): Readonly<NativeTerminalPage> | undefined {
+    return this.committedPage;
   }
 
-  /** A seat is silent and its row shows the marker: the counter is live. */
   isThinking(): boolean {
-    return this.canInteract() && this.thinkingSince !== undefined;
+    return this.canInteract() && this.thinkingSince !== undefined && this.prompt === undefined;
   }
 
-  /** Advance the local elapsed counter: one body upgrade, no Mac frame. */
+  /** Advance the local working spinner and elapsed counter via `terminal-foot` upgrade only. */
   tick(): boolean {
     if (!this.isThinking()) return false;
+    this.spinnerIndex = (this.spinnerIndex + 1) % TERMINAL_WORKING_SPINNERS.length;
     this.bumpDesired();
     this.dirty = true;
     void this.ensureDrain();
@@ -479,14 +803,16 @@ export class NativeTerminalSurface {
     return this.viewport.importState(value.viewport);
   }
 
-  /** Reinstall the fixed native page after host UI may have discarded it. */
   async repaint(): Promise<boolean> {
     if (!this.canInteract() || !this.desired) return false;
     await this.whenIdle();
     if (!this.canInteract() || !this.desired) return false;
     const desired = this.desired;
     this.pageMounted = false;
-    this.physicalBodyText = '';
+    this.physicalHeadText = '';
+    this.physicalDimText = '';
+    this.physicalBrightText = '';
+    this.physicalFootText = '';
     this.bumpDesired();
     this.dirty = true;
     await this.ensureDrain();
@@ -503,8 +829,6 @@ export class NativeTerminalSurface {
     }
   }
 
-  /** Stop scheduling native writes and wait for the already-issued call before
-   * a presenter replaces this page. */
   async pauseForHandoff(): Promise<boolean> {
     if (!this.active || this.paused) return false;
     this.paused = true;
@@ -513,21 +837,20 @@ export class NativeTerminalSurface {
     return this.active && this.paused;
   }
 
-  /** The replacement page won. Retain only viewport history, which is keyed by
-   * conversation and restores the reading anchor when that conversation opens. */
   completeHandoff(): boolean {
     if (!this.active || !this.paused) return false;
     this.clearVisit();
     return true;
   }
 
-  /** The replacement failed, so reinstall the known native page before
-   * accepting more terminal interaction. */
   async resume(): Promise<boolean> {
     if (!this.active || !this.paused || !this.desired) return false;
     this.paused = false;
     this.pageMounted = false;
-    this.physicalBodyText = '';
+    this.physicalHeadText = '';
+    this.physicalDimText = '';
+    this.physicalBrightText = '';
+    this.physicalFootText = '';
     this.bumpDesired();
     this.dirty = true;
     await this.ensureDrain();
@@ -552,9 +875,8 @@ export class NativeTerminalSurface {
     return this.canInteract();
   }
 
-  private conversationKey(model: BrainstormHudModel): string {
-    if (isBrainstorm(model)) return `brainstorm:${model.topic.replace(/\s+/gu, ' ').trim()}`;
-    return model.conversationId?.trim() || `agent:${focusName(model.topic)}`;
+  private conversationKey(model: AgentTerminalHudModel): string {
+    return model.conversationId?.trim() || `agent:${terminalHeadTitle(model.focus)}`;
   }
 
   private bumpDesired(): void {
@@ -563,51 +885,113 @@ export class NativeTerminalSurface {
   }
 
   private pageFor(desired: DesiredTerminal, prompt: TerminalPrompt | undefined): NativeTerminalPage | undefined {
-    if (!current(desired.isCurrent)) return;
-    const question = promptRows(prompt, this.measureTextWidth);
-    if (question === undefined) return;
-    const contentRows = NATIVE_TERMINAL_GEOMETRY.bodyLineCapacity - BODY_FIXED_ROWS;
-    const transcriptRows = Math.max(1, contentRows - question.length);
-    const page = this.viewport.view(
+    if (!current(desired.isCurrent)) return undefined;
+    const capacity = NATIVE_TERMINAL_GEOMETRY.bodyLineCapacity; // 7
+    const width = NATIVE_TERMINAL_GEOMETRY.bodyTextWidth; // 528
+    const promptLines = promptBrightRows(prompt, width, this.measureTextWidth);
+    if (promptLines === undefined) return undefined;
+
+    const approvals = prompt === undefined ? (desired.model.approvals ?? 0) : 0;
+    const approvalBox = approvals > 0
+      ? buildApprovalBox(approvalSummaryFor(desired.model), approvals, width, this.measureTextWidth)
+      : [];
+
+    const reservedBottom = promptLines.length > 0 ? promptLines.length : approvalBox.length;
+    const transcriptCapacity = Math.max(1, capacity - reservedBottom);
+    const hideApprovals = approvals > 0;
+    const view = this.viewport.viewLayered(
       this.conversationKey(desired.model),
       messagesFor(desired.model),
-      transcriptRows,
-      (text) => wrapWithMetrics(text, this.measureTextWidth),
+      transcriptCapacity,
+      (message) => formatTerminalMessage(message, hideApprovals, width, this.measureTextWidth),
       desired.model.historyTruncated,
-      `${NATIVE_TERMINAL_GEOMETRY.bodyTextWidth}|${MAX_LINE_UNITS}`,
+      `${width}|${MAX_LINE_UNITS}|${hideApprovals ? 1 : 0}`,
     );
-    const brainstorm = isBrainstorm(desired.model);
-    const visible = page.lines.length > 0 ? page.lines
-      : [brainstorm ? 'Say “JOAT, brainstorm …” or tap to speak.' : 'Tap to speak to this agent.'];
-    const bodyRows = [...visible, ...question];
-    while (bodyRows.length < contentRows) bodyRows.push(' ');
-    // The page's head line IS the status header (clock · page · mic ·
-    // battery, composed by the presenter), so the body's state row no
-    // longer repeats it. A Brainstorm seat that has not spoken yet shows
-    // how long it has been thinking (one in-place upgrade a second).
-    const elapsed = brainstorm && this.thinkingSince !== undefined
-      ? `${Math.max(0, Math.floor((Date.now() - this.thinkingSince) / 1000))}s`
+
+    const agentTitle = terminalAgentTitle(desired.model.focus);
+    const visibleRows: TerminalLayeredLine[] = view.rows.length > 0
+      ? view.rows.slice(0, transcriptCapacity)
+      : (promptLines.length === 0 && approvalBox.length === 0)
+        ? [{ layer: 'dim', text: oneMeasuredTerminalLine(`Tap to speak to ${agentTitle}.`, width, this.measureTextWidth) }]
+        : [];
+
+    const combined: TerminalLayeredLine[] = [];
+    if (approvalBox.length > 0) {
+      // Dim context rows above the bright Unicode approval callout box.
+      const contextSlots = capacity - approvalBox.length;
+      const contextRows = visibleRows.slice(-contextSlots);
+      for (const row of contextRows) {
+        combined.push(row.layer === 'blank' ? { layer: 'blank', text: ' ' } : { layer: 'dim', text: row.text });
+      }
+      while (combined.length < contextSlots) {
+        combined.push({ layer: 'blank', text: ' ' });
+      }
+      for (const boxLine of approvalBox) {
+        combined.push({ layer: 'bright', text: boxLine });
+      }
+    } else if (promptLines.length > 0) {
+      const contextSlots = capacity - promptLines.length;
+      let contextRows = visibleRows.slice(-contextSlots);
+      if (contextRows[contextRows.length - 1]?.layer === 'bright' && contextSlots >= 2) {
+        if (contextRows.length >= contextSlots) {
+          contextRows = visibleRows.slice(-(contextSlots - 1));
+        }
+        for (const row of contextRows) combined.push(row);
+        combined.push({ layer: 'blank', text: ' ' });
+      } else {
+        for (const row of contextRows) combined.push(row);
+      }
+      for (const line of promptLines) {
+        combined.push({ layer: 'bright', text: line });
+      }
+      while (combined.length < capacity) {
+        combined.push({ layer: 'blank', text: ' ' });
+      }
+    } else {
+      for (const row of visibleRows) {
+        combined.push(row);
+      }
+      while (combined.length < capacity) {
+        combined.push({ layer: 'blank', text: ' ' });
+      }
+    }
+
+    const aligned = combined.slice(0, capacity);
+    const dimLines = aligned.map((row) => (row.layer === 'dim' && row.text.trim() ? row.text : ' '));
+    const brightLines = aligned.map((row) => (row.layer === 'bright' && row.text.trim() ? row.text : ' '));
+
+    const elapsedSeconds = this.thinkingSince !== undefined
+      ? Math.max(0, Math.floor((Date.now() - this.thinkingSince) / 1000))
       : undefined;
-    const status = oneMeasuredLine(
-      brainstorm
-        ? [brainstormStatusRow(desired.model), elapsed].filter(Boolean).join(' · ')
-        : `${focusName(desired.model.topic)} > ${stateName(desired.model)}`,
-      this.measureTextWidth,
+
+    const headRaw = desired.status || `JOAT · ${terminalHeadTitle(desired.model.focus)}`;
+    const headText = fitUtf8(
+      oneMeasuredTerminalLine(stripTerminalModelIds(headRaw), NATIVE_TERMINAL_GEOMETRY.headTextWidth, this.measureTextWidth),
+      TEXT_CONTAINER_MAX_BYTES,
     );
-    const footer = oneMeasuredLine(
-      brainstorm && prompt === undefined
-        ? brainstormFooter(desired.model, page.newer)
-        : nativeTerminalFooter(desired.model, page.older, page.newer, prompt !== undefined),
-      this.measureTextWidth,
+    const dimText = fitUtf8(dimLines.join('\n'), TEXT_CONTAINER_MAX_BYTES);
+    const brightText = fitUtf8(brightLines.join('\n'), TEXT_CONTAINER_MAX_BYTES);
+    const footText = fitUtf8(
+      nativeTerminalFooter(desired.model, view.older, view.newer, {
+        promptVisible: prompt !== undefined,
+        promptTranscribing: prompt?.transcribing === true,
+        elapsedSeconds,
+        spinnerIndex: this.spinnerIndex,
+        measureTextWidth: this.measureTextWidth,
+      }),
+      TEXT_CONTAINER_MAX_BYTES,
     );
-    const bodyText = [status, ...bodyRows.slice(0, contentRows), footer].join('\n');
-    if (bodyText.length > MAX_UPGRADE_UNITS) return;
+
     return {
-      headText: desired.status ?? headTextFor(desired.model),
-      bodyText,
+      headText,
+      dimLines,
+      brightLines,
+      dimText,
+      brightText,
+      footText,
       conversationKey: this.conversationKey(desired.model),
-      older: page.older,
-      newer: page.newer,
+      older: view.older,
+      newer: view.newer,
       state: desired.model.state,
       ...(prompt ? { promptId: prompt.id } : {}),
     };
@@ -639,14 +1023,14 @@ export class NativeTerminalSurface {
       }
       const snapshot: RenderSnapshot = { desired, prompt, page };
       let painted = this.pageMounted
-        ? await this.upgradeBody(snapshot)
+        ? await this.upgradeContainers(snapshot)
         : await this.rebuild(snapshot);
-      // A false native-text receipt commonly means the host discarded this
-      // page during a WebView or plugin transition. Reinstall the same fixed
-      // native document once; never fall back to the four-image page.
       if (!painted && this.pageMounted && this.snapshotCurrent(snapshot)) {
         this.pageMounted = false;
-        this.physicalBodyText = '';
+        this.physicalHeadText = '';
+        this.physicalDimText = '';
+        this.physicalBrightText = '';
+        this.physicalFootText = '';
         painted = await this.rebuild(snapshot);
       }
       if (!this.snapshotCurrent(snapshot)) continue;
@@ -655,6 +1039,7 @@ export class NativeTerminalSurface {
       this.pageMounted = true;
       this.renderedToken = desired.token;
       this.renderedPromptId = prompt?.id;
+      this.committedPage = page;
     }
   }
 
@@ -676,56 +1061,95 @@ export class NativeTerminalSurface {
       const replaced = await this.replacePage(layout);
       if (replaced && this.active && this.desired?.visit === snapshot.desired.visit) {
         this.pageMounted = true;
-        this.physicalBodyText = snapshot.page.bodyText;
         this.physicalHeadText = snapshot.page.headText;
+        this.physicalDimText = snapshot.page.dimText;
+        this.physicalBrightText = snapshot.page.brightText;
+        this.physicalFootText = snapshot.page.footText;
       }
       return replaced;
     } catch { return false; }
   }
 
-  private async upgradeBody(snapshot: RenderSnapshot): Promise<boolean> {
+  private async upgradeContainers(snapshot: RenderSnapshot): Promise<boolean> {
     if (!this.snapshotCurrent(snapshot)) return false;
-    if (!await this.upgradeHead(snapshot)) return false;
-    if (!this.snapshotCurrent(snapshot)) return false;
-    const previous = this.physicalBodyText;
-    if (previous === snapshot.page.bodyText) return true;
-    try {
-      const accepted = await this.client.require().textContainerUpgrade(
-        new TextContainerUpgrade({
-          containerID: NativeTerminalContainer.Body.id,
-          containerName: NativeTerminalContainer.Body.name,
-          contentOffset: 0,
-          contentLength: Math.max(previous.length, snapshot.page.bodyText.length),
-          content: fitUtf8(snapshot.page.bodyText, TEXT_CONTAINER_MAX_BYTES) || ' ',
-        }),
+    if (!this.imageHeader() && this.physicalHeadText !== snapshot.page.headText) {
+      const ok = await this.upgradeOne(
+        NativeTerminalContainer.Head.id,
+        NativeTerminalContainer.Head.name,
+        snapshot.page.headText,
+        this.physicalHeadText,
       );
-      if (accepted && this.active && this.desired?.visit === snapshot.desired.visit) {
-        this.physicalBodyText = snapshot.page.bodyText;
-      }
-      return accepted;
-    } catch { return false; }
-  }
-
-  private async upgradeHead(snapshot: RenderSnapshot): Promise<boolean> {
-    const previous = this.physicalHeadText;
-    if (previous === snapshot.page.headText) return true;
-    // The spine is the image header: the presenter already redrew it.
-    if (this.imageHeader()) return true;
-    try {
-      const accepted = await this.client.require().textContainerUpgrade(
-        new TextContainerUpgrade({
-          containerID: NativeTerminalContainer.Head.id,
-          containerName: NativeTerminalContainer.Head.name,
-          contentOffset: 0,
-          contentLength: Math.max(previous.length, snapshot.page.headText.length),
-          content: snapshot.page.headText || ' ',
-        }),
-      );
-      if (accepted && this.active && this.desired?.visit === snapshot.desired.visit) {
+      if (!ok) return false;
+      if (this.active && this.desired?.visit === snapshot.desired.visit) {
         this.physicalHeadText = snapshot.page.headText;
       }
-      return accepted;
-    } catch { return false; }
+      if (!this.snapshotCurrent(snapshot)) return false;
+    }
+
+    if (this.physicalDimText !== snapshot.page.dimText) {
+      const ok = await this.upgradeOne(
+        NativeTerminalContainer.Dim.id,
+        NativeTerminalContainer.Dim.name,
+        snapshot.page.dimText,
+        this.physicalDimText,
+      );
+      if (!ok) return false;
+      if (this.active && this.desired?.visit === snapshot.desired.visit) {
+        this.physicalDimText = snapshot.page.dimText;
+      }
+      if (!this.snapshotCurrent(snapshot)) return false;
+    }
+
+    if (this.physicalBrightText !== snapshot.page.brightText) {
+      const ok = await this.upgradeOne(
+        NativeTerminalContainer.Bright.id,
+        NativeTerminalContainer.Bright.name,
+        snapshot.page.brightText,
+        this.physicalBrightText,
+      );
+      if (!ok) return false;
+      if (this.active && this.desired?.visit === snapshot.desired.visit) {
+        this.physicalBrightText = snapshot.page.brightText;
+      }
+      if (!this.snapshotCurrent(snapshot)) return false;
+    }
+
+    if (this.physicalFootText !== snapshot.page.footText) {
+      const ok = await this.upgradeOne(
+        NativeTerminalContainer.Foot.id,
+        NativeTerminalContainer.Foot.name,
+        snapshot.page.footText,
+        this.physicalFootText,
+      );
+      if (!ok) return false;
+      if (this.active && this.desired?.visit === snapshot.desired.visit) {
+        this.physicalFootText = snapshot.page.footText;
+      }
+    }
+
+    return true;
+  }
+
+  private async upgradeOne(
+    containerID: number,
+    containerName: string,
+    nextContent: string,
+    previousContent: string,
+  ): Promise<boolean> {
+    const content = fitUtf8(nextContent, TEXT_CONTAINER_MAX_BYTES) || ' ';
+    try {
+      return await this.client.require().textContainerUpgrade(
+        new TextContainerUpgrade({
+          containerID,
+          containerName,
+          contentOffset: 0,
+          contentLength: Math.max(previousContent.length, content.length),
+          content,
+        }),
+      );
+    } catch {
+      return false;
+    }
   }
 
   private clearVisit(): void {
@@ -737,10 +1161,14 @@ export class NativeTerminalSurface {
     this.dirty = false;
     this.desired = undefined;
     this.prompt = undefined;
-    this.physicalBodyText = '';
     this.physicalHeadText = '';
+    this.physicalDimText = '';
+    this.physicalBrightText = '';
+    this.physicalFootText = '';
     this.thinkingSince = undefined;
+    this.spinnerIndex = 2;
     this.lastPaintSucceeded = false;
     this.renderedPromptId = undefined;
+    this.committedPage = undefined;
   }
 }

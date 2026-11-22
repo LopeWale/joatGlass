@@ -93,10 +93,7 @@ def _prepare_simulator_plugin_root(repo: Path, output: Path, websocket_url: str)
     )
     if not isinstance(network, dict) or not isinstance(network.get("whitelist"), list):
         raise SimulatorFlowError("production Hub manifest has no network whitelist")
-    whitelist = list(network["whitelist"])
-    if origin not in whitelist:
-        whitelist.append(origin)
-    network["whitelist"] = whitelist
+    network["whitelist"] = [origin]
 
     root = output / "simulator-plugin-root"
     root.mkdir(mode=0o700)

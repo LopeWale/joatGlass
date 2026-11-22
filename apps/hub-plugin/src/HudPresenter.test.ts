@@ -79,9 +79,6 @@ describe('prompt question ownership', () => {
   }
 
   it('publishes a terminal question inline only after its exact paint and restores the conversation on cancel', async () => {
-    // The Agent Terminal is Even's own two-text page (2026-09-13): the
-    // question rides the terminal body as one serialized text upgrade, so
-    // the exact paint to wait for is that bridge write, not a raster frame.
     const upgrades: TextContainerUpgrade[] = [];
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
@@ -91,7 +88,10 @@ describe('prompt question ownership', () => {
         rebuildPageContainer: async () => true,
         textContainerUpgrade: async (upgrade: TextContainerUpgrade) => {
           upgrades.push(upgrade);
-          if (upgrade.content?.includes('QUESTION >')) { entered = true; await held; }
+          if (upgrade.containerName === 'terminal-bright' && upgrade.content?.includes('> Listening…')) {
+            entered = true;
+            await held;
+          }
           return true;
         },
       }),
@@ -102,22 +102,28 @@ describe('prompt question ownership', () => {
       forgetPage: () => undefined,
       withPageTransition: async (replace: () => Promise<boolean>) => replace(),
     });
-    const body = () => lastOf(upgrades.filter(u => u.containerName === 'terminal-body')).content ?? '';
-    const model = {screen: 'agent_terminal' as const, state: 'ready' as const,
-      topic: 'OpenClaw · ready', collaborators: [], activity: '', conversationId: 'conversation-a',
-      messages: [{id:'answer-one', role:'assistant' as const, text:'Previous answer remains visible.'}]};
-    expect(await hud.showBrainstorm(model)).toBe(true);
+    const bright = () => lastOf(upgrades.filter(u => u.containerName === 'terminal-bright')).content ?? '';
+    const model = {
+      state: 'ready' as const,
+      focus: 'Claude · ready',
+      lanes: ['Claude · ready'],
+      activity: 'Ready',
+      conversationId: 'conversation-a',
+      messages: [{ id: 'answer-one', role: 'assistant' as const, text: 'Previous answer remains visible.' }],
+    };
+    expect(await hud.showTerminal(model)).toBe(true);
     let settled = false;
-    const publication = hud.showPromptQuestion('terminal-prompt', 'Speak to OpenClaw.', () => true, 'terminal')
+    const publication = hud.showPromptQuestion('terminal-prompt', 'Speak to Claude.', () => true, 'terminal')
       .then(ok => { settled = true; return ok; });
     await vi.waitFor(() => expect(entered).toBe(true));
     expect(settled).toBe(false);
-    expect(body()).toContain('QUESTION > Speak to OpenClaw.');
-    expect(body()).toContain('Previous answer remains visible.');
+    expect(bright()).toContain('> Listening…');
+    expect(bright()).not.toContain('QUESTION >');
+    expect(bright()).toContain('Previous answer remains visible.');
     release(); expect(await publication).toBe(true);
     expect(await hud.dismissPromptQuestion('terminal-prompt')).toBe(true);
-    expect(body()).not.toContain('QUESTION >');
-    expect(body()).toContain('Previous answer remains visible.');
+    expect(bright()).not.toContain('> Listening…');
+    expect(bright()).toContain('Previous answer remains visible.');
   });
 
   it('rejects terminal publication when its conversation is absent', async () => {
@@ -1307,27 +1313,22 @@ describe('an answer is not an interruption', () => {
   };
 
   const session = {
-    screen: 'brainstorm' as const,
-    state: 'settled' as const, topic: 'cold-start latency',
-    collaborators: ['Codex', 'Claude'], activity: 'JOAT > AGREED: cache it',
+    state: 'settled' as const,
+    focus: 'Claude · settled',
+    lanes: ['Claude · settled', 'Codex · idle'],
+    activity: 'Ready',
   };
 
-  it('refuses unrelated chatter over a Brainstorm', async () => {
-    // A queued reply once drained the instant a session settled and
-    // painted "REPLY — Using the phone mic…" across the synthesis.
+  it('refuses unrelated chatter over an active Agent Terminal', async () => {
     const { hud } = room();
-    expect(await hud.showBrainstorm(session as never)).toBe(true);
+    expect(await hud.showTerminal(session)).toBe(true);
     expect(await hud.showAssistantOverlay('REPLY — using the phone mic'))
       .toBe(false);
   });
 
   it('shows the reply to something the wearer just asked there', async () => {
-    // The rule was written as "never", which also silenced the answers TO
-    // the wearer: "make that shorter" produced its result into nothing,
-    // and the question asked before replacing a live session was never
-    // seen — so they were waiting on a prompt that did not exist.
     const { hud } = room();
-    expect(await hud.showBrainstorm(session as never)).toBe(true);
+    expect(await hud.showTerminal(session)).toBe(true);
     expect(await hud.showAssistantOverlay('shorter version', false, true))
       .toBe(true);
     expect(hud.hasAssistantOverlay()).toBe(true);
@@ -1336,26 +1337,26 @@ describe('an answer is not an interruption', () => {
 
 
 describe('Terminal opening paint ownership', () => {
-  const model = { screen: 'agent_terminal', state: 'ready', topic: 'work', collaborators: [], activity: 'Ready' } as const;
+  const model = {
+    state: 'ready' as const,
+    focus: 'Claude · ready',
+    lanes: ['Claude · ready'],
+    activity: 'Ready',
+  };
   it('does not paint an opening retired before presentation', async () => {
     const paint = vi.fn(async () => true);
     const visual = { paint, paintExact: vi.fn(async (_value, current) => current()) };
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
-    expect(await hud.showBrainstorm({ ...model, collaborators: [] }, undefined, () => false)).toBe(false);
+    expect(await hud.showTerminal({ ...model }, undefined, () => false)).toBe(false);
     expect(paint).not.toHaveBeenCalled();
     expect(visual.paintExact).not.toHaveBeenCalled();
   });
 
   it.each([true, false])('a held opening settling %s cannot acknowledge or restore over Home', async (paintResult) => {
-    // The Agent Terminal opens as Even's own two-text page (2026-09-13):
-    // the held write is the terminal page rebuild under the transition
-    // barrier, and Home waits behind that in-flight write before it owns
-    // the glass. A retired opening may neither acknowledge nor paint its
-    // old snapshot back over Home once the write settles.
     const frames: HudVisualFrame[] = [];
     const pages: RebuildPageContainer[] = [];
     const isTerminalPage = (page: RebuildPageContainer) =>
-      page.textObject?.some((c) => c.containerName === 'terminal-body') ?? false;
+      page.textObject?.some((c) => c.containerName === 'terminal-card') ?? false;
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     let entered!: () => void;
@@ -1380,7 +1381,7 @@ describe('Terminal opening paint ownership', () => {
     };
     const hud = new HudPresenter(client, new HudPageBuilder(), visual);
     await hud.showText('Original feature', ContainerId.Main);
-    const opening = hud.showBrainstorm({ ...model, collaborators: [] }, undefined, () => current);
+    const opening = hud.showTerminal({ ...model }, undefined, () => current);
     await began;
     current = false;
     const home = hud.showDefault();
@@ -1389,8 +1390,6 @@ describe('Terminal opening paint ownership', () => {
     expect(await home).toBe(true);
     expect(frames.map((frame) => frame.kind)).toEqual(['overview', 'overview']);
     expect(frames[frames.length - 1]).toMatchObject({ kind: 'overview', main: 'Original feature' });
-    // One terminal page was ever written; the retired opening never
-    // reinstalled it or its prior snapshot after the write settled.
     expect(pages.filter(isTerminalPage)).toHaveLength(1);
   });
 });

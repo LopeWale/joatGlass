@@ -113,9 +113,8 @@ export class ScrollBox {
    * `lines` is another document.
    *
    * `opensOnNew` is for a document that only ever grows at its end and is
-   * reopened to read what was added (a Brainstorm room, after the wearer's
-   * next move): it opens on the first new line, wherever the wearer had
-   * stopped reading.
+   * reopened to read what was added: it opens on the first new line,
+   * wherever the wearer had stopped reading.
    */
   resume(lines: readonly string[], opensOnNew = false): number | undefined {
     if (lines.length < this.lines.length) return undefined;

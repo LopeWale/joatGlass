@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   ASSISTANT_OVERLAY_VISUAL_TEXT,
   VISUAL_CONFIRMATION_PROMPT,
-  brainstormVisualFixture,
-  isBrainstormVisualState,
+  terminalVisualFixture,
+  isTerminalVisualState,
   runVisualConfirmationFixture,
   isProductivityVisualState,
   stitchHudPreviewRgba,
@@ -84,20 +84,26 @@ describe('visual fixtures', () => {
     expect(isProductivityVisualState('overview')).toBe(false);
   });
 
-  it('covers real Brainstorm and Hermes terminal visual states', () => {
-    expect(brainstormVisualFixture('brainstorm-live')).toMatchObject({
-      // Brainstorm seats are Codex and Claude only; Hermes/OpenClaw are
-      // Agent Terminal workers and never speak in a Brainstorm.
-      screen: 'brainstorm', state: 'running', activeSpeaker: 'Claude · critic',
+  it('covers Agent Terminal visual states and 3-level picker lists', () => {
+    expect(terminalVisualFixture('agent-terminal-ready')).toMatchObject({
+      state: 'ready', focus: 'Claude · idle',
     });
-    expect(brainstormVisualFixture('agent-terminal-ready')).toMatchObject({
-      screen: 'agent_terminal', state: 'ready', noToolsChecked: true,
+    expect(terminalVisualFixture('agent-terminal-working')).toMatchObject({
+      state: 'running', focus: 'Claude · working',
     });
-    expect(brainstormVisualFixture('agent-terminal-blocked')).toMatchObject({
-      screen: 'agent_terminal', state: 'blocked', noToolsChecked: false,
+    expect(terminalVisualFixture('agent-terminal-approval')).toMatchObject({
+      state: 'running', approvals: 1,
     });
-    expect(isBrainstormVisualState('brainstorm-ready')).toBe(true);
-    expect(isBrainstormVisualState('overview')).toBe(false);
+    expect(terminalVisualFixture('agent-terminal-blocked')).toMatchObject({
+      state: 'blocked', focus: 'Claude · blocked',
+    });
+    expect(visualListFixture('terminal-sessions')).toMatchObject({
+      title: 'AGENT TERMINAL',
+      selectable: true,
+    });
+    expect(isTerminalVisualState('agent-terminal-ready')).toBe(true);
+    expect(isTerminalVisualState('agent-terminal-approval')).toBe(true);
+    expect(isTerminalVisualState('overview')).toBe(false);
   });
 
   it('makes the confirmation fixture unmistakably test-only', () => {

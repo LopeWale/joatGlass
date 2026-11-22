@@ -1,28 +1,25 @@
 # Messages shortcuts for JOAT Brain
 
-Two ready-made Shortcuts automations that let JOAT read and send your texts from the glasses, from your own number. iOS has no other way for an app to read Messages or send a text without a tap, so these are required for Messages on the glasses.
+Two Shortcuts automations let JOAT read and send your texts from the glasses, from your own number. iOS has no other way for an app to read Messages or send a text without a tap, so they are required for Messages on the glasses.
 
 | File | When it runs | What it does |
 |---|---|---|
-| [Show Messages on Glasses with Contact Names.shortcut](https://github.com/LopeWale/joatGlass/raw/main/apps/ios-companion/Shortcuts/Show%20Messages%20on%20Glasses%20with%20Contact%20Names.shortcut) | A text arrives (any text containing a space) | Hands the text to JOAT Brain with the sender's contact name; a group text arrives as "Group (Person)". JOAT Brain keeps spam from unsaved numbers off the glasses. |
+| [Show Texts on Glasses.shortcut](https://github.com/LopeWale/joatGlass/raw/main/apps/ios-companion/Shortcuts/Show%20Texts%20on%20Glasses.shortcut) | A text arrives (any text with a space in it) | Three actions: Find Conversations (the newest), JOAT Brain's Show Text on Glasses (the sender, the text, the group's name), Mark as Unread. JOAT Brain finds the sender's name in Contacts, shows a group text as "Group (Person)", and keeps spam from unsaved numbers off the glasses. |
 | [Send Message from JOAT Brain.shortcut](https://github.com/LopeWale/joatGlass/raw/main/apps/ios-companion/Shortcuts/Send%20Message%20from%20JOAT%20Brain.shortcut) | JOAT Brain posts "JOAT • text to send" | Sends the text you confirmed on the glasses, to the group when you replied in a group, then tells the glasses it was sent. |
 
-The files here call the repo owner's JOAT Brain (Apple team `J2XU5XWJM9`, bundle `com.joat.brain`). With your own build of JOAT Brain ([docs/IOS_APP.md](../../../docs/IOS_APP.md)), run [one command](#your-own-build) first so they call yours.
+Since iOS 27 a shortcut carries its automation, so adding one adds its automation too.
 
-## Install (on the iPhone, about 3 minutes)
+## Install (on the iPhone, about 2 minutes)
 
-1. Install your JOAT Brain build and open it once.
-2. In Safari on the iPhone, open this page (or your fork's, after [Your own build](#your-own-build)) and tap the first file's link in the table above. Tap **Download**.
-3. Tap the download icon in Safari's address bar, then tap the file. Shortcuts opens it; tap the button at the bottom to add it.
-4. Do the same for the second file.
-5. Open **Shortcuts › Automation**. Both automations are listed there. For each one:
-   1. Tap it.
-   2. Choose **Run Immediately**.
-   3. Turn **Notify When Run** off (otherwise iOS adds its own notification for every text).
-   4. Tap **Done**.
-6. Test: ask someone to text you. The text shows on the glasses and in JOAT Brain › Messages › Recent. On the glasses, open Messages, tap the conversation, tap to reply, say it, then tap to confirm.
+1. Install JOAT Brain from TestFlight and open it once.
+2. JOAT Brain › Messages › **Add “Show Texts on Glasses” to Shortcuts**. Shortcuts opens; tap **Add Shortcut**.
+3. The same for **Add “Send Message from JOAT Brain” to Shortcuts**.
+4. For each of the two, in Shortcuts: tap it, tap **Edit**, then the Info button (ⓘ), tap **Privacy**, and turn on **Allow Running When Locked** (Apple's guide: [Add automations](https://support.apple.com/guide/shortcuts/add-automations-apdfbdbd7123/ios)).
+5. If Shortcuts asks to allow an action (Messages, JOAT Brain), choose **Always Allow**.
+6. If you had the older **Show Messages on Glasses with Contact Names**, delete it, or texts come through it as well.
+7. Test: ask someone to text you. The text shows on the glasses and in JOAT Brain › Messages › Recent. On the glasses, open Messages, tap the conversation, tap to reply, say it, then tap to confirm.
 
-Keep the automations: they are what runs. The shortcuts in the Shortcuts tab are the steps they run.
+The buttons open iCloud links to the two shortcuts, for the repo owner's JOAT Brain (Apple team `J2XU5XWJM9`, bundle `com.joat.brain`). With your own build, use the files instead ([Your own build](#your-own-build)).
 
 ## Limits
 
@@ -38,6 +35,4 @@ cd apps/ios-companion/Shortcuts
 python3 make_shortcuts.py --team YOURTEAMID --bundle com.you.joatbrain
 ```
 
-This rewrites the unsigned shortcuts in `source/` for your app, signs them with Apple's `shortcuts sign --mode anyone`, and replaces the two `.shortcut` files here. AirDrop them to your iPhone (or push them to your fork) and install them as above. The signature names no person (an Apple-issued certificate), so the files are safe to share.
-
-You can also build the same automations by hand: JOAT Brain › Messages has the steps.
+This rewrites the unsigned shortcuts in `source/` for your app, signs them with Apple's `shortcuts sign --mode anyone`, and replaces the two `.shortcut` files here. AirDrop them to your iPhone (or open them in Files) and tap Add Shortcut, then do steps 4 to 6 above. The signature names no person (an Apple-issued certificate), so the files are safe to share. To give your own build's Messages page one-tap buttons, open each file in Shortcuts on your Mac, then Share › Copy iCloud Link, and put the links in `MessagesView.showLink` and `sendLink` (`AppScreens.swift`).

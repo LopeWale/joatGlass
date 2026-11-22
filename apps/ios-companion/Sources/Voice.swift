@@ -45,13 +45,29 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             Log.add("not spoken (spoken replies off): \(text.prefix(120))")
             return
         }
+        speakToHeadphones(text, stopCurrent: false, tag: "speak")
+    }
+
+    /// Turn-by-turn navigation cues use their own preference (`Navigation.spokenDirections`),
+    /// independent of general `spokenReplies`, while preserving the headphones-only
+    /// rule and mic echo suppression (`speaking`/`startedAt`/`finishedAt`).
+    func sayNavigation(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        speakToHeadphones(trimmed, stopCurrent: true, tag: "speak nav")
+    }
+
+    private func speakToHeadphones(_ text: String, stopCurrent: Bool, tag: String) {
         let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
         let route = outputs.map { $0.portType.rawValue }.joined(separator: ",")
         guard outputs.contains(where: { Self.earPorts.contains($0.portType) }) else {
             Log.add("not spoken, no headphones (\(route)): \(text.prefix(120))")
             return
         }
-        Log.add("speak (\(route)): \(text.prefix(120))")
+        if stopCurrent, synth.isSpeaking {
+            synth.stopSpeaking(at: .word)
+        }
+        Log.add("\(tag) (\(route)): \(text.prefix(120))")
         let u = AVSpeechUtterance(string: text)
         u.voice = AVSpeechSynthesisVoice(language: "en-US")
         synth.speak(u)
@@ -61,13 +77,13 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         DispatchQueue.main.async { self.speaking = true; self.startedAt = Date() }
     }
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
-        DispatchQueue.main.async { self.speaking = false; self.finishedAt = Date() }
+        DispatchQueue.main.async { self.speaking = s.isSpeaking; self.finishedAt = Date() }
     }
     /// A reply cut off (a call, another app's audio) ends too: otherwise
     /// `speaking` stayed true and every note sentence and follow-up after it
     /// was dropped as JOAT's own voice (review, 2026-10-30).
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) {
-        DispatchQueue.main.async { self.speaking = false; self.finishedAt = Date() }
+        DispatchQueue.main.async { self.speaking = s.isSpeaking; self.finishedAt = Date() }
     }
 
     /// Was the phone talking when a sentence that ended at `moment` was

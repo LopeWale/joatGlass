@@ -18,7 +18,7 @@ from .agent_terminal import AgentTerminalCommands, ClaimedTerminalInput, Termina
 from .message_prompts import ActivatePrompt, MessagePromptBridge, PromptPresentationAck
 from .message_reply import MessageActionStatus, MessageReplyController
 from .prompted_input import PromptedInputDispatcher, PromptTicket, RetirementReason
-from .session import SessionManager, TopicCapture
+from .session import SessionManager
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class PromptedSpeechRuntime:
 
     def __init__(
         self, hud: HudWriter, replies: MessageReplyController, *,
-        sessions: Callable[[], SessionManager],
+        sessions: Callable[[], SessionManager] | None = None,
         connection_generation: Callable[[], str | None],
         fence_audio: Callable[[], int], capturing: Callable[[], bool],
         audio_source: Callable[[], AudioSource] = lambda: "glasses",
@@ -93,23 +93,6 @@ class PromptedSpeechRuntime:
         """Publish only an explicit controller input step, never a status poll."""
         if not self._closed:
             await self._messages.after_input(status)
-
-    async def publish_topic_capture(self, capture: TopicCapture) -> bool:
-        """Bind the real capture owner before requesting its exact question."""
-        manager = self._sessions()
-
-        def clear() -> None:
-            if manager.current_topic_capture is capture:
-                manager.clear_topic_capture()
-
-        async def consume(text: str) -> None:
-            manager.consume_topic_capture(capture, text)
-
-        return await self._publish_owned_capture(
-            capture, owner_kind="brainstorm", field="topic",
-            is_current=lambda: manager.topic_capture_is_current(capture),
-            clear=clear, consume=consume,
-        )
 
     async def publish_terminal_capture(self, capture: TerminalCapture) -> bool:
         """Publish a question for one exact Terminal lane and local context."""
@@ -284,7 +267,6 @@ class PromptedSpeechRuntime:
     def revoke_current(self) -> None:
         """Synchronously end admission and its exact owner; cleanup is scoped."""
         self.dispatcher.revoke()
-        self._sessions().clear_topic_capture()
         # A tap binds its owner synchronously before publication is scheduled.
         # Home/recording/shutdown must also retire that pre-publication owner.
         if self._terminal is not None:

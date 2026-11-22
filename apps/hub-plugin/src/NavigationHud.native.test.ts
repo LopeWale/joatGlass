@@ -122,6 +122,7 @@ describe('navigationNativeBody', () => {
       'Cajun Corner · 1.2 km',
       '▶ Walk · 18 min',
       '  Cycle · 7 min',
+      '  Drive · 4 min',
     ]);
     expect(page.hint).toBe('swipe: choose · tap: continue');
   });
@@ -176,6 +177,10 @@ describe('navigationNativeBody', () => {
     expect(walking.hint).toBe('tap: start · up: mode · down: place');
     const cycling = navigationNativeBody({ ...fixture('preview'), mode: 'cycling' })!;
     expect(lines(cycling.body)[0]).toBe('CYCLE · ROUTE PREVIEW');
+    const driving = navigationNativeBody({ ...fixture('preview'), mode: 'driving' })!;
+    expect(lines(driving.body)[0]).toBe('DRIVE · ROUTE PREVIEW');
+    const drivingWarning = navigationNativeBody({ ...fixture('uncertain'), mode: 'driving' })!;
+    expect(lines(drivingWarning.body)[3]).toBe('Driving · 900 m left · 13 min');
   });
 
   it('uncertain: the warning with the live facts in the renderer\'s words', () => {

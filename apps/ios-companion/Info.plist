@@ -44,8 +44,12 @@
 	<false/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<false/>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>JOAT Brain reads your calendar events when you ask about your schedule through the glasses.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>JOAT Brain finds the number of the person you text or reply to from the glasses.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>JOAT Brain uses your location for turn-by-turn glasses navigation, nearby searches, and saving places.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>JOAT Brain keeps an audio session open so it can keep working while the Even app is in front.</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
@@ -55,12 +59,15 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>location</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 </dict>
 </plist>

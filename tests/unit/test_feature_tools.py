@@ -16,7 +16,7 @@ from joat.persistence.notes import NoteStore
 from joat.persistence.store import DurableStore
 from joat.services.note_commands import NoteCommandController
 from joat.services.pomodoro import PomodoroService
-from joat.services.session import BrainstormStartResult
+from joat.services.session import SessionStartResult
 
 
 class Capabilities:
@@ -127,7 +127,7 @@ def test_feature_tools_do_not_add_a_local_decision_pass_for_ordinary_chat(
     "Keep this as a quick note: the spare key is with Sam",
     "Keep this for later: the spare key is with Sam",
     "Give me a focus session", "Could you pause that timer?",
-    "Open Agent Terminal", "Can we brainstorm this?", "Show my notifications",
+    "Open Agent Terminal", "Show my notifications",
     "Start navigation", "Open planning", "Show activity", "Check the news",
     "Search for the station", "Open QuickNotes",
 ])
@@ -146,91 +146,73 @@ def test_feature_tools_remain_in_the_cli_registry(rig: Rig) -> None:
     }
 
 
-class Brainstorms:
+class Routes:
     def __init__(self) -> None:
-        self.topics: list[str] = []
+        self.destinations: list[str] = []
         self.result = "started"
 
-    def start_brainstorm(self, topic: str) -> BrainstormStartResult:
-        self.topics.append(topic)
-        return BrainstormStartResult(self.result)
+    def start_navigation(self, destination: str) -> SessionStartResult:
+        self.destinations.append(destination)
+        return SessionStartResult(self.result)
 
 
-def brainstorm_tool(rig: Rig, controller: Brainstorms) -> Tool:
+def navigation_tool(rig: Rig, controller: Routes) -> Tool:
     tools = feature_tools(
         capabilities=rig.capabilities, notes=NoteCommandController(rig.notes),
-        pomodoro=rig.timer, panels=rig.panels, brainstorm=controller,
-        max_brainstorm_operations=2,
+        pomodoro=rig.timer, panels=rig.panels, navigation=controller,
+        max_navigation_operations=2,
     )
-    return next(tool for tool in tools if tool.name == "start_brainstorm")
+    return next(tool for tool in tools if tool.name == "start_navigation")
 
 
-async def test_brainstorm_tool_starts_exact_topic_once_on_simultaneous_retry(rig: Rig) -> None:
-    controller = Brainstorms()
-    tool = brainstorm_tool(rig, controller)
-    topic = "  Café design: two  views.\nPreserve the question?  "
-    arguments = {"topic": topic, "operation_id": "brainstorm-1"}
+async def test_navigation_tool_starts_exact_destination_once_on_simultaneous_retry(rig: Rig) -> None:
+    controller = Routes()
+    tool = navigation_tool(rig, controller)
+    destination = "  Café de Flore  "
+    arguments = {"destination": destination, "operation_id": "nav-1"}
 
     first, replay = await asyncio.gather(tool.run(arguments), tool.run(arguments))
 
-    assert controller.topics == [topic]
-    assert first.startswith("Brainstorm started")
-    assert "already started" in replay and "no new session" in replay
-    assert rig.capabilities.opened == [], "start must not reopen the READY picker"
+    assert controller.destinations == [destination]
+    assert first.startswith("Navigation started")
+    assert "already started" in replay
+    assert rig.capabilities.opened == []
 
 
-async def test_brainstorm_tool_binds_retry_to_topic_and_never_evicts_launch_identity(rig: Rig) -> None:
-    controller = Brainstorms()
-    tool = brainstorm_tool(rig, controller)
-    await tool.run({"topic": "First", "operation_id": "one"})
-    conflict = await tool.run({"topic": "Changed", "operation_id": "one"})
-    await tool.run({"topic": "Second", "operation_id": "two"})
-    capacity = await tool.run({"topic": "Third", "operation_id": "three"})
-    replay = await tool.run({"topic": "First", "operation_id": "one"})
+async def test_navigation_tool_binds_retry_to_destination_and_never_evicts_launch_identity(rig: Rig) -> None:
+    controller = Routes()
+    tool = navigation_tool(rig, controller)
+    await tool.run({"destination": "First", "operation_id": "one"})
+    conflict = await tool.run({"destination": "Changed", "operation_id": "one"})
+    await tool.run({"destination": "Second", "operation_id": "two"})
+    capacity = await tool.run({"destination": "Third", "operation_id": "three"})
+    replay = await tool.run({"destination": "First", "operation_id": "one"})
 
-    assert conflict.startswith("error:") and "different topic" in conflict
+    assert conflict.startswith("error:") and "different destination" in conflict
     assert capacity.startswith("error:") and "capacity" in capacity
     assert "already started" in replay
-    assert controller.topics == ["First", "Second"]
+    assert controller.destinations == ["First", "Second"]
 
 
 @pytest.mark.parametrize("status", ["busy", "unavailable", "closed", "invalid"])
-async def test_brainstorm_failed_admission_is_truthful_and_can_retry_after_recovery(
+async def test_navigation_failed_admission_is_truthful_and_can_retry_after_recovery(
     rig: Rig, status: str,
 ) -> None:
-    controller = Brainstorms()
+    controller = Routes()
     controller.result = status
-    tool = brainstorm_tool(rig, controller)
-    arguments = {"topic": "A useful question", "operation_id": "one"}
+    tool = navigation_tool(rig, controller)
+    arguments = {"destination": "Central Library", "operation_id": "one"}
 
     refused = await tool.run(arguments)
     assert refused.startswith("error:")
     controller.result = "started"
-    assert (await tool.run(arguments)).startswith("Brainstorm started")
-    assert controller.topics == ["A useful question", "A useful question"]
-
-
-@pytest.mark.parametrize("arguments", [
-    {}, {"topic": "Question"}, {"topic": "Question", "operation_id": ""},
-    {"topic": "Question", "operation_id": True},
-    {"topic": "Question", "operation_id": "bad id"},
-    {"topic": "Question", "operation_id": "a" * 129},
-    {"topic": "Question", "operation_id": "one", "replace": True},
-    *({"topic": topic, "operation_id": "one"}
-      for topic in (None, 1, True, "", " \n", "bad\x00topic", "bad\ud800topic", "a" * 4097)),
-])
-async def test_brainstorm_tool_rejects_invalid_arguments_without_calling_controller(
-    rig: Rig, arguments: dict[str, Any],
-) -> None:
-    controller = Brainstorms()
-    tool = brainstorm_tool(rig, controller)
-    assert (await tool.run(arguments)).startswith("error:")
-    assert controller.topics == []
+    assert (await tool.run(arguments)).startswith("Navigation started")
+    assert controller.destinations == ["Central Library", "Central Library"]
 
 
 @pytest.mark.parametrize("feature,target", [
     ("messages", "Messages"), ("notifications", "Notifications"),
-    ("brainstorm", "Brainstorm"), ("agent_terminal", "Agent Terminal"),
+    ("agent_terminal", "Agent Terminal"),
     ("planning", "Planning"), ("navigation", "Navigation"),
     ("quicknotes", "QuickNotes"), ("activity", "Activity"),
     ("news", "News"), ("timer", "Pomodoro"), ("search", "Search"),

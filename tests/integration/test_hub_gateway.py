@@ -33,7 +33,7 @@ from joat.core.interfaces import AudioFrame, MessageSender, SttEngine, Transcrip
 from joat.core.pairing import PairingStore
 from joat.core.protocol import (
     PLUGIN_SLOT_OCCUPIED_CLOSE_CODE,
-    BrainstormAction,
+    TerminalAction,
     Device,
     EventSource,
     EventType,
@@ -308,20 +308,20 @@ class TestUplink:
         assert timeout == DEFAULT_LOCATION_REFRESH_TIMEOUT_S
         assert timeout > EVEN_LOCATION_ONE_SHOT_TIMEOUT_S
 
-    async def test_brainstorm_action_is_bound_to_the_current_authenticated_connection(
+    async def test_terminal_action_is_bound_to_the_current_authenticated_connection(
         self, transport,
     ) -> None:
         t, url = transport
-        received: list[BrainstormAction] = []
-        t.on_brainstorm_action(received.append)
+        received: list[TerminalAction] = []
+        t.on_terminal_action(received.append)
 
         async with websockets.connect(url) as ws:
             await ws.send(json.dumps({"kind": "auth", "token": None}))
             assert json.loads(await ws.recv()) == {"kind": "auth.accepted"}
-            await ws.send(json.dumps({"kind": "brainstorm.action", "action": "cancel"}))
+            await ws.send(json.dumps({"kind": "terminal.action", "action": "cancel_terminal"}))
             await _wait_for(lambda: bool(received))
 
-        assert received == [BrainstormAction(action="cancel", connection_generation=1)]
+        assert received == [TerminalAction(action="cancel_terminal", connection_generation=1)]
 
     async def test_nearby_toolbelt_uses_a_request_bound_phone_refresh(
         self, transport,
@@ -577,17 +577,17 @@ class TestUplink:
             await _wait_for(lambda: bool(got))
         assert got[0].is_right_temple_click
 
-    async def test_brainstorm_action_reaches_its_dedicated_subscribers(self, transport) -> None:
+    async def test_terminal_action_reaches_its_dedicated_subscribers(self, transport) -> None:
         t, url = transport
         got = []
-        t.on_brainstorm_action(got.append)
+        t.on_terminal_action(got.append)
         async with websockets.connect(url) as ws:
             await ws.send(json.dumps({
-                "kind": "brainstorm.action",
-                "action": "show_terminal",
+                "kind": "terminal.action",
+                "action": "begin_terminal_input",
             }))
             await _wait_for(lambda: bool(got))
-        assert got[0].action == "show_terminal"
+        assert got[0].action == "begin_terminal_input"
 
     async def test_traced_message_selection_is_observable_without_content(
         self, transport, caplog

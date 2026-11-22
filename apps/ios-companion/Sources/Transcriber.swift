@@ -56,6 +56,12 @@ final class Transcriber: ObservableObject {
     }
 
     func start() {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["JOAT_SKIP_SIM_PROMPTS"] == "1" {
+            engine = "dictation · simulator"
+            return
+        }
+        #endif
         guard !running else { return }
         running = true
         generation += 1

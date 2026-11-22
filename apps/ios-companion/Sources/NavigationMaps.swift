@@ -17,7 +17,7 @@ import CryptoKit
 // logged, not trusted.
 
 /// protocol.py NavigationCoordinate / core/navigation.py NavigationPoint.
-struct NavPoint: Equatable {
+struct NavPoint: Equatable, Hashable, Codable {
     let latitude: Double
     let longitude: Double
 
@@ -37,13 +37,15 @@ struct NavPoint: Equatable {
 }
 
 /// core/navigation.py NavigationCandidate: one place the wearer may confirm.
-struct NavCandidate {
+struct NavCandidate: Equatable, Hashable, Identifiable {
     let choiceId: String
     let label: String
     let address: String
     let point: NavPoint
     var repairHint: String? = nil
     var distanceM: Double? = nil
+
+    var id: String { choiceId }
 }
 
 struct NavStep {
@@ -106,6 +108,25 @@ enum NavigationMaps {
     // MARK: - Policies (navigation/policies.py)
 
     static func policy(_ mode: String) -> [String: Any] {
+        if mode == "driving" {
+            return [
+                "maxAccuracyM": 45.0,
+                "staleAfterMs": 6000.0,
+                "corridorRadiusM": 50.0,
+                "ambiguityMarginM": 10.0,
+                "ambiguityProgressDeltaM": 180.0,
+                "searchBackM": 220.0,
+                "searchForwardM": 1500.0,
+                "minCourseDisplacementM": 12.0,
+                "wrongWayAngleDeg": 130.0,
+                "wrongWayMinBacktrackM": 45.0,
+                "wrongWaySamples": 3,
+                "offRouteSamples": 3,
+                "arrivalRadiusM": 40.0,
+                "arrivalSamples": 2,
+                "uTurnSuppressionM": 90.0,
+            ]
+        }
         let walking = mode == "walking"
         return [
             "maxAccuracyM": walking ? 25.0 : 20.0,
@@ -320,7 +341,11 @@ enum NavigationMaps {
         request.destination = MKMapItem(location: CLLocation(latitude: destination.point.latitude,
                                                              longitude: destination.point.longitude),
                                         address: nil)
-        request.transportType = mode == "walking" ? .walking : .cycling
+        switch mode {
+        case "walking": request.transportType = .walking
+        case "driving": request.transportType = .automobile
+        default: request.transportType = .cycling
+        }
         request.requestsAlternateRoutes = false
         let response: MKDirections.Response
         do {

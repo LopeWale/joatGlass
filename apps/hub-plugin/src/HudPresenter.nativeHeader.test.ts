@@ -4,7 +4,7 @@ import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
 import type { HudStatusModel } from './HudStatus';
-import { ContainerId, HeaderImageId, type BrainstormHudModel } from './types';
+import { ContainerId, HeaderImageId, type AgentTerminalHudModel } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
 
 // These tests pin the IMAGE overview (VITE_NATIVE_OVERVIEW=0). The text
@@ -144,23 +144,28 @@ describe('the header on a firmware text page', () => {
 });
 
 describe('the head line of the native terminal page', () => {
-  const session: BrainstormHudModel = {
-    screen: 'brainstorm', state: 'running', topic: 'Should the glasses cache the picker?',
-    collaborators: ['Codex', 'Claude'], activeSpeaker: 'Codex · round 1/3 · 2 calls',
-    activity: 'YOU > Should the glasses cache the picker?\nCODEX > A cache saves a round trip.',
+  const session: AgentTerminalHudModel = {
+    state: 'running',
+    focus: 'Claude · running',
+    lanes: ['Claude · running', 'Codex · idle'],
+    activity: 'Inspecting workspace',
+    messages: [
+      { id: 'u1', role: 'user', text: 'Should the glasses cache the picker?' },
+      { id: 'a1', role: 'assistant', text: 'A cache saves a round trip.' },
+    ],
   };
 
   it('is the status header, upgraded in place when the facts change', async () => {
     const r = rig();
     await r.hud.setStatusModel(at941);
-    expect(await r.hud.showBrainstorm(session)).toBe(true);
+    expect(await r.hud.showTerminal(session)).toBe(true);
     const page = last(r.rebuilds);
     expect(page?.textObject?.find((c) => c.containerName === 'terminal-head')?.content)
-      .toBe('9:41 · BRAINSTORM · ○ · ▇');
+      .toBe('9:41 · CLAUDE · ○ · ▇');
     const mark = r.operations.length;
     expect(await r.hud.setStatusModel(at942)).toBe(true);
     expect(r.since(mark)).toEqual(['upgrade:terminal-head']);
-    expect(last(r.upgrades)?.content).toBe('9:42 · BRAINSTORM · ○ · ▇');
+    expect(last(r.upgrades)?.content).toBe('9:42 · CLAUDE · ○ · ▇');
     expect(r.rebuilds).toHaveLength(1);
   });
 
@@ -189,20 +194,23 @@ describe('the head line of the native terminal page', () => {
     try {
       const hud = new HudPresenter(client, new HudPageBuilder(), visual);
       await hud.setStatusModel(at941);
-      expect(await hud.showBrainstorm(session)).toBe(true);
-      await vi.runAllTimersAsync();
+      expect(await hud.showTerminal(session)).toBe(true);
+      await vi.advanceTimersByTimeAsync(250);
       const page = last(rebuilds);
       // The status line became the two header halves; no text head remains.
-      expect(page?.textObject?.map((c) => c.containerName)).toEqual(['terminal-body']);
+      expect(page?.textObject?.map((c) => c.containerName)).toEqual([
+        'terminal-card', 'terminal-dim', 'terminal-bright', 'terminal-foot',
+      ]);
       expect(page?.imageObject?.map((c) => c.containerID)).toEqual([HeaderImageId.Left, HeaderImageId.Right]);
-      expect(last(headers)).toBe('BRAINSTORM');
+      expect(last(headers)).toBe('CLAUDE');
 
       // A clock tick repaints the spine; it never writes a head that is gone.
       const mark = operations.length;
       expect(await hud.setStatusModel(at942)).toBe(true);
-      expect(await hud.showBrainstorm({ ...session, activeSpeaker: 'Claude · round 1/3 · 3 calls' })).toBe(true);
+      expect(await hud.showTerminal({ ...session, activity: 'Updated tool call' })).toBe(true);
       expect(operations.slice(mark)).not.toContain('upgrade:terminal-head');
       expect(rebuilds).toHaveLength(1);
+      await hud.showDefault();
     } finally {
       vi.useRealTimers();
     }

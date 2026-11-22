@@ -178,6 +178,32 @@ class TerminalOpeningController:
             if not operation.accepted and self._instruction_operations.get(operation_id) is operation:
                 del self._instruction_operations[operation_id]
 
+    def lane_active_summary(self, name: str) -> str | None:
+        return self._roster.lane_active_summary(name)
+
+    async def list_sessions(self, name: str, limit: int = 16) -> list[dict[str, str]]:
+        return await self._roster.list_lane_sessions(name, limit=limit)
+
+    async def open_new_session(
+        self, name: str, request_id: str | None, selection_id: str,
+        is_current: Callable[[], bool],
+    ) -> None:
+        if not is_current():
+            return
+        await self._roster.start_new_lane_session(name)
+        if is_current():
+            await self.open(name, request_id, selection_id, is_current)
+
+    async def open_resumed_session(
+        self, name: str, session_key: str, request_id: str | None, selection_id: str,
+        is_current: Callable[[], bool],
+    ) -> None:
+        if not is_current():
+            return
+        await self._roster.resume_lane_session(name, session_key)
+        if is_current():
+            await self.open(name, request_id, selection_id, is_current)
+
     async def open(
         self, name: str, request_id: str | None, selection_id: str,
         is_current: Callable[[], bool],

@@ -541,4 +541,94 @@ describe('NavigationController', () => {
     expect(frames[1]).toMatchObject({ view: 'guidance', maneuverDistanceM: 278 });
     expect(sent.filter((message) => message.kind === 'navigation.state')).toHaveLength(2);
   });
+
+  it('installs phoneFixes routes immediately without LocationSessionManager and emits enriched privacy-clean navigation.state', async () => {
+    const setNavigationConsumer = vi.fn(async () => {
+      throw new Error('should never touch Even Hub location bridge when phoneFixes is true');
+    });
+    const frames: NavigationHudModel[] = [];
+    const sent: UplinkMessage[] = [];
+    let visible = true;
+    const ended = vi.fn();
+    const controller = new NavigationController(
+      {
+        showNavigation: async (frame) => { frames.push(frame); return true; },
+        isNavigationVisible: () => visible,
+        navigationEnded: ended,
+      },
+      { sendNavigation: (message) => { if (message.kind !== 'navigation.view.ack') sent.push(message); } },
+      {
+        setNavigationConsumer,
+        requestNavigationOrigin: async () => null,
+      },
+      undefined,
+      () => 10_100,
+    );
+
+    expect(await controller.installRoute({
+      kind: 'navigation.route',
+      sessionId: 'nav-phone-1',
+      requestId: 'route-phone-1',
+      generation: 1,
+      routeId: 'route-1',
+      revision: 1,
+      destinationLabel: 'Cajun Corner',
+      etaMinutes: 18,
+      plan: routePlan,
+      phoneFixes: true,
+    })).toBe(true);
+    expect(setNavigationConsumer).not.toHaveBeenCalled();
+    expect(sent[0]).toEqual({
+      kind: 'navigation.route.ack',
+      sessionId: 'nav-phone-1',
+      routeId: 'route-1',
+      revision: 1,
+      outcome: 'installed',
+    });
+
+    controller.acceptExternalFix({
+      kind: 'navigation.fix',
+      sessionId: 'nav-phone-1',
+      latitude: 0,
+      longitude: 0.0009,
+      accuracy: 5,
+      timestamp: 10_000,
+    });
+    await controller.whenIdle();
+
+    const stateMsg = sent.find((m) => m.kind === 'navigation.state');
+    expect(stateMsg).toMatchObject({
+      kind: 'navigation.state',
+      sessionId: 'nav-phone-1',
+      routeId: 'route-1',
+      revision: 1,
+      sequence: 1,
+      state: 'guidance',
+      maneuver: 'turn_right',
+      maneuverDistanceM: 400,
+      instruction: 'onto Test Ave',
+      stepId: 'turn',
+      remainingDistanceM: 1_012,
+    });
+    expect(typeof (stateMsg as Record<string, unknown>).etaMinutes).toBe('number');
+    expect(stateMsg).not.toHaveProperty('latitude');
+    expect(stateMsg).not.toHaveProperty('longitude');
+
+    // Resuming active guidance reclaims the glass with the latest retained NavigationHudModel.
+    frames.length = 0;
+    expect(await controller.resumeToGlass('other-session')).toBe(false);
+    expect(await controller.resumeToGlass('nav-phone-1')).toBe(true);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({
+      view: 'guidance',
+      maneuver: 'turn_right',
+      secondary: 'onto Test Ave',
+    });
+
+    // Stopping from the NAVIGATION menu (when navigation does not own the glass) cleans up without returning true for Overview reset.
+    visible = false;
+    expect(await controller.stopRoute('nav-phone-1')).toBe(false);
+    expect(ended).toHaveBeenCalledOnce();
+    expect(controller.isActive()).toBe(false);
+  });
 });

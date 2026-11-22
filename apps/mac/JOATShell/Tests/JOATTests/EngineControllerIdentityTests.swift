@@ -54,6 +54,7 @@ final class EngineControllerIdentityTests: XCTestCase {
         )
 
         XCTAssertFalse(ordinary.contains("--private-tailnet-gateway"))
+        XCTAssertFalse(ordinary.contains("--messages-endpoint"))
         XCTAssertEqual(
             privateTailnet,
             [
@@ -62,6 +63,7 @@ final class EngineControllerIdentityTests: XCTestCase {
                 "--stt-port", "50060",
                 "--g2-diagnostics",
                 "--private-tailnet-gateway",
+                "--messages-endpoint",
             ]
         )
     }

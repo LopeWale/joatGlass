@@ -1,5 +1,8 @@
 import { TextContainerUpgrade, type RebuildPageContainer } from '@evenrealities/even_hub_sdk';
 import { GesturePolicy } from './GesturePolicy';
+import { isCommsTitle } from './MessagesViewState';
+
+export { isCommsTitle };
 
 import type { BridgeClient } from './BridgeClient';
 import type { HudPageBuilder } from './HudPageBuilder';
@@ -14,6 +17,7 @@ import type { G2DiagnosticTrace, G2TracePage } from './G2DiagnosticTrace';
 import {
   AssistantConversationSurface,
   replyDraftView,
+  REPLY_LISTENING_HINT,
   REPLY_REVIEW_HINT,
   validAssistantConversationSnapshot,
   type ConversationExitResult,
@@ -40,7 +44,7 @@ import {
   notificationCardLayout, overlayNotificationCard,
 } from './NotificationCard';
 import { isRouteProgressView, navigationChip, pomodoroChip } from './ActivityChips';
-import { NativeTerminalSurface } from './NativeTerminalSurface';
+import { NativeTerminalSurface, terminalHeadTitle } from './NativeTerminalSurface';
 import { productivityActionHint, productivityPhaseLabel, usesActionPillLayout } from './HudCanvasRenderer';
 import { navigationNativeBody, type NavigationHudModel } from './NavigationHud';
 import {
@@ -53,7 +57,7 @@ import {
   CONFIRM_PROMPT_MAX_UNITS,
   MESSAGE_REVIEW_PROMPT_MAX_UNITS,
   ContainerId,
-  type BrainstormHudModel,
+  type AgentTerminalHudModel,
   type ConfirmationPurpose,
   type AssistantConversationSnapshot,
   type AssistantConversationTurn,
@@ -182,7 +186,7 @@ type HudSurface =
     selectedIndex: number;
   }
   | { kind: 'navigation'; navigation: NavigationHudModel }
-  | { kind: 'brainstorm'; brainstorm: BrainstormHudModel }
+  | { kind: 'terminal'; terminal: AgentTerminalHudModel }
   | { kind: 'productivity'; productivity: ProductivityHudModel };
 
 /** Home as firmware text (OverviewText.ts) rather than four image tiles:
@@ -205,35 +209,32 @@ let evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '0') =
  * the firmware text pages in place (one upgrade per swipe) and draws every
  * stroke at full brightness, where the 55% image's thin strokes look faded
  * (the wearer, 2026-10-07). */
-const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', QUICKNOTES_NOTE_TITLE, 'BRAINSTORM · ROOM']);
+const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', QUICKNOTES_NOTE_TITLE]);
 /** Long text the glasses scroll themselves (ScrollBox): the Mac sends it
  * whole, and it reads as one scroll, a line a swipe, with no round trip
  * until a stretch's edge (the wearer's ruling after the hardware test,
  * 2026-10-14): a News article, a Search result, a Messages conversation
- * and a saved QuickNote (its note page and its exact text), and a
- * Brainstorm's whole conversation while the room waits on the wearer
- * (2026-10-16). */
+ * and a saved QuickNote (its note page and its exact text). */
 const SCROLL_BOX_READERS = new Set([
-  'NEWS · ARTICLE', 'SEARCH · RESULT', 'MESSAGES · CONVERSATION', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
-  'QUICKNOTES · CUE', 'QUICKNOTES · PREP', 'BRAINSTORM · ROOM',
+  'NEWS · ARTICLE', 'SEARCH · RESULT', 'MESSAGES · CONVERSATION', 'MAIL · CONVERSATION',
+  'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
+  'QUICKNOTES · CUE', 'QUICKNOTES · PREP',
 ]);
 function scrollsInBox(title: string): boolean {
   return SCROLL_BOX_READERS.has(title.trim().toUpperCase());
 }
-/** A Brainstorm room only grows at its end (the wearer's move, then each
- * seat's answer) and comes back for those words, so it reopens on the first
- * new line, not where the wearer had stopped in the round before. */
-function opensOnNewWords(title: string): boolean {
-  return title.trim().toUpperCase() === 'BRAINSTORM · ROOM';
+function opensOnNewWords(_title: string): boolean {
+  return false;
 }
 /** Whole lines a scroll box shows. Its height is exactly these lines, so
  * the firmware's last scroll lands on the last line and the next swipe is
  * the edge, not a nudge that only realigns a part line. */
 export const SCROLL_BOX_LINES = 7;
 /** Text pages laid out as speakers' turns ("Them: …" with its wrapped rows
- * under the words): a Messages thread. */
+ * under the words): a Messages or Mail thread. */
 function speakerPaged(title: string): boolean {
-  return title.startsWith('MESSAGES');
+  const normalized = title.trim().toUpperCase();
+  return normalized.startsWith('MESSAGES') || normalized.startsWith('MAIL');
 }
 /** An open QuickNote (Even's "New note"): plain words paged from the
  * newest end, and "Undo last input" in the glasses' menu. */
@@ -246,14 +247,15 @@ const QUICKNOTES_NOTE_MENU = [
   { id: QUICKNOTES_PREP_MENU_ID, name: QUICKNOTES_PREP_MENU_LABEL },
 ] as const;
 /**
- * A Messages page scrolls on the glass instead of turning seven-line pages
+ * A Messages or Mail page scrolls on the glass instead of turning seven-line pages
  * (the wearer's ruling, 2026-10-11). The firmware scrolls an overflowing
  * capture text container one line a swipe and draws its own scrollbar,
  * and only the boundary swipe reaches the plugin, which then asks the Mac
  * for the next chunk. The page is cut only by the container's byte cap.
  */
 function scrollsOnGlass(title: string): boolean {
-  return title.startsWith('MESSAGES');
+  const normalized = title.trim().toUpperCase();
+  return normalized.startsWith('MESSAGES') || normalized.startsWith('MAIL');
 }
 const SCROLLING_PAGE_MAX_LINES = 40;
 /** Code units a scrolling page holds. The paginators also end a page at the
@@ -345,13 +347,20 @@ interface NativeTextPageState {
 /** The working glyph's cadence on the wearer's row of a reply card. */
 const REPLY_LISTENING_TICK_MS = 450;
 
-/** The Mac's reply consent, `Send to Ada? “words”` (or, after a long
- * draft's review, `Send to Ada? (reviewed) “opening…”`), split back into
- * who and what. Anything else keeps the plain decision page. */
-export function parseMessageDraft(prompt: string): { recipient: string; body: string } | undefined {
-  const match = /^Send to ([\s\S]+?)\? (?:\(reviewed\) )?“([\s\S]*)”$/u.exec(prompt.trim());
-  if (!match?.[1] || !match[2]?.trim()) return undefined;
-  return { recipient: match[1], body: match[2] };
+/** The reply/compose consent (`Send to Ada? “words”`, `Reply (Work) to …? “words”`,
+ * or `Email (Personal) to …? “words”`, optionally `(reviewed)`), split back into
+ * the JOAT header question and the wearer's body. Anything else keeps the plain decision page. */
+export function parseMessageDraft(prompt: string): { question: string; body: string } | undefined {
+  const trimmed = prompt.trim();
+  const sms = /^Send to ([\s\S]+?)\? (?:\(reviewed\) )?“([\s\S]*)”$/u.exec(trimmed);
+  if (sms?.[1]?.trim() && sms[2]?.trim()) {
+    return { question: `What do you want to say to ${sms[1]}?`, body: sms[2] };
+  }
+  const mail = /^(Reply|Email) \(([\s\S]+?)\) to ([\s\S]+?)\? (?:\(reviewed\) )?“([\s\S]*)”$/u.exec(trimmed);
+  if (mail?.[1] && mail[2]?.trim() && mail[3]?.trim() && mail[4]?.trim()) {
+    return { question: `${mail[1]} (${mail[2]}) to ${mail[3]}?`, body: mail[4] };
+  }
+  return undefined;
 }
 
 const PAGE_SWIPES = new Set(['swipe: previous', 'swipe: more', 'swipe: page']);
@@ -442,8 +451,9 @@ interface AssistantOverlayState extends AssistantOverlayVisual {
 interface PromptQuestionState {
   terminalConversationId?: string;
   inlineTerminal?: boolean;
-  /** A Messages reply's question, drawn in JOAT's conversation card. */
-  messageReply?: boolean;
+  /** A Messages reply or capability prompt drawn in JOAT's conversation card. */
+  liveTranscriptCard?: boolean;
+  replyFooterHint?: string;
   id: string;
   question: string;
   isCurrent: () => boolean;
@@ -760,8 +770,8 @@ export class HudPresenter {
   private async restoreRetainedPage(): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
-    if (this.surface.kind === 'brainstorm') {
-      return this.nativeTerminal.present(this.surface.brainstorm,
+    if (this.surface.kind === 'terminal') {
+      return this.nativeTerminal.present(this.surface.terminal,
         this.nativeHeader(this.nativePageTitle()), displayCurrent);
     }
     if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
@@ -1041,7 +1051,7 @@ export class HudPresenter {
   ): Promise<boolean> {
     const from = this.tracePage();
     const source = surface.items.join('\n');
-    const lines = paginateEven(surface.items, surface.options.title.trim().toUpperCase().startsWith('MESSAGES'));
+    const lines = paginateEven(surface.items, speakerPaged(surface.options.title));
     const pages = lines.map((page) => page.map((line) => line.text).join('\n'));
     const page = this.nativeTextPage?.source === source
       ? Math.max(0, Math.min(this.nativeTextPage.page, pages.length - 1))
@@ -1058,6 +1068,14 @@ export class HudPresenter {
       };
     }
     this.clearActionOverlay();
+    this.cancelAssistantOverlayPaintTimer();
+    this.assistantOverlayPaintDirty = false;
+    this.assistantOverlayPaint = undefined;
+    if (this.assistantOverlay?.dismissTimer !== undefined) {
+      clearTimeout(this.assistantOverlay.dismissTimer);
+    }
+    this.assistantOverlay = undefined;
+    this.nativeOverlay = undefined;
     this.resetAll();
     this.surface = surface;
     this.streams.set(ContainerId.Main, surface.options.title);
@@ -1220,8 +1238,9 @@ export class HudPresenter {
       return Promise.resolve(false);
     }
     if (ownerKind === 'terminal') {
-      if (!this.nativeTerminal.isActive() || this.surface.kind !== 'brainstorm'
-        || this.surface.brainstorm.screen !== 'agent_terminal') return Promise.resolve(false);
+      if (!this.nativeTerminal.isActive() || this.surface.kind !== 'terminal') {
+        return Promise.resolve(false);
+      }
       const existing = this.promptQuestion;
       if (existing?.id === promptId) {
         return existing.question === question && this.isPromptCurrent(existing)
@@ -1233,7 +1252,7 @@ export class HudPresenter {
         question,
         isCurrent,
         inlineTerminal: true,
-        terminalConversationId: this.surface.brainstorm.conversationId,
+        terminalConversationId: this.surface.terminal.conversationId,
       };
       this.promptQuestion = prompt;
       const paint = this.nativeTerminal.showPrompt(
@@ -1263,9 +1282,15 @@ export class HudPresenter {
         ? existing.paint ?? Promise.resolve(false)
         : Promise.resolve(false);
     }
+    const liveTranscriptCard = ownerKind === 'messages' || ownerKind === 'capability';
     const prompt: PromptQuestionState = {
       id: promptId, question, isCurrent,
-      ...(ownerKind === 'messages' ? { messageReply: true } : {}),
+      ...(liveTranscriptCard ? {
+        liveTranscriptCard: true,
+        replyFooterHint: ownerKind === 'capability'
+          ? 'tap: search · 2x tap: cancel'
+          : REPLY_LISTENING_HINT,
+      } : {}),
     };
     this.promptQuestion = prompt;
     this.cancelAssistantOverlayPaintTimer();
@@ -1288,17 +1313,16 @@ export class HudPresenter {
       if (!this.isPromptCurrent(prompt)) return false;
       const pages = paginateAnswer(prompt.question);
       if (pages.length !== 1) return false;
-      // A native conversation page (Agent Terminal, Brainstorm) must hand
-      // over first, as it does for a confirmation, or its surface keeps
-      // writing into containers the question page has replaced.
+      // A native Agent Terminal session page must hand over first, as it does
+      // for a confirmation, so its surface stops writing into replaced containers.
       if (!await this.prepareNativeTerminalHandoff()) return false;
       if (!this.isPromptCurrent(prompt)) return false;
-      const layout = prompt.messageReply
+      const layout = prompt.liveTranscriptCard
         ? this.replyCardLayout(prompt)
         : this.layouts.promptQuestionLayout(pages[0] ?? ' ', this.nativeHeader(this.nativePageTitle()));
       prompt.layout = layout;
       painted = await this.replaceNativePage(layout, 'prompt-native');
-      if (painted && prompt.messageReply) this.armReplyListening(prompt);
+      if (painted && prompt.liveTranscriptCard) this.armReplyListening(prompt);
       return painted && this.isPromptCurrent(prompt);
     } catch {
       return false;
@@ -1310,14 +1334,14 @@ export class HudPresenter {
     }
   }
 
-  /** The Messages reply card over the thread: JOAT's question and, while
-   * the wearer speaks, their words so far. */
+  /** The Messages reply or capability prompt card over the feature: JOAT's
+   * question and, while the wearer speaks, their words so far. */
   private replyCardLayout(prompt: PromptQuestionState): RebuildPageContainer {
     const turns: AssistantConversationTurn[] = [{ role: 'assistant', text: prompt.question }];
     const spoken = Boolean(prompt.partial?.trim());
     if (spoken) turns.push({ role: 'user', text: prompt.partial! });
     return overlayConversation(this.layouts.assistantConversationLayout(
-      replyDraftView(turns, spoken ? undefined : prompt.listeningFrame ?? 0),
+      replyDraftView(turns, spoken ? undefined : prompt.listeningFrame ?? 0, prompt.replyFooterHint),
       this.nativeHeader(this.nativePageTitle()),
     ), this.conversationUnderlay());
   }
@@ -1331,11 +1355,28 @@ export class HudPresenter {
    */
   showPromptPartial(promptId: string, text: string): Promise<boolean> {
     const prompt = this.promptQuestion;
-    if (!prompt || prompt.id !== promptId || !prompt.messageReply || !this.isPromptCurrent(prompt)) {
+    if (!prompt || prompt.id !== promptId || !this.isPromptCurrent(prompt)) {
+      return Promise.resolve(false);
+    }
+    if (prompt.inlineTerminal) {
+      return this.nativeTerminal.showPromptPartial(promptId, text);
+    }
+    if (!prompt.liveTranscriptCard) {
       return Promise.resolve(false);
     }
     prompt.pendingPartial = text;
     return this.drainReplyCard(prompt);
+  }
+
+  showPromptTranscribing(promptId: string): Promise<boolean> {
+    const prompt = this.promptQuestion;
+    if (!prompt || prompt.id !== promptId || !this.isPromptCurrent(prompt)) {
+      return Promise.resolve(false);
+    }
+    if (prompt.inlineTerminal) {
+      return this.nativeTerminal.showPromptTranscribing(promptId);
+    }
+    return Promise.resolve(false);
   }
 
   /** The working glyph moves on the wearer's row of a reply card until
@@ -1440,9 +1481,8 @@ export class HudPresenter {
     try {
       return this.promptQuestion === prompt && !this.confirmation && prompt.isCurrent()
         && (!prompt.inlineTerminal || (this.nativeTerminal.isActive()
-          && this.surface.kind === 'brainstorm'
-          && this.surface.brainstorm.screen === 'agent_terminal'
-          && this.surface.brainstorm.conversationId === prompt.terminalConversationId));
+          && this.surface.kind === 'terminal'
+          && this.surface.terminal.conversationId === prompt.terminalConversationId));
     } catch {
       return false;
     }
@@ -1456,19 +1496,9 @@ export class HudPresenter {
     answersWearer = false,
     presentation: AssistantOverlayPresentation = 'answer',
   ): Promise<boolean> {
-    // Not over a brainstorm/terminal page — UNLESS it answers something
-    // the wearer just asked there. Seen live in the simulator: a queued
-    // reply drained the instant a session settled and painted "REPLY —
-    // Using the phone mic…" across the synthesis, default-layout text
-    // stamped over a full-frame surface. The session's answer owns that
-    // screen and unrelated chatter must wait.
-    //
-    // But the rule was written as "never", and that silenced the replies
-    // TO the wearer: "make that shorter" produced its answer into nothing,
-    // and the question asked before replacing a live session was never
-    // seen — so the wearer was waiting on a prompt that did not exist.
-    // An answer is not an interruption.
-    if (this.surface.kind === 'brainstorm' && !answersWearer) return false;
+    // Not over an active terminal session page — UNLESS it answers something
+    // the wearer just asked there.
+    if (this.surface.kind === 'terminal' && !answersWearer) return false;
     if (!text) return false;
     // A receipt must be visible, not merely recorded behind the native
     // conversation page. Quiesce that page first; the retained conversation
@@ -2179,8 +2209,8 @@ export class HudPresenter {
       case 'list': return this.surface.options.title;
       case 'navigation': return 'NAVIGATION';
       case 'productivity': return 'REMINDERS';
-      case 'brainstorm':
-        return this.surface.brainstorm.screen === 'agent_terminal' ? 'AGENT TERMINAL' : 'BRAINSTORM';
+      case 'terminal':
+        return terminalHeadTitle(this.surface.terminal.focus);
       default: return undefined;
     }
   }
@@ -2308,6 +2338,14 @@ export class HudPresenter {
       };
     }
     this.clearActionOverlay();
+    this.cancelAssistantOverlayPaintTimer();
+    this.assistantOverlayPaintDirty = false;
+    this.assistantOverlayPaint = undefined;
+    if (this.assistantOverlay?.dismissTimer !== undefined) {
+      clearTimeout(this.assistantOverlay.dismissTimer);
+    }
+    this.assistantOverlay = undefined;
+    this.nativeOverlay = undefined;
     this.resetAll();
     this.surface = surface;
     this.streams.set(ContainerId.Main, surface.options.title);
@@ -2703,39 +2741,34 @@ export class HudPresenter {
     return true;
   }
 
-  /** Dedicated four-tile production page for a live Brainstorm or Hermes. */
-  /** Swipe on the brainstorm/terminal surface pages through history. */
+  /** Swipe on the Agent Terminal surface pages through conversation history. */
   scrollTranscript(direction: 'up' | 'down'): boolean {
-    if (this.surface.kind !== 'brainstorm') return false;
+    if (this.surface.kind !== 'terminal') return false;
     return this.nativeTerminal.scroll(direction);
   }
 
-  async showBrainstorm(
-    brainstorm: BrainstormHudModel, statusOverride?: string, isCurrent?: () => boolean,
+  async showTerminal(
+    terminal: AgentTerminalHudModel, statusOverride?: string, isCurrent?: () => boolean,
   ): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (this.confirmation || (isCurrent && !isCurrent())) return false;
     if (!await this.prepareAssistantConversationHandoff()) return false;
-    const shown = await this.showNativeTerminal(brainstorm, statusOverride, isCurrent);
-    if (shown && brainstorm.screen === 'brainstorm') this.armThinkingTicker();
+    const shown = await this.showNativeTerminal(terminal, statusOverride, isCurrent);
+    if (shown) this.armThinkingTicker();
     return shown;
   }
 
-  /** While a Brainstorm seat's row is the silent "Thinking…" marker, move
-   * its elapsed counter on the glass once a second: one in-place body
-   * upgrade on the native page, no Mac frame. The Mac ships nothing until
-   * the seat produces a token, so the counter is device-local. */
+  /** While an Agent Terminal turn is running, advance its spinner and elapsed
+   * counter on the glass once a second (every 5s past 60s) via one in-place
+   * `terminal-foot` upgrade, with zero page rebuilds. */
   private thinkingTicker?: ReturnType<typeof setTimeout>;
-  /** How long the counter has been ticking, so it can slow down. */
   private thinkingTicks = 0;
-  /** Past a minute of silence the wearer is deciding whether to cancel,
-   * not reading digits: the counter drops to one write every five seconds. */
   private static readonly THINKING_PRECISE_S = 60;
 
   private armThinkingTicker(): void {
     if (!this.displayActive || this.thinkingTicker !== undefined) return;
-    if (this.surface.kind !== 'brainstorm' || !this.nativeTerminal.isThinking()) {
+    if (this.surface.kind !== 'terminal' || !this.nativeTerminal.isThinking()) {
       this.thinkingTicks = 0;
       return;
     }
@@ -2743,13 +2776,13 @@ export class HudPresenter {
     const interval = this.thinkingTicks < HudPresenter.THINKING_PRECISE_S ? 1000 : 5000;
     this.thinkingTicker = setTimeout(() => {
       this.thinkingTicker = undefined;
-      if (this.surface.kind === 'brainstorm' && this.nativeTerminal.tick()) this.armThinkingTicker();
+      if (this.surface.kind === 'terminal' && this.nativeTerminal.tick()) this.armThinkingTicker();
       else this.thinkingTicks = 0;
     }, interval);
   }
 
   private async showNativeTerminal(
-    terminal: BrainstormHudModel,
+    terminal: AgentTerminalHudModel,
     statusOverride?: string,
     isCurrent?: () => boolean,
   ): Promise<boolean> {
@@ -2758,8 +2791,8 @@ export class HudPresenter {
     const prior = this.capturePresenterSnapshot();
     const wasActive = this.nativeTerminal.isActive();
     const surface: HudSurface = {
-      kind: 'brainstorm',
-      brainstorm: this.cloneBrainstorm(terminal),
+      kind: 'terminal',
+      terminal: this.cloneTerminal(terminal),
     };
     if (this.surface.kind === 'default' && !this.focusReturn) {
       this.focusReturn = {
@@ -2772,6 +2805,14 @@ export class HudPresenter {
       ? this.captureLiveStatus()
       : { text: statusOverride, brightness: 2 };
     this.clearActionOverlay();
+    this.cancelAssistantOverlayPaintTimer();
+    this.assistantOverlayPaintDirty = false;
+    this.assistantOverlayPaint = undefined;
+    if (this.assistantOverlay?.dismissTimer !== undefined) {
+      clearTimeout(this.assistantOverlay.dismissTimer);
+    }
+    this.assistantOverlay = undefined;
+    this.nativeOverlay = undefined;
     this.resetAll();
     this.surface = surface;
     if (liveStatus) {
@@ -2782,7 +2823,7 @@ export class HudPresenter {
     }
     const stillCurrent = () => displayCurrent() && this.surface === surface && (isCurrent?.() ?? true);
     const painted = await this.nativeTerminal.present(
-      surface.brainstorm,
+      surface.terminal,
       this.nativeHeader(this.nativePageTitle()),
       stillCurrent,
     );
@@ -2878,6 +2919,14 @@ export class HudPresenter {
       };
     }
     this.clearActionOverlay();
+    this.cancelAssistantOverlayPaintTimer();
+    this.assistantOverlayPaintDirty = false;
+    this.assistantOverlayPaint = undefined;
+    if (this.assistantOverlay?.dismissTimer !== undefined) {
+      clearTimeout(this.assistantOverlay.dismissTimer);
+    }
+    this.assistantOverlay = undefined;
+    this.nativeOverlay = undefined;
     this.resetAll();
     this.surface = surface;
     this.streams.set(ContainerId.Main, model.title);
@@ -3401,7 +3450,7 @@ export class HudPresenter {
     // question it answered, then the wearer's exact words, then the gestures.
     const layout = draft
       ? overlayConversation(this.layouts.assistantConversationLayout(replyDraftView([
-        { role: 'assistant', text: `What do you want to say to ${draft.recipient}?` },
+        { role: 'assistant', text: draft.question },
         { role: 'user', text: draft.body },
       ], undefined, REPLY_REVIEW_HINT), header), this.conversationUnderlay())
       : this.layouts.confirmationLayout(current.prompt, header, current.purpose);
@@ -3499,13 +3548,13 @@ export class HudPresenter {
       return result;
     }
 
-    if (prior.surface.kind === 'brainstorm') {
+    if (prior.surface.kind === 'terminal') {
       this.focusReturn = {
         streams: new Map(prior.streams),
         brightness: new Map(prior.brightness),
         kinds: new Map(prior.kinds), notificationId: prior.notificationId,
       };
-      const restored = await this.showBrainstorm(prior.surface.brainstorm);
+      const restored = await this.showTerminal(prior.surface.terminal);
       const result = await this.repaintReplacementConfirmation(restored, displayCurrent);
       this.recordPageTransition('confirmation', 'list', 'dismiss_confirmation', result ? 'success' : 'failed');
       return result;
@@ -3719,7 +3768,7 @@ export class HudPresenter {
     if (this.confirmation) return 'confirmation';
     if (this.surface.kind === 'default') return 'overview';
     // The trace vocabulary predates this visual page; it remains content-free.
-    return this.surface.kind === 'brainstorm' || this.surface.kind === 'productivity'
+    return this.surface.kind === 'terminal' || this.surface.kind === 'productivity'
       ? 'list'
       : this.surface.kind;
   }
@@ -3973,9 +4022,9 @@ export class HudPresenter {
     if (!displayCurrent()) return false;
     this.visual?.forgetPage?.();
     if (this.assistantConversation.isActive()) return this.assistantConversation.repaint();
-    if (this.surface.kind === 'brainstorm') {
+    if (this.surface.kind === 'terminal') {
       if (this.nativeTerminal.isActive()) return this.nativeTerminal.repaint();
-      return this.nativeTerminal.present(this.surface.brainstorm,
+      return this.nativeTerminal.present(this.surface.terminal,
         this.nativeHeader(this.nativePageTitle()), displayCurrent);
     }
     if (this.surface.kind === 'list' && this.surface.options.nativeFirmwareList) {
@@ -4222,8 +4271,8 @@ export class HudPresenter {
     if (surface.kind === 'navigation') {
       return { kind: 'navigation', navigation: this.cloneNavigation(surface.navigation) };
     }
-    if (surface.kind === 'brainstorm') {
-      return { kind: 'brainstorm', brainstorm: this.cloneBrainstorm(surface.brainstorm) };
+    if (surface.kind === 'terminal') {
+      return { kind: 'terminal', terminal: this.cloneTerminal(surface.terminal) };
     }
     if (surface.kind === 'productivity') {
       return { kind: 'productivity', productivity: this.cloneProductivity(surface.productivity) };
@@ -4275,7 +4324,7 @@ export class HudPresenter {
       }
     }
     const assistantConversation = this.assistantConversation.exportState();
-    const nativeTerminal = this.surface.kind === 'brainstorm'
+    const nativeTerminal = this.surface.kind === 'terminal'
       ? this.nativeTerminal.exportState()
       : undefined;
     return {
@@ -4306,7 +4355,9 @@ export class HudPresenter {
     const surface = saved.surface;
     if (typeof surface !== 'object' || surface === null) return false;
     const kind = (surface as { kind?: unknown }).kind;
-    if (typeof kind !== 'string') return false;
+    if (typeof kind !== 'string' || !['default', 'list', 'navigation', 'terminal', 'productivity'].includes(kind)) {
+      return false;
+    }
     this.surface = this.cloneSurface(surface as HudSurface);
     // A replacement WebView starts from the declared visual startup page.
     // repaintRestoredSurface performs the one native rebuild, if needed.
@@ -4368,9 +4419,12 @@ export class HudPresenter {
     return { ...navigation, options: [...navigation.options] };
   }
 
-  private cloneBrainstorm(brainstorm: BrainstormHudModel): BrainstormHudModel {
-    return { ...brainstorm, collaborators: [...brainstorm.collaborators],
-      messages: brainstorm.messages?.map(message => ({...message})) };
+  private cloneTerminal(terminal: AgentTerminalHudModel): AgentTerminalHudModel {
+    return {
+      ...terminal,
+      lanes: [...terminal.lanes],
+      messages: terminal.messages?.map((message) => ({ ...message })),
+    };
   }
 
   private cloneProductivity(productivity: ProductivityHudModel): ProductivityHudModel {

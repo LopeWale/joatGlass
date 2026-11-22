@@ -285,6 +285,7 @@ class WhisperServeEngine(SttEngine):
         self._batch_tasks: set[asyncio.Task[Transcript | None]] = set()
         self._lifecycle_lock = asyncio.Lock()
         self._process_lock = asyncio.Lock()
+        self._infer_lock = asyncio.Lock()
 
     @property
     def available(self) -> bool:
@@ -482,8 +483,8 @@ class WhisperServeEngine(SttEngine):
             log.warning("stt buffer full, dropped %d bytes of old audio", overflow)
         return None
 
-    async def flush(self) -> Transcript | None:
-        return self._filter_echo(await self._flush_raw())
+    async def flush(self, *, bias: bool = True) -> Transcript | None:
+        return self._filter_echo(await self._flush_raw(bias=bias))
 
     async def transcribe_partial(self, pcm: bytes) -> str | None:
         """Transcribe the speech so far through the warm server, without
@@ -493,8 +494,11 @@ class WhisperServeEngine(SttEngine):
             return None
         if self._shutdown is not None and self._shutdown.is_set():
             return None
+        if self._infer_lock.locked():
+            return None
         try:
-            text = await asyncio.to_thread(self._post, wav_bytes(pcm))
+            async with self._infer_lock:
+                text = await asyncio.to_thread(self._call_post, wav_bytes(pcm), bias=False)
         except Exception as exc:
             log.info("partial transcript skipped error=%s", type(exc).__name__)
             return None
@@ -526,7 +530,8 @@ class WhisperServeEngine(SttEngine):
         if len(pcm) < MIN_UTTERANCE_BYTES:
             return None
         try:
-            text = await asyncio.to_thread(self._post, wav_bytes(pcm), bias=False)
+            async with self._infer_lock:
+                text = await asyncio.to_thread(self._call_post, wav_bytes(pcm), bias=False)
         except Exception as exc:
             log.warning("note chunk transcription failed error=%s", type(exc).__name__)
             raise SttUnavailableError("whisper serve request failed") from exc
@@ -545,7 +550,10 @@ class WhisperServeEngine(SttEngine):
             return None
         return transcript
 
-    async def _flush_raw(self) -> Transcript | None:
+    def _call_post(self, payload: bytes, *, bias: bool = True) -> str:
+        return self._post(payload) if bias else self._post(payload, bias=False)
+
+    async def _flush_raw(self, *, bias: bool = True) -> Transcript | None:
         if self._closed or (self._shutdown is not None and self._shutdown.is_set()):
             self._buffer.clear()
             return None
@@ -558,7 +566,8 @@ class WhisperServeEngine(SttEngine):
             return await self._batch_transcribe(pcm)
         payload = wav_bytes(pcm)
         try:
-            text = await asyncio.to_thread(self._post, payload)
+            async with self._infer_lock:
+                text = await asyncio.to_thread(self._call_post, payload, bias=bias)
         except Exception as exc:
             log.warning(
                 "whisper serve request failed error=%s — respawning once",
@@ -567,11 +576,12 @@ class WhisperServeEngine(SttEngine):
             if not await self._respawn():
                 return await self._batch_transcribe(pcm) if not self._external else None
             try:
-                text = await asyncio.to_thread(self._post, payload)
+                async with self._infer_lock:
+                    text = await asyncio.to_thread(self._call_post, payload, bias=bias)
             except Exception as exc2:
                 log.error("whisper serve retry failed error=%s", type(exc2).__name__)
                 return None
-        if (text and not is_prompt_echo(text, self._prompt)
+        if (bias and text and not is_prompt_echo(text, self._prompt)
                 and only_prompt_words(text, self._prompt)):
             text = await self._confirm_without_prompt(payload, text)
         return Transcript(text=text, is_final=True) if text else None

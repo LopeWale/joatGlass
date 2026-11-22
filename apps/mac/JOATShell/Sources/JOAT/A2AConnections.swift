@@ -459,11 +459,13 @@ final class A2AConnectionsModel {
         guard drafts.count < 16, !loadFailed else { return }
         let id = (1...16).map { $0 == 1 ? kind : "\(kind)-\($0)" }
             .first { candidate in !drafts.contains { $0.profileID == candidate } }!
-        let name = kind == "openclaw" ? "OpenClaw" : "Hermes"
+        let name = kind == "openclaw" ? "OpenClaw" : kind == "hermes" ? "Hermes" : "Agent"
         let label = id == kind ? name : "\(name) \(id.split(separator: "-").last!)"
-        let endpoint = kind == "openclaw"
-            ? "https://home-mac.example-tailnet.ts.net:8443/a2a/v1"
-            : "https://home-mac.example-tailnet.ts.net:9900/"
+        let endpoint = switch kind {
+        case "openclaw": "https://home-mac.example-tailnet.ts.net:8443/a2a/v1"
+        case "hermes": "https://home-mac.example-tailnet.ts.net:9900/"
+        default: "https://agent.example-tailnet.ts.net/"
+        }
         drafts.append(Draft(profileID: id, label: label, endpoint: endpoint))
     }
     func remove(_ id: UUID) { drafts.removeAll { $0.id == id } }
@@ -514,7 +516,7 @@ struct A2AConnectionSettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Choose OpenClaw or Hermes in Agent Terminal to send instructions and read replies. Credentials stay in this Mac’s Keychain.")
+            Text("Agents you can choose in Agent Terminal to send instructions and read replies: OpenClaw, Hermes or any other A2A agent. Credentials stay in this Mac’s Keychain.")
                 .font(.caption).foregroundStyle(.secondary)
             if model.drafts.isEmpty { Text("Add an agent connection to get started.").foregroundStyle(.secondary) }
             ForEach($model.drafts) { $draft in
@@ -526,7 +528,7 @@ struct A2AConnectionSettings: View {
                         Button("Remove connection", systemImage: "minus.circle") { model.remove(draft.id) }
                             .labelStyle(.iconOnly).buttonStyle(.borderless)
                     }
-                    Picker("Provider", selection: $draft.provider) {
+                    Picker("Agent type", selection: $draft.provider) {
                         ForEach(A2AProvider.allCases, id: \.self) { provider in
                             Text(provider.label).tag(provider)
                         }
@@ -544,6 +546,7 @@ struct A2AConnectionSettings: View {
                 Menu("Add Agent") {
                     Button("OpenClaw") { model.add("openclaw") }
                     Button("Hermes") { model.add("hermes") }
+                    Button("Other A2A agent") { model.add("agent") }
                 }.disabled(model.drafts.count >= 16 || model.loadFailed)
                 Spacer()
                 Button("Reload Saved") { model.reload() }

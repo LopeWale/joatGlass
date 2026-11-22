@@ -198,6 +198,8 @@ def action(view: NavigationView, name: str, choice_id: str | None = None) -> Nav
 
 class TestNavigationSession:
     def test_requires_an_explicit_navigation_invocation(self) -> None:
+        from joat.services.navigation import navigation_parsed_query
+
         assert navigation_query("navigate to Cajun Corner") == "Cajun Corner"
         assert navigation_query("Directions to 2301 N Lincoln Ave?") == (
             "2301 N Lincoln Ave"
@@ -213,6 +215,14 @@ class TestNavigationSession:
         assert navigation_query("JOAT, please help me get to OnCue") == "OnCue"
         assert navigation_query("How do I get to the airport?") == "the airport"
         assert navigation_query("What's the best way to the library?") == "the library"
+        assert navigation_parsed_query("walk to Starbucks") == ("Starbucks", "walking")
+        assert navigation_parsed_query("bike to the park") == ("the park", "cycling")
+        assert navigation_parsed_query("cycle to the park") == ("the park", "cycling")
+        assert navigation_parsed_query("drive to Cajun Corner") == ("Cajun Corner", "driving")
+        assert navigation_parsed_query("drive home") == ("home", "driving")
+        assert navigation_parsed_query("walk home") == ("home", "walking")
+        assert navigation_parsed_query("bike home") == ("home", "cycling")
+        assert navigation_parsed_query("navigate to Navy Pier") == ("Navy Pier", None)
         assert navigation_query("Cajun Corner") is None
         assert navigation_query("I talked about the way to the library") is None
 
@@ -726,7 +736,9 @@ class TestNavigationSession:
         mode = await wait_for(transport, NavigationView, count=2)
         assert isinstance(mode, NavigationView)
         assert mode.navigation.view == "mode"
-        assert mode.navigation.hint == "tap choose · swipe select · say walk/cycle"
+        assert mode.navigation.options == ["Walk", "Cycle", "Drive"]
+        assert mode.navigation.choice_ids == ["walking", "cycling", "driving"]
+        assert mode.navigation.hint == "tap choose · swipe select · say walk/cycle/drive"
         session.accept_action(action(mode, "select_mode", "walking"))
 
         origin_request = await wait_for(transport, NavigationOriginRequest)
@@ -1208,6 +1220,118 @@ class TestSavedPlaces:
             assert isinstance(destination, NavigationView)
             assert destination.navigation.primary == "Cajun Corner"
             assert provider.searches == ["Cajun Corner"]
+        finally:
+            session.cancel()
+            await task
+
+    @pytest.mark.asyncio
+    async def test_mode_spoken_upfront_skips_mode_view_and_fetches_driving_zoom_15_tiles(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fetched_zooms: list[int] = []
+        fetched_centres: list[tuple[float, float]] = []
+
+        async def fake_tile(
+            token: str, latitude: float, longitude: float, *, zoom: int = 16, **_: object,
+        ) -> NavigationMapTile:
+            assert token == "map-token"
+            fetched_zooms.append(zoom)
+            fetched_centres.append((latitude, longitude))
+            return NavigationMapTile(
+                latitude=latitude, longitude=longitude, zoom=zoom, width=284, height=220,
+                png=b"\x89PNG fake",
+            )
+
+        monkeypatch.setattr(navigation_service, "render_map_tile", fake_tile)
+
+        class DrivingProvider(FakeProvider):
+            async def route(
+                self, origin: NavigationPoint, destination: NavigationCandidate, mode: NavigationMode,
+            ) -> ProviderRoute:
+                self.routes.append((origin, destination, mode))
+                base = plan()
+                return ProviderRoute(
+                    route_id="route-drive-1",
+                    eta_minutes=4,
+                    plan=NavigationRoutePlan(
+                        mode=mode,
+                        geometry=base.geometry,
+                        steps=base.steps,
+                        policy=base.policy,
+                    ),
+                )
+
+        candidate = NavigationCandidate(
+            choice_id="place-1", label="Cajun Corner",
+            address="2301 N Lincoln Ave, Chicago",
+            point=NavigationPoint(latitude=41.92, longitude=-87.65),
+        )
+        provider = DrivingProvider([candidate])
+        transport = SinkTransport()
+        session = NavigationSession(
+            "drive to Cajun Corner", provider, transport,
+            session_id="nav-drive-test", map_token="map-token",
+        )
+        task = asyncio.create_task(session.run())
+        try:
+            destination = await wait_for(transport, NavigationView)
+            assert isinstance(destination, NavigationView)
+            assert destination.navigation.view == "destination"
+            assert provider.searches == ["Cajun Corner"]
+
+            # Confirming destination skips _show_mode and goes directly to locating / origin request!
+            session.accept_action(action(destination, "confirm_destination"))
+            origin_request = await wait_for(transport, NavigationOriginRequest)
+            assert isinstance(origin_request, NavigationOriginRequest)
+            assert not any(
+                isinstance(m, NavigationView) and m.navigation.view == "mode"
+                for m in transport.sent
+            )
+
+            session.accept_origin(NavigationOrigin(
+                session_id=origin_request.session_id,
+                request_id=origin_request.request_id,
+                generation=origin_request.generation,
+                latitude=41.9, longitude=-87.65, accuracy=6,
+            ))
+            preview = await wait_for(transport, NavigationView, count=4)
+            assert isinstance(preview, NavigationView)
+            assert preview.navigation.view == "preview"
+            assert preview.navigation.mode == "driving"
+            assert preview.navigation.secondary == "Driving · 4 min"
+
+            for _ in range(40):
+                await asyncio.sleep(0)
+            expected_centres = route_map_centres(plan().geometry, stride_m=360.0)
+            panels = [m for m in transport.sent if isinstance(m, NavigationMapPanel)]
+            assert len(panels) == len(expected_centres)
+            assert all(z == 15 for z in fetched_zooms)
+            assert all(p.zoom == 15 for p in panels)
+        finally:
+            session.cancel()
+            await task
+
+    @pytest.mark.asyncio
+    async def test_mode_view_accepts_spoken_drive_command(self) -> None:
+        candidate = NavigationCandidate(
+            choice_id="place-1", label="Cajun Corner",
+            address="2301 N Lincoln Ave, Chicago",
+            point=NavigationPoint(latitude=41.92, longitude=-87.65),
+        )
+        provider = FakeProvider([candidate])
+        transport = SinkTransport()
+        session = NavigationSession("Cajun Corner", provider, transport, session_id="nav-voice-drive")
+        task = asyncio.create_task(session.run())
+        try:
+            destination = await wait_for(transport, NavigationView)
+            assert isinstance(destination, NavigationView)
+            session.accept_action(action(destination, "confirm_destination"))
+            mode = await wait_for(transport, NavigationView, count=2)
+            assert isinstance(mode, NavigationView)
+            assert mode.navigation.view == "mode"
+            assert session.consume_transcript("drive") is True
+            origin_request = await wait_for(transport, NavigationOriginRequest)
+            assert isinstance(origin_request, NavigationOriginRequest)
         finally:
             session.cancel()
             await task

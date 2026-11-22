@@ -123,6 +123,7 @@ class NotificationMux:
 
     async def _ingest(self, lane: NotificationLane) -> None:
         cursor = None
+        startup_failures = 0
         while self._running and cursor is None:
             try:
                 baseline = await asyncio.to_thread(lane.source.baseline)
@@ -140,11 +141,16 @@ class NotificationMux:
                     "failed",
                     now_us=time.time_ns() // 1_000,
                 )
-                log.warning(
-                    "notification source=%s startup unavailable error=%s",
-                    lane.source_id,
-                    type(exc).__name__,
-                )
+                # Once per spell: the banner watcher's file does not exist
+                # until the app's watcher first writes it, and this retried
+                # every 5 s with a warning each time (2026-11-18 log).
+                startup_failures += 1
+                if startup_failures == 1:
+                    log.warning(
+                        "notification source=%s startup unavailable error=%s (retrying quietly)",
+                        lane.source_id,
+                        type(exc).__name__,
+                    )
                 self._publish_status()
                 await asyncio.sleep(max(5.0, self._interval))
         if cursor is None:

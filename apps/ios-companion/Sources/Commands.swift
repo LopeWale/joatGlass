@@ -6,6 +6,7 @@ import Foundation
 struct CommandReply {
     let text: String
     let activated: Bool
+    var suppressesHudReceipt: Bool = false
 }
 
 /// One link in the command chain the orchestrator runs ahead of any model.

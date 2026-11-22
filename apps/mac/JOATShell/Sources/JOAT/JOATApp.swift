@@ -123,10 +123,10 @@ struct SettingsView: View {
                 Button("Restart Engine") { engine.restart() }
                     .disabled(engine.state != .running || engine.isTransitioning)
             }
-            Section("Agent Terminal · OpenClaw and Hermes") {
+            Section("Agents") {
                 A2AConnectionSettings(engine: engine)
             }
-            Section("OpenClaw session Gateway") {
+            Section("Agent Gateway (advanced)") {
                 HermesConnectionSettings(engine: engine)
             }
             Section("Advanced") {

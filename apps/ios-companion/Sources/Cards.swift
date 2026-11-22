@@ -37,7 +37,9 @@ final class Cards: BrainFeature {
         }
     }
 
-    static let keep = 10
+    /// Enough that a backlog of texts shown on reconnect keeps every one in
+    /// the notifications list (the tray still shows the newest few).
+    static let keep = 50
     private let link: PluginLink
     private var entries: [Card] = []
     private var acknowledged: Set<String> = []

@@ -11,8 +11,7 @@ import {
   QUICKNOTES_CUES_MENU_ID,
   QUICKNOTES_PREP_MENU_ID,
   QUICKNOTES_UNDO_MENU_ID,
-  type BrainstormAction,
-  type BrainstormHudScreen,
+  type TerminalAction,
 } from './types';
 
 type G2Gesture = Extract<G2TraceEvent, { type: 'gesture' }>['gesture'];
@@ -40,20 +39,19 @@ export interface NavigationInputOwner {
   handleCancel(): boolean;
 }
 
-/** The live Brainstorm surface gets first claim on its explicit gestures. */
-export interface BrainstormInputOwner {
+/** The live Agent Terminal surface gets first claim on its explicit gestures. */
+export interface TerminalInputOwner {
   isActive(): boolean;
   handleClick(): boolean;
-  /** Double press cancels an active Brainstorm round. */
-  handleCancel(): boolean;
-  /** A swipe during topic capture backs out of the armed capture; every
-   * other state lets the swipe fall through to transcript scrolling. */
+  /** Optional double-press cancellation hook (false on Agent Terminal, which uses Back). */
+  handleCancel?(): boolean;
+  /** A swipe denies a pending tool approval; every other state lets the swipe
+   * fall through to transcript scrolling. */
   handleSwipe(): boolean;
-  /** Long-press on a running work session cancels its job; false elsewhere,
-   * where long-press stays the microphone. */
+  /** Long-press on a running work session cancels its job; false elsewhere. */
   handleLongPress(): boolean;
   /** Fixed receipt of a successfully handed-off action; never prompt content. */
-  consumeAcceptedAction(): { action: BrainstormAction; surface: BrainstormHudScreen } | undefined;
+  consumeAcceptedAction(): { action: TerminalAction; surface: 'agent_terminal' } | undefined;
 }
 
 /** A transient JOAT reply sits above the active feature, without destroying
@@ -87,6 +85,8 @@ export interface PromptInputOwner {
   cancel(reason?: string): void;
   /** Tap on the listening box: the acknowledged question's ID to close now. */
   commit?(): string | undefined;
+  /** Mark the committed question as transcribing while final STT runs. */
+  notifyCommitted?(promptId: string): void;
 }
 
 /**
@@ -146,7 +146,7 @@ export class EventRouter {
     private readonly lifecycle?: LifecycleHandler,
     private readonly diagnostics?: G2DiagnosticTrace,
     private readonly navigation?: NavigationInputOwner,
-    private readonly brainstorm?: BrainstormInputOwner,
+    private readonly terminal?: TerminalInputOwner,
     private readonly assistantOverlay?: AssistantOverlayInputOwner,
     private readonly transcriptScroll?: (direction: 'up' | 'down') => boolean,
     private readonly promptedInput?: PromptInputOwner,
@@ -191,7 +191,7 @@ export class EventRouter {
       const toggleMic = this.pendingMicLongPress && !this.contextualMenuOverlayOpen;
       this.pendingMicLongPress = false;
       if (toggleMic && !this.promptedInput?.isActive()
-        && this.brainstorm?.isActive() && this.brainstorm.handleLongPress()) {
+        && this.terminal?.isActive() && this.terminal.handleLongPress()) {
         // The second carve-out (2026-10-06): on a running work session the
         // gesture cancels the job, the wearer's choice over "terminal cancel".
         console.info(`[EventRouter] long-press via ${via} — cancelling the terminal job`);
@@ -446,20 +446,15 @@ export class EventRouter {
           return;
         }
       }
-      // The Brainstorm/terminal page HAS scrollback now — the wearer asked
-      // for it in as many words, and a swipe that CANCELLED the session
-      // while they tried to re-read a reply was the harshest possible
-      // answer to "can I scroll?". Swipes page the transcript; cancel is
-      // the deliberate double-press.
-      if (this.brainstorm?.isActive()) {
+      // The Agent Terminal page has scrollback; swipes deny a pending tool
+      // approval or otherwise page the transcript.
+      if (this.terminal?.isActive()) {
         const swipe = event.textEvent.eventType ?? OsEventTypeList.CLICK_EVENT;
         if (
           swipe === OsEventTypeList.SCROLL_TOP_EVENT
           || swipe === OsEventTypeList.SCROLL_BOTTOM_EVENT
         ) {
-          // Topic capture first: it has nothing to scroll, and a swipe
-          // there is the wearer backing out of the armed capture.
-          if (this.brainstorm.handleSwipe()) return;
+          if (this.terminal.handleSwipe()) return;
           this.transcriptScroll?.(
             swipe === OsEventTypeList.SCROLL_TOP_EVENT ? 'up' : 'down',
           );
@@ -482,7 +477,7 @@ export class EventRouter {
       // gesture there (it used to relay to a Mac that dropped it).
       if (
         !this.navigation?.isActive()
-        && !this.brainstorm?.isActive()
+        && !this.terminal?.isActive()
         && this.menu.handleOverviewSwipe(eventType)
       ) return;
       // Scrolls and otherwise unowned text clicks relay to the Mac.
@@ -534,7 +529,7 @@ export class EventRouter {
     if (this.handleAssistantConversation(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
     if (this.dismissAssistantOverlayFor(OsEventTypeList.DOUBLE_CLICK_EVENT)) return;
     if (this.navigation?.isActive() && this.navigation.handleCancel()) return;
-    if (this.brainstorm?.isActive() && this.brainstorm.handleCancel()) return;
+    if (this.terminal?.isActive() && this.terminal.handleCancel?.()) return;
     this.backPending = true;
     void this.menu.toggle().finally(() => { this.backPending = false; });
   }
@@ -577,6 +572,7 @@ export class EventRouter {
       const promptId = this.promptedInput.commit?.();
       if (promptId !== undefined && this.link.linkState === 'connected') {
         this.link.send({ kind: 'input', event: { containerName: 'prompt-commit', selectedName: promptId } });
+        this.promptedInput.notifyCommitted?.(promptId);
       }
       return true;
     }
@@ -609,23 +605,19 @@ export class EventRouter {
     this.diagnostics?.record({ type: 'gesture', gesture, delivery });
   }
 
-  private recordAcceptedBrainstormAction(
+  private recordAcceptedTerminalAction(
     sourceName: GestureSource | undefined,
     gesture: 'tap' | 'double_press',
   ): void {
-    const accepted = this.brainstorm?.consumeAcceptedAction();
+    const accepted = this.terminal?.consumeAcceptedAction();
     if (!accepted || sourceName === undefined) return;
-    // The acceptance trace keeps a deliberately BOUNDED vocabulary of
-    // actions (see G2DiagnosticTrace). An approval decision is not part of
-    // it: the acceptance run never exercises one, and a receipt is not the
-    // place to record what the wearer authorised a work session to do.
     if (
       accepted.action === 'approve_terminal'
       || accepted.action === 'deny_terminal'
       || accepted.action === 'cancel_terminal'
     ) return;
     this.diagnostics?.record({
-      type: 'brainstorm_action',
+      type: 'terminal_action',
       action: accepted.action,
       surface: accepted.surface,
       source: sourceName,
@@ -722,24 +714,22 @@ export class EventRouter {
       return;
     }
 
-    // "tap" on the Brainstorm and Terminal footers means a single press on
-    // EITHER temple or the ring: Even's input reference gives both temples
-    // the same gesture set, and double press is JOAT's Back.
-    // The gate used to admit right/ring only, so a left tap silently did
-    // nothing while the footer promised it would (the audit's O3).
+    // "tap" on the Terminal footer means a single press on EITHER temple or
+    // the ring: Even's input reference gives both temples the same gesture
+    // set, and double press is JOAT's Back.
     if (
       type === OsEventTypeList.CLICK_EVENT
-      && this.brainstorm?.isActive()
+      && this.terminal?.isActive()
       && this.isLocalTapSource(source)
-      && this.brainstorm.handleClick()
+      && this.terminal.handleClick()
     ) {
-      this.recordAcceptedBrainstormAction(GesturePolicy.sourceOf(source), 'tap');
+      this.recordAcceptedTerminalAction(GesturePolicy.sourceOf(source), 'tap');
       return;
     }
 
-    // Checking Messages mid-Brainstorm no longer needs a plugin gesture: the
+    // Checking Messages mid-session no longer needs a plugin gesture: the
     // firmware contextual menu (tap, then long-press) is registered on every
-    // page, including this one, and cancel stays on double-click.
+    // page, including this one.
 
     // On the resting overview a click drills into the tab the rail has
     // selected: Notifications opens the unread cards, the Planner opens
@@ -753,7 +743,7 @@ export class EventRouter {
       && this.isLocalTapSource(source)
       && !this.menu.isOpen()
       && !this.navigation?.isActive()
-      && !this.brainstorm?.isActive()
+      && !this.terminal?.isActive()
     ) {
       void this.menu.openActiveTab();
       return;

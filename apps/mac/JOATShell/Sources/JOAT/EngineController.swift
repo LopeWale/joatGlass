@@ -140,6 +140,7 @@ final class EngineController: ObservableObject {
     @Published var pairingNotice: String?
     @Published var calendarAccess = "not determined"
     @Published var remindersAccess = "not determined"
+    @Published var contactsAccess = "not determined"
     @Published var g2DiagnosticsEnabled: Bool
     @Published var g2DiagnosticNotice: String?
     @Published var privateTailnetGateway: Bool
@@ -207,6 +208,19 @@ final class EngineController: ObservableObject {
             let snapshot = await NativeBridgeServer.shared.authorizationSnapshot()
             calendarAccess = display(snapshot.calendar)
             remindersAccess = display(snapshot.reminders)
+            contactsAccess = display(await NativeBridgeServer.shared.contactsStatus().contacts)
+        }
+    }
+
+    func requestContactsAccess() {
+        guard !isPreview else { return }
+        Task { @MainActor in
+            do {
+                contactsAccess = display(try await NativeBridgeServer.shared.requestContactsAccess().contacts)
+            } catch {
+                appendLog("[shell] contacts permission request failed: \(error.localizedDescription)")
+                refreshPersonalDataAccess()
+            }
         }
     }
 
@@ -335,7 +349,12 @@ final class EngineController: ObservableObject {
             "--stt-port", String(sttPort),
         ]
         if g2DiagnosticsEnabled { arguments.append("--g2-diagnostics") }
-        if privateTailnetGateway { arguments.append("--private-tailnet-gateway") }
+        if privateTailnetGateway {
+            arguments.append("--private-tailnet-gateway")
+            // A home Mac that is on the tailnet also serves its Messages to the
+            // wearer's iPhone (loopback only; Tailscale Serve carries it).
+            arguments.append("--messages-endpoint")
+        }
         return arguments
     }
 

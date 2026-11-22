@@ -18,7 +18,7 @@ from joat.agents.message_tools import message_tools
 from joat.agents.tools import ToolBelt
 from joat.channels.cards import CardLog
 from joat.core.interfaces import GlassesTransport, ReplyEngine
-from joat.core.protocol import AgentTerminalHudView, BrainstormHudView, HudList, HudPanel, HudRebuild
+from joat.core.protocol import AgentTerminalHudView, HudList, HudPanel
 from joat.persistence.notes import NoteStore
 from joat.persistence.store import DurableStore
 from joat.services.agent_endpoint import AgentEndpoint
@@ -29,9 +29,6 @@ from joat.services.message_reply import MessageReplyController
 from joat.services.note_commands import NoteCommandController
 from joat.services.panels import PanelPublisher
 from joat.services.pomodoro import PomodoroService
-from joat.services.roundtable import Participant, RoundTable
-from joat.services.session import DebateSession, SessionManager
-from joat.services.sinks import HudSink
 from joat.services.status import StatusPublisher
 from joat.services.terminal_opening import TerminalOpeningController
 
@@ -273,104 +270,3 @@ async def test_mcp_message_clarification_returns_before_review_and_submits_once(
         confirmation_release.set()
         await endpoint.stop()
         await replies.aclose()
-
-
-async def test_mcp_brainstorm_topic_reaches_both_collaborators_and_live_hud(tmp_path: Path) -> None:
-    """Real HTTP, tool registry, session arbitration, debate and HUD producer.
-
-    Only collaborator responses and glasses transport are controlled. This
-    proves the topic path, not real provider availability or lit pixels.
-    """
-    output = RecordingTransport()
-    transport = cast(GlassesTransport, output)
-    hud = HudWriter(transport)
-    timer = PomodoroService(clock=lambda: 1000.0)
-    panels = PanelPublisher(transport, {"pomodoro": timer})
-    topics: list[str] = []
-    prompts: dict[str, list[str]] = {"codex": [], "claude": []}
-    release = asyncio.Event()
-    settled = asyncio.Event()
-    rooms: list[DebateSession] = []
-
-    def collaborator(name: str, answer: str):
-        async def stream(prompt: str) -> AsyncIterator[str]:
-            prompts[name].append(prompt)
-            await release.wait()
-            yield answer
-        return stream
-
-    def factory(topic: str) -> DebateSession:
-        topics.append(topic)
-        room = DebateSession(topic, RoundTable([
-            Participant("codex", "collaborator", collaborator("codex", "Sort by use.\nKeep daily tools close.")),
-            Participant("claude", "collaborator", collaborator("claude", "Leave a clear zone.\nKeep one work surface free.")),
-        ]), HudSink(hud))
-        rooms.append(room)
-        return room
-
-    sessions = SessionManager(
-        hud, factory, brainstorm_available=lambda: True,
-        on_state=lambda state: settled.set() if state == "cancelled" else None,
-    )
-    belt = ToolBelt()
-    endpoint = AgentEndpoint(UnusedEngine(), "fixture-token", port=0, tools=belt)
-    with DurableStore(tmp_path / "notes.sqlite3") as durable:
-        notes = NoteStore(durable)
-        capabilities = CapabilityRouter(
-            hud=hud, transport=transport,
-            status=StatusPublisher(tmp_path / "status.json"), messages=None,
-            cards=CardLog(tmp_path / "cards.jsonl"), notes=notes, panels=panels,
-        )
-        for tool in feature_tools(
-            capabilities=capabilities, notes=NoteCommandController(notes),
-            pomodoro=timer, panels=panels, brainstorm=sessions,
-        ):
-            belt.register(tool)
-        await endpoint.start()
-        try:
-            listed = await rpc(endpoint.port, "tools/list")
-            assert "start_brainstorm" in {tool["name"] for tool in listed["tools"]}
-            topic = "  Organize a desk: café notes, tools, and  clear space.\nTwo options.  "
-            call = {"name": "start_brainstorm", "arguments": {
-                "topic": topic, "operation_id": "topic-once",
-            }}
-            first = await rpc(endpoint.port, "tools/call", call)
-            assert first["isError"] is False
-            assert topics == [topic] and sessions.active
-            assert (await rpc(endpoint.port, "tools/call", call))["isError"] is False
-            assert topics == [topic]
-            busy = await rpc(endpoint.port, "tools/call", {
-                "name": "start_brainstorm", "arguments": {
-                    "topic": "A different topic", "operation_id": "do-not-replace",
-                },
-            })
-            assert busy["isError"] is True and topics == [topic]
-            release.set()
-            # Both collaborators answer, then the room WAITS for the wearer:
-            # it neither carries on by itself nor ends.
-            async def until_waiting() -> None:
-                while not (rooms and rooms[0].awaiting_wearer):
-                    await asyncio.sleep(0)
-
-            await asyncio.wait_for(until_waiting(), timeout=1)
-            assert sessions.active
-            assert all(len(value) == 1 and topic in value[0] for value in prompts.values())
-            assert sessions.handle_transcript("stop", addressed=None) is True
-            await asyncio.wait_for(settled.wait(), timeout=1)
-            frames = [message for message in output.sent if isinstance(message, BrainstormHudView)]
-            entries = [message for message in output.sent if isinstance(message, HudRebuild)]
-            assert len(entries) == 1 and entries[0].reason == "brainstorm"
-            assert output.sent.index(entries[0]) < output.sent.index(frames[0]), (
-                "the initial entry must release menu focus before streaming frames"
-            )
-            assert frames[0].topic == topic and frames[0].state == "running"
-            assert frames[0].collaborators == ["codex", "claude"]
-            assert any("Sort by use" in frame.activity for frame in frames)
-            assert any("Leave a clear zone" in frame.activity for frame in frames)
-            assert frames[-1].state == "cancelled" and not sessions.active
-            assert (await rpc(endpoint.port, "tools/call", call))["isError"] is False
-            assert topics == [topic], "a late retry cannot launch the collaborators again"
-        finally:
-            release.set()
-            await endpoint.stop()
-            await sessions.close(timeout_s=.1)

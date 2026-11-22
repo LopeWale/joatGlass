@@ -126,14 +126,23 @@ describe('HudPresenter reply card words so far', () => {
     expect(onGlass?.textObject?.find((text) => text.containerName === 'wearer-turns')?.content).toContain('On my way.');
   });
 
-  it('ignores words for another prompt or a non-Messages question', async () => {
+  it('supports capability prompts with live speech-in-text and search hint, while ignoring brainstorm/unbound partials', async () => {
     const r = rig();
     await r.hud.showPromptQuestion('p1', QUESTION, () => true, 'messages');
     expect(await r.hud.showPromptPartial('p2', 'Running')).toBe(false);
+    expect(last(r.rebuilds)?.textObject?.find((t) => t.containerName === 'generation')?.content?.trim())
+      .toBe('tap: review · 2x tap: cancel');
 
-    const other = rig();
-    await other.hud.showPromptQuestion('q1', 'What should the note say?', () => true, 'capability');
-    expect(await other.hud.showPromptPartial('q1', 'Buy milk')).toBe(false);
+    const cap = rig();
+    expect(await cap.hud.showPromptQuestion('q1', 'Where to?', () => true, 'capability')).toBe(true);
+    expect(last(cap.rebuilds)?.textObject?.find((t) => t.containerName === 'generation')?.content?.trim())
+      .toBe('tap: search · 2x tap: cancel');
+    expect(await cap.hud.showPromptPartial('q1', 'Navy Pier')).toBe(true);
+    expect(last(cap.upgrades)?.content).toContain('Navy Pier');
+
+    const plain = rig();
+    await plain.hud.showPromptQuestion('b1', 'What topic?', () => true, 'brainstorm');
+    expect(await plain.hud.showPromptPartial('b1', 'Buy milk')).toBe(false);
   });
 
   it('paints only the newest words when several arrive during one paint', async () => {

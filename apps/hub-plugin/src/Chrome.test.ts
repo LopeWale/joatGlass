@@ -165,7 +165,7 @@ describe('Chrome', () => {
     const chrome = new Chrome(hud);
     chrome.setBattery(100, false);
     chrome.setLink('connected');
-    chrome.setMacState('brainstorm connection test preparing reconnect');
+    chrome.setMacState('background connection test preparing reconnect');
     chrome.start();
     await vi.advanceTimersByTimeAsync(0);
     chrome.stop();
@@ -173,15 +173,15 @@ describe('Chrome', () => {
     // The composed line keeps the clock and the battery and shortens only
     // the state word, within the 46-character status wire budget.
     const content = lastStatus();
-    expect(content).toContain('JOAT · BRAINSTORM CONNECTION TEST PREPA…');
+    expect(content).toContain('JOAT · BACKGROUND CONNECTION TEST PREPA…');
     expect(content).toMatch(/ · ○ · █$/);
     // The frame carries the facts as data; the spine draws the shortened
     // word from them, and the battery is an icon beside it, not a word.
     expect(frames[frames.length - 1]!.statusModel).toMatchObject({
       link: 'connected', mic: false, battery: 100, charging: false,
-      macState: 'brainstorm connection test preparing reconnect',
+      macState: 'background connection test preparing reconnect',
     });
-    expect(lastSpine()).toBe('JOAT · BRAINSTORM CONNECTION TEST PREPA…');
+    expect(lastSpine()).toBe('JOAT · BACKGROUND CONNECTION TEST PREPA…');
     expect(lastSpine()).not.toContain('BAT');
   });
 
@@ -195,11 +195,11 @@ describe('Chrome', () => {
     const chrome = new Chrome(hud);
     chrome.setBattery(100, false);
     chrome.setLink('connected');
-    chrome.setMacState('brainstorm connection test preparing reconnect');
+    chrome.setMacState('background connection test preparing reconnect');
     chrome.start();
     await vi.advanceTimersByTimeAsync(0);
     // Shown fitted to the firmware line: the word is cut, never the glyphs.
-    expect(wrote(ContainerId.StatusBar).pop()!.content).toMatch(/^\d{1,2}:\d{2} · JOAT · BRAINSTORM CONNECTION TEST PREPA… · ○ · █$/);
+    expect(wrote(ContainerId.StatusBar).pop()!.content).toMatch(/^\d{1,2}:\d{2} · JOAT · BACKGROUND CONNECTION TEST PREPA… · ○ · █$/);
     await vi.advanceTimersByTimeAsync(12_500);
     chrome.stop();
     const content = wrote(ContainerId.StatusBar).pop()!.content!;

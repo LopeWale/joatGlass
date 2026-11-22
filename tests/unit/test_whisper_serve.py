@@ -813,3 +813,31 @@ class TestShortEchoIsHeardAgainWithoutThePrompt:
         assert not only_prompt_words("Hey JOAT", PROMPT)
         assert not only_prompt_words("JOAT, what time is it?", PROMPT)
         assert not only_prompt_words("JOAT.", None)
+
+
+class TestSingleFlightAndUnbiasedPromptFlush:
+    async def test_partial_skips_immediately_while_inference_is_busy(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        engine = WhisperServeEngine(base_url="http://127.0.0.1:1", prompt=PROMPT)
+        engine._ready = True
+        calls: list[bool] = []
+
+        def slow_post(_payload: bytes, *, bias: bool = True) -> str:
+            calls.append(bias)
+            started.set()
+            release.wait(timeout=2.0)
+            return "check git status"
+
+        monkeypatch.setattr(engine, "_post", slow_post)
+        await engine.feed(SPEECH)
+        flush_task = asyncio.create_task(engine.flush(bias=False))
+        await asyncio.to_thread(started.wait, 1.0)
+        # While flush holds _infer_lock, partial never piles up a second request.
+        assert await engine.transcribe_partial(SPEECH) is None
+        release.set()
+        heard = await flush_task
+        assert heard is not None and heard.text == "check git status"
+        assert calls == [False]

@@ -617,24 +617,24 @@ export class HudPageBuilder {
     });
   }
 
-  /** One fixed firmware-text document for a selected terminal provider.
-   * The complete dynamic body is replaced in a single SDK transaction, so a
-   * provider revision or page gesture cannot expose mixed quadrants or mixed
-   * old/new terminal regions. */
+  /** 5-container framed dual-brightness Agent Terminal card layout.
+   * Mounts once per session visit (`RebuildPageContainer`); all streaming,
+   * live speech, scrolling, timer ticks, and approval boxes update via
+   * selective `TextContainerUpgrade` writes on `Head`, `Dim`, `Bright`, and `Foot`. */
   nativeTerminalLayout(page: NativeTerminalPage): RebuildPageContainer {
     const geometry = NATIVE_TERMINAL_GEOMETRY;
     return new RebuildPageContainer({
-      containerTotalNum: 2,
+      containerTotalNum: 5,
       ...this.menuConfig(),
       textObject: [
         new TextContainerProperty({
           containerID: NativeTerminalContainer.Head.id,
           containerName: NativeTerminalContainer.Head.name,
-          xPosition: 0,
+          xPosition: geometry.headX,
           yPosition: geometry.headY,
-          width: geometry.width,
+          width: geometry.headWidth,
           height: geometry.headHeight,
-          paddingLength: geometry.padding,
+          paddingLength: geometry.headPadding,
           borderWidth: 0,
           isEventCapture: 0,
           zOrderIndex: 1,
@@ -642,18 +642,62 @@ export class HudPageBuilder {
           content: fitUtf8(page.headText || ' ', TEXT_CONTAINER_MAX_BYTES),
         }),
         new TextContainerProperty({
-          containerID: NativeTerminalContainer.Body.id,
-          containerName: NativeTerminalContainer.Body.name,
-          xPosition: 0,
-          yPosition: geometry.bodyY,
-          width: geometry.width,
-          height: geometry.bodyHeight,
-          paddingLength: geometry.padding,
-          borderWidth: 0,
+          containerID: NativeTerminalContainer.Card.id,
+          containerName: NativeTerminalContainer.Card.name,
+          xPosition: geometry.cardX,
+          yPosition: geometry.cardY,
+          width: geometry.cardWidth,
+          height: geometry.cardHeight,
+          paddingLength: 0,
+          borderWidth: geometry.cardBorderWidth,
+          borderColor: geometry.cardBorderColor,
+          borderRadius: geometry.cardBorderRadius,
           isEventCapture: 1,
           zOrderIndex: 2,
+          textColor: 0,
+          content: ' ',
+        }),
+        new TextContainerProperty({
+          containerID: NativeTerminalContainer.Dim.id,
+          containerName: NativeTerminalContainer.Dim.name,
+          xPosition: geometry.bodyX,
+          yPosition: geometry.bodyY,
+          width: geometry.bodyWidth,
+          height: geometry.bodyHeight,
+          paddingLength: 0,
+          borderWidth: 0,
+          isEventCapture: 0,
+          zOrderIndex: 3,
+          textColor: 2,
+          content: fitUtf8(page.dimText || ' ', TEXT_CONTAINER_MAX_BYTES),
+        }),
+        new TextContainerProperty({
+          containerID: NativeTerminalContainer.Bright.id,
+          containerName: NativeTerminalContainer.Bright.name,
+          xPosition: geometry.bodyX,
+          yPosition: geometry.bodyY,
+          width: geometry.bodyWidth,
+          height: geometry.bodyHeight,
+          paddingLength: 0,
+          borderWidth: 0,
+          isEventCapture: 0,
+          zOrderIndex: 4,
           textColor: 4,
-          content: fitUtf8(page.bodyText || ' ', TEXT_CONTAINER_MAX_BYTES),
+          content: fitUtf8(page.brightText || ' ', TEXT_CONTAINER_MAX_BYTES),
+        }),
+        new TextContainerProperty({
+          containerID: NativeTerminalContainer.Foot.id,
+          containerName: NativeTerminalContainer.Foot.name,
+          xPosition: geometry.footX,
+          yPosition: geometry.footY,
+          width: geometry.footWidth,
+          height: geometry.footHeight,
+          paddingLength: 0,
+          borderWidth: 0,
+          isEventCapture: 0,
+          zOrderIndex: 5,
+          textColor: 2,
+          content: fitUtf8(page.footText || ' ', TEXT_CONTAINER_MAX_BYTES),
         }),
       ],
     });

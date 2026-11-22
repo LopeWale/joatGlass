@@ -24,6 +24,8 @@ dist/
 
 # Cross-model collab workspace (specs, reports, transient codex output)
 .collab/
+docs/superpowers/
+/joatGlass/
 
 # IMU calibration traces (personal motion data)
 traces/

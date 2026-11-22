@@ -163,8 +163,10 @@ if [ "$WANT_INSTALL" = 1 ]; then
   trap - EXIT
 
   say "installed atomically: $INSTALL_TARGET"
+  # The old app was only kept to restore a failed swap; once the new one is
+  # in place it goes, so installs do not pile JOAT-backup.* up in /Applications.
   if [ -n "$INSTALL_BACKUP_DIR" ]; then
-    say "previous app retained: $INSTALL_BACKUP_DIR/JOAT.app"
+    rm -rf "$INSTALL_BACKUP_DIR"
   fi
 else
   say "built: $APP   (--install to place it in /Applications)"

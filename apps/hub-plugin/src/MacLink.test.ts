@@ -552,7 +552,7 @@ describe('MacLink downlink ordering', () => {
     sockets[0]!.open();
     sockets[0]!.receive({ kind: 'auth.accepted' });
 
-    sockets[0]!.receive({ kind: 'hud.rebuild', reason: 'brainstorm' });
+    sockets[0]!.receive({ kind: 'hud.rebuild', reason: 'terminal' });
     sockets[0]!.receive({ kind: 'hud.text', containerId: 4, text: 'first turn' });
     await Promise.resolve();
     expect(order).toEqual(['start:hud.rebuild']);
@@ -580,7 +580,7 @@ describe('MacLink downlink ordering', () => {
     sockets[0]!.open();
     sockets[0]!.receive({ kind: 'auth.accepted' });
 
-    sockets[0]!.receive({ kind: 'hud.rebuild', reason: 'brainstorm' });
+    sockets[0]!.receive({ kind: 'hud.rebuild', reason: 'terminal' });
     sockets[0]!.receive({ kind: 'hud.text', containerId: 4, text: 'still handled' });
     await vi.waitFor(() => expect(handled).toEqual(['hud.text']));
   });

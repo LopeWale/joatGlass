@@ -160,6 +160,18 @@ export class ImuMonitor {
     return true;
   }
 
+  /** Silently disarm a remote-cancelled confirmation without emitting an uplink verdict. */
+  disarm(actionId: string): boolean {
+    if (!actionId || this.pending?.actionId !== actionId) return false;
+    const pending = this.pending;
+    this.pending = undefined;
+    this.detachAbort(pending);
+    if (this.expiryTimer) clearTimeout(this.expiryTimer);
+    this.expiryTimer = undefined;
+    console.info(`[joat trace] trace=${actionId} stage=confirmation-disarmed`);
+    return true;
+  }
+
   /** Teardown path: clear timers without emitting into a link being closed. */
   dispose(): void {
     if (this.expiryTimer) clearTimeout(this.expiryTimer);

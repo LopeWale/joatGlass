@@ -226,6 +226,22 @@ async def test_a_silent_mind_still_gets_words_on_the_lens_and_markdown_is_stripp
 
 
 @pytest.mark.asyncio
+async def test_a_raw_request_gets_the_whole_answer_with_its_lines() -> None:
+    # JOAT Brain on the phone asks for a note's summary: sections and list
+    # lines intact, not lens text. Only an explicit true opts in.
+    answer = "TITLE: Standup\n\nOVERVIEW\nShipped it.\n\nKEY POINTS\n- one\n- two"
+    endpoint = AgentEndpoint(ScriptedEngine([answer]), "secret", port=0)
+    await endpoint.start()
+    try:
+        _, _, body = await http(endpoint.port, "POST", "/", ask("summarize", joat_raw=True), AUTH)
+        assert json.loads(body)["choices"][0]["message"]["content"] == answer
+        _, _, body = await http(endpoint.port, "POST", "/", ask("summarize", joat_raw="yes"), AUTH)
+        assert "\n" not in json.loads(body)["choices"][0]["message"]["content"]
+    finally:
+        await endpoint.stop()
+
+
+@pytest.mark.asyncio
 async def test_a_mind_that_takes_too_long_is_a_gateway_timeout() -> None:
     endpoint = AgentEndpoint(ScriptedEngine(["late"], delay_s=0.5), "secret", port=0,
                              request_timeout_s=0.05)

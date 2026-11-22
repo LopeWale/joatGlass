@@ -26,7 +26,6 @@ from joat.core.protocol import (
     AgentTerminalHudView,
     VOICE_REQUEST_PREFIX,
     AssistantOverlay,
-    BrainstormHudView,
     ContainerId,
     EventType,
     HudList,
@@ -700,16 +699,16 @@ def make_router(
     voice_notes=None,
     voice_capture=None,
     actions=None,
-    brainstorm_recap=None,
-    brainstorm_replay=None,
-    brainstorm_sessions=None,
-    brainstorm_continue=None,
-    brainstorm_unavailable=None,
     terminal_rows=None,
     terminal_focus=None,
     terminal_view=None,
     terminal_busy=None,
     terminal_open=None,
+    terminal_sessions=None,
+    terminal_resume=None,
+    terminal_new_session=None,
+    terminal_active_summary=None,
+    terminal_roster=None,
     message_ui=None,
     ask=None,
     navigate=None,
@@ -732,16 +731,16 @@ def make_router(
         voice_notes=voice_notes,
         voice_capture=voice_capture,
         actions=actions,
-        brainstorm_recap=brainstorm_recap,
-        brainstorm_replay=brainstorm_replay,
-        brainstorm_sessions=brainstorm_sessions,
-        brainstorm_continue=brainstorm_continue,
-        brainstorm_unavailable=brainstorm_unavailable,
         terminal_rows=terminal_rows,
         terminal_focus=terminal_focus,
         terminal_view=terminal_view,
         terminal_busy=terminal_busy,
         terminal_open=terminal_open,
+        terminal_sessions=terminal_sessions,
+        terminal_resume=terminal_resume,
+        terminal_new_session=terminal_new_session,
+        terminal_active_summary=terminal_active_summary,
+        terminal_roster=terminal_roster,
         message_ui=message_ui,
         ask=ask,
         navigate=navigate,
@@ -802,46 +801,13 @@ class TestCapabilityViews:
             await asyncio.sleep(0)
             assert router._note_reader is None
 
-    async def test_brainstorm_row_shows_the_missing_seat_instead_of_a_promise(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        """A missing CLI seat used to surface only after the tap: the row opened
-        on "Ready for a question" and the tap went nowhere useful."""
-        gone = BrainstormHudView(
-            state="unavailable", topic="Brainstorm", collaborators=["Claude"],
-            activity="codex CLI missing on the Mac — install to enable.",
-        )
-        router, transport, _ = make_router(
-            tmp_path, brainstorm_unavailable=lambda: gone,
-            brainstorm_sessions=lambda: [],
-        )
-        await router.open("Brainstorm")
-        frames = [item for item in transport.sent if isinstance(item, BrainstormHudView)]
-        assert frames[-1].state == "unavailable"
-        assert "codex CLI missing" in frames[-1].activity
-
-    async def test_brainstorm_and_agent_terminal_open_real_hud_views(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    async def test_agent_terminal_opens_real_hud_view(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, status = make_router(tmp_path)
-        status.set_openclaw(
-            state="connected_read_only",
-            endpoint_host="home-mac.example-tailnet.ts.net",
-            scopes=["operator.read"],
-            reason="",
-        )
         status.set_agent_terminal(state="ready", reason="")
-        await router.open("Brainstorm")
         await router.open("Agent Terminal")
-        # Two surfaces, two frame TYPES — the discriminator used to be a
-        # `screen` field on one shared frame (SESSION_MODEL.md:74-75).
-        frames = [item for item in transport.sent
-                  if isinstance(item, (BrainstormHudView, AgentTerminalHudView))]
-        assert [type(frame).__name__ for frame in frames] == [
-            "BrainstormHudView", "AgentTerminalHudView",
-        ]
-        assert frames[-1].endpoint_host == "home-mac.example-tailnet.ts.net"
-        assert frames[-1].no_tools_checked is True
-        # The idle frame invites a tap; voice works from anywhere and the
-        # frame no longer tells the wearer what to say.
+        frames = [item for item in transport.sent if isinstance(item, AgentTerminalHudView)]
+        assert [type(frame).__name__ for frame in frames] == ["AgentTerminalHudView"]
         assert frames[0].state == "ready"
-        assert frames[0].activity == "Tap to speak a topic."
 
     @pytest.mark.parametrize(
         ("state", "reason", "expected"),
@@ -854,12 +820,12 @@ class TestCapabilityViews:
             (
                 "unavailable",
                 "gateway_not_ready",
-                "Hermes is unavailable; retry when the Mac connection recovers.",
+                "OpenClaw is unavailable; retry when the Mac connection recovers.",
             ),
             (
                 "blocked",
                 "tools_enabled",
-                "Hermes tools are enabled; this JOAT session remains blocked.",
+                "OpenClaw tools are enabled; this JOAT session remains blocked.",
             ),
         ],
     )
@@ -890,6 +856,20 @@ class TestCapabilityViews:
         assert lists[0].title == "MESSAGES"
         assert lists[0].items[0] == "New message · voice recipient + text"
         assert lists[0].hint == "tap: select · left x2: back"
+
+    async def test_mail_open_returns_iphone_setup_fallback_on_mac(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        router, transport, _ = make_router(tmp_path)
+        await router.open("Mail", request_id="mail-open-1")
+        lists = [m for m in transport.sent if isinstance(m, HudList)]
+        assert len(lists) == 1
+        assert lists[0].title == "MAIL · SETUP"
+        assert lists[0].items == [
+            "Mail runs on your iPhone in JOAT Brain.",
+            "Connect JOAT to This iPhone · JOAT Brain.",
+        ]
+        assert lists[0].selectable is False
+        assert lists[0].hint == "left x2: back"
+        assert lists[0].request_id == "mail-open-1"
 
     async def test_messages_list_marks_unread_attachment_only_conversations(
         self, tmp_path,
@@ -964,7 +944,7 @@ class TestCapabilityViews:
         assert lists[0].title == "NAVIGATION"
         assert lists[0].items == [
             "➤ Navigate to a place",
-            "I’ll confirm the place. Then choose Walk or Cycle.",
+            "I’ll confirm the place. Then choose Walk, Cycle, or Drive.",
         ]
         assert lists[0].hint == "tap: choose · left x2: back"
         assert lists[0].selectable is True
@@ -1033,7 +1013,7 @@ class TestCapabilityViews:
         ][-1]
         assert frame.items == [
             "➤ Navigate to a place",
-            "I’ll confirm the place. Then choose Walk or Cycle.",
+            "I’ll confirm the place. Then choose Walk, Cycle, or Drive.",
         ]
         assert frame.selectable is True
         assert frame.hint == "tap: choose · left x2: back"
@@ -2985,185 +2965,233 @@ class TestVoiceOpenChain:
         assert any("Adele" in item for item in painted.items)
 
 
-class TestReenteringALiveBrainstorm:
-    """docs/SESSION_MODEL.md:46 — "open Brainstorm during an active run →
-    restore the current conversation."
-
-    The opposite shipped: any non-empty transcript painted state="settled",
-    which renders DONE on the glass and makes the tap a no-op. Opening the
-    menu mid-session told the wearer their live conversation had finished
-    and left no way back into it.
+class TestAgentTerminalThreeLevelNavigation:
+    """3-level Agent Terminal navigation:
+    AGENT TERMINAL -> AGENT TERMINAL · <LANE_UPPER> -> Live Terminal
+    with capability-lifecycle 'terminal-sessions' and 'terminal-agents' step-back.
     """
 
-    async def test_opening_the_row_mid_session_restores_it(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        replayed: list[bool] = []
-
-        async def replay() -> bool:
-            replayed.append(True)
-            return True                      # a session IS live
-
-        router, transport, _ = make_router(tmp_path, brainstorm_replay=replay)
-        await router.open("Brainstorm")
-
-        assert replayed == [True]
-        # The live sink owns the frame; the router must not paint a second,
-        # reconstructed one over it — that is how the streaming turn in
-        # progress got replaced by a "settled" recap.
-        assert not [m for m in transport.sent if isinstance(m, BrainstormHudView)]
-
-    async def test_an_idle_row_still_opens_normally(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        async def replay() -> bool:
-            return False                     # nothing live
-
-        router, transport, _ = make_router(tmp_path, brainstorm_replay=replay)
-        await router.open("Brainstorm")
-
-        frames = [m for m in transport.sent if isinstance(m, BrainstormHudView)]
-        assert frames and frames[-1].state == "ready"
-
-
-class TestTheSessionPicker:
-    """docs/SESSION_MODEL.md:47 — "open Brainstorm while idle → show recent
-    sessions plus NEW."
-
-    It was four lines of dead text inside an activity string. The wearer
-    could SEE that past sessions existed and could not open one, because
-    nothing carried an id to select them by.
-    """
-
-    class Past:
-        def __init__(self, sid, topic, turns):
-            self.session_id = sid
-            self.topic = topic
-            self.turns = turns
-
-        @property
-        def title(self):
-            return self.topic
-
-        def age(self):
-            return "2m ago"
-
-    def _rows(self):
-        return [
-            self.Past("aaa", "cold-start latency", (("CODEX", "x"),)),
-            self.Past("bbb", "tabs or spaces", (("CLAUDE", "y"), ("JOAT", "z"))),
-        ]
-
-    async def test_the_idle_row_lists_real_sessions_with_new_on_top(
+    async def test_agent_picker_opens_session_picker_with_active_new_and_saved_rows(
         self, tmp_path,
     ) -> None:  # type: ignore[no-untyped-def]
-        rows = self._rows()
+        sessions_by_lane = {
+            "claude": [
+                {"key": "conv-2", "label": "Fix BLE frame chunking"},
+                {"key": "conv-1", "label": "Audit tailnet token rotation"},
+            ],
+            "antigravity": [
+                {"key": "ag-9", "label": "Redesign 5-container HUD card"},
+            ],
+        }
+        summaries = {"claude": "working · running pytest", "antigravity": None}
+        opened: list[tuple[str, str | None, str]] = []
+        resumed: list[tuple[str, str]] = []
+        new_started: list[str] = []
+
+        async def list_sessions(lane: str) -> list[dict[str, str]]:
+            return list(sessions_by_lane.get(lane, []))
+
+        async def resume_session(lane: str, key: str) -> bool:
+            resumed.append((lane, key))
+            return True
+
+        async def start_new_session(lane: str) -> bool:
+            new_started.append(lane)
+            return True
+
+        async def open_lane(
+            lane: str, request_id: str | None, trace_id: str, _is_current: object,
+        ) -> None:
+            opened.append((lane, request_id, trace_id))
+
         router, transport, _ = make_router(
-            tmp_path, brainstorm_sessions=lambda: rows)
-        await router.open("Brainstorm")
-
-        lists = [m for m in transport.sent if isinstance(m, HudList)]
-        assert lists, "the picker must be a real selectable list, not prose"
-        items = lists[-1].to_wire()["items"]
-        assert items[0] == "+ New brainstorm"
-        assert "cold-start latency" in items[1]
-        assert "2 turns" in items[2]
-        assert lists[-1].to_wire()["selectable"] is True
-        # A hand-opened picker is tapped, not spoken to.
-        assert lists[-1].hint == "tap: open · left x2: back"
-
-    async def test_a_session_that_cannot_reopen_points_at_the_new_row(
-        self, tmp_path,
-    ) -> None:  # type: ignore[no-untyped-def]
-        """The failure page names the row to tap, not a phrase to say."""
-        rows = [self.Past("ccc", "no transcript kept", ())]
-        attempted: list[str] = []
-
-        async def continue_it(session_id: str) -> bool:
-            attempted.append(session_id)
-            return False
-
-        router, transport, _ = make_router(
-            tmp_path, brainstorm_sessions=lambda: rows, brainstorm_continue=continue_it,
+            tmp_path,
+            terminal_rows=lambda: [
+                ("claude", "Claude · working"),
+                ("codex", "Codex · idle"),
+                ("antigravity", "Antigravity · idle"),
+            ],
+            terminal_sessions=list_sessions,
+            terminal_resume=resume_session,
+            terminal_new_session=start_new_session,
+            terminal_active_summary=lambda lane: summaries.get(lane),
+            terminal_open=open_lane,
         )
-        await router.open("Brainstorm")
-        await router._select_brainstorm(1)
-        assert attempted == ["ccc"]
-        failed = [m for m in transport.sent if isinstance(m, HudList)][-1]
-        assert failed.title == "BRAINSTORM"
-        assert failed.items == [
-            "That session could not be reopened.",
-            "Tap “+ New brainstorm” to start another.",
-        ]
-        assert failed.selectable is False
 
-    async def test_the_picker_survives_a_session_closing_in_process(
+        # Level 1: Agent Picker
+        await router.open("Agent Terminal", request_id="visit-3level")
+        level1 = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert level1.title == "AGENT TERMINAL"
+        assert level1.selectable is True
+        assert level1.items == [
+            "Claude · working",
+            "Codex · idle",
+            "Antigravity · idle",
+        ]
+
+        # Tap row 0 (Claude, busy) -> Level 2 includes "Active · ..."
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="AGENT TERMINAL",
+            selected_index=0,
+            request_id="visit-3level",
+            trace_id="tap-agent-claude",
+        ))
+        await wait_until(lambda: any(
+            isinstance(m, HudList) and m.title == "AGENT TERMINAL · CLAUDE"
+            for m in transport.sent
+        ))
+        claude_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert claude_list.title == "AGENT TERMINAL · CLAUDE"
+        assert claude_list.selectable is True
+        assert claude_list.hint == "tap: open · 2x tap: agents"
+        assert claude_list.items == [
+            "Active · working · running pytest",
+            "+ New session",
+            "Fix BLE frame chunking",
+            "Audit tailnet token rotation",
+        ]
+        assert opened == []
+
+        # Tap row 0 ("Active · ...") -> opens active session without reset or resume
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="AGENT TERMINAL · CLAUDE",
+            selected_index=0,
+            request_id="visit-3level",
+            trace_id="tap-active",
+        ))
+        await wait_until(lambda: len(opened) == 1)
+        assert opened == [("claude", "visit-3level", "tap-active")]
+        assert resumed == [] and new_started == []
+
+    async def test_new_session_and_resume_session_and_lifecycle_step_back(
         self, tmp_path,
     ) -> None:  # type: ignore[no-untyped-def]
-        """The audit's BSI-03: the picker was gated on the in-process recap
-        having ZERO rows, so the moment any session closed in this process
-        the idle view became that session's dead text and the picker was
-        unreachable until a restart. Idle means picker, unconditionally —
-        docs/SESSION_MODEL.md:47 has no other clause."""
-        rows = self._rows()
+        saved = [
+            {"key": "ag-2", "label": "Wire terminal endpoint"},
+            {"key": "ag-1", "label": "Clean up brainstorm"},
+        ]
+        resumed: list[tuple[str, str]] = []
+        new_started: list[str] = []
+        leases: list[tuple[str, object]] = []
 
-        class Recap:
-            topic = "tabs or spaces"
-            speakers = ("codex", "claude")
+        async def list_sessions(_lane: str) -> list[dict[str, str]]:
+            return list(saved)
 
-            def rows(self, *a: object, **k: object) -> list[str]:
-                return ["CLAUDE — y", "JOAT — z"]   # a session HAS closed
+        async def resume_session(lane: str, key: str) -> bool:
+            resumed.append((lane, key))
+            return True
+
+        async def start_new_session(lane: str) -> bool:
+            new_started.append(lane)
+            return True
+
+        async def open_lane(
+            lane: str, _request_id: str | None, _trace_id: str, is_current: object,
+        ) -> None:
+            leases.append((lane, is_current))
 
         router, transport, _ = make_router(
-            tmp_path, brainstorm_sessions=lambda: rows,
-            brainstorm_recap=lambda: Recap())
-        await router.open("Brainstorm")
+            tmp_path,
+            terminal_rows=lambda: [
+                ("claude", "Claude · idle"),
+                ("antigravity", "Antigravity · idle"),
+            ],
+            terminal_sessions=list_sessions,
+            terminal_resume=resume_session,
+            terminal_new_session=start_new_session,
+            terminal_active_summary=lambda _lane: None,
+            terminal_open=open_lane,
+        )
 
-        lists = [m for m in transport.sent if isinstance(m, HudList)]
-        assert lists, "the recap text hid the picker"
-        items = lists[-1].to_wire()["items"]
-        assert items[0] == "+ New brainstorm"
+        await router.open("Agent Terminal", request_id="visit-ag")
+        # Tap row 1 (Antigravity, idle) -> Level 2 omits "Active · ..."
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="AGENT TERMINAL",
+            selected_index=1,
+            request_id="visit-ag",
+            trace_id="tap-ag",
+        ))
+        await wait_until(lambda: any(
+            isinstance(m, HudList) and m.title == "AGENT TERMINAL · ANTIGRAVITY"
+            for m in transport.sent
+        ))
+        ag_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert ag_list.items == [
+            "+ New session",
+            "Wire terminal endpoint",
+            "Clean up brainstorm",
+        ]
 
-    async def test_tapping_a_row_opens_that_session(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        rows = self._rows()
-        opened: list[str] = []
+        # Tap row 2 ("Clean up brainstorm") -> resumes 'ag-1' and opens Antigravity
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="AGENT TERMINAL · ANTIGRAVITY",
+            selected_index=2,
+            request_id="visit-ag",
+            trace_id="tap-resume",
+        ))
+        await wait_until(lambda: len(leases) == 1)
+        assert resumed == [("antigravity", "ag-1")]
+        first_lease = leases[0][1]
+        assert callable(first_lease) and first_lease() is True
 
-        async def continue_it(session_id: str) -> bool:
-            opened.append(session_id)
-            return True
+        # 2x tap from Live Session -> capability-lifecycle "terminal-sessions"
+        # Retires live lease and refreshes "AGENT TERMINAL · ANTIGRAVITY"
+        saved.insert(0, {"key": "ag-3", "label": "Newest conversation"})
+        before_count = len([
+            m for m in transport.sent
+            if isinstance(m, HudList) and m.title == "AGENT TERMINAL · ANTIGRAVITY"
+        ])
+        router.on_input(InputEvent(
+            container_name="capability-lifecycle",
+            selected_name="terminal-sessions",
+            request_id="visit-ag",
+            trace_id="tap-resume",
+        ))
+        assert first_lease() is False
+        await wait_until(lambda: len([
+            m for m in transport.sent
+            if isinstance(m, HudList) and m.title == "AGENT TERMINAL · ANTIGRAVITY"
+        ]) > before_count)
+        refreshed = [m for m in transport.sent if isinstance(m, HudList)][-1]
+        assert refreshed.items[0] == "+ New session"
+        assert refreshed.items[1] == "Newest conversation"
 
-        router, transport, _s = make_router(
-            tmp_path, brainstorm_sessions=lambda: rows,
-            brainstorm_continue=continue_it)
-        await router.open("Brainstorm")
-        await router._select_brainstorm(2)      # row 0 is NEW
+        # Tap row 0 ("+ New session") -> resets lane without erasing saved list, opens lane
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="AGENT TERMINAL · ANTIGRAVITY",
+            selected_index=0,
+            request_id="visit-ag",
+            trace_id="tap-new",
+        ))
+        await wait_until(lambda: len(leases) == 2)
+        assert new_started == ["antigravity"]
+        assert len(saved) == 3
 
-        # Read first (the audit's B3): the tap opens the saved transcript in
-        # the exact reader; continuation — two subscription CLIs — starts
-        # only on the next, deliberate tap.
-        lists = [m for m in transport.sent if isinstance(m, HudList)]
-        assert lists[-1].title == "BRAINSTORM · SAVED"
-        assert opened == [], "a first tap reads; it must not start collaborators"
-        await router._select_brainstorm(2)
-        assert opened == ["bbb"], "the id, not the row number"
-
-    async def test_a_row_that_moved_is_not_opened_by_position(
-        self, tmp_path,
-    ) -> None:  # type: ignore[no-untyped-def]
-        """A session can finish between the paint and the tap. Indexing the
-        store again would open whatever had shifted into that slot."""
-        rows = self._rows()
-        opened: list[str] = []
-
-        async def continue_it(session_id: str) -> bool:
-            opened.append(session_id)
-            return True
-
-        router, _t, _s = make_router(
-            tmp_path, brainstorm_sessions=lambda: rows,
-            brainstorm_continue=continue_it)
-        await router.open("Brainstorm")
-        rows.insert(0, self.Past("ccc", "something new", (("CODEX", "q"),)))
-
-        await router._select_brainstorm(2)      # opens the reader for "bbb"
-        await router._select_brainstorm(2)      # the reader's tap: continue
-        assert opened == ["bbb"], "resolved against what was DRAWN"
+        # Step back to Level 1 -> capability-lifecycle "terminal-agents"
+        router.on_input(InputEvent(
+            container_name="capability-lifecycle",
+            selected_name="terminal-agents",
+            request_id="visit-ag",
+            trace_id="tap-new",
+        ))
+        assert router._terminal_session_lane is None
+        # Next row tap on index 0 selects Claude's session picker!
+        router.on_input(InputEvent(
+            container_name="capdata",
+            selected_name="AGENT TERMINAL",
+            selected_index=0,
+            request_id="visit-ag",
+            trace_id="tap-claude",
+        ))
+        await wait_until(lambda: any(
+            isinstance(m, HudList) and m.title == "AGENT TERMINAL · CLAUDE"
+            for m in transport.sent
+        ))
 
 
 class TestATerminalReplyTooLongForTheCheckIsReadWhole:
@@ -3260,72 +3288,25 @@ class TestARowTapCrossesTheRealGuards:
     wearer seeing a tap that did nothing.
     """
 
-    class Past:
-        def __init__(self, sid, topic, turns):
-            self.session_id, self.topic, self.turns = sid, topic, turns
+    async def test_a_stale_tap_is_dropped(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        focused: list[str] = []
 
-        @property
-        def title(self):
-            return self.topic
+        async def focus(name: str) -> None:
+            focused.append(name)
 
-        def age(self):
-            return "2m ago"
-
-    async def test_a_brainstorm_row_tap_opens_that_session(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        opened: list[str] = []
-
-        async def continue_it(session_id: str) -> bool:
-            opened.append(session_id)
-            return True
-
-        rows = [self.Past("aaa", "cold-start latency", (("CODEX", "x"),)),
-                self.Past("bbb", "tabs or spaces", (("CLAUDE", "y"),))]
-        router, transport, _ = make_router(
-            tmp_path, brainstorm_sessions=lambda: rows,
-            brainstorm_continue=continue_it)
-        await router.open("Brainstorm")
-
-        lists = [m for m in transport.sent if isinstance(m, HudList)]
-        request_id = getattr(lists[-1], "request_id", None)
-        router.on_input(InputEvent(
-            container_name="capdata", selected_index=2,
-            selected_name="BRAINSTORM", request_id=request_id, trace_id="hud",
-        ))
-        for _ in range(40):
-            await asyncio.sleep(0.01)
-            if any(isinstance(m, HudList) and m.title == "BRAINSTORM · SAVED" for m in transport.sent):
-                break
-        assert opened == [], "the first tap opens the saved transcript, not the collaborators"
-        # The tap inside the open reader is its action: continue this session.
+        router, _t, _s = make_router(
+            tmp_path,
+            terminal_rows=lambda: [("work", "work · idle")],
+            terminal_focus=focus,
+        )
+        await router.open("Agent Terminal")
         router.on_input(InputEvent(
             container_name="capdata", selected_index=0,
-            selected_name="BRAINSTORM", request_id=request_id, trace_id="hud",
-        ))
-        for _ in range(40):
-            await asyncio.sleep(0.01)
-            if opened:
-                break
-        assert opened == ["bbb"], "row 0 is NEW, so index 2 is the second session"
-
-    async def test_a_stale_tap_is_dropped(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        opened: list[str] = []
-
-        async def continue_it(session_id: str) -> bool:
-            opened.append(session_id)
-            return True
-
-        rows = [self.Past("aaa", "t", (("CODEX", "x"),))]
-        router, _t, _s = make_router(
-            tmp_path, brainstorm_sessions=lambda: rows,
-            brainstorm_continue=continue_it)
-        await router.open("Brainstorm")
-        router.on_input(InputEvent(
-            container_name="capdata", selected_index=1,
-            selected_name="BRAINSTORM", request_id="a-request-that-moved-on",
+            selected_name="AGENT TERMINAL", request_id="a-request-that-moved-on",
             trace_id="hud",
         ))
         await asyncio.sleep(0.05)
-        assert opened == []
+        assert focused == []
 
     async def test_a_terminal_row_tap_focuses_that_lane(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         focused: list[str] = []
@@ -3427,24 +3408,6 @@ class TestATapThatFailsSaysSo:
 
         router, transport, _status = make_router(tmp_path, terminal_focus=focus)
         await router._select_terminal(3)          # nothing was drawn
-        await asyncio.sleep(0.02)
-
-        spoken = [
-            m.text for m in transport.sent
-            if isinstance(m, AssistantOverlay) and m.text
-        ]
-        assert spoken and "no longer listed" in spoken[-1]
-
-    async def test_a_brainstorm_row_that_scrolled_away_says_so_too(
-        self, tmp_path,
-    ) -> None:  # type: ignore[no-untyped-def]
-        async def continue_it(session_id: str) -> bool:
-            return True
-
-        router, transport, _status = make_router(
-            tmp_path, brainstorm_continue=continue_it,
-        )
-        await router._select_brainstorm(5)
         await asyncio.sleep(0.02)
 
         spoken = [

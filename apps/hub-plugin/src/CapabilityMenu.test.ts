@@ -3,7 +3,7 @@ import {
 } from 'vitest';
 import { OsEventTypeList, type RebuildPageContainer } from '@evenrealities/even_hub_sdk';
 import { CapabilityMenu, isActionLifecycleTitle } from './CapabilityMenu';
-import { BrainstormController } from './BrainstormController';
+import { TerminalController } from './TerminalController';
 import { Settings } from './Settings';
 import { HudPresenter } from './HudPresenter';
 import { HudPageBuilder } from './HudPageBuilder';
@@ -112,33 +112,15 @@ function latestRequestId(sent: Array<Record<string, unknown>>): string {
 
 const rows = (count: number) => Array.from({ length: count }, (_, index) => `Row ${index + 1}`);
 
-describe('Brainstorm surface ownership', () => {
-  it('a pending Messages request does not authorize a Brainstorm frame', async () => {
-    const { menu } = rig();
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Messages'));
-    expect(menu.isAwaitingResponse()).toBe(true);
-    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
-  });
-
-  it('a final Brainstorm frame does not replace local Settings', async () => {
-    const { menu } = rig();
-    await menu.openSettings();
-    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
-  });
-
-  it('retires queued and in-flight Brainstorm work before Settings finishes painting', async () => {
+describe('Terminal surface ownership & 3-level Agent Terminal navigation', () => {
+  it('retires active TerminalController focus before Settings finishes painting', async () => {
     let finish!: (value: boolean) => void;
     const { menu, surfaceEvents, operations } = rig(new Promise<boolean>((resolve) => { finish = resolve; }));
-    const oldVisit = menu.captureBrainstormVisit();
-    menu.claimBrainstormVisit(oldVisit);
-    const controller = new BrainstormController({ sendBrainstorm: () => true });
-    controller.present({ screen: 'brainstorm', state: 'running', topic: '', collaborators: [], activity: '' });
+    const controller = new TerminalController({ sendTerminal: () => true });
+    controller.present({ state: 'running', focus: 'Claude · running', lanes: ['Claude · running'], activity: 'Working' });
     menu.onSurfaceDeparture = () => controller.clear();
     const opening = menu.openSettings();
     expect(controller.isActive()).toBe(false);
-    expect(oldVisit()).toBe(false);
-    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
-    expect(menu.claimBrainstormVisit(oldVisit)).toBe(false);
     expect(operations.slice(0, 2)).toEqual(['surface-settings', 'list']);
     expect(surfaceEvents).toEqual([{ kind: 'input', event: {
       containerName: 'capability-lifecycle', selectedName: 'surface-settings',
@@ -147,48 +129,146 @@ describe('Brainstorm surface ownership', () => {
     await opening;
   });
 
-  it('notifies Home locally and permits only a subsequent explicit Brainstorm visit', async () => {
+  it('publishes contextual menu open/close lifecycle events cleanly', async () => {
     const { menu, surfaceEvents } = rig();
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Brainstorm'));
-    const previous = menu.captureBrainstormVisit();
-    expect(menu.mayPresentBrainstorm(previous)).toBe(true);
-    await menu.toggle();
-    expect(menu.mayPresentBrainstorm(previous)).toBe(false);
-    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
-    expect(surfaceEvents[surfaceEvents.length - 1]?.event).toEqual({ containerName: 'capability-lifecycle', selectedName: 'surface-home' });
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Brainstorm'));
-    expect(menu.mayPresentBrainstorm(previous)).toBe(false);
-    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(true);
-  });
-
-  it('suspends the native menu, then preserves the visit only if no feature was chosen', async () => {
-    const { menu, surfaceEvents } = rig();
-    menu.claimBrainstormVisit(menu.captureBrainstormVisit());
-    const beforeOverlay = menu.captureBrainstormVisit();
     menu.setContextualMenuOpen(true);
-    expect(beforeOverlay()).toBe(false);
-    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
     menu.setContextualMenuOpen(false);
-    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(true);
     menu.setContextualMenuOpen(true);
     await menu.openFromContextualMenu(CAPABILITIES.indexOf('Messages'));
     menu.setContextualMenuOpen(false);
-    expect(menu.mayPresentBrainstorm(menu.captureBrainstormVisit())).toBe(false);
     expect(surfaceEvents.map((message) => (message.event as { selectedName: string }).selectedName)).toEqual([
       'surface-context-menu-open', 'surface-context-menu-closed',
       'surface-context-menu-open', 'surface-feature', 'surface-context-menu-closed',
     ]);
   });
 
-  it('retires an accepted Mac list without echoing, while an explicitly queued replay may reopen', async () => {
-    const { menu, surfaceEvents } = rig();
-    menu.claimBrainstormVisit(menu.captureBrainstormVisit());
-    const explicitReplay = menu.captureBrainstormVisit();
-    expect(await menu.presentList('MESSAGES', ['Conversation'], 'voice-request-new', true)).toBe(true);
-    expect(menu.mayPresentBrainstorm(explicitReplay)).toBe(false);
-    expect(surfaceEvents).toEqual([]);
-    expect(menu.claimBrainstormVisit(explicitReplay)).toBe(true);
-    expect(menu.mayPresentBrainstorm(explicitReplay)).toBe(true);
+  it('walks 3-level Agent Terminal navigation cleanly: Agent Picker -> Session Picker -> Live Session -> Session Picker -> Agent Picker -> Home', async () => {
+    const { menu, hud, lists, listOptions, sent, defaultsCount } = rig();
+    const controller = new TerminalController({ sendTerminal: () => true });
+    menu.onSurfaceDeparture = () => controller.clear();
+    const homeEvents: number[] = [];
+    menu.onHome = () => homeEvents.push(1);
+    hud.showTerminal = vi.fn(async () => true);
+
+    // Level 1: Open Agent Terminal from firmware contextual menu -> Agent Picker
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Agent Terminal'));
+    const requestId = latestRequestId(sent);
+    expect(requestId).toMatch(/^hud-request-/);
+
+    const agentRows = ['Claude · 2 sessions', 'Codex · idle', 'Antigravity · idle'];
+    expect(await menu.presentList(
+      'AGENT TERMINAL', agentRows, requestId, true, 'tap: open · 2x: close',
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({
+      title: 'AGENT TERMINAL', selectable: true, nativeFirmwareList: true,
+    });
+
+    // Tap Claude -> Mac presents Level 2: Session Picker (`AGENT TERMINAL · CLAUDE`)
+    expect(menu.handleList(click(0))).toBe(true);
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'capdata', selectedName: 'AGENT TERMINAL', selectedIndex: 0, requestId,
+    });
+
+    const sessionRows = ['+ New session', 'Auth refactor · settled', 'Fix flaky test · ready'];
+    expect(await menu.presentList(
+      'AGENT TERMINAL · CLAUDE', sessionRows, requestId, true, 'tap: open · 2x: agents',
+    )).toBe(true);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({
+      title: 'AGENT TERMINAL · CLAUDE', selectable: true, nativeFirmwareList: true,
+    });
+
+    // Tap session row 1 -> Mac presents Level 3: Live Session
+    expect(menu.handleList(click(1))).toBe(true);
+    const sessionSelectEvent = sent[sent.length - 1]?.event as { traceId: string; requestId: string };
+    expect(sessionSelectEvent).toMatchObject({
+      containerName: 'capdata', selectedName: 'AGENT TERMINAL', selectedIndex: 1, requestId,
+    });
+
+    const liveModel = {
+      state: 'ready' as const,
+      focus: 'Claude · ready',
+      lanes: ['Claude · ready'],
+      activity: 'Ready',
+      conversationId: 'claude-auth-refactor',
+      messages: [{ id: 'a1', role: 'assistant' as const, text: 'Auth tests green.' }],
+    };
+    expect(await menu.presentTerminalOpening(
+      liveModel,
+      { requestId, selectionId: sessionSelectEvent.traceId },
+      () => true,
+    )).toBe(true);
+    controller.present(liveModel);
+    expect(controller.isActive()).toBe(true);
+    expect(menu.isOpen()).toBe(false);
+
+    // 1st `2x tap` from Live Session -> restores Session Picker (`AGENT TERMINAL · CLAUDE`) + `terminal-sessions`
+    const beforeBack1 = sent.length;
+    await menu.toggle();
+    expect(controller.isActive()).toBe(false);
+    expect(menu.isOpen()).toBe(true);
+    expect(lists[lists.length - 1]).toEqual(sessionRows);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({
+      title: 'AGENT TERMINAL · CLAUDE', selectable: true, nativeFirmwareList: true,
+    });
+    expect(sent.slice(beforeBack1)).toEqual([{
+      kind: 'input',
+      event: {
+        containerName: 'capability-lifecycle',
+        selectedName: 'terminal-sessions',
+        requestId,
+      },
+    }]);
+
+    // Late frames from the exited session are rejected!
+    expect(await menu.presentTerminalOpening(
+      liveModel,
+      { requestId, selectionId: sessionSelectEvent.traceId },
+      () => true,
+    )).toBe(false);
+
+    // 2nd `2x tap` from Session Picker -> restores Agent Picker (`AGENT TERMINAL`) + `terminal-agents`
+    const beforeBack2 = sent.length;
+    await menu.toggle();
+    expect(menu.isOpen()).toBe(true);
+    expect(lists[lists.length - 1]).toEqual(agentRows);
+    expect(listOptions[listOptions.length - 1]).toMatchObject({
+      title: 'AGENT TERMINAL', selectable: true, nativeFirmwareList: true,
+    });
+    expect(sent.slice(beforeBack2)).toEqual([{
+      kind: 'input',
+      event: {
+        containerName: 'capability-lifecycle',
+        selectedName: 'terminal-agents',
+        requestId,
+      },
+    }]);
+
+    // 3rd `2x tap` from Agent Picker -> closes to Home (`showDefault` + `onHome`)
+    await menu.toggle();
+    expect(menu.isOpen()).toBe(false);
+    expect(defaultsCount()).toBe(1);
+    expect(homeEvents).toHaveLength(1);
+  });
+
+  it('rejects an in-flight session opening if the wearer backs out from Session Picker to Agent Picker first', async () => {
+    const { menu, hud, sent } = rig();
+    hud.showTerminal = vi.fn(async () => true);
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Agent Terminal'));
+    const requestId = latestRequestId(sent);
+    await menu.presentList('AGENT TERMINAL', ['Claude · idle'], requestId, true);
+    menu.handleList(click(0));
+    await menu.presentList('AGENT TERMINAL · CLAUDE', ['+ New session'], requestId, true);
+    menu.handleList(click(0));
+    const abortedSelectionId = (sent[sent.length - 1]?.event as { traceId: string }).traceId;
+
+    // Back out to Agent Picker before Mac responds with session opening
+    await menu.toggle();
+    expect(await menu.presentTerminalOpening(
+      { state: 'ready', focus: 'Claude · ready', lanes: ['Claude · ready'], activity: 'Ready' },
+      { requestId, selectionId: abortedSelectionId },
+      () => true,
+    )).toBe(false);
+    expect(hud.showTerminal).not.toHaveBeenCalled();
   });
 
   it('the Reminders page carries its next-up card to the presenter, and a tap names REMINDERS', async () => {
@@ -214,37 +294,13 @@ describe('Brainstorm surface ownership', () => {
     expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'PLANNING · PLAN · OCTOBER 2026', nativeFirmwareList: true });
   });
 
-  it('does not retire Brainstorm for a rejected stale list', async () => {
+  it('does not retire active TerminalController focus for a rejected stale list', async () => {
     const { menu } = rig();
-    const visit = menu.captureBrainstormVisit();
-    menu.claimBrainstormVisit(visit);
-    expect(await menu.presentList('MESSAGES', ['Old conversation'], 'old-request', true)).toBe(false);
-    expect(menu.mayPresentBrainstorm(visit)).toBe(true);
-  });
-
-  it('the Brainstorm conversation reader takes the page from the room, so its gestures are the reader\'s and not "show terminal" / "cancel"', async () => {
-    // The room waits on the wearer after every round and puts the whole
-    // conversation up to read. While the reader was up the room's controller
-    // still owned the page: a tap was sent as `show_terminal` and Back as
-    // `cancel` (simulator, 2026-10-15).
-    const { menu, sent } = rig();
-    menu.claimBrainstormVisit(menu.captureBrainstormVisit());
-    const controller = new BrainstormController({ sendBrainstorm: () => true });
-    controller.present({ screen: 'brainstorm', state: 'running', topic: '', collaborators: [], activity: '' });
+    const controller = new TerminalController({ sendTerminal: () => true });
+    controller.present({ state: 'ready', focus: 'Claude · ready', lanes: ['Claude · ready'], activity: 'Ready' });
     menu.onSurfaceDeparture = () => controller.clear();
+    expect(await menu.presentList('MESSAGES', ['Old conversation'], 'old-request', true)).toBe(false);
     expect(controller.isActive()).toBe(true);
-
-    expect(await menu.presentList(
-      'BRAINSTORM · ROOM', ['CODEX > Heat pumps win.', '', 'CLAUDE > Only near a pipeline.'], 'voice-room-1', true,
-      'speak: your move · 2x tap: back',
-    )).toBe(true);
-    expect(controller.isActive()).toBe(false);
-
-    sent.length = 0;
-    expect(menu.handleClick()).toBe(true);
-    expect(sent[sent.length - 1]?.event).toMatchObject({
-      containerName: 'capdata', selectedName: 'BRAINSTORM', selectedIndex: 0, requestId: 'voice-room-1',
-    });
   });
 });
 
@@ -318,14 +374,14 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, listOptions, sent } = rig();
-      await menu.openFromContextualMenu(1); // Reminders
+      await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders')); // Reminders
       await vi.advanceTimersByTimeAsync(0);
       const requestId = latestRequestId(sent);
       expect(requestId).toMatch(/^hud-request-/);
 
       await vi.advanceTimersByTimeAsync(12_000);
       expect(lists[1]).toEqual([
-        'No response from the Mac yet.',
+        'No response from JOAT yet.',
         'Return to Overview, then open Reminders to retry.',
       ]);
       expect(listOptions[1]).toMatchObject({
@@ -350,7 +406,7 @@ describe('CapabilityMenu', () => {
       const firstRequestId = latestRequestId(sent);
 
       await vi.advanceTimersByTimeAsync(12_000);
-      expect(lists[1]).toEqual(['Mac did not answer. Tap to retry Messages.']);
+      expect(lists[1]).toEqual(['JOAT did not answer. Tap to retry Messages.']);
       expect(listOptions[1]).toMatchObject({
         title: 'MESSAGES · RETRY', hint: 'tap: retry · 2x tap: back', selectable: true,
       });
@@ -434,7 +490,7 @@ describe('CapabilityMenu', () => {
       });
 
       await vi.advanceTimersByTimeAsync(12_000);
-      expect(lists[lists.length - 1]).toEqual(['Mac did not answer. Tap to retry Messages.']);
+      expect(lists[lists.length - 1]).toEqual(['JOAT did not answer. Tap to retry Messages.']);
       expect(listOptions[listOptions.length - 1]).toMatchObject({
         title: 'MESSAGES · RETRY',
         hint: 'tap: retry · 2x tap: back',
@@ -459,7 +515,7 @@ describe('CapabilityMenu', () => {
       let finishRetryPaint: ((shown: boolean) => void) | undefined;
       const retryPaint = new Promise<boolean>((resolve) => { finishRetryPaint = resolve; });
       const { menu, sent } = rig([true, retryPaint, true]);
-      await menu.openFromContextualMenu(1); // Reminders
+      await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders')); // Reminders
       await vi.advanceTimersByTimeAsync(0);
       const requestId = latestRequestId(sent);
 
@@ -479,7 +535,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, sent } = rig();
-      await menu.openFromContextualMenu(1); // Reminders
+      await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders')); // Reminders
       await vi.advanceTimersByTimeAsync(0);
       expect(await menu.presentList(
         'PLANNING · PLAN · AUGUST 2026', rows(2), latestRequestId(sent), true,
@@ -507,7 +563,7 @@ describe('CapabilityMenu', () => {
       // The guidance names the row exactly as the sidebar prints it —
       // 'QuickNotes', not a case-folded 'Quicknotes'.
       expect(lists[1]).toEqual([
-        'No response from the Mac yet.',
+        'No response from JOAT yet.',
         'Return to Overview, then open QuickNotes to retry.',
       ]);
       expect(listOptions[1]).toMatchObject({
@@ -522,7 +578,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, listOptions, sent } = rig();
-      await menu.openFromContextualMenu(1); // Reminders, via the firmware menu
+      await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders')); // Reminders, via the firmware menu
       await vi.advanceTimersByTimeAsync(0);
       const requestId = latestRequestId(sent);
       expect(await menu.presentList(
@@ -562,7 +618,7 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, lists, sent, defaultsCount } = rig();
-      await menu.openFromContextualMenu(1); // Reminders, via the firmware menu
+      await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders')); // Reminders, via the firmware menu
       await vi.advanceTimersByTimeAsync(0);
       expect(lists).toHaveLength(1);
       expect(menu.isOpen()).toBe(true);
@@ -596,29 +652,76 @@ describe('CapabilityMenu', () => {
     });
   });
 
-  it('Navigation opens from the firmware menu into its destination handoff', async () => {
-    const { menu, lists, listOptions, sent } = rig();
-    await menu.openFromContextualMenu(2); // Navigation
-    await vi.waitFor(() => expect(sent).toHaveLength(1));
-    expect(lists[0]).toEqual(['Loading recent navigation…']);
-    expect(listOptions[0]?.title).toBe('NAVIGATION');
-    expect(sent[0]).toMatchObject({
-      kind: 'input',
-      event: { containerName: 'capmenu', eventType: 0, selectedIndex: 2, selectedName: 'Navigation' },
-    });
+  it('Navigation opens as a selectable firmware list, disarms the 12 s timeout on capability prompt, and resets selection on cancel', async () => {
+    vi.useFakeTimers();
+    try {
+      const { menu, lists, listOptions, sent } = rig();
+      await menu.openFromContextualMenu(CAPABILITIES.indexOf('Navigation')); // Navigation
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      const requestId = latestRequestId(sent);
+      expect(lists[0]).toEqual(['Loading recent navigation…']);
+      expect(listOptions[0]).toMatchObject({ title: 'NAVIGATION', nativeFirmwareList: true });
+      expect(sent[0]).toMatchObject({
+        kind: 'input',
+        event: {
+          containerName: 'capmenu',
+          eventType: 0,
+          selectedIndex: CAPABILITIES.indexOf('Navigation'),
+          selectedName: 'Navigation',
+        },
+      });
+
+      expect(await menu.presentList(
+        'NAVIGATION', ['➤ Navigate to a place…', '➤ Home'], requestId, true, 'tap: choose · 2x tap: back',
+      )).toBe(true);
+      expect(listOptions[1]).toMatchObject({
+        title: 'NAVIGATION',
+        selectable: true,
+        nativeFirmwareList: true,
+      });
+      expect((listOptions[1] as { nativeTextPage?: boolean } | undefined)?.nativeTextPage).toBeUndefined();
+
+      // Tap row 0 ("➤ Navigate to a place…") -> opens capability prompt ("Where to?")
+      expect(menu.handleList(click(0))).toBe(true);
+      expect(sent[sent.length - 1]?.event).toMatchObject({
+        containerName: 'capdata',
+        selectedName: 'NAVIGATION',
+        selectedIndex: 0,
+        requestId,
+      });
+
+      menu.noteCapabilityPromptPresented();
+      // Advance 15 s (past the 12 s capability response timeout): no NAVIGATION · RETRY page may appear!
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(lists).toHaveLength(2);
+
+      // Cancel prompt via 2x tap -> tapping row 1 ("➤ Home") works immediately!
+      menu.noteCapabilityPromptCancelled();
+      expect(menu.handleList(click(1))).toBe(true);
+      expect(sent[sent.length - 1]?.event).toMatchObject({
+        containerName: 'capdata',
+        selectedName: 'NAVIGATION',
+        selectedIndex: 1,
+        requestId,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('Agent Terminal opens from the firmware menu without a More submenu', async () => {
     const { menu, lists, listOptions, sent } = rig();
-    await menu.openFromContextualMenu(5); // Agent Terminal
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Agent Terminal')); // Agent Terminal
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(lists[0]).toEqual(['Loading recent agent terminal…']);
     expect(listOptions[0]?.title).toBe('AGENT TERMINAL');
     expect(sent[0]).toMatchObject({
       kind: 'input',
       event: {
-        // Agent Terminal is index 5 in the 8-row menu since Notifications left.
-        containerName: 'capmenu', eventType: 0, selectedIndex: 5, selectedName: 'Agent Terminal',
+        containerName: 'capmenu',
+        eventType: 0,
+        selectedIndex: CAPABILITIES.indexOf('Agent Terminal'),
+        selectedName: 'Agent Terminal',
       },
     });
   });
@@ -630,13 +733,13 @@ describe('CapabilityMenu', () => {
     expect(await menu.presentList('MESSAGES', rows(3), latestRequestId(sent), true)).toBe(true);
     expect(listOptions[1]).toMatchObject({ title: 'MESSAGES', nativeFirmwareList: true });
 
-    await menu.openFromContextualMenu(6); // Activity
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Activity')); // Activity
     await vi.waitFor(() => expect(sent.filter((m) => (m.event as { containerName?: string }).containerName === 'capmenu')).toHaveLength(2));
     expect(listOptions[2]).toMatchObject({ title: 'ACTIVITY', nativeFirmwareList: true });
     expect(await menu.presentList('ACTIVITY', rows(2), latestRequestId(sent), true)).toBe(true);
     expect(listOptions[3]).toMatchObject({ title: 'ACTIVITY', nativeFirmwareList: true });
 
-    await menu.openFromContextualMenu(1); // Reminders
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders')); // Reminders
     await vi.waitFor(() => expect(sent.filter((m) => (m.event as { containerName?: string }).containerName === 'capmenu')).toHaveLength(3));
     // The loading page is a firmware list; so is the Mac's month page.
     expect(listOptions[4]).toMatchObject({ title: 'REMINDERS', nativeFirmwareList: true });
@@ -825,33 +928,6 @@ describe('CapabilityMenu', () => {
     expect(sent).toHaveLength(1);
   });
 
-  it('pages a saved Brainstorm to its end and opens the previous page on its last local page', async () => {
-    // Before, nothing asked the Mac for a saved session's next page: the
-    // footer promised "swipe: more" and the swipe did nothing.
-    const { menu, hud, listOptions, sent } = rig();
-    hud.scrollTextPage = vi.fn(() => false);
-    const requestId = 'voice-brainstorm-1';
-    const show = (index: number, hint: string) => menu.presentList(
-      'BRAINSTORM · SAVED', [`${index + 1}/3 · session`, `Turn ${index + 1}`], requestId, true, hint,
-      undefined, undefined, undefined, undefined, undefined, { id: 'brainstorm', index, count: 3 },
-    );
-    expect(await show(0, 'down more · tap: continue · 2x tap: back')).toBe(true);
-    sent.length = 0;
-    expect(menu.handleScroll(OsEventTypeList.SCROLL_BOTTOM_EVENT)).toBe(true);
-    expect(sent[sent.length - 1]?.event).toMatchObject({
-      containerName: 'cappage', selectedName: 'BRAINSTORM', selectedIndex: 0, traceId: 'brainstorm', requestId,
-    });
-
-    expect(await show(1, 'up previous · down more · tap: continue · 2x tap: back')).toBe(true);
-    expect(listOptions[listOptions.length - 1]).not.toHaveProperty('nativeTextPageFromEnd');
-    expect(menu.handleScroll(OsEventTypeList.SCROLL_TOP_EVENT)).toBe(true);
-    expect(sent[sent.length - 1]?.event).toMatchObject({
-      containerName: 'cappage', selectedName: 'BRAINSTORM', selectedIndex: 1,
-      eventType: OsEventTypeList.SCROLL_TOP_EVENT,
-    });
-    expect(await show(0, 'down more · tap: continue · 2x tap: back')).toBe(true);
-    expect(listOptions[listOptions.length - 1]).toMatchObject({ nativeTextPageFromEnd: true });
-  });
 
   it.each([
     ['AGENT TERMINAL · CHECK', 'AGENT TERMINAL', 'voice-check-2'],
@@ -992,7 +1068,7 @@ describe('CapabilityMenu', () => {
 
   it('opens a firmware list with the cursor on row one, whatever row the Mac remembers', async () => {
     const { menu, sent } = rig();
-    await menu.openFromContextualMenu(1); // Reminders
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders')); // Reminders
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
     expect(await menu.presentList(
@@ -1411,7 +1487,7 @@ describe('CapabilityMenu', () => {
 
   it('routes non-Messages data clicks as capability detail selections', async () => {
     const { menu, sent } = rig();
-    await menu.openFromContextualMenu(1); // Reminders
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders')); // Reminders
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList(
       'PLANNING', rows(2), latestRequestId(sent), true,
@@ -1430,7 +1506,7 @@ describe('CapabilityMenu', () => {
 
   it('returns a Planning drill-down to the live planner instead of Home', async () => {
     const { menu, sent } = rig();
-    await menu.openFromContextualMenu(1); // Reminders
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders')); // Reminders
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     await menu.presentList('PLANNING', rows(2), latestRequestId(sent), true);
 
@@ -1444,13 +1520,13 @@ describe('CapabilityMenu', () => {
     await vi.waitFor(() => expect(sent).toHaveLength(3));
     expect(sent[2]).toMatchObject({
       kind: 'input',
-      event: { containerName: 'capmenu', selectedName: 'Reminders', selectedIndex: 1 },
+      event: { containerName: 'capmenu', selectedName: 'Reminders', selectedIndex: CAPABILITIES.indexOf('Reminders') },
     });
   });
 
   it('keeps setup and action lifecycle lists read-only', async () => {
     const { menu, sent } = rig();
-    await menu.openFromContextualMenu(1); // Reminders
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders')); // Reminders
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(await menu.presentList(
       'PLANNING · PLAN · SETUP', rows(2), latestRequestId(sent), false,
@@ -1501,7 +1577,7 @@ describe('CapabilityMenu', () => {
     expect(sent[0]).toMatchObject({
       kind: 'input',
       event: {
-        containerName: 'capmenu', selectedIndex: 1, selectedName: 'Reminders',
+        containerName: 'capmenu', selectedIndex: CAPABILITIES.indexOf('Reminders'), selectedName: 'Reminders',
         planningAnchorUnixMs: 1_788_274_200_000,
       },
     });
@@ -1537,7 +1613,7 @@ describe('CapabilityMenu', () => {
     expect(sent[0]).toMatchObject({
       kind: 'input',
       event: {
-        containerName: 'capmenu', selectedIndex: 1, selectedName: 'Reminders',
+        containerName: 'capmenu', selectedIndex: CAPABILITIES.indexOf('Reminders'), selectedName: 'Reminders',
         planningAnchorUnixMs: 1_788_274_200_000,
       },
     });
@@ -1688,7 +1764,7 @@ describe('CapabilityMenu', () => {
         kind: 'input',
         event: {
           containerName: 'capmenu',
-          selectedIndex: 1,
+          selectedIndex: CAPABILITIES.indexOf('Reminders'),
           selectedName: 'Reminders',
           planningAnchorUnixMs,
         },
@@ -1736,7 +1812,7 @@ describe('CapabilityMenu', () => {
         kind: 'input',
         event: {
           containerName: 'capmenu',
-          selectedIndex: 1,
+          selectedIndex: CAPABILITIES.indexOf('Reminders'),
           selectedName: 'Reminders',
           planningAnchorUnixMs,
         },
@@ -1769,7 +1845,7 @@ describe('CapabilityMenu', () => {
       kind: 'input',
       event: {
         containerName: 'capmenu',
-        selectedIndex: 1,
+        selectedIndex: CAPABILITIES.indexOf('Reminders'),
         selectedName: 'Reminders',
         planningAnchorUnixMs: 1_788_274_200_000,
       },
@@ -2035,23 +2111,6 @@ describe('CapabilityMenu', () => {
     });
   });
 
-  it('a live Brainstorm atomically releases its instruction page and menu input', async () => {
-    const { menu, sent, defaultsCount } = rig();
-    await menu.openFromContextualMenu(3); // via the firmware menu // scrollable first-level Brainstorm
-    await vi.waitFor(() => expect(sent).toHaveLength(1));
-    expect(await menu.presentList(
-      'BRAINSTORM',
-      ['Say: “JOAT, brainstorm <question>”'],
-      latestRequestId(sent),
-      false,
-    )).toBe(true);
-
-    await menu.beginLiveSession('brainstorm');
-
-    expect(menu.isOpen()).toBe(false);
-    expect(defaultsCount()).toBe(0);
-    expect(menu.handleClick()).toBe(false);
-  });
 
   it('rejects a delayed capability response after the wearer returns home', async () => {
     const { menu, sent } = rig();
@@ -2069,7 +2128,7 @@ describe('CapabilityMenu', () => {
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const oldRequest = latestRequestId(sent);
     await menu.toggle(); // back: data -> Home (also retires reply consent)
-    await menu.openFromContextualMenu(1); // Reminders, a NEW generation
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Reminders')); // Reminders, a NEW generation
     await vi.waitFor(() => expect(sent).toHaveLength(3));
     const newRequest = latestRequestId(sent);
 
@@ -2182,11 +2241,10 @@ describe('CapabilityMenu', () => {
   it('binds a conversational Terminal visit and rejects its frames after Home', async () => {
     const { menu, hud } = rig();
     const shown = vi.fn(async () => true);
-    hud.showBrainstorm = shown;
+    hud.showTerminal = shown;
     await menu.presentList('MESSAGES', ['Choose a conversation'], 'voice-messages', true);
-    expect(await menu.presentList('AGENT TERMINAL', ['Opening hermes…'], 'voice-terminal')).toBe(true);
-    const model = { screen: 'agent_terminal' as const, state: 'ready' as const,
-      topic: 'hermes', collaborators: ['hermes'], activity: 'Ready' };
+    expect(await menu.presentList('AGENT TERMINAL', ['Opening Claude…'], 'voice-terminal')).toBe(true);
+    const model = { state: 'ready' as const, focus: 'Claude · ready', lanes: ['Claude · ready'], activity: 'Ready' };
     const binding = { requestId: 'voice-terminal', selectionId: 'voice-terminal' };
     expect(await menu.presentTerminalOpening(model, binding, () => true)).toBe(true);
     expect(shown).toHaveBeenCalledTimes(1);
@@ -2195,12 +2253,11 @@ describe('CapabilityMenu', () => {
     expect(shown).toHaveBeenCalledTimes(1);
   });
 
-  it('returns a terminal conversation to agent choices and rejects late old frames', async () => {
+  it('returns a direct terminal conversation to agent choices and rejects late old frames', async () => {
     const { menu, hud, sent } = rig();
-    hud.showBrainstorm = vi.fn(async () => true);
-    await menu.presentList('AGENT TERMINAL', ['Opening Hermes…'], 'voice-terminal-back');
-    const model = { screen: 'agent_terminal' as const, state: 'ready' as const,
-      topic: 'Hermes', collaborators: ['Hermes'], activity: 'Reply' };
+    hud.showTerminal = vi.fn(async () => true);
+    await menu.presentList('AGENT TERMINAL', ['Opening Claude…'], 'voice-terminal-back');
+    const model = { state: 'ready' as const, focus: 'Claude · ready', lanes: ['Claude · ready'], activity: 'Reply' };
     const binding = { requestId: 'voice-terminal-back', selectionId: 'voice-terminal-back' };
     expect(await menu.presentTerminalOpening(model, binding, () => true)).toBe(true);
     await menu.toggle();
@@ -2213,21 +2270,21 @@ describe('CapabilityMenu', () => {
     vi.useFakeTimers();
     try {
       const { menu, hud, lists } = rig();
-      hud.showBrainstorm = vi.fn(async () => false);
-      await menu.presentList('AGENT TERMINAL', ['Opening hermes…'], 'voice-lost-terminal');
-      await menu.presentTerminalOpening({ screen: 'agent_terminal', state: 'ready',
-        topic: 'hermes', collaborators: ['hermes'], activity: 'Ready' },
+      hud.showTerminal = vi.fn(async () => false);
+      await menu.presentList('AGENT TERMINAL', ['Opening Claude…'], 'voice-lost-terminal');
+      await menu.presentTerminalOpening({ state: 'ready',
+        focus: 'Claude · ready', lanes: ['Claude · ready'], activity: 'Ready' },
       { requestId: 'voice-lost-terminal', selectionId: 'voice-lost-terminal' }, () => true);
       await vi.advanceTimersByTimeAsync(15_000);
       expect(lists[lists.length - 1]?.join(' ')).toContain('retry');
     } finally { vi.useRealTimers(); }
   });
 
-  it('hands a live Brainstorm its view without painting Overview between updates', async () => {
+  it('releases to a live session without painting Overview between updates', async () => {
     const { menu, defaultsCount } = rig();
-    await menu.presentList('BRAINSTORM', ['New brainstorm'], 'voice-brainstorm', true);
-    await menu.beginLiveSession('brainstorm');
-    await menu.beginLiveSession('brainstorm');
+    await menu.presentList('AGENT TERMINAL', ['Claude · idle'], 'voice-terminal-live', true);
+    menu.releaseToLiveSession();
+    menu.releaseToLiveSession();
     expect(menu.isOpen()).toBe(false);
     expect(defaultsCount()).toBe(0);
   });
@@ -2258,13 +2315,13 @@ describe('queued conversational Terminal prelude ownership', () => {
   }
 
   const ready = {
-    screen: 'agent_terminal' as const, state: 'ready' as const,
-    topic: 'hermes', collaborators: ['hermes'], activity: 'Ready',
+    state: 'ready' as const,
+    focus: 'Hermes · ready', lanes: ['Hermes · ready'], activity: 'Ready',
   };
 
   it('drops a prelude received before Home but dispatched afterward, without opening its queued ready frame', async () => {
     const { menu, hud, lists } = rig();
-    hud.showBrainstorm = vi.fn(async () => true);
+    hud.showTerminal = vi.fn(async () => true);
     await menu.presentList('MESSAGES', ['Choose a conversation'], 'voice-old-messages', true);
     const dispatch = queuedPrelude(menu, 'voice-queued-terminal');
     await menu.toggle();
@@ -2276,13 +2333,13 @@ describe('queued conversational Terminal prelude ownership', () => {
     expect(await menu.presentTerminalOpening(ready, {
       requestId: 'voice-queued-terminal', selectionId: 'voice-queued-terminal',
     }, () => true)).toBe(false);
-    expect(hud.showBrainstorm).not.toHaveBeenCalled();
+    expect(hud.showTerminal).not.toHaveBeenCalled();
     expect(menu.isOpen()).toBe(false);
   });
 
   it('keeps a newly chosen capability when an older prelude leaves the downlink queue', async () => {
     const { menu, hud, lists, listOptions } = rig();
-    hud.showBrainstorm = vi.fn(async () => true);
+    hud.showTerminal = vi.fn(async () => true);
     const dispatch = queuedPrelude(menu, 'voice-before-quicknotes');
     await menu.openQuickNotes();
     const before = lists.length;
@@ -2293,13 +2350,13 @@ describe('queued conversational Terminal prelude ownership', () => {
     expect(await menu.presentTerminalOpening(ready, {
       requestId: 'voice-before-quicknotes', selectionId: 'voice-before-quicknotes',
     }, () => true)).toBe(false);
-    expect(hud.showBrainstorm).not.toHaveBeenCalled();
+    expect(hud.showTerminal).not.toHaveBeenCalled();
     await menu.toggle();
   });
 
   it('retires a queued prelude on disconnect even before any Terminal binding exists', async () => {
     const { menu, hud, lists, sent } = rig();
-    hud.showBrainstorm = vi.fn(async () => true);
+    hud.showTerminal = vi.fn(async () => true);
     const dispatch = queuedPrelude(menu, 'voice-before-disconnect');
     menu.retireTerminalOpening(false);
 
@@ -2309,12 +2366,12 @@ describe('queued conversational Terminal prelude ownership', () => {
     expect(await menu.presentTerminalOpening(ready, {
       requestId: 'voice-before-disconnect', selectionId: 'voice-before-disconnect',
     }, () => true)).toBe(false);
-    expect(hud.showBrainstorm).not.toHaveBeenCalled();
+    expect(hud.showTerminal).not.toHaveBeenCalled();
   });
 
   it('admits a current prelude once before adoption and accepts its normal bound ready frame', async () => {
     const { menu, hud, lists } = rig();
-    hud.showBrainstorm = vi.fn(async () => true);
+    hud.showTerminal = vi.fn(async () => true);
     await menu.presentList('MESSAGES', ['Choose a conversation'], 'voice-current-messages', true);
     const dispatch = queuedPrelude(menu, 'voice-current-terminal');
 
@@ -2323,13 +2380,13 @@ describe('queued conversational Terminal prelude ownership', () => {
     expect(await menu.presentTerminalOpening(ready, {
       requestId: 'voice-current-terminal', selectionId: 'voice-current-terminal',
     }, () => true)).toBe(true);
-    expect(hud.showBrainstorm).toHaveBeenCalledTimes(1);
+    expect(hud.showTerminal).toHaveBeenCalledTimes(1);
     expect(menu.isOpen()).toBe(false);
   });
 
   it('accepts two legitimate queued preludes in order without adoption retiring the later arrival', async () => {
     const { menu, hud, lists } = rig();
-    hud.showBrainstorm = vi.fn(async () => true);
+    hud.showTerminal = vi.fn(async () => true);
     const first = queuedPrelude(menu, 'voice-queued-first');
     const second = queuedPrelude(menu, 'voice-queued-second');
 
@@ -2342,12 +2399,12 @@ describe('queued conversational Terminal prelude ownership', () => {
       requestId: 'voice-queued-second', selectionId: 'voice-queued-second',
     }, () => true)).toBe(true);
     expect(lists).toEqual([['Opening hermes…'], ['Opening hermes…']]);
-    expect(hud.showBrainstorm).toHaveBeenCalledTimes(2);
+    expect(hud.showTerminal).toHaveBeenCalledTimes(2);
   });
 
   it('Home retires both queued preludes, including the one not yet dispatched', async () => {
     const { menu, hud, lists } = rig();
-    hud.showBrainstorm = vi.fn(async () => true);
+    hud.showTerminal = vi.fn(async () => true);
     await menu.presentList('MESSAGES', ['Choose a conversation'], 'voice-before-both', true);
     const first = queuedPrelude(menu, 'voice-retired-first');
     const second = queuedPrelude(menu, 'voice-retired-second');
@@ -2362,20 +2419,138 @@ describe('queued conversational Terminal prelude ownership', () => {
         requestId, selectionId: requestId,
       }, () => true)).toBe(false);
     }
-    expect(hud.showBrainstorm).not.toHaveBeenCalled();
+    expect(hud.showTerminal).not.toHaveBeenCalled();
     expect(menu.isOpen()).toBe(false);
   });
 
   it('keeps a queued prelude current across an ordinary incoming live-frame handoff', async () => {
     const { menu, hud } = rig();
-    hud.showBrainstorm = vi.fn(async () => true);
+    hud.showTerminal = vi.fn(async () => true);
     const dispatch = queuedPrelude(menu, 'voice-after-incoming-frame');
-    await menu.beginLiveSession('brainstorm');
+    menu.releaseToLiveSession();
 
     expect(await dispatch()).toBe(true);
     expect(await menu.presentTerminalOpening(ready, {
       requestId: 'voice-after-incoming-frame', selectionId: 'voice-after-incoming-frame',
     }, () => true)).toBe(true);
-    expect(hud.showBrainstorm).toHaveBeenCalledTimes(1);
+    expect(hud.showTerminal).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Mac handoff interception, single-paint prepareMacHandoffPage, and hardened openOnMac', () => {
+  it('intercepts Messages, Agent Terminal, and Activity directly on the phone brain without round-tripping to the iPhone, while forwarding when already on the Mac', async () => {
+    const { menu, lists, sent, surfaceEvents } = rig();
+    const intercepted: string[] = [];
+    let onPhoneBrain = true;
+    menu.handoffCapability = (capability) => {
+      if (!onPhoneBrain) return false;
+      intercepted.push(capability);
+      return true;
+    };
+
+    for (const name of ['Messages', 'Agent Terminal', 'Activity'] as const) {
+      await menu.openFromContextualMenu(CAPABILITIES.indexOf(name));
+    }
+    expect(intercepted).toEqual(['Messages', 'Agent Terminal', 'Activity']);
+    expect(lists).toHaveLength(0);
+    expect(sent).toHaveLength(0);
+    expect(surfaceEvents).toHaveLength(0);
+
+    // Non-handoff capabilities still open on the phone brain immediately.
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Mail'));
+    expect(lists).toEqual([['Loading recent mail…']]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.event).toMatchObject({ containerName: 'capmenu', selectedName: 'Mail' });
+
+    // Once connected to the Mac brain, picking Messages and Agent Terminal sends capmenu normally.
+    onPhoneBrain = false;
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Messages'));
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'capmenu',
+      selectedIndex: CAPABILITIES.indexOf('Messages'),
+      selectedName: 'Messages',
+    });
+
+    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Agent Terminal'));
+    expect(sent[sent.length - 1]?.event).toMatchObject({
+      containerName: 'capmenu',
+      selectedIndex: CAPABILITIES.indexOf('Agent Terminal'),
+      selectedName: 'Agent Terminal',
+    });
+  });
+
+  it('prepareMacHandoffPage + openOnMac paints once and avoids a duplicate Loading rebuild', async () => {
+    const { menu, lists, listOptions, sent } = rig();
+    expect(await menu.prepareMacHandoffPage('Messages')).toBe(true);
+    expect(lists).toEqual([['Opening Messages on your Mac…']]);
+    expect(listOptions[0]).toEqual({
+      title: 'MESSAGES',
+      hint: '2x tap: back',
+      selectable: false,
+      nativeFirmwareList: true,
+    });
+    expect(menu.isOpen()).toBe(true);
+    expect(menu.isAwaitingResponse()).toBe(false);
+    expect(sent).toHaveLength(0);
+
+    await menu.openOnMac('Messages');
+    // Still only ONE showList paint before the Mac's real MESSAGES list arrives!
+    expect(lists).toHaveLength(1);
+    expect(menu.isAwaitingResponse()).toBe(true);
+    expect(sent).toHaveLength(1);
+    const requestId = latestRequestId(sent);
+    expect(sent[0]?.event).toMatchObject({
+      containerName: 'capmenu',
+      eventType: 0,
+      selectedIndex: CAPABILITIES.indexOf('Messages'),
+      selectedName: 'Messages',
+      requestId,
+    });
+
+    expect(await menu.presentList('MESSAGES', ['Adele · Hey'], requestId, true)).toBe(true);
+    expect(lists).toEqual([
+      ['Opening Messages on your Mac…'],
+      ['Adele · Hey'],
+    ]);
+  });
+
+  it('openOnMac ALWAYS sends capmenu and binds Agent Terminal even when showList returns false', async () => {
+    // Case 1: direct openOnMac when showList returns false
+    const direct = rig([false, true]);
+    direct.hud.showTerminal = vi.fn(async () => true);
+    await direct.menu.openOnMac('Agent Terminal');
+
+    expect(direct.sent).toHaveLength(1);
+    const directReqId = latestRequestId(direct.sent);
+    expect(direct.sent[0]?.event).toMatchObject({
+      containerName: 'capmenu',
+      eventType: 0,
+      selectedIndex: CAPABILITIES.indexOf('Agent Terminal'),
+      selectedName: 'Agent Terminal',
+      requestId: directReqId,
+    });
+    expect(direct.menu.isOpen()).toBe(true);
+    expect(direct.menu.isAwaitingResponse()).toBe(true);
+    expect(await direct.menu.presentTerminalOpening(
+      { state: 'ready', focus: 'Claude · ready', lanes: ['Claude · ready'], activity: 'Ready' },
+      { requestId: directReqId, selectionId: directReqId },
+      () => true,
+    )).toBe(true);
+
+    // Case 2: prepareMacHandoffPage returns false from showList, then openOnMac still sends capmenu with zero extra showList
+    const prepared = rig([false, true]);
+    expect(await prepared.menu.prepareMacHandoffPage('Messages')).toBe(false);
+    expect(prepared.lists).toHaveLength(1);
+    await prepared.menu.openOnMac('Messages');
+    expect(prepared.lists).toHaveLength(1);
+    expect(prepared.sent).toHaveLength(1);
+    const msgReqId = latestRequestId(prepared.sent);
+    expect(prepared.sent[0]?.event).toMatchObject({
+      containerName: 'capmenu',
+      selectedName: 'Messages',
+      requestId: msgReqId,
+    });
+    expect(await prepared.menu.presentList('MESSAGES', ['Sam · Ready'], msgReqId, true)).toBe(true);
+    expect(prepared.lists[1]).toEqual(['Sam · Ready']);
   });
 });

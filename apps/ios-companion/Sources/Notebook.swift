@@ -1,31 +1,65 @@
 import SwiftUI
 import PencilKit
+import PhotosUI
 import CryptoKit
 import UniformTypeIdentifiers
 
-/// JOAT Brain's notebook (the wearer, 2026-11-09, after TypeDraw): a page you
-/// type on and write or draw on with Apple Pencil or a finger, in one view.
-/// A saved page is a QuickNote (QuickNotes.savePage): the glasses list and
-/// read it, Claude summarizes it and offers its next steps as reminders, and
-/// it can be the prep notes the AI cues answer from. Claude reads the
-/// handwriting into text (ClaudeLink.readHandwriting); the ink itself is kept
-/// in Documents/pages/<id>.drawing. Text and images paste into the typing
-/// (a screenshot of a course slide, say: the wearer, 2026-11-11); Claude
-/// reads the images' words into the page's text too.
-///
-/// A page is US Letter paper (612 × 792 points a sheet), the same on every
-/// screen, zoomed to fill the screen's width; it never reflows (2026-11-11:
-/// a page begun on the Duo's outer screen showed a big gap on the inner one).
-/// The page being written is kept as a draft on disk as it changes, and a
-/// draft left behind is saved as Done would have (2026-11-11: the wearer's
-/// pages from the day before were gone).
-///
-/// The iPhone Duo takes the USB-C Apple Pencil from iOS 27.2: tilt, no
-/// pressure (MacRumors, 2026-09-09). PencilKit draws with either.
+/// JOAT Brain's Apple Pencil & keyboard notebook: fixed `612 × 792 pt` US Letter
+/// stationery sheets (`#FAF8F4`) with per-page vector templates (`Ruled`,
+/// `Dot Grid`, `Square Grid`, `Blank`), continuous per-`noteId` auto-save,
+/// quota-safe vision OCR through `OnPhoneAI` (Gemini 3.5 Flash Lite / Claude),
+/// and adaptive support for both compact outer screens and unfolded iPhone Duo
+/// `NavigationSplitView` detail panes.
 
-// MARK: - The ink on disk
+// MARK: - Paper Templates
+
+enum PaperTemplate: String, CaseIterable, Identifiable, Codable {
+    case ruled
+    case dotGrid
+    case squareGrid
+    case blank
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .ruled: return "Ruled"
+        case .dotGrid: return "Dot Grid"
+        case .squareGrid: return "Square Grid"
+        case .blank: return "Blank"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .ruled: return "Ruled"
+        case .dotGrid: return "Dots"
+        case .squareGrid: return "Grid"
+        case .blank: return "Blank"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .ruled: return "line.3.horizontal"
+        case .dotGrid: return "circle.grid.3x3"
+        case .squareGrid: return "squareshape.split.3x3"
+        case .blank: return "doc"
+        }
+    }
+
+    static func resolve(_ raw: String?, isLegacySaved: Bool = false) -> PaperTemplate {
+        if let raw, let found = PaperTemplate(rawValue: raw) { return found }
+        return isLegacySaved ? .blank : .ruled
+    }
+}
+
+// MARK: - The ink & images on disk
 
 enum PageStore {
+    /// Warm ivory stationery (`#FAF8F4`).
+    static let stationeryColor = UIColor(red: 0.980, green: 0.973, blue: 0.957, alpha: 1.0)
+
     static var directory: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("pages")
     }
@@ -53,12 +87,18 @@ enum PageStore {
 
     static func hasInk(_ id: String) -> Bool { FileManager.default.fileExists(atPath: url(id).path) }
 
-    // MARK: Pasted images (2026-11-11, the wearer: "I cannot paste anything
-    // on the writing and typing sections, even an image")
+    static func deleteFiles(_ id: String) {
+        let fm = FileManager.default
+        try? fm.removeItem(at: url(id))
+        try? fm.removeItem(at: richURL(id))
+        for file in (try? fm.contentsOfDirectory(atPath: directory.path)) ?? []
+        where file.hasPrefix("\(id)-") && file.hasSuffix(".jpg") {
+            try? fm.removeItem(at: directory.appendingPathComponent(file))
+        }
+    }
 
-    /// The typed text with its pasted images, in order, in `<id>.page.json`
-    /// beside the ink; each image is `<id>-<hash>.jpg`. Absent when the page
-    /// has no images: its typed text is then the note's `typed`.
+    // MARK: Pasted images (`<id>.page.json` + `<id>-<hash>.jpg`)
+
     private struct RichPage: Codable {
         struct Segment: Codable {
             var text: String?
@@ -69,9 +109,11 @@ enum PageStore {
 
     static func richURL(_ id: String) -> URL { directory.appendingPathComponent("\(id).page.json") }
 
-    /// The page's typing as the text view shows it.
     static var textAttributes: [NSAttributedString.Key: Any] {
-        [.font: UIFont.preferredFont(forTextStyle: .body), .foregroundColor: UIColor.label]
+        [
+            .font: UIFont.preferredFont(forTextStyle: .body),
+            .foregroundColor: UIColor(red: 0.11, green: 0.12, blue: 0.14, alpha: 1.0),
+        ]
     }
 
     static func imageNames(_ id: String) -> [String] {
@@ -92,7 +134,6 @@ enum PageStore {
         return out
     }
 
-    /// The typing with its images, for the editor; nil when it has none.
     static func loadRich(_ id: String) -> NSAttributedString? {
         guard let data = try? Data(contentsOf: richURL(id)),
               let page = try? JSONDecoder().decode(RichPage.self, from: data) else { return nil }
@@ -110,10 +151,6 @@ enum PageStore {
         return out
     }
 
-    /// Keeps the images and where they sit in the typing. With no images
-    /// left, only the typed text is kept. Images no longer on the page go.
-    /// `draft`: the page being written (`draftId`); it may point at the
-    /// note's own image files, which stay until Done.
     static func saveRich(_ text: NSAttributedString, _ id: String, draft: Bool = false) {
         let fm = FileManager.default
         try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -139,11 +176,11 @@ enum PageStore {
         where file.hasPrefix("\(id)-") && file.hasSuffix(".jpg") && !keep.contains(file) {
             try? fm.removeItem(at: directory.appendingPathComponent(file))
         }
-        if !draft { Log.add("notebook: page \(id.prefix(6)) has \(names.count) pasted image\(names.count == 1 ? "" : "s")") }
+        if !draft, !names.isEmpty {
+            Log.add("notebook: page \(id.prefix(6)) has \(names.count) pasted image\(names.count == 1 ? "" : "s")")
+        }
     }
 
-    /// An image's file: the page's own, else a new JPEG. A draft keeps
-    /// pointing at the note's file, or writes `draft-<hash>.jpg`.
     private static func store(_ a: NSTextAttachment, _ id: String, draft: Bool) -> String? {
         let page = a as? PageImage
         func existing(_ name: String?) -> String? {
@@ -164,12 +201,9 @@ enum PageStore {
         return name
     }
 
-    // MARK: The page being written
+    // MARK: Legacy single-draft migration support
 
-    /// What the editor shows, on disk as it changes: `draft.json`, with its
-    /// ink (`draft.drawing`) and images (`draft.page.json`, `draft-*.jpg`).
     struct Draft: Codable {
-        /// The note it changes; nil: a new page.
         var noteId: String?
         var typed: String
         var inkChanged: Bool
@@ -179,7 +213,6 @@ enum PageStore {
     static let draftId = "draft"
     private static var draftURL: URL { directory.appendingPathComponent("\(draftId).json") }
 
-    /// False: it wasn't written (a full disk, say).
     @discardableResult
     static func writeDraft(noteId: String?, typed: String, rich: NSAttributedString, drawing: PKDrawing, inkChanged: Bool) -> Bool {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -213,14 +246,11 @@ enum PageStore {
             || provider.registeredTypeIdentifiers.contains { UTType($0)?.conforms(to: .image) == true }
     }
 
-    /// What a pasted item holds.
     enum Pasted {
         case image(UIImage)
         case text(String)
     }
 
-    /// A pasted item, loading at once: an image (as an image, else from its
-    /// image file types in turn), else its words. Nil: nothing usable.
     static func load(_ provider: NSItemProvider, completion: @escaping (Pasted?) -> Void) {
         let imageTypes = provider.registeredTypeIdentifiers.filter { UTType($0)?.conforms(to: .image) == true }
         func fromData(_ types: ArraySlice<String>) {
@@ -246,15 +276,11 @@ enum PageStore {
         }
     }
 
-    /// A pasted image for Claude: JPEG, its long edge at most 1568 px,
-    /// past which Claude downscales it (vision docs).
+    /// Vision OCR input JPEG: long edge capped at 1568 px.
     static func jpegForClaude(_ image: UIImage) -> Data? {
         scaled(image, longEdge: 1568).jpegData(compressionQuality: 0.85)
     }
 
-    /// The image with its long edge at most `longEdge` pixels, at scale 1
-    /// (a pasted screenshot is kept at 2048: sharp enough to read, small
-    /// enough to keep many).
     static func scaled(_ image: UIImage, longEdge: CGFloat) -> UIImage {
         let pixels = CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
         let factor = min(1, longEdge / max(pixels.width, pixels.height, 1))
@@ -270,27 +296,31 @@ enum PageStore {
         }
     }
 
-    /// The ink as the page shows it, for the note's screen.
-    static func preview(_ drawing: PKDrawing, dark: Bool) -> UIImage? {
+    /// Crisp ink thumbnail on warm `#FAF8F4` stationery for Notes cards and detail previews.
+    static func preview(_ drawing: PKDrawing) -> UIImage? {
         guard !drawing.strokes.isEmpty else { return nil }
         let rect = drawing.bounds.insetBy(dx: -12, dy: -12)
-        var image: UIImage?
-        UITraitCollection(userInterfaceStyle: dark ? .dark : .light).performAsCurrent {
-            image = drawing.image(from: rect, scale: 2)
+        var ink: UIImage?
+        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+            ink = drawing.image(from: rect, scale: 2)
         }
-        return image
+        guard let ink else { return nil }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 2
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: rect.size, format: format).image { context in
+            stationeryColor.setFill()
+            context.fill(CGRect(origin: .zero, size: rect.size))
+            ink.draw(at: .zero)
+        }
     }
 
-    /// The page for Claude to read, as PNGs from top to bottom: dark ink on
-    /// white, cut between lines of writing so no line is split, each about a
-    /// screen tall. Claude downscales an image past its long-edge limit
-    /// (vision docs), so one tall image would make the writing too small.
+    /// High-contrast dark ink on pure white PNG tiles for vision OCR (`OnPhoneAI.readHandwriting`).
     static func pngTiles(_ drawing: PKDrawing) -> [Data] {
         let strokes = drawing.strokes.map(\.renderBounds).filter { !$0.isNull && !$0.isEmpty }
         guard !strokes.isEmpty else { return [] }
         let width = max(drawing.bounds.maxX + 16, 320)
         let tileHeight = width * 1.3
-        // Lines of writing: strokes whose heights overlap.
         var bands: [(top: CGFloat, bottom: CGFloat)] = []
         for r in strokes.sorted(by: { $0.minY < $1.minY }) {
             if let last = bands.last, r.minY <= last.bottom + 4 {
@@ -327,24 +357,14 @@ enum PageStore {
     }
 }
 
-/// A pasted image in the typing (PageView sizes it to the page). It
-/// remembers its file once saved, so a page saved again keeps it rather
-/// than writing it anew.
 final class PageImage: NSTextAttachment {
     var fileName: String?
-    /// Its file in the draft of the page being written.
     var draftName: String?
 }
 
-/// The page's typing. It also takes pasted images: a text view on its own
-/// pastes only the words. The edit menu's Paste (and ⌘V) comes to paste(_:);
-/// the keyboard's "Photo, Paste from …" suggestion (iOS 27) and drops come
-/// as item providers, through the paste delegate (UITextPasteDelegate.h).
 final class PastingTextView: UITextView, UITextPasteDelegate {
     var onPasteImages: (([UIImage]) -> Void)?
 
-    /// Takes images as well as words (UIKit's own: words only, while
-    /// allowsEditingTextAttributes is off).
     func acceptImages() {
         let accepted = UIPasteConfiguration(forAccepting: UIImage.self)
         accepted.addTypeIdentifiers(forAccepting: NSString.self)
@@ -355,9 +375,6 @@ final class PastingTextView: UITextView, UITextPasteDelegate {
     func textPasteConfigurationSupporting(_ textPasteConfigurationSupporting: any UITextPasteConfigurationSupporting,
                                           transform item: any UITextPasteItem) {
         let provider = item.itemProvider
-        #if DEBUG
-        Log.add("debug: paste item \(provider.registeredTypeIdentifiers)")
-        #endif
         guard PageStore.hasImage(provider) else { item.setDefaultResult(); return }
         PageStore.load(provider) { pasted in
             if case .image(let image) = pasted {
@@ -370,27 +387,15 @@ final class PastingTextView: UITextView, UITextPasteDelegate {
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-        // hasImages doesn't read the pasteboard, so no "Allow Paste" alert.
         if action == #selector(paste(_:)), UIPasteboard.general.hasImages { return true }
         return super.canPerformAction(action, withSender: sender)
     }
 
-    #if DEBUG
-    override func target(forAction action: Selector, withSender sender: Any?) -> Any? {
-        let name = NSStringFromSelector(action)
-        if name.localizedCaseInsensitiveContains("paste") { Log.add("debug: text view action \(name)") }
-        return super.target(forAction: action, withSender: sender)
-    }
-    #endif
-
     override func paste(_ sender: Any?) {
-        // Paste chosen in the edit menu (or ⌘V): reading it asks nothing.
         let board = UIPasteboard.general
         if board.hasImages, let images = board.images, !images.isEmpty {
             onPasteImages?(images)
         } else if board.hasStrings, let words = board.string, let range = selectedTextRange {
-            // Words as typed: UIKit's own paste, through the item providers
-            // this view now takes, put a blank line before them (Simulator).
             replace(range, withText: words)
         } else {
             super.paste(sender)
@@ -398,20 +403,28 @@ final class PastingTextView: UITextView, UITextPasteDelegate {
     }
 }
 
-// MARK: - Saving a page
+// MARK: - Saving & Quota-Safe Vision OCR
 
 @MainActor
 enum Notebook {
-    private static let claude = ClaudeLink()
-    /// Pages Claude is reading now (the note's screen says so).
+    static let readingChangedNotification = Notification.Name("joat.notebook.readingChanged")
+    static let autoSaveDebounceSeconds: TimeInterval = 1.2
+    static let ocrIdleSeconds: TimeInterval = 25.0
+
+    /// Pages whose handwriting/images are currently being read by `OnPhoneAI`.
     static private(set) var reading: Set<String> = []
 
-    /// Done on the page: the words, the pasted images and the ink are kept
-    /// at once; the page is read again when the ink or the images changed.
-    /// Nil when nothing was saved. `rich`: the typing with its images.
     @discardableResult
-    static func save(noteId: String?, typed rawTyped: String, rich: NSAttributedString?, drawing: PKDrawing,
-                     inkChanged: Bool, quickNotes: QuickNotes) -> String? {
+    static func save(
+        noteId: String?,
+        typed rawTyped: String,
+        rich: NSAttributedString?,
+        drawing: PKDrawing,
+        inkChanged: Bool,
+        paperTemplate: String? = nil,
+        triggerOCR: Bool = true,
+        quickNotes: QuickNotes
+    ) -> String? {
         let typed = rawTyped.trimmingCharacters(in: .whitespacesAndNewlines)
         let ink = !drawing.strokes.isEmpty
         let attachments = rich.map(PageStore.attachments) ?? []
@@ -419,18 +432,25 @@ enum Notebook {
         if noteId == nil, typed.isEmpty, !ink, !pasted { return nil }
         let before = noteId.map(PageStore.imageNames) ?? []
         let imagesChanged = attachments.map { ($0 as? PageImage)?.fileName } != before.map { Optional($0) }
-        let id = quickNotes.savePage(id: noteId, typed: typed, inkChanged: inkChanged || imagesChanged)
-        if inkChanged || noteId == nil { PageStore.save(drawing, id) }
+        let id = quickNotes.savePage(
+            id: noteId,
+            typed: typed,
+            inkChanged: inkChanged || imagesChanged,
+            paperTemplate: paperTemplate
+        )
+        if inkChanged || noteId == nil || !ink { PageStore.save(drawing, id) }
         if let rich, pasted || !before.isEmpty { PageStore.saveRich(rich, id) }
-        if (inkChanged || imagesChanged) && (ink || pasted) {
-            read(id, drawing, quickNotes: quickNotes)
-        } else {
-            quickNotes.pageReady(id)
+        if triggerOCR {
+            if (inkChanged || imagesChanged) && (ink || pasted) {
+                read(id, drawing, quickNotes: quickNotes)
+            } else {
+                quickNotes.pageReady(id)
+            }
         }
         return id
     }
 
-    /// The page being written, from its draft, saved as a note.
+    /// Migrates any legacy `draft.json` once into a concrete per-`noteId` page, then clears it.
     @discardableResult
     static func saveDraft(quickNotes: QuickNotes) -> String? {
         guard let d = PageStore.readDraft() else { return nil }
@@ -441,128 +461,159 @@ enum Notebook {
         return id
     }
 
-    /// A draft left behind (JOAT Brain stopped with the page open, or the
-    /// editor closed without Done or Cancel) is saved as Done would have.
-    /// `except`: the page about to be opened, which carries on from its own.
+    /// Safe compatible entry point: migrates any legacy `draft.json` once if present, else no-op.
     static func recoverDraft(quickNotes: QuickNotes, except: String?? = .none) {
         guard let d = PageStore.readDraft() else { return }
         if let except, d.draft.noteId == except { return }
-        Log.add("notebook: saved a page left open (\(d.draft.noteId.map { "page " + $0.prefix(6) } ?? "a new page"), "
-            + "last changed \(d.draft.updated.formatted(date: .abbreviated, time: .shortened)))")
+        Log.add("notebook: migrated legacy page draft (\(d.draft.noteId.map { "page " + $0.prefix(6) } ?? "new page"))")
         saveDraft(quickNotes: quickNotes)
     }
 
-    /// The Notes tab: a draft whose page is no longer open (its editor went
-    /// away without Done or Cancel) is saved now.
     static func recoverIfClosed(quickNotes: QuickNotes) {
         if PageView.open == nil { recoverDraft(quickNotes: quickNotes) }
     }
 
-    /// Claude reads the handwriting, and the pasted images, into the
-    /// page's text.
-    static func read(_ id: String, _ drawing: PKDrawing, quickNotes: QuickNotes) {
+    /// Routes handwriting + pasted-image OCR through `OnPhoneAI.shared.readHandwriting`
+    /// so Gemini 3.5 Flash Lite vision and Claude vision both work out of the box.
+    static func read(
+        _ id: String,
+        _ drawing: PKDrawing,
+        quickNotes: QuickNotes,
+        completion: ((Result<String, MacLink.Failure>) -> Void)? = nil
+    ) {
         let tiles = PageStore.pngTiles(drawing)
         let pasted = PageStore.images(id).prefix(10).compactMap(PageStore.jpegForClaude)
-        guard !(tiles.isEmpty && pasted.isEmpty), !reading.contains(id) else { return }
-        guard claude.configured else {
-            Log.add("notebook: handwriting not read: no Claude key on this phone")
+        guard !(tiles.isEmpty && pasted.isEmpty) else {
             quickNotes.pageReady(id)
+            completion?(.failure(.empty))
+            return
+        }
+        guard !reading.contains(id) else { return }
+        guard OnPhoneAI.shared.visionConfigured else {
+            Log.add("notebook: handwriting not read: no Gemini or Claude key on this phone")
+            quickNotes.pageReady(id)
+            completion?(.failure(.notConfigured))
             return
         }
         reading.insert(id)
+        NotificationCenter.default.post(name: readingChangedNotification, object: id)
         Log.add("notebook: reading page \(id.prefix(6)), \(tiles.count) ink image\(tiles.count == 1 ? "" : "s"), "
             + "\(pasted.count) pasted")
-        claude.readHandwriting(tiles, pasted: Array(pasted)) { result in
-            reading.remove(id)
-            switch result {
-            case .success(let text): quickNotes.pageRead(id, handwriting: text)
-            case .failure(let f):
-                Log.add("notebook: handwriting not read: \(MacLink.explain(f))")
-                quickNotes.pageReady(id)
+        OnPhoneAI.shared.readHandwriting(tiles, pasted: Array(pasted)) { result in
+            Task { @MainActor in
+                reading.remove(id)
+                NotificationCenter.default.post(name: readingChangedNotification, object: id)
+                switch result {
+                case .success(let text):
+                    quickNotes.pageRead(id, handwriting: text)
+                case .failure(let f):
+                    Log.add("notebook: handwriting not read: \(MacLink.explain(f))")
+                    quickNotes.pageReady(id)
+                }
+                completion?(result)
             }
         }
     }
 }
 
-// MARK: - The page
+// MARK: - The Page Canvas (`UIView`)
 
-/// Typing and ink on one page. Write: the Pencil (or a finger, unless iOS is
-/// set to draw with Apple Pencil only) draws, and two fingers scroll and
-/// pinch to zoom. Type: the keyboard (or Scribble with the Pencil) types on
-/// the same page, under the ink; one finger scrolls, two fingers zoom.
-///
-/// The canvas zooms itself, so the ink stays sharp (a parent scroll view's
-/// zoom blurs PencilKit ink: Apple forums 698317). The typed text has its own
-/// scroll view under the canvas; the two follow each other's scroll and zoom.
-/// Write moves the canvas, Type moves the text.
-///
-/// The page is US Letter wide, as in GoodNotes and Notability (Letter is
-/// GoodNotes' default size in the US), and as many sheets tall as the
-/// writing needs. It opens zoomed to fill the screen's width, as Apple's
-/// PencilKit sample fits its fixed-width canvas (zoom = view width ÷ canvas
-/// width); pinch in, and it scrolls both ways. Folding, unfolding or turning
-/// the phone zooms the same page; nothing moves on it.
 final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPickerObserver {
-    /// One sheet: US Letter, 8.5 × 11 in at 72 points an inch.
+    /// Fixed US Letter sheet: 8.5 × 11 in at 72 pt/in (`612 × 792 pt`).
     static let sheet = CGSize(width: 612, height: 792)
-    /// The page open now: a draft with no page open was left behind.
     static weak var open: PageView?
+    private static let pages = NSHashTable<PageView>.weakObjects()
+    private static let pickers = NSHashTable<PKToolPicker>.weakObjects()
+    static let launched: Date = {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else { return Date() }
+        let t = info.kp_proc.p_starttime
+        return Date(timeIntervalSince1970: Double(t.tv_sec) + Double(t.tv_usec) / 1_000_000)
+    }()
+
     private let textScroll = UIScrollView()
     let textView = PastingTextView()
     let canvas = PKCanvasView()
     private let sheetLines = SheetLines()
     private let toolPicker = PKToolPicker()
     private lazy var textScrollDelegate = TextScrollDelegate(page: self)
-    /// The note this page changes; nil: a new page.
-    let noteId: String?
-    /// Letter, or wider for a page written before pages had a width, whose
-    /// ink reaches further (it was as wide as the screen it was written on).
+
+    /// Concrete per-page identifier used for immediate continuous persistence.
+    let pageId: String
+    /// Legacy optional accessor (`pageId` is always non-empty).
+    var noteId: String? { pageId }
     let pageWidth: CGFloat
-    /// The zoom that fills the screen's width now.
+
     private var fitScale: CGFloat = 0
-    /// Changed since the draft was last written.
-    private var dirty = false
-    /// Changed since it opened (or carries on from a draft).
+    private var saveDirty = false
+    private var ocrDirty = false
+    private var typedSummaryDirty = false
     private var edited = false
-    private var inkChanged = false
-    private var draftTimer: Timer?
-    /// The typing with its pasted images.
+    private var settledClose = false
+    private var saveTimer: Timer?
+    private var ocrIdleTimer: Timer?
+    private var undoObservers: [NSObjectProtocol] = []
+
+    var shouldCleanupEmptyOnClose = false
+    var userRenamedTitle = false
+    var onUndoStateChange: ((_ canUndo: Bool, _ canRedo: Bool) -> Void)?
+
+    var template: PaperTemplate {
+        get { sheetLines.template }
+        set {
+            guard sheetLines.template != newValue else { return }
+            sheetLines.template = newValue
+        }
+    }
+
     var rich: NSAttributedString { textView.attributedText ?? NSAttributedString() }
     var writing = true {
-        didSet { if writing != oldValue { applyMode() } }
+        didSet {
+            if writing != oldValue {
+                applyMode()
+                notifyUndoState()
+            }
+        }
     }
-    /// The saved ink, given to the canvas once it has its size: Edit page
-    /// showed a blank page (and new strokes didn't show) when the canvas got
-    /// its drawing while still zero-sized (Simulator UI test, 2026-11-10).
+
     private var pendingDrawing: PKDrawing?
     private var settingDrawing = false
-    /// The page at zoom 1, in points.
     private var pageSize = CGSize.zero
-    /// One scroll view is following the other.
     private var following = false
-    /// The pen, pencil or marker in use before the eraser: an eraser stroke
-    /// goes back to it when the Pencil lifts (the wearer's ask, 2026-11-10).
     private var lastInk: PKToolPickerItem?
 
-    /// `rich`: the typing with its pasted images, if it has any. `inkChanged`
-    /// and `unsaved`: it carries on from a draft, or starts with content
-    /// that isn't saved yet.
-    init(noteId: String?, typed: String, rich: NSAttributedString?, drawing: PKDrawing,
-         inkChanged: Bool = false, unsaved: Bool = false) {
-        self.noteId = noteId
+    init(
+        noteId: String?,
+        typed: String,
+        rich: NSAttributedString?,
+        drawing: PKDrawing,
+        template: PaperTemplate = .ruled,
+        inkChanged: Bool = false,
+        unsaved: Bool = false
+    ) {
+        let resolvedId = noteId ?? UUID().uuidString.lowercased()
+        self.pageId = resolvedId
         let inkEdge = drawing.strokes.isEmpty ? 0 : drawing.bounds.maxX
         pageWidth = max(Self.sheet.width, ceil(inkEdge + 24))
-        self.inkChanged = inkChanged
+        self.ocrDirty = inkChanged
         super.init(frame: .zero)
         Self.open = self
-        // Around the paper (seen only past its end).
-        backgroundColor = .secondarySystemBackground
+
+        // Stationery always renders in light appearance so ink colors and swatch
+        // colors stay faithful even when iOS is in Dark Mode.
+        overrideUserInterfaceStyle = .light
+        toolPicker.colorUserInterfaceStyle = .light
+        backgroundColor = UIColor(red: 0.92, green: 0.91, blue: 0.89, alpha: 1.0)
+
         for scroller in [textScroll, canvas] as [UIScrollView] {
             scroller.alwaysBounceVertical = true
             scroller.isDirectionalLockEnabled = true
         }
         textScroll.keyboardDismissMode = .interactive
         textScroll.delegate = textScrollDelegate
+
         textView.font = .preferredFont(forTextStyle: .body)
         textView.adjustsFontForContentSizeCategory = true
         if let rich { textView.attributedText = rich } else { textView.text = typed }
@@ -573,95 +624,262 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         textView.backgroundColor = .clear
         textView.textContainerInset = UIEdgeInsets(top: 20, left: 16, bottom: 20, right: 16)
         textView.delegate = self
+
+        sheetLines.template = template
         textView.insertSubview(sheetLines, at: 0)
+
         pendingDrawing = drawing.strokes.isEmpty ? nil : drawing
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
         canvas.drawingPolicy = .default
         canvas.delegate = self
+
         addSubview(textScroll)
         textScroll.addSubview(textView)
         addSubview(canvas)
+
         toolPicker.addObserver(canvas)
         toolPicker.addObserver(self)
         toolPicker.setVisible(true, forFirstResponder: canvas)
-        // A page starts with a pen, pencil or marker: the tool picker keeps
-        // its last tool, and one left on the eraser had no pen to go back to.
+
         if !(toolPicker.selectedToolItem is PKToolPickerInkingItem),
            let pen = toolPicker.toolItems.first(where: { $0 is PKToolPickerInkingItem }) {
-            Log.add("notebook: started with \(toolPicker.selectedToolItem.identifier); \(pen.identifier) instead")
             toolPicker.selectedToolItem = pen
         }
         if toolPicker.selectedToolItem is PKToolPickerInkingItem { lastInk = toolPicker.selectedToolItem }
-        // The draft is written at once when the app leaves the screen.
-        for name in [UIApplication.willResignActiveNotification, UIApplication.didEnterBackgroundNotification,
-                     UIScene.didDisconnectNotification] {
-            NotificationCenter.default.addObserver(self, selector: #selector(writeDraftNow), name: name, object: nil)
+
+        Self.pages.add(self)
+        Self.pickers.add(toolPicker)
+        let up = Int(Date().timeIntervalSince(Self.launched))
+        Log.add("notebook: page \(resolvedId.prefix(6)) opened (\(template.rawValue)); \(Self.pages.allObjects.count) page views alive; "
+            + "up \(up / 3600) h \(up / 60 % 60) min")
+
+        for name in [
+            UIApplication.willResignActiveNotification,
+            UIApplication.didEnterBackgroundNotification,
+            UIScene.didDisconnectNotification,
+        ] {
+            NotificationCenter.default.addObserver(self, selector: #selector(handleAppBackgrounding), name: name, object: nil)
         }
-        if unsaved { markChanged() }
+
+        for undoName in [
+            Notification.Name.NSUndoManagerDidCloseUndoGroup,
+            Notification.Name.NSUndoManagerDidUndoChange,
+            Notification.Name.NSUndoManagerDidRedoChange,
+        ] {
+            let token = NotificationCenter.default.addObserver(forName: undoName, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.notifyUndoState() }
+            }
+            undoObservers.append(token)
+        }
+
+        if unsaved {
+            markChanged(ink: !drawing.strokes.isEmpty)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        // First responders need a window: the tool picker follows the canvas.
-        if window != nil { DispatchQueue.main.async { [weak self] in self?.applyMode() } } else { writeDraft() }
+        if window != nil {
+            settledClose = false
+            DispatchQueue.main.async { [weak self] in
+                self?.applyMode()
+                self?.notifyUndoState()
+            }
+        } else {
+            flushAutoSave(triggerOCR: false)
+        }
     }
 
-    // MARK: The draft
+    // MARK: - Undo / Redo
 
-    /// The words alone (an image is one U+FFFC character in the text).
+    var activeUndoManager: UndoManager? {
+        writing ? canvas.undoManager : textView.undoManager
+    }
+
+    var canUndo: Bool { activeUndoManager?.canUndo ?? false }
+    var canRedo: Bool { activeUndoManager?.canRedo ?? false }
+
+    func performUndo() {
+        guard let um = activeUndoManager, um.canUndo else { return }
+        um.undo()
+        markChanged(ink: writing)
+        setNeedsLayout()
+        notifyUndoState()
+    }
+
+    func performRedo() {
+        guard let um = activeUndoManager, um.canRedo else { return }
+        um.redo()
+        markChanged(ink: writing)
+        setNeedsLayout()
+        notifyUndoState()
+    }
+
+    func notifyUndoState() {
+        let u = canUndo
+        let r = canRedo
+        onUndoStateChange?(u, r)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.onUndoStateChange?(self.canUndo, self.canRedo)
+        }
+    }
+
+    // MARK: - Continuous Per-Page Auto-Save & 25s Idle OCR
+
     var typedText: String { textView.text.replacingOccurrences(of: "\u{FFFC}", with: "") }
 
-    /// A change: the draft is written a moment later.
-    private func markChanged(ink: Bool = false) {
-        if ink { inkChanged = true }
-        dirty = true
+    var currentDrawing: PKDrawing { pendingDrawing ?? canvas.drawing }
+
+    var hasAnyContent: Bool {
+        !typedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !currentDrawing.strokes.isEmpty
+            || !PageStore.attachments(rich).isEmpty
+    }
+
+    private func markChanged(ink: Bool = false, imageChanged: Bool = false) {
+        settledClose = false
+        saveDirty = true
         edited = true
-        draftTimer?.invalidate()
-        draftTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.writeDraft() }
+        if ink || imageChanged {
+            ocrDirty = true
+        } else {
+            typedSummaryDirty = true
+        }
+
+        saveTimer?.invalidate()
+        saveTimer = Timer.scheduledTimer(withTimeInterval: Notebook.autoSaveDebounceSeconds, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                _ = self?.flushAutoSave(triggerOCR: false)
+            }
+        }
+
+        ocrIdleTimer?.invalidate()
+        ocrIdleTimer = Timer.scheduledTimer(withTimeInterval: Notebook.ocrIdleSeconds, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleIdleOCRTimeout()
+            }
         }
     }
 
-    @objc private func writeDraftNow() { writeDraft() }
-
-    /// The page as it is now, on disk (Done saves it from there).
-    func writeDraft() {
-        draftTimer?.invalidate()
-        draftTimer = nil
-        guard dirty else { return }
-        // Not written (a full disk): tried again at the next change.
-        dirty = !PageStore.writeDraft(noteId: noteId, typed: typedText, rich: rich, drawing: pendingDrawing ?? canvas.drawing,
-                                      inkChanged: inkChanged)
+    @objc private func handleAppBackgrounding() {
+        flushAutoSave(triggerOCR: false)
     }
 
-    /// Done: the page as it is now, saved as a note (from the page itself,
-    /// so a draft that couldn't be written doesn't matter); the draft goes.
-    func save(quickNotes: QuickNotes) -> String? {
-        draftTimer?.invalidate()
-        draftTimer = nil
-        defer {
-            dirty = false
+    private func handleIdleOCRTimeout() {
+        ocrIdleTimer?.invalidate()
+        ocrIdleTimer = nil
+        flushAutoSave(triggerOCR: true)
+    }
+
+    @discardableResult
+    func flushAutoSave(quickNotes explicitQuickNotes: QuickNotes? = nil, triggerOCR: Bool = false) -> String? {
+        saveTimer?.invalidate()
+        saveTimer = nil
+        if triggerOCR {
+            ocrIdleTimer?.invalidate()
+            ocrIdleTimer = nil
+        }
+
+        let drawingNow = currentDrawing
+        let richNow = rich
+        let cleanTyped = typedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let attachments = PageStore.attachments(richNow)
+        let qn = explicitQuickNotes ?? JOATRuntime.shared.brain?.quickNotes
+
+        if saveDirty {
+            PageStore.save(drawingNow, pageId)
+            PageStore.saveRich(richNow, pageId, draft: false)
+            if let qn {
+                qn.savePage(
+                    id: pageId,
+                    typed: cleanTyped,
+                    inkChanged: ocrDirty,
+                    paperTemplate: template.rawValue
+                )
+            } else {
+                PageStore.writeDraft(
+                    noteId: pageId,
+                    typed: cleanTyped,
+                    rich: richNow,
+                    drawing: drawingNow,
+                    inkChanged: ocrDirty
+                )
+            }
+            saveDirty = false
+        }
+
+        if triggerOCR, let qn {
+            if ocrDirty {
+                ocrDirty = false
+                typedSummaryDirty = false
+                if !drawingNow.strokes.isEmpty || !attachments.isEmpty {
+                    Notebook.read(pageId, drawingNow, quickNotes: qn)
+                } else if !cleanTyped.isEmpty {
+                    qn.pageReady(pageId)
+                }
+            } else if typedSummaryDirty {
+                typedSummaryDirty = false
+                if !cleanTyped.isEmpty {
+                    qn.pageReady(pageId)
+                }
+            }
+        }
+
+        return pageId
+    }
+
+    /// Settles the page on exit (`Done`, `onDisappear`, or switching pages in `NavigationSplitView`):
+    /// flushes pending edits synchronously, triggers OCR if ink/images changed, or removes an
+    /// untouched brand-new blank page.
+    @discardableResult
+    func closeAndSettle(quickNotes explicitQuickNotes: QuickNotes? = nil) -> String? {
+        guard !settledClose else { return hasAnyContent ? pageId : nil }
+        settledClose = true
+        saveTimer?.invalidate()
+        saveTimer = nil
+        ocrIdleTimer?.invalidate()
+        ocrIdleTimer = nil
+
+        let qn = explicitQuickNotes ?? JOATRuntime.shared.brain?.quickNotes
+        if !hasAnyContent && shouldCleanupEmptyOnClose && !userRenamedTitle {
+            saveDirty = false
+            ocrDirty = false
+            typedSummaryDirty = false
             PageStore.clearDraft()
+            qn?.deleteEmptyPageIfUntouched(pageId)
+            return nil
         }
-        guard edited else { return noteId }
-        return Notebook.save(noteId: noteId, typed: typedText, rich: rich, drawing: pendingDrawing ?? canvas.drawing,
-                             inkChanged: inkChanged, quickNotes: quickNotes)
+
+        PageStore.clearDraft()
+        return flushAutoSave(quickNotes: qn, triggerOCR: true)
     }
 
-    /// Cancel: the page stays as it was saved.
+    /// Backwards-compatible explicit save entry point.
+    func save(quickNotes: QuickNotes) -> String? {
+        closeAndSettle(quickNotes: quickNotes)
+    }
+
+    func writeDraft() {
+        flushAutoSave(triggerOCR: false)
+    }
+
     func discardDraft() {
-        draftTimer?.invalidate()
-        draftTimer = nil
-        dirty = false
+        saveTimer?.invalidate()
+        saveTimer = nil
+        ocrIdleTimer?.invalidate()
+        ocrIdleTimer = nil
+        saveDirty = false
+        ocrDirty = false
+        typedSummaryDirty = false
         PageStore.clearDraft()
     }
 
     private func applyMode() {
         guard window != nil else { return }
-        // Type: the canvas only shows the ink; touches reach the text.
         canvas.isUserInteractionEnabled = writing
         let fingerDraws = !UIPencilInteraction.prefersPencilOnlyDrawing
         if writing {
@@ -672,7 +890,7 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
             textView.becomeFirstResponder()
         }
         Log.add("notebook: \(writing ? "write" : "type") mode (canvas first: \(canvas.isFirstResponder), "
-            + "Pencil only: \(!fingerDraws), tools shown: \(toolPicker.isVisible), tool \(toolPicker.selectedToolItem.identifier))")
+            + "Pencil only: \(!fingerDraws), tools shown: \(toolPicker.isVisible))")
     }
 
     override func layoutSubviews() {
@@ -682,9 +900,8 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         guard bounds.width > 0 else { return }
         fitImages()
         let textHeight = textView.sizeThatFits(CGSize(width: pageWidth, height: .greatestFiniteMagnitude)).height
-        let drawing = pendingDrawing ?? canvas.drawing
+        let drawing = currentDrawing
         let ink = drawing.strokes.isEmpty ? 0 : drawing.bounds.maxY
-        // Another sheet once the writing nears the end of the last one.
         let sheets = max(1, Int(ceil((max(textHeight, ink) + 160) / Self.sheet.height)))
         let size = CGSize(width: pageWidth, height: CGFloat(sheets) * Self.sheet.height)
         let fit = bounds.width / pageWidth
@@ -693,7 +910,6 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         pageSize = size
         following = true
         let offset = refit ? zoomToFit(fit) : nil
-        // Both in zoomed points, as Apple's PencilKit sample sets the canvas.
         let zoom = canvas.zoomScale
         let zoomed = CGSize(width: size.width * zoom, height: size.height * zoom)
         textView.bounds = CGRect(origin: .zero, size: size)
@@ -716,17 +932,11 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
             settingDrawing = true
             canvas.drawing = pending
             settingDrawing = false
+            notifyUndoState()
         }
         if refit { sharpenText() }
-        #if DEBUG
-        Log.add("debug: page layout: view \(Int(bounds.width)), sheets \(sheets), text frame \(textView.frame.integral), "
-            + "zoom text \(String(format: "%.3f", textScroll.zoomScale)) ink \(String(format: "%.3f", canvas.zoomScale))")
-        #endif
     }
 
-    /// The zoom for this screen's width: as far in as before, relative to
-    /// filling the width (first: filling it). Returns where to scroll so the
-    /// same part of the page stays in view.
     private func zoomToFit(_ fit: CGFloat) -> CGPoint {
         let relative = fitScale > 0 ? canvas.zoomScale / fitScale : 1
         let before = canvas.zoomScale
@@ -744,9 +954,6 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         return CGPoint(x: offset.x * ratio, y: offset.y * ratio)
     }
 
-    /// Each pasted image as wide as the page, or its own width if narrower
-    /// (the image's own size showed a 1280-point slide cut off, Simulator,
-    /// 2026-11-11).
     private func fitImages() {
         let inset = textView.textContainerInset
         let room = max(40, pageWidth - inset.left - inset.right - 2 * textView.textContainer.lineFragmentPadding)
@@ -762,13 +969,11 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
             }
         }
         guard !resized.isEmpty else { return }
-        // Set again, so the text lays out with the new sizes.
         storage.beginEditing()
         for (a, range) in resized { storage.addAttribute(.attachment, value: a, range: range) }
         storage.endEditing()
     }
 
-    /// The other scroll view takes the one that moved: zoom, then position.
     fileprivate func follow(_ moved: UIScrollView) {
         guard !following else { return }
         following = true
@@ -783,34 +988,69 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         following = false
     }
 
-    /// Text drawn again at the zoom it's shown at, so it isn't blurred.
     fileprivate func sharpenText() {
-        // At most 2.5× sharper: each line (and pasted image) is drawn at this
-        // scale, and a bigger one costs memory the phone may not have.
         let scale = traitCollection.displayScale * min(textScroll.zoomScale, 2.5)
         func apply(_ view: UIView) {
-            // Not the sheets: a backing store as big as the zoomed page.
             if view is SheetLines { return }
             view.contentScaleFactor = scale
             view.setNeedsDisplay()
             view.subviews.forEach(apply)
         }
         apply(textView)
-        Log.add("notebook: zoom \(String(format: "%.1f", canvas.zoomScale))x")
     }
 
     deinit {
-        #if DEBUG
-        Log.add("notebook: page view closed")
-        #endif
-        // Closed without Done or Cancel (both leave no draft): saved now.
+        for token in undoObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        saveTimer?.invalidate()
+        ocrIdleTimer?.invalidate()
+        let pid = pageId
+        let wasSaveDirty = saveDirty
+        let wasOcrDirty = ocrDirty
+        let wasTypedDirty = typedSummaryDirty
+        let wasSettled = settledClose
+        let cleanupEmpty = shouldCleanupEmptyOnClose && !userRenamedTitle
+        var capturedTyped = ""
+        var capturedDrawing: PKDrawing?
+        var capturedRich: NSAttributedString?
+        var capturedTemplate = PaperTemplate.ruled.rawValue
+        var capturedHasContent = true
+        if Thread.isMainThread, !wasSettled {
+            capturedTyped = typedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let d = pendingDrawing ?? canvas.drawing
+            let r = textView.attributedText ?? NSAttributedString()
+            capturedDrawing = d
+            capturedRich = r
+            capturedTemplate = sheetLines.template.rawValue
+            capturedHasContent = !capturedTyped.isEmpty || !d.strokes.isEmpty || !PageStore.attachments(r).isEmpty
+        }
+        Log.add("notebook: page view \(pid.prefix(6)) closed")
+        guard !wasSettled else { return }
         DispatchQueue.main.async {
-            if let quickNotes = JOATRuntime.shared.brain?.quickNotes { Notebook.recoverIfClosed(quickNotes: quickNotes) }
+            guard let qn = JOATRuntime.shared.brain?.quickNotes else { return }
+            if !capturedHasContent && cleanupEmpty {
+                qn.deleteEmptyPageIfUntouched(pid)
+                return
+            }
+            if wasSaveDirty, let d = capturedDrawing, let r = capturedRich {
+                PageStore.save(d, pid)
+                PageStore.saveRich(r, pid, draft: false)
+                qn.savePage(id: pid, typed: capturedTyped, inkChanged: wasOcrDirty, paperTemplate: capturedTemplate)
+            }
+            if wasOcrDirty, let d = capturedDrawing {
+                if !d.strokes.isEmpty || !PageStore.imageNames(pid).isEmpty {
+                    Notebook.read(pid, d, quickNotes: qn)
+                } else if !capturedTyped.isEmpty {
+                    qn.pageReady(pid)
+                }
+            } else if wasTypedDirty && !capturedTyped.isEmpty {
+                qn.pageReady(pid)
+            }
         }
     }
 
     #if DEBUG
-    /// The UI test picks the eraser (JOAT_UITEST=1, Darwin "com.joat.debug.eraser").
     func debugSelectEraser() {
         guard let eraser = toolPicker.toolItems.first(where: { $0 is PKToolPickerEraserItem }) else { return }
         toolPicker.selectedToolItem = eraser
@@ -819,23 +1059,12 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
     #endif
 
     func textViewDidChange(_ textView: UITextView) {
-        changed()
-    }
-
-    #if DEBUG
-    func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
-        if text.count > 1 || text.contains("\u{FFFC}") { Log.add("debug: text change at \(range.location), \(text.count) chars") }
-        return true
-    }
-    #endif
-
-    private func changed() {
-        markChanged()
+        let hasAttachmentChange = textView.attributedText.map { !PageStore.attachments($0).isEmpty } ?? false
+        markChanged(ink: false, imageChanged: hasAttachmentChange)
         setNeedsLayout()
+        notifyUndoState()
     }
 
-    /// Pasted images go into the typing, each on its own line: at the cursor
-    /// in Type, after the last line in Write.
     func insert(images: [UIImage], text: String = "") {
         guard !images.isEmpty || !text.isEmpty else { return }
         let page = NSMutableAttributedString(attributedString: rich)
@@ -855,10 +1084,11 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         fitImages()
         textView.typingAttributes = attributes
         textView.selectedRange = NSRange(location: range.location + piece.length, length: 0)
-        changed()
-        Log.add("notebook: pasted \(images.count) image\(images.count == 1 ? "" : "s")"
-            + (text.isEmpty ? "" : " and \(text.count) characters") + (writing ? " (end of page)" : ""))
-        // Show what was pasted once the page has made room for it.
+        markChanged(ink: false, imageChanged: !images.isEmpty)
+        setNeedsLayout()
+        notifyUndoState()
+        Log.add("notebook: inserted \(images.count) image\(images.count == 1 ? "" : "s")"
+            + (text.isEmpty ? "" : " and \(text.count) characters"))
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.layoutIfNeeded()
@@ -869,8 +1099,6 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         }
     }
 
-    /// The toolbar's Paste button (Write or Type): images and words, in
-    /// order. Each item starts loading at once, inside the button's callback.
     func pasteItems(_ providers: [NSItemProvider]) {
         final class Found: @unchecked Sendable {
             let lock = NSLock()
@@ -900,13 +1128,8 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
                     }
                 }
                 if images.isEmpty, words.isEmpty {
-                    // The button's items wouldn't load (the Simulator, under a UI
-                    // test: "Cannot load representation of type public.png"):
-                    // the pasteboard itself, which may ask "Allow Paste?".
                     let board = UIPasteboard.general
                     if board.hasImages { images = board.images ?? [] } else if board.hasStrings, let text = board.string { words = [text] }
-                    Log.add("notebook: Paste button's items didn't load (\(providers.map(\.registeredTypeIdentifiers))); "
-                        + "read the pasteboard: \(images.count) image\(images.count == 1 ? "" : "s"), \(words.count) text")
                 }
                 self?.insert(images: images, text: words.joined(separator: "\n"))
             }
@@ -919,7 +1142,6 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         textScroll.scrollRectToVisible(caret.insetBy(dx: 0, dy: -24), animated: true)
     }
 
-    // The canvas (Write) moves the text.
     func scrollViewDidScroll(_ scrollView: UIScrollView) { follow(scrollView) }
     func scrollViewDidZoom(_ scrollView: UIScrollView) { follow(scrollView) }
     func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
@@ -930,11 +1152,11 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         guard !settingDrawing else { return }
         markChanged(ink: true)
         setNeedsLayout()
+        notifyUndoState()
     }
 
     func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
-        // The Pencil (or finger) lifted after an eraser stroke: back to the
-        // pen, pencil or marker used before the eraser.
+        notifyUndoState()
         guard toolPicker.selectedToolItem is PKToolPickerEraserItem, let ink = lastInk else { return }
         toolPicker.selectedToolItem = ink
         Log.add("notebook: eraser lifted, back to \(ink.identifier)")
@@ -954,8 +1176,6 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
     }
 }
 
-/// The text scroll view's delegate (Type moves the canvas). Separate from
-/// the canvas's, so the canvas keeps zooming its own content.
 private final class TextScrollDelegate: NSObject, UIScrollViewDelegate {
     weak var page: PageView?
     init(page: PageView) { self.page = page }
@@ -967,24 +1187,35 @@ private final class TextScrollDelegate: NSObject, UIScrollViewDelegate {
     }
 }
 
-/// The paper under the typing: white sheets, a dashed line where one ends
-/// and the next begins, and their numbers. Layers and labels only: a view
-/// that draws itself would need a backing store as big as the page.
+// MARK: - Warm Stationery & Crisp Vector Paper Templates (`SheetLines`)
+
 final class SheetLines: UIView {
     var sheets = 1 {
         didSet { if sheets != oldValue { setNeedsLayout() } }
     }
+    var template: PaperTemplate = .ruled {
+        didSet { if template != oldValue { setNeedsLayout() } }
+    }
+
+    private let patternLayer = CAShapeLayer()
+    private let marginLayer = CAShapeLayer()
     private let breaks = CAShapeLayer()
     private var numbers: [UILabel] = []
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        backgroundColor = .systemBackground
+        backgroundColor = PageStore.stationeryColor
         isUserInteractionEnabled = false
         isAccessibilityElement = false
+
+        patternLayer.fillColor = nil
+        marginLayer.fillColor = nil
         breaks.fillColor = nil
         breaks.lineWidth = 1
         breaks.lineDashPattern = [6, 4]
+
+        layer.addSublayer(patternLayer)
+        layer.addSublayer(marginLayer)
         layer.addSublayer(breaks)
     }
 
@@ -992,19 +1223,106 @@ final class SheetLines: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let height = PageView.sheet.height
-        let path = UIBezierPath()
-        for k in stride(from: 1, to: sheets, by: 1) {
-            path.move(to: CGPoint(x: 0, y: CGFloat(k) * height))
-            path.addLine(to: CGPoint(x: bounds.width, y: CGFloat(k) * height))
-        }
+        let width = bounds.width
+        let sheetHeight = PageView.sheet.height
+        guard width > 0, sheets >= 1 else { return }
+
+        patternLayer.frame = bounds
+        marginLayer.frame = bounds
         breaks.frame = bounds
-        breaks.path = path.cgPath
-        breaks.strokeColor = UIColor.separator.resolvedColor(with: traitCollection).cgColor
+
+        // 1. Vector stationery pattern (`CAShapeLayer` only — zero bitmap backing store)
+        switch template {
+        case .ruled:
+            let rulesPath = UIBezierPath()
+            let ruleSpacing: CGFloat = 28
+            let topMargin: CGFloat = 56
+            let bottomMargin: CGFloat = 36
+            for s in 0..<sheets {
+                let baseY = CGFloat(s) * sheetHeight
+                var y = topMargin
+                while y <= sheetHeight - bottomMargin {
+                    rulesPath.move(to: CGPoint(x: 0, y: baseY + y))
+                    rulesPath.addLine(to: CGPoint(x: width, y: baseY + y))
+                    y += ruleSpacing
+                }
+            }
+            patternLayer.path = rulesPath.cgPath
+            patternLayer.fillColor = nil
+            patternLayer.strokeColor = UIColor(red: 0.66, green: 0.73, blue: 0.82, alpha: 0.52).cgColor
+            patternLayer.lineWidth = 0.75
+
+            let marginPath = UIBezierPath()
+            marginPath.move(to: CGPoint(x: 52, y: 0))
+            marginPath.addLine(to: CGPoint(x: 52, y: bounds.height))
+            marginLayer.path = marginPath.cgPath
+            marginLayer.strokeColor = UIColor(red: 0.84, green: 0.58, blue: 0.58, alpha: 0.38).cgColor
+            marginLayer.lineWidth = 0.85
+
+        case .dotGrid:
+            let dotsPath = CGMutablePath()
+            let step: CGFloat = 24
+            let dotSize: CGFloat = 2.0
+            let half = dotSize / 2
+            for s in 0..<sheets {
+                let baseY = CGFloat(s) * sheetHeight
+                var y: CGFloat = step
+                while y <= sheetHeight - 16 {
+                    var x: CGFloat = step
+                    while x <= width - 16 {
+                        dotsPath.addEllipse(in: CGRect(x: x - half, y: baseY + y - half, width: dotSize, height: dotSize))
+                        x += step
+                    }
+                    y += step
+                }
+            }
+            patternLayer.path = dotsPath
+            patternLayer.strokeColor = nil
+            patternLayer.fillColor = UIColor(red: 0.56, green: 0.61, blue: 0.68, alpha: 0.52).cgColor
+            marginLayer.path = nil
+
+        case .squareGrid:
+            let gridPath = UIBezierPath()
+            let step: CGFloat = 24
+            var x: CGFloat = step
+            while x < width {
+                gridPath.move(to: CGPoint(x: x, y: 0))
+                gridPath.addLine(to: CGPoint(x: x, y: bounds.height))
+                x += step
+            }
+            for s in 0..<sheets {
+                let baseY = CGFloat(s) * sheetHeight
+                var y: CGFloat = step
+                while y < sheetHeight {
+                    gridPath.move(to: CGPoint(x: 0, y: baseY + y))
+                    gridPath.addLine(to: CGPoint(x: width, y: baseY + y))
+                    y += step
+                }
+            }
+            patternLayer.path = gridPath.cgPath
+            patternLayer.fillColor = nil
+            patternLayer.strokeColor = UIColor(red: 0.68, green: 0.74, blue: 0.80, alpha: 0.42).cgColor
+            patternLayer.lineWidth = 0.6
+            marginLayer.path = nil
+
+        case .blank:
+            patternLayer.path = nil
+            marginLayer.path = nil
+        }
+
+        // 2. Dashed US Letter page-break dividers & page numbers
+        let breakPath = UIBezierPath()
+        for k in stride(from: 1, to: sheets, by: 1) {
+            breakPath.move(to: CGPoint(x: 0, y: CGFloat(k) * sheetHeight))
+            breakPath.addLine(to: CGPoint(x: width, y: CGFloat(k) * sheetHeight))
+        }
+        breaks.path = breakPath.cgPath
+        breaks.strokeColor = UIColor(red: 0.60, green: 0.58, blue: 0.54, alpha: 0.45).cgColor
+
         while numbers.count < sheets {
             let label = UILabel()
             label.font = .preferredFont(forTextStyle: .caption2)
-            label.textColor = .tertiaryLabel
+            label.textColor = UIColor(red: 0.48, green: 0.46, blue: 0.42, alpha: 0.85)
             addSubview(label)
             numbers.append(label)
         }
@@ -1012,45 +1330,61 @@ final class SheetLines: UIView {
             label.isHidden = sheets < 2 || i >= sheets
             label.text = "\(i + 1)"
             label.sizeToFit()
-            label.frame.origin = CGPoint(x: bounds.width - label.frame.width - 16, y: CGFloat(i + 1) * height - label.frame.height - 8)
+            label.frame.origin = CGPoint(
+                x: width - label.frame.width - 16,
+                y: CGFloat(i + 1) * sheetHeight - label.frame.height - 8
+            )
         }
-    }
-
-    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
-        super.traitCollectionDidChange(previous)
-        setNeedsLayout()
     }
 }
 
-/// The editor's way to the page it shows (Paste, the draft at Done).
+// MARK: - SwiftUI Canvas Bridge (`PageCanvas`)
+
 final class PageHandle {
     weak var view: PageView?
 }
 
 struct PageCanvas: UIViewRepresentable {
-    let noteId: String?
+    let pageId: String
     let typed: String
     let drawing: PKDrawing
-    /// The page starts with content that isn't saved (the simulator check).
+    let template: PaperTemplate
     let unsaved: Bool
+    let shouldCleanupEmptyOnClose: Bool
+    let userRenamedTitle: Bool
     let handle: PageHandle
     var writing: Bool
+    let onUndoChange: (Bool, Bool) -> Void
 
     func makeUIView(context: Context) -> PageView {
-        // A draft of another page is saved first, so this one can't write over it.
         if let quickNotes = JOATRuntime.shared.brain?.quickNotes {
-            Notebook.recoverDraft(quickNotes: quickNotes, except: .some(noteId))
+            Notebook.recoverDraft(quickNotes: quickNotes, except: .some(pageId))
         }
         let view: PageView
-        if let d = PageStore.readDraft(), d.draft.noteId == noteId {
-            // This page's own draft: carry on from it.
-            Log.add("notebook: page carries on from its draft (\(d.draft.typed.count) typed chars)")
-            view = PageView(noteId: noteId, typed: d.draft.typed, rich: d.rich, drawing: d.drawing,
-                            inkChanged: d.draft.inkChanged, unsaved: true)
+        if let d = PageStore.readDraft(), d.draft.noteId == pageId {
+            view = PageView(
+                noteId: pageId,
+                typed: d.draft.typed,
+                rich: d.rich,
+                drawing: d.drawing,
+                template: template,
+                inkChanged: d.draft.inkChanged,
+                unsaved: true
+            )
+            PageStore.clearDraft()
         } else {
-            view = PageView(noteId: noteId, typed: typed, rich: noteId.flatMap(PageStore.loadRich), drawing: drawing,
-                            unsaved: unsaved)
+            view = PageView(
+                noteId: pageId,
+                typed: typed,
+                rich: PageStore.loadRich(pageId),
+                drawing: drawing,
+                template: template,
+                unsaved: unsaved
+            )
         }
+        view.shouldCleanupEmptyOnClose = shouldCleanupEmptyOnClose
+        view.userRenamedTitle = userRenamedTitle
+        view.onUndoStateChange = onUndoChange
         handle.view = view
         view.writing = writing
         return view
@@ -1058,108 +1392,665 @@ struct PageCanvas: UIViewRepresentable {
 
     func updateUIView(_ view: PageView, context: Context) {
         view.writing = writing
+        view.template = template
+        view.shouldCleanupEmptyOnClose = shouldCleanupEmptyOnClose
+        view.userRenamedTitle = userRenamedTitle
+        view.onUndoStateChange = onUndoChange
+    }
+
+    static func dismantleUIView(_ uiView: PageView, coordinator: ()) {
+        MainActor.assumeIsolated {
+            _ = uiView.closeAndSettle()
+        }
     }
 }
 
-/// A new page, or a saved one to change. Done keeps it; Cancel leaves the
-/// page as it was. What's written is kept on disk as it changes (the
-/// draft), so a page closed any other way isn't lost.
+// MARK: - Apple Pencil & iPhone Duo Page Editor (`PageEditorView`)
+
 struct PageEditorView: View {
-    let noteId: String?
-    let onDone: (String?) -> Void
-    private let typed: String
-    private let drawing: PKDrawing
-    private let unsaved: Bool
+    private let initialNoteId: String?
+    private let embedded: Bool
+    private let onDone: (String?) -> Void
+    private let initialTyped: String
+    private let initialDrawing: PKDrawing
+    private let initialUnsaved: Bool
+    private let wasInitiallyEmpty: Bool
+
+    @State private var activeNoteId: String
+    @State private var pageTitle: String
+    @State private var titleDraft: String
+    @State private var userRenamedTitle = false
+    @State private var editingTitlePopover = false
     @State private var writing = true
+    @State private var template: PaperTemplate
+    @State private var canUndo = false
+    @State private var canRedo = false
     @State private var handle = PageHandle()
-    /// The simulator check narrows the page's view, as a narrower screen would.
+    @State private var pickedPhotos: [PhotosPickerItem] = []
+    @State private var showingInspector = false
+    @State private var isReadingHandwriting = false
     @State private var debugWidth: CGFloat?
     @Environment(\.dismiss) private var dismiss
 
-    init(noteId: String?, typed: String, drawing: PKDrawing, onDone: @escaping (String?) -> Void) {
-        self.noteId = noteId
+    init(
+        noteId: String?,
+        typed: String = "",
+        drawing: PKDrawing = PKDrawing(),
+        embedded: Bool = false,
+        onDone: @escaping (String?) -> Void = { _ in }
+    ) {
+        self.initialNoteId = noteId
+        self.embedded = embedded
         self.onDone = onDone
+
+        let existingNote = noteId.flatMap { id in
+            JOATRuntime.shared.brain?.quickNotes.savedNotes.first(where: { $0.id == id })
+        }
+
+        let resolvedTyped: String
+        let resolvedDrawing: PKDrawing
+        let resolvedUnsaved: Bool
+
         #if DEBUG
         let start = noteId == nil ? Notebook.debugStart : nil
         Notebook.debugStart = nil
-        self.typed = start?.typed ?? typed
-        self.drawing = start?.drawing ?? drawing
-        unsaved = start != nil
+        if let start {
+            resolvedTyped = start.typed
+            resolvedDrawing = start.drawing
+            resolvedUnsaved = true
+        } else {
+            resolvedTyped = !typed.isEmpty ? typed : (existingNote?.typed ?? "")
+            resolvedDrawing = !drawing.strokes.isEmpty ? drawing : (noteId.map(PageStore.load) ?? PKDrawing())
+            resolvedUnsaved = false
+        }
         #else
-        self.typed = typed
-        self.drawing = drawing
-        unsaved = false
+        resolvedTyped = !typed.isEmpty ? typed : (existingNote?.typed ?? "")
+        resolvedDrawing = !drawing.strokes.isEmpty ? drawing : (noteId.map(PageStore.load) ?? PKDrawing())
+        resolvedUnsaved = false
         #endif
+
+        self.initialTyped = resolvedTyped
+        self.initialDrawing = resolvedDrawing
+        self.initialUnsaved = resolvedUnsaved
+
+        let mintedId = noteId ?? UUID().uuidString.lowercased()
+        _activeNoteId = State(initialValue: mintedId)
+
+        let defaultTitle = existingNote.flatMap { $0.title.isEmpty ? nil : $0.title }
+            ?? QuickNotes.pageClockTitle()
+        _pageTitle = State(initialValue: defaultTitle)
+        _titleDraft = State(initialValue: defaultTitle)
+
+        let resolvedTemplate = PaperTemplate.resolve(
+            existingNote?.paperTemplate,
+            isLegacySaved: existingNote != nil && existingNote?.paperTemplate == nil
+        )
+        _template = State(initialValue: resolvedTemplate)
+
+        let hasExistingImages = noteId.map { !PageStore.imageNames($0).isEmpty } ?? false
+        let hasExistingParagraphs = !(existingNote?.paragraphs ?? []).isEmpty
+        self.wasInitiallyEmpty = resolvedTyped.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && resolvedDrawing.strokes.isEmpty
+            && !hasExistingImages
+            && !hasExistingParagraphs
+    }
+
+    var body: some View {
+        Group {
+            if embedded {
+                editorSurface
+            } else {
+                NavigationStack {
+                    editorSurface
+                }
+            }
+        }
+        .sheet(isPresented: $showingInspector) {
+            PageInspectorSheet(noteId: activeNoteId, handle: handle)
+        }
+        .onChange(of: pickedPhotos) { _, newItems in
+            guard !newItems.isEmpty else { return }
+            loadPickedPhotos(newItems)
+        }
+        .onAppear {
+            isReadingHandwriting = Notebook.reading.contains(activeNoteId)
+            if initialNoteId == nil, let qn = JOATRuntime.shared.brain?.quickNotes {
+                qn.ensureBlankPage(id: activeNoteId, paperTemplate: template.rawValue)
+            }
+            refreshTitleFromStore()
+        }
+        .onDisappear {
+            _ = handle.view?.closeAndSettle()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notebook.readingChangedNotification)) { _ in
+            isReadingHandwriting = Notebook.reading.contains(activeNoteId)
+            refreshTitleFromStore()
+        }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: Notebook.debugDone)) { _ in closeModal() }
+        .onReceive(NotificationCenter.default.publisher(for: Notebook.debugWidth)) { note in
+            debugWidth = note.object as? CGFloat
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notebook.debugDrop)) { _ in
+            if !embedded { dismiss() }
+        }
+        #endif
+    }
+
+    private var editorSurface: some View {
+        VStack(spacing: 0) {
+            stationeryControlStrip
+            Divider()
+            PageCanvas(
+                pageId: activeNoteId,
+                typed: initialTyped,
+                drawing: initialDrawing,
+                template: template,
+                unsaved: initialUnsaved,
+                shouldCleanupEmptyOnClose: wasInitiallyEmpty,
+                userRenamedTitle: userRenamedTitle,
+                handle: handle,
+                writing: writing,
+                onUndoChange: { u, r in
+                    if canUndo != u { canUndo = u }
+                    if canRedo != r { canRedo = r }
+                }
+            )
+            .frame(maxWidth: debugWidth ?? .infinity, maxHeight: .infinity)
+            .ignoresSafeArea(.container, edges: .bottom)
+        }
+        .navigationTitle(pageTitle)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if !embedded {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") { closeModal() }
+                        .fontWeight(.semibold)
+                }
+            }
+            ToolbarItem(placement: .principal) {
+                Button {
+                    titleDraft = pageTitle
+                    editingTitlePopover = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(pageTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Image(systemName: "pencil")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.quaternary.opacity(0.5), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Rename page \(pageTitle)")
+                .popover(isPresented: $editingTitlePopover) {
+                    renamePopoverContent
+                        .presentationCompactAdaptation(.popover)
+                }
+            }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button {
+                    handle.view?.performUndo()
+                } label: {
+                    Label("Undo", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(!canUndo)
+
+                Button {
+                    handle.view?.performRedo()
+                } label: {
+                    Label("Redo", systemImage: "arrow.uturn.forward")
+                }
+                .disabled(!canRedo)
+
+                Button {
+                    _ = handle.view?.flushAutoSave(triggerOCR: false)
+                    showingInspector = true
+                } label: {
+                    Label("AI Insights & Prep", systemImage: isReadingHandwriting ? "sparkles.rectangle.stack" : "sparkles")
+                        .symbolEffect(.pulse, isActive: isReadingHandwriting)
+                }
+            }
+        }
+    }
+
+    private var stationeryControlStrip: some View {
+        HStack(spacing: 10) {
+            Picker("Mode", selection: $writing) {
+                Text("Write").tag(true)
+                Text("Type").tag(false)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 138)
+
+            Spacer(minLength: 4)
+
+            Menu {
+                Section("Paper Template") {
+                    ForEach(PaperTemplate.allCases) { option in
+                        Button {
+                            applyTemplate(option)
+                        } label: {
+                            Label(
+                                option.title,
+                                systemImage: template == option ? "checkmark" : option.icon
+                            )
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: template.icon)
+                    Text(template.shortTitle)
+                        .font(.subheadline.weight(.medium))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.quaternary.opacity(0.6), in: Capsule())
+            }
+            .accessibilityLabel("Paper template: \(template.title)")
+
+            PhotosPicker(
+                selection: $pickedPhotos,
+                maxSelectionCount: 6,
+                matching: .images
+            ) {
+                Image(systemName: "photo.badge.plus")
+                    .font(.body.weight(.medium))
+                    .padding(7)
+                    .background(.quaternary.opacity(0.6), in: Circle())
+            }
+            .accessibilityLabel("Insert photo")
+
+            PasteButton(supportedContentTypes: [.image, .plainText]) { providers in
+                handle.view?.pasteItems(providers)
+            }
+            .labelStyle(.iconOnly)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(.ultraThinMaterial)
+    }
+
+    private var renamePopoverContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Page Title")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            TextField("Page title", text: $titleDraft)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 230)
+                .submitLabel(.done)
+                .onSubmit { commitRename() }
+            HStack {
+                Button("Cancel") {
+                    editingTitlePopover = false
+                }
+                .buttonStyle(.bordered)
+                Spacer()
+                Button("Save") {
+                    commitRename()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(titleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(14)
+    }
+
+    private func commitRename() {
+        let cleaned = titleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else {
+            editingTitlePopover = false
+            return
+        }
+        let capped = String(cleaned.prefix(120))
+        pageTitle = capped
+        userRenamedTitle = true
+        if let qn = JOATRuntime.shared.brain?.quickNotes {
+            qn.ensureBlankPage(id: activeNoteId, paperTemplate: template.rawValue)
+            qn.renameNote(activeNoteId, to: capped)
+        }
+        editingTitlePopover = false
+    }
+
+    private func applyTemplate(_ newTemplate: PaperTemplate) {
+        template = newTemplate
+        handle.view?.template = newTemplate
+        if let qn = JOATRuntime.shared.brain?.quickNotes {
+            qn.ensureBlankPage(id: activeNoteId, paperTemplate: newTemplate.rawValue)
+            qn.setPaperTemplate(activeNoteId, template: newTemplate.rawValue)
+        }
+    }
+
+    private func refreshTitleFromStore() {
+        guard !userRenamedTitle,
+              let stored = JOATRuntime.shared.brain?.quickNotes.savedNotes.first(where: { $0.id == activeNoteId }),
+              !stored.title.isEmpty,
+              stored.title != pageTitle else { return }
+        pageTitle = stored.title
+    }
+
+    private func loadPickedPhotos(_ items: [PhotosPickerItem]) {
+        Task { @MainActor in
+            var loaded: [UIImage] = []
+            for item in items {
+                if let data = try? await item.loadTransferable(type: Data.self),
+                   let image = UIImage(data: data) {
+                    loaded.append(image)
+                }
+            }
+            pickedPhotos.removeAll()
+            if !loaded.isEmpty {
+                handle.view?.insert(images: loaded)
+            }
+        }
+    }
+
+    private func closeModal() {
+        let settledId: String?
+        if let qn = JOATRuntime.shared.brain?.quickNotes {
+            settledId = handle.view?.closeAndSettle(quickNotes: qn)
+        } else {
+            _ = handle.view?.flushAutoSave(triggerOCR: false)
+            settledId = activeNoteId
+        }
+        onDone(settledId)
+        dismiss()
+    }
+}
+
+// MARK: - Sparkles AI Insights & Prep Inspector (`PageInspectorSheet`)
+
+private struct InspectorOfferItem: Identifiable {
+    let id = UUID()
+    let offer: QuickNotes.ReminderOffer
+}
+
+struct PageInspectorSheet: View {
+    let noteId: String
+    let handle: PageHandle
+
+    @ObservedObject private var notesModel = JOATRuntime.shared.notes
+    @ObservedObject private var ai = OnPhoneAI.shared
+    @State private var isReading = false
+    @State private var isSummarizing = false
+    @State private var isFindingReminders = false
+    @State private var statusMessage = ""
+    @State private var reminderOfferItem: InspectorOfferItem?
+    @State private var choosingPrep = false
+    @Environment(\.dismiss) private var dismiss
+
+    private var quickNotes: QuickNotes? { JOATRuntime.shared.brain?.quickNotes }
+    private var note: QuickNotes.VoiceNote? {
+        notesModel.voice.first(where: { $0.id == noteId })
+            ?? quickNotes?.savedNotes.first(where: { $0.id == noteId })
+    }
+    private var currentDrawing: PKDrawing {
+        handle.view?.currentDrawing ?? PageStore.load(noteId)
+    }
+    private var hasInk: Bool { !currentDrawing.strokes.isEmpty || PageStore.hasInk(noteId) }
+    private var hasImages: Bool {
+        if let view = handle.view {
+            return !PageStore.attachments(view.rich).isEmpty
+        }
+        return !PageStore.imageNames(noteId).isEmpty
     }
 
     var body: some View {
         NavigationStack {
-            PageCanvas(noteId: noteId, typed: typed, drawing: drawing, unsaved: unsaved, handle: handle, writing: writing)
-                .frame(maxWidth: debugWidth ?? .infinity)
-                .ignoresSafeArea(.container, edges: .bottom)
-                .navigationTitle(noteId == nil ? "New page" : "Page")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { cancel() } }
-                    ToolbarItem(placement: .principal) {
-                        Picker("Mode", selection: $writing) {
-                            Text("Write").tag(true)
-                            Text("Type").tag(false)
+            List {
+                handwritingSection
+                overviewSection
+                if let pts = note?.keyPoints, !pts.isEmpty {
+                    Section("Key Points") {
+                        ForEach(pts, id: \.self) { point in
+                            Label(point, systemImage: "circle.fill")
+                                .font(.callout)
+                                .labelStyle(.titleOnly)
                         }
-                        .pickerStyle(.segmented)
-                        .frame(width: 160)
-                    }
-                    ToolbarItem(placement: .confirmationAction) { Button("Done") { save() } }
-                    ToolbarItem(placement: .primaryAction) {
-                        // A screenshot of a slide, say: Write or Type, no
-                        // "Allow Paste" alert (it's the system's button).
-                        PasteButton(supportedContentTypes: [.image, .plainText]) { providers in
-                            handle.view?.pasteItems(providers)
-                        }
-                        .labelStyle(.iconOnly)
                     }
                 }
+                remindersSection
+                prepSection
+                if !statusMessage.isEmpty {
+                    Section {
+                        Text(statusMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("Page Insights & Prep")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .onAppear {
+                isReading = Notebook.reading.contains(noteId)
+                notesModel.reload()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: Notebook.readingChangedNotification)) { _ in
+                isReading = Notebook.reading.contains(noteId)
+                notesModel.reload()
+            }
+            .sheet(item: $reminderOfferItem) { item in
+                ReminderReviewSheet(offer: item.offer) { receipt in
+                    statusMessage = receipt
+                }
+            }
+            .sheet(isPresented: $choosingPrep) {
+                let label = (note?.title.isEmpty == false) ? "“\(note!.title)”" : "this page"
+                PrepTargetPicker(what: label) { target in
+                    addPageToPrep(target: target)
+                }
+            }
         }
-        #if DEBUG
-        .onReceive(NotificationCenter.default.publisher(for: Notebook.debugDone)) { _ in save() }
-        .onReceive(NotificationCenter.default.publisher(for: Notebook.debugWidth)) { note in
-            debugWidth = note.object as? CGFloat
-        }
-        // The editor going away without Done or Cancel.
-        .onReceive(NotificationCenter.default.publisher(for: Notebook.debugDrop)) { _ in dismiss() }
-        #endif
     }
 
-    private func save() {
-        if let quickNotes = JOATRuntime.shared.brain?.quickNotes {
-            onDone(handle.view.map { $0.save(quickNotes: quickNotes) } ?? Notebook.saveDraft(quickNotes: quickNotes))
-        } else {
-            handle.view?.writeDraft()
-            Log.add("notebook: Done with JOAT Brain not running: the page stays a draft, saved when it starts")
+    @ViewBuilder
+    private var handwritingSection: some View {
+        Section("Handwriting & Slide OCR") {
+            if isReading {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Reading handwriting & images…")
+                        .foregroundStyle(.secondary)
+                }
+            } else if let hw = note?.handwriting, !hw.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Extracted text (\(hw.count) chars)", systemImage: "checkmark.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.green)
+                    Text(hw)
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                        .lineLimit(8)
+                }
+            } else if note?.handwriting == "" {
+                Text("Last scan found no handwritten or slide words.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else if hasInk || hasImages {
+                Text("Handwriting or pasted images are ready to read. Auto-OCR runs after 25s of idle or when closing the page.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Write with Apple Pencil or insert a slide photo to extract searchable text.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !ai.visionConfigured {
+                Text("Add a Gemini or Claude API key in Home to enable vision OCR.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            Button {
+                triggerManualOCR()
+            } label: {
+                Label(
+                    (note?.handwriting != nil) ? "Re-read handwriting now" : "Read handwriting now",
+                    systemImage: "text.viewfinder"
+                )
+            }
+            .disabled(isReading || (!hasInk && !hasImages) || !ai.visionConfigured)
         }
-        dismiss()
     }
 
-    private func cancel() {
-        if let view = handle.view { view.discardDraft() } else { PageStore.clearDraft() }
-        dismiss()
+    @ViewBuilder
+    private var overviewSection: some View {
+        Section("AI Overview") {
+            if let summary = note?.summary, !summary.isEmpty {
+                Text(summary)
+                    .font(.callout)
+            }
+            Button {
+                triggerSummary()
+            } label: {
+                if isSummarizing {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Summarizing page…")
+                    }
+                } else {
+                    Label(
+                        (note?.summary?.isEmpty == false) ? "Re-summarize page" : "Summarize page",
+                        systemImage: "sparkles"
+                    )
+                }
+            }
+            .disabled(isSummarizing)
+        }
+    }
+
+    @ViewBuilder
+    private var remindersSection: some View {
+        Section("Next Steps & Reminders") {
+            if let todos = note?.todos, !todos.isEmpty {
+                ForEach(todos, id: \.self) { todo in
+                    Text("□ \(todo)")
+                        .font(.callout)
+                }
+            }
+            Button {
+                findReminders()
+            } label: {
+                if isFindingReminders {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Finding reminders…")
+                    }
+                } else {
+                    Label("Find reminders in this page", systemImage: "checklist")
+                }
+            }
+            .disabled(isFindingReminders)
+        }
+    }
+
+    @ViewBuilder
+    private var prepSection: some View {
+        Section("Conversation Prep") {
+            Button {
+                _ = handle.view?.flushAutoSave(triggerOCR: false)
+                notesModel.reload()
+                let text = (note?.paragraphs ?? []).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else {
+                    statusMessage = hasInk || hasImages
+                        ? "Tap “Read handwriting now” first so your handwritten notes can be added to Prep."
+                        : "Type or write something on this page before adding it to Prep."
+                    return
+                }
+                choosingPrep = true
+            } label: {
+                Label("Add to Prep…", systemImage: "doc.text.magnifyingglass")
+            }
+        }
+    }
+
+    private func triggerManualOCR() {
+        guard let qn = quickNotes else { return }
+        _ = handle.view?.flushAutoSave(quickNotes: qn, triggerOCR: false)
+        let drawing = currentDrawing
+        statusMessage = ""
+        isReading = true
+        Notebook.read(noteId, drawing, quickNotes: qn) { result in
+            isReading = false
+            notesModel.reload()
+            switch result {
+            case .success(let text):
+                let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                statusMessage = clean.uppercased() == "NONE" || clean.isEmpty
+                    ? "No handwritten words were found on this page."
+                    : "Handwriting read (\(clean.count) chars) and added to page transcript."
+            case .failure(let failure):
+                statusMessage = MacLink.explain(failure)
+            }
+        }
+    }
+
+    private func triggerSummary() {
+        guard let qn = quickNotes else { return }
+        _ = handle.view?.flushAutoSave(quickNotes: qn, triggerOCR: false)
+        isSummarizing = true
+        statusMessage = ""
+        qn.summarize(noteId) { receipt in
+            isSummarizing = false
+            statusMessage = receipt
+            notesModel.reload()
+        }
+    }
+
+    private func findReminders() {
+        guard let qn = quickNotes else { return }
+        _ = handle.view?.flushAutoSave(quickNotes: qn, triggerOCR: false)
+        isFindingReminders = true
+        statusMessage = ""
+        qn.proposeReminders(noteId) { offer, why in
+            isFindingReminders = false
+            if let offer {
+                reminderOfferItem = InspectorOfferItem(offer: offer)
+            } else {
+                statusMessage = why
+            }
+        }
+    }
+
+    private func addPageToPrep(target: String?) {
+        guard let n = note else { return }
+        let text = n.paragraphs.joined(separator: "\n")
+        guard !text.isEmpty else { return }
+        let prep = JOATRuntime.shared.prep
+        prep.addText(
+            text,
+            title: n.title.isEmpty ? "Page" : n.title,
+            source: "Notebook page",
+            to: target
+        )
+        let targetName = target.flatMap { id in prep.notes.first(where: { $0.id == id })?.title } ?? "a new prep note"
+        statusMessage = "Added to \(targetName)."
     }
 }
 
 #if DEBUG
-// MARK: - Simulator check (JOAT_DEBUG_PAGE=1; the Simulator has no Pencil
-// and, headless, no screenshots: the app draws its own window to files)
+// MARK: - Simulator Debug Hooks (`JOAT_DEBUG_PAGE=1`, `JOAT_UITEST=1`)
 
 extension Notebook {
     static let debugOpen = Notification.Name("joat.debug.page.open")
     static let debugDone = Notification.Name("joat.debug.page.done")
     static let debugWidth = Notification.Name("joat.debug.page.width")
     static let debugDrop = Notification.Name("joat.debug.page.drop")
-    /// What the next new page starts with.
     static var debugStart: (typed: String, drawing: PKDrawing)?
 
-    /// Ink shaped like handwriting: each line's glyph outlines in a script
-    /// font, as pen strokes.
     static func debugDrawing(_ lines: [String], top: CGFloat) -> PKDrawing {
         let font = CTFontCreateWithName("SnellRoundhand" as CFString, 30, nil)
         let ink = PKInk(.pen, color: .black)
@@ -1205,7 +2096,6 @@ extension Notebook {
         return PKDrawing(strokes: strokes)
     }
 
-    /// The app's own windows (the page, the tool picker) as a PNG in Documents.
     static func debugSnapshot(_ name: String) {
         guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
               let window = scene.keyWindow else { Log.add("debug: no window"); return }
@@ -1219,14 +2109,6 @@ extension Notebook {
             .appendingPathComponent("debug-\(name).png")
         try? image.pngData()?.write(to: url)
         Log.add("debug: snapshot \(name)")
-        if let canvas = findCanvas(in: window) {
-            let f = canvas.convert(canvas.bounds, to: window)
-            let d = canvas.drawing
-            let ink = d.strokes.isEmpty ? "none" : "y \(Int(d.bounds.minY))–\(Int(d.bounds.maxY))"
-            Log.add("debug: canvas at \(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)), zoom \(String(format: "%.2f", canvas.zoomScale)), offset \(Int(canvas.contentOffset.y)), "
-                + "\(d.strokes.count) strokes \(ink), hidden \(canvas.isHidden), alpha \(canvas.alpha), first \(canvas.isFirstResponder), "
-                + "views \(canvas.subviews.map { "\(type(of: $0))\($0.isHidden ? "(hidden)" : "")" })")
-        }
     }
 
     static func findCanvas(in view: UIView) -> PKCanvasView? {
@@ -1235,7 +2117,6 @@ extension Notebook {
         return nil
     }
 
-    /// The tiles Claude is sent, as files (debug-tile-N.png).
     static func debugTiles(_ drawing: PKDrawing) {
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         for (i, png) in PageStore.pngTiles(drawing).enumerated() {
@@ -1243,8 +2124,6 @@ extension Notebook {
         }
     }
 
-    /// The UI test (JOAT_UITEST=1) asks for each picture with a Darwin
-    /// notification; the app draws its window to Documents/debug-ui-N.png.
     static func listenForSnaps() {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), nil, { _, _, _, _, _ in
             Task { @MainActor in
@@ -1267,7 +2146,6 @@ extension Notebook {
                 Log.add("debug: copied text")
             }
         }, "com.joat.debug.copytext" as CFString, nil, .deliverImmediately)
-        // The page's view 300 points wide, then back: a screen's width changing.
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), nil, { _, _, _, _, _ in
             Task { @MainActor in NotificationCenter.default.post(name: Notebook.debugWidth, object: CGFloat(300)) }
         }, "com.joat.debug.narrow" as CFString, nil, .deliverImmediately)
@@ -1281,8 +2159,6 @@ extension Notebook {
     }
     private static var snapCount = 0
 
-    /// The next of three course slides onto the pasteboard, as PNG (the UI
-    /// test's own copies, from its runner, didn't load in the app).
     static func debugCopySlide() {
         let slides = [("Week 3: Gradient Descent", ["Pick a learning rate", "Step against the gradient", "Stop when the loss flattens"]),
                       ("Choosing the learning rate", ["Too small: slow", "Too big: it never settles"]),
@@ -1307,7 +2183,6 @@ extension Notebook {
     }
     private static var slideCount = 0
 
-    /// Notes tab › ✎, write, type, Done, as the wearer would.
     static func debugRun() {
         let drawing = debugDrawing(["Call Mike about the tag map", "on Friday at 3 pm", "Order two spare relays"], top: 140)
         debugStart = ("Site visit, Tuesday", drawing)

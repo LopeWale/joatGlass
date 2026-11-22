@@ -73,7 +73,6 @@ class VoiceCommandRouter:
         hermes: CommandController | None = None,
         terminal: CommandController | None = None,
         capability_opens: CapabilityOpenCommandController | None = None,
-        brainstorm_history: CommandController | None = None,
         news: CommandController | None = None,
         pomodoro: CommandController | None = None,
         search: CommandController | None = None,
@@ -87,7 +86,6 @@ class VoiceCommandRouter:
         self._hermes = hermes
         self._terminal = terminal
         self._capability_opens = capability_opens
-        self._brainstorm_history = brainstorm_history
         self._news = news
         self._pomodoro = pomodoro
         self._search = search
@@ -154,12 +152,6 @@ class VoiceCommandRouter:
                 return _present(productivity_result, "receipt")
         # Agent Terminal claims only utterances that SAY "terminal", so it
         # sits late in the order: nothing broader can be shadowed by it.
-        # "where are my brainstorms" — narrow, and only about Brainstorm's
-        # own exports, so it cannot shadow the terminal or notes grammars.
-        if self._brainstorm_history is not None:
-            history_result = await self._brainstorm_history.handle_command(text)
-            if history_result is not None:
-                return _present(history_result, "receipt")
         if self._terminal is not None:
             terminal_result = await self._terminal.handle_command(text)
             if terminal_result is not None:

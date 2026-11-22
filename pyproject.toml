@@ -18,6 +18,11 @@ dependencies = [
     "trafilatura>=2.0",
     # "JOAT, look up …": key-free metasearch (DuckDuckGo, Brave, Bing).
     "ddgs>=9.0",
+    # Agent Terminal: JOAT hosts Claude Code sessions (output, approvals,
+    # interrupt, resume) through the official SDK over the installed CLI.
+    "claude-agent-sdk>=0.2.184",
+    # Agent Terminal: JOAT hosts an Antigravity agent (Gemini API key).
+    "google-antigravity>=0.1.23",
 ]
 
 [project.optional-dependencies]

@@ -130,23 +130,20 @@ NAVIGATION_ACTIONS: tuple[str, ...] = (
     "retry",
     "cancel",
 )
-BRAINSTORM_ACTIONS: tuple[str, ...] = (
-    "begin_topic_capture",
+TERMINAL_ACTIONS: tuple[str, ...] = (
     "begin_terminal_input",
-    "show_terminal",
-    "show_brainstorm",
-    "cancel",
     "retry_terminal",
-    # Long-press on a running work session cancels it (2026-10-06).
     "cancel_terminal",
-    # An approval is answered ON the glass. It was voice-only ("terminal
-    # approve"), so a wearer looking at a blocked work session had no
-    # gesture for the decision in front of them — and the tap they DID have
-    # sent retry_terminal, retrying the daemon when what was waiting was a
-    # tool request.
     "approve_terminal",
     "deny_terminal",
 )
+TerminalActionName = Literal[
+    "begin_terminal_input",
+    "retry_terminal",
+    "cancel_terminal",
+    "approve_terminal",
+    "deny_terminal",
+]
 
 
 # ── Uplink: plugin → Mac ─────────────────────────────────────────────────────
@@ -405,15 +402,19 @@ class NavigationAction:
 
 
 @dataclass(frozen=True, slots=True)
-class BrainstormAction:
-    """A bounded wearer gesture while the Brainstorm HUD owns input."""
+class TerminalAction:
+    """A bounded wearer gesture while the Agent Terminal HUD owns input."""
 
     action: str
-    surface: Literal["brainstorm", "agent_terminal"] | None = None
     # Set only by HubGatewayTransport after the authenticated WebSocket has
-    # been selected as the current wearer connection.  It is deliberately not
+    # been selected as the current wearer connection. It is deliberately not
     # a wire field: a plugin must never be able to nominate a generation.
     connection_generation: int | None = None
+
+    def to_wire(self) -> dict[str, str]:
+        if self.action not in TERMINAL_ACTIONS:
+            raise ProtocolError("terminal action is invalid")
+        return {"kind": "terminal.action", "action": self.action}
 
 
 @dataclass(frozen=True, slots=True)
@@ -439,6 +440,15 @@ class NavigationState:
     revision: int
     sequence: int
     state: Literal["guidance", "uncertain", "wrong_way", "off_route", "arrived"]
+    maneuver: Literal[
+        "depart", "continue", "turn_left", "turn_right", "slight_left",
+        "slight_right", "u_turn", "arrive",
+    ] | None = None
+    maneuver_distance_m: float | None = None
+    instruction: str | None = None
+    step_id: str | None = None
+    remaining_distance_m: float | None = None
+    eta_minutes: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -573,53 +583,12 @@ class PromptPartial:
 PROMPT_PARTIAL_MAX_CHARS = 500
 
 
-CONTROL_ACTIONS = frozenset({
-    "refresh",
-    "brainstorm.reset",
-    "account.add",
-    "account.activate",
-    "account.signin",
-    "account.code",
-    "account.cancel",
-    "account.dismiss",
-    "account.signout",
-    "account.remove",
-    "account.rename",
-    "model.select",
-})
-"""What the phone's control screen may ask the Mac to do.
-
-A closed set with per-action field allowlists, like every other uplink: the
-phone screen is a remote control for JOAT's own settings, never a channel
-for arbitrary commands."""
-
-CONTROL_PROVIDERS = ("claude", "codex")
-CONTROL_MODEL_SLOTS = ("codex", "claude", "assistant")
-_CONTROL_PROFILE_ID = re.compile(r"default|acct-[0-9a-f]{8}")
-_CONTROL_OPTION = re.compile(r"[A-Za-z0-9._ -]{1,40}")
-
-
-@dataclass(frozen=True, slots=True)
-class ControlAction:
-    """One request from the phone's JOAT control screen (not the lenses)."""
-
-    action: str
-    provider: Literal["claude", "codex"] | None = None
-    profile_id: str | None = None
-    label: str | None = None
-    # A one-time sign-in code pasted on the phone. Excluded from repr so a
-    # logged message can never carry it.
-    code: str | None = field(default=None, repr=False)
-    slot: str | None = None
-    option: str | None = None
-
-
 UplinkMessage = (
     Auth | Hello | Audio | Imu | Input | Device | Confirm | Policy | Places | PairingAck
-    | Location | G2Diagnostic | BrainstormAction | NavigationAction | NavigationRouteAck
+    | Location | G2Diagnostic | TerminalAction | NavigationAction | NavigationRouteAck
     | NavigationViewAck | NavigationState | NavigationRerouteRequest
     | NavigationOrigin | NavigationOriginFailure | ReminderDueAck | ReminderDueComplete
-    | ProductivityViewAck | PromptAck | PromptCancel | ControlAction | LinkPong
+    | ProductivityViewAck | PromptAck | PromptCancel | LinkPong
 )
 
 
@@ -844,7 +813,7 @@ class PromptPresent:
 @dataclass(frozen=True, slots=True)
 class HudRebuild:
     layout: Literal["default", "list", "image"] = "default"
-    reason: Literal["brainstorm"] | None = None
+    reason: Literal["terminal", "brainstorm"] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         message: dict[str, Any] = {"kind": "hud.rebuild", "layout": self.layout}
@@ -1020,8 +989,18 @@ class HudList:
         return message
 
 
-_BRAINSTORM_HUD_STATES = frozenset({
-    "unavailable", "approval_required", "ready", "topic_capture", "running",
+TerminalHudState = Literal[
+    "unavailable",
+    "approval_required",
+    "ready",
+    "running",
+    "settled",
+    "cancelled",
+    "failed",
+    "blocked",
+]
+TERMINAL_HUD_STATES: frozenset[str] = frozenset({
+    "unavailable", "approval_required", "ready", "running",
     "settled", "cancelled", "failed", "blocked",
 })
 _PRODUCTIVITY_HUD_DOMAINS = frozenset({"calendar", "reminders"})
@@ -1032,15 +1011,11 @@ _PLANNING_ANCHOR_MAX_UNIX_MS = 32_503_680_000_000  # 3000-01-01T00:00:00Z
 
 
 HUD_TEXT_MEAN_ADVANCE_PX = 5.18
-"""Mean advance of the old raster transcript face, kept as a size bound.
+"""Mean advance of the transcript face, kept as a wire size bound.
 
-It was measured on the plugin's canvas renderer, whose transcript is gone:
-the Agent Terminal and Brainstorm are the firmware's own text page now
-(NativeTerminalSurface), which wraps every row by the firmware's measured
-glyph widths. The character budgets below are therefore WIRE bounds, not a
-layout; test_sinks pins that a full row stays inside the page's per-row
-unit cap, so nothing here can split a Mac row into more lines than the
-page expects."""
+The Agent Terminal renders on the firmware's native text containers, which
+wrap every row by measured glyph widths. The character budgets below bound
+how much scrollback rides one wire frame."""
 
 HUD_CONTENT_WIDTH_PX = 548
 """The lens content width the plugin draws into (576 less 14px per edge)."""
@@ -1051,142 +1026,32 @@ def _columns_for(width_px: float) -> int:
     return int(width_px // HUD_TEXT_MEAN_ADVANCE_PX)
 
 
-BRAINSTORM_ROW_COLUMNS = _columns_for(HUD_CONTENT_WIDTH_PX)
-BRAINSTORM_SCROLLBACK_ROWS = 40
-BRAINSTORM_ACTIVITY_MAX = (
-    BRAINSTORM_ROW_COLUMNS * BRAINSTORM_SCROLLBACK_ROWS
-    + (BRAINSTORM_SCROLLBACK_ROWS - 1)
+TERMINAL_ROW_COLUMNS = _columns_for(HUD_CONTENT_WIDTH_PX)
+TERMINAL_SCROLLBACK_ROWS = 40
+TERMINAL_ACTIVITY_MAX = (
+    TERMINAL_ROW_COLUMNS * TERMINAL_SCROLLBACK_ROWS
+    + (TERMINAL_SCROLLBACK_ROWS - 1)
 )
-"""How much transcript rides the wire, in characters.
-
-Not the DISPLAY size. The wearer asked to scroll — "can i scroll up and
-down to see the replies?" — and a bound derived from what fits on screen
-at once is exactly what made scrolling pointless: there was nothing
-off-screen to scroll to. The renderer keeps a window (13 rows on
-Brainstorm, 12 on a running terminal) over this scrollback, so forty rows
-is several full turns of history.
-
-A hundred and five is the column count, derived from the face and the
-column the renderer actually draws with. HudCanvasRenderer sets the
-transcript in `HUD_TEXT_FONT` — `"Helvetica Neue", "SF Pro Text", Arial,
-sans-serif` — at 11px across HUD_CONTENT_WIDTH, which is 548px
-(x=14 to x=562). The advance is MEASURED, not assumed: a 63-character
-transcript row rendered by the real simulator spans 326px, so 5.18px per
-character, and 548 / 5.18 = 105.
-
-The column was 504px when this said 96. Both numbers moved together
-because the wearer objected to the 72px of margin the old column left
-unused — "why are we still not fully using the display?" — so if the
-column moves again, this moves with it.
-
-This constant was 74 for a monospace transcript and stayed 74 after the
-face changed, which is what the wearer saw: "why are some words being cut
-off when there is obviously room on the right". A derived number outlives
-the thing it was derived from unless the derivation is written down next
-to it, so: **if the transcript's font or column ever changes, this number
-is wrong until it is re-derived.**
-
-Proportional type has no true column count — 96 is an average, not a
-bound, so an all-caps or wide-glyph row can wrap. That is why the
-renderer measures each row with the canvas and wraps on the measurement
-(`brainstormTranscriptRowCount`) instead of trusting this number. Here it
-sizes the wire budget; there it decides the pixels. Neither is guessing
-the other's job.
-
-Rows are separated by newlines, and those are characters too — the
-separators are counted, so the bound carries exactly forty full rows.
-
-This was 180 — under 40% of one screen — then one screenful (524), and
-now scrollback. History: the wearer read a third of a screen while the
-rest sat empty, on the one surface whose entire job is showing the
-discussion.
-"""
-
-
-BRAINSTORM_TRANSCRIPT_MAX = 65_536
-"""How much of a Brainstorm's conversation rides one frame, in characters.
-
-Not the screen: the room page shows seven rows and the wearer scrolls
-through the rest, so this is how much conversation the frame can hold. It
-was BRAINSTORM_ACTIVITY_MAX (about 4,200 characters, forty one-line rows),
-which was enough for two collapsed turns and cut one full answer; a
-Brainstorm turn is now whole, and a few rounds of two full answers is tens
-of thousands of characters. The oldest rows drop first (HudSink); the
-whole conversation is kept on the Mac and in the saved record either way."""
-
-
-@dataclass(frozen=True, slots=True)
-class BrainstormHudView:
-    """Bounded, non-secret state for the Brainstorm conversation.
-
-    Carries NO Agent Terminal, Hermes, OpenClaw, endpoint, approval or
-    tool-policy field. docs/SESSION_MODEL.md:74-75 states that as a
-    requirement, and this frame violated it for the whole life of the
-    feature by also being the Agent Terminal's frame — discriminated by a
-    `screen` field.
-
-    That was not a tidiness problem. One frame for two features is why the Agent
-    Terminal printed "JOAT · BRAINSTORM" across its spine, why a healthy
-    terminal spent four rows on connection chrome the wearer asked about
-    ("are all the fixed content like the mac mini tailscale needed there?"),
-    and why a tap on the terminal was gated on the BRAINSTORM lane's
-    readiness. See AgentTerminalHudView for the other half.
-    """
-
-    state: str
-    topic: str
-    collaborators: list[str]
-    activity: str
-    active_speaker: str = ""
-
-    def to_wire(self) -> dict[str, Any]:
-        if self.state not in _BRAINSTORM_HUD_STATES:
-            raise ProtocolError("Brainstorm HUD state is invalid")
-        if len(self.collaborators) > 3:
-            raise ProtocolError("Brainstorm HUD has too many collaborators")
-        return {
-            "kind": "brainstorm.view",
-            "brainstorm": {
-                "state": self.state,
-                "topic": _brainstorm_text(self.topic, "topic", 96),
-                "collaborators": [
-                    _brainstorm_text(item, "collaborator", 48)
-                    for item in self.collaborators
-                ],
-                "activeSpeaker": _brainstorm_text(
-                    self.active_speaker, "active speaker", 64, allow_empty=True,
-                ),
-                "activity": _brainstorm_text(
-                    self.activity, "activity", BRAINSTORM_TRANSCRIPT_MAX,
-                    allow_empty=True,
-                ),
-            },
-        }
+# Internal size aliases kept for agent_terminal.py scrollback bounds.
+BRAINSTORM_ROW_COLUMNS = TERMINAL_ROW_COLUMNS
+BRAINSTORM_SCROLLBACK_ROWS = TERMINAL_SCROLLBACK_ROWS
+BRAINSTORM_ACTIVITY_MAX = TERMINAL_ACTIVITY_MAX
 
 
 @dataclass(frozen=True, slots=True)
 class AgentTerminalHudView:
-    """Bounded, non-secret state for the Agent Terminal.
-
-    The connection host, the tool-policy attestation and the recovery reason
-    live HERE, on the only surface they describe, instead of riding every
-    Brainstorm frame.
-    """
+    """Bounded, non-secret state for the Agent Terminal (`agent_terminal.view`)."""
 
     state: str
     focus: str
     lanes: list[str]
     activity: str
-    endpoint_host: str = ""
     reason: str = ""
-    no_tools_checked: bool = False
     #: Tool requests the focused lane is blocked on.
     #:
     #: Distinct from state="approval_required", which ALSO describes a
-    #: connection whose device has not been approved in OpenClaw — a
-    #: different problem with a different remedy (retry, not approve).
-    #: Overloading one field for both made a tap ambiguous: approve the
-    #: tool, or retry the daemon? The count answers it.
+    #: connection whose device has not been approved — a different problem
+    #: with a different remedy (retry, not approve).
     approvals: int = 0
     opening_request_id: str | None = None
     opening_selection_id: str | None = None
@@ -1197,7 +1062,7 @@ class AgentTerminalHudView:
     task_recovery: bool = False
 
     def to_wire(self) -> dict[str, Any]:
-        if self.state not in _BRAINSTORM_HUD_STATES:
+        if self.state not in TERMINAL_HUD_STATES:
             raise ProtocolError("Agent Terminal HUD state is invalid")
         if self.approvals < 0:
             raise ProtocolError("Agent Terminal approval count is invalid")
@@ -1208,8 +1073,8 @@ class AgentTerminalHudView:
             raise ProtocolError("Agent Terminal opening requires both identifiers")
         if self.opening_request_id is not None and self.opening_selection_id is not None:
             opening = {
-                "openingRequestId": _brainstorm_text(self.opening_request_id, "opening request", 128),
-                "openingSelectionId": _brainstorm_text(self.opening_selection_id, "opening selection", 128),
+                "openingRequestId": _terminal_text(self.opening_request_id, "opening request", 128),
+                "openingSelectionId": _terminal_text(self.opening_selection_id, "opening selection", 128),
             }
         conversation: dict[str, Any] = {}
         if self.conversation_id is not None:
@@ -1222,13 +1087,13 @@ class AgentTerminalHudView:
                 if message.role not in {"user", "assistant", "status"} or message.id in identities:
                     raise ProtocolError("Agent Terminal message identity or role is invalid")
                 identities.add(message.id)
-                text = _brainstorm_text(message.text, "message", TERMINAL_HISTORY_BYTES, allow_empty=True)
+                text = _terminal_text(message.text, "message", TERMINAL_HISTORY_BYTES, allow_empty=True)
                 try:
                     size += len(text.encode("utf-8"))
                 except UnicodeError:
                     raise ProtocolError("Agent Terminal message encoding is invalid") from None
                 entries.append({
-                    "id": _brainstorm_text(message.id, "message identity", 128),
+                    "id": _terminal_text(message.id, "message identity", 128),
                     "role": message.role, "text": text,
                 })
             if size > TERMINAL_HISTORY_BYTES:
@@ -1236,7 +1101,7 @@ class AgentTerminalHudView:
             if type(self.history_truncated) is not bool or type(self.input_required) is not bool or type(self.task_recovery) is not bool:
                 raise ProtocolError("Agent Terminal conversation flags are invalid")
             conversation = {
-                "conversationId": _brainstorm_text(self.conversation_id, "conversation identity", 128),
+                "conversationId": _terminal_text(self.conversation_id, "conversation identity", 128),
                 "messages": entries, "historyTruncated": self.history_truncated,
                 "inputRequired": self.input_required, "taskRecovery": self.task_recovery,
             }
@@ -1246,21 +1111,17 @@ class AgentTerminalHudView:
             "kind": "agent_terminal.view",
             "terminal": {
                 "state": self.state,
-                "focus": _brainstorm_text(self.focus, "focus", 96),
+                "focus": _terminal_text(self.focus, "focus", 96),
                 "lanes": [
-                    _brainstorm_text(item, "lane", 48) for item in self.lanes
+                    _terminal_text(item, "lane", 48) for item in self.lanes
                 ],
-                "activity": _brainstorm_text(
-                    self.activity, "activity", BRAINSTORM_ACTIVITY_MAX,
+                "activity": _terminal_text(
+                    self.activity, "activity", TERMINAL_ACTIVITY_MAX,
                     allow_empty=True,
                 ),
-                "endpointHost": _brainstorm_text(
-                    self.endpoint_host, "endpoint host", 253, allow_empty=True,
-                ),
-                "terminalReason": _brainstorm_text(
+                "terminalReason": _terminal_text(
                     self.reason, "terminal reason", 64, allow_empty=True,
                 ),
-                "noToolsChecked": self.no_tools_checked,
                 "approvals": self.approvals,
                 **opening,
                 **conversation,
@@ -1452,7 +1313,7 @@ class NavigationHudView:
     options: list[str] = field(default_factory=list)
     selected_index: int = 0
     choice_ids: list[str] | None = None
-    mode: Literal["walking", "cycling"] | None = None
+    mode: Literal["walking", "cycling", "driving"] | None = None
     maneuver: Literal[
         "depart", "continue", "turn_left", "turn_right", "slight_left",
         "slight_right", "u_turn", "arrive",
@@ -1533,7 +1394,7 @@ class NavigationProgressPolicy:
 
 @dataclass(frozen=True, slots=True)
 class NavigationRoutePlan:
-    mode: Literal["walking", "cycling"]
+    mode: Literal["walking", "cycling", "driving"]
     geometry: list[NavigationCoordinate]
     steps: list[NavigationRouteStep]
     policy: NavigationProgressPolicy
@@ -1549,9 +1410,12 @@ class NavigationRoute:
     destination_label: str
     eta_minutes: float
     plan: NavigationRoutePlan
+    phone_fixes: bool = False
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        if not isinstance(self.phone_fixes, bool):
+            raise ProtocolError("navigation phoneFixes must be a boolean")
+        wire: dict[str, Any] = {
             "kind": "navigation.route",
             "sessionId": _navigation_identifier(self.session_id, "sessionId"),
             "requestId": _navigation_identifier(self.request_id, "requestId"),
@@ -1566,6 +1430,9 @@ class NavigationRoute:
             ),
             "plan": _navigation_route_plan_to_wire(self.plan),
         }
+        if self.phone_fixes:
+            wire["phoneFixes"] = True
+        return wire
 
 
 @dataclass(frozen=True, slots=True)
@@ -1813,6 +1680,57 @@ class NavigationStop:
 
 
 @dataclass(frozen=True, slots=True)
+class NavigationFix:
+    session_id: str
+    latitude: float
+    longitude: float
+    accuracy: float | None = None
+    heading: float | None = None
+    speed: float | None = None
+    timestamp: float | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        wire: dict[str, Any] = {
+            "kind": "navigation.fix",
+            "sessionId": _navigation_identifier(self.session_id, "sessionId"),
+            "latitude": _navigation_number(
+                self.latitude, "latitude", minimum=-90, maximum=90,
+            ),
+            "longitude": _navigation_number(
+                self.longitude, "longitude", minimum=-180, maximum=180,
+            ),
+        }
+        if self.accuracy is not None:
+            wire["accuracy"] = _navigation_number(
+                self.accuracy, "accuracy", minimum=0, maximum=100_000,
+            )
+        if self.heading is not None:
+            wire["heading"] = _navigation_number(
+                self.heading, "heading", minimum=0, maximum=360,
+            )
+        if self.speed is not None:
+            wire["speed"] = _navigation_number(
+                self.speed, "speed", minimum=0, maximum=1_000,
+            )
+        if self.timestamp is not None:
+            wire["timestamp"] = _navigation_number(
+                self.timestamp, "timestamp", minimum=0, maximum=100_000_000_000_000,
+            )
+        return wire
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationResume:
+    session_id: str
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": "navigation.resume",
+            "sessionId": _navigation_identifier(self.session_id, "sessionId"),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ConfirmRequest:
     action_id: str
     prompt: str
@@ -1853,6 +1771,21 @@ class ConfirmRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfirmCancel:
+    """Tear down an active confirmation gate on the lenses without emitting an uplink verdict."""
+
+    action_id: str
+
+    def to_wire(self) -> dict[str, Any]:
+        if not isinstance(self.action_id, str) or not self.action_id.strip() or len(self.action_id) > 128:
+            raise ProtocolError("confirm.cancel actionId must be a non-empty string")
+        return {
+            "kind": "confirm.cancel",
+            "actionId": self.action_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PolicySet:
     resume: ResumePolicy
 
@@ -1882,137 +1815,6 @@ class PairingSet:
         return {"kind": "pairing.set", "token": self.token}
 
 
-@dataclass(frozen=True, slots=True)
-class ControlSeat:
-    """A Brainstorm seat as the phone shows it."""
-
-    name: str
-    title: str
-    installed: bool
-    account: str
-    """logged_in, logged_out, limited, missing or unknown."""
-    account_label: str
-    model: str
-
-    def to_wire(self) -> dict[str, Any]:
-        return {
-            "name": self.name, "title": self.title, "installed": self.installed,
-            "account": self.account, "accountLabel": self.account_label, "model": self.model,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ControlProfile:
-    """One saved account. Names and state only — never a credential."""
-
-    profile_id: str
-    label: str
-    state: str
-    is_default: bool
-    active: bool
-    email: str | None = None
-    plan: str | None = None
-
-    def to_wire(self) -> dict[str, Any]:
-        wire: dict[str, Any] = {
-            "id": self.profile_id, "label": self.label, "state": self.state,
-            "isDefault": self.is_default, "active": self.active,
-        }
-        if self.email is not None:
-            wire["email"] = self.email
-        if self.plan is not None:
-            wire["plan"] = self.plan
-        return wire
-
-
-@dataclass(frozen=True, slots=True)
-class ControlProvider:
-    provider: Literal["claude", "codex"]
-    title: str
-    installed: bool
-    profiles: tuple[ControlProfile, ...]
-
-    def to_wire(self) -> dict[str, Any]:
-        return {
-            "provider": self.provider, "title": self.title, "installed": self.installed,
-            "profiles": [p.to_wire() for p in self.profiles],
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ControlModelSlot:
-    key: str
-    title: str
-    current: str
-    options: tuple[str, ...]
-
-    def to_wire(self) -> dict[str, Any]:
-        return {"key": self.key, "title": self.title, "current": self.current,
-                "options": list(self.options)}
-
-
-@dataclass(frozen=True, slots=True)
-class ControlLogin:
-    """An in-progress sign-in, finished by the wearer on the phone."""
-
-    provider: Literal["claude", "codex"]
-    profile_id: str
-    stage: str
-    message: str
-    url: str | None = None
-    code: str | None = None
-    needs_code: bool = False
-
-    def to_wire(self) -> dict[str, Any]:
-        wire: dict[str, Any] = {
-            "provider": self.provider, "profileId": self.profile_id, "stage": self.stage,
-            "message": self.message, "needsCode": self.needs_code,
-        }
-        if self.url is not None:
-            if not self.url.startswith("https://"):
-                raise ProtocolError("sign-in link must be https")
-            wire["url"] = self.url
-        if self.code is not None:
-            wire["code"] = self.code
-        return wire
-
-
-@dataclass(frozen=True, slots=True)
-class ControlState:
-    """Everything the phone's control screen renders, sent whole.
-
-    Whole-state rather than deltas: the screen is small, changes are rare
-    and human-paced, and a phone that reconnects mid-sign-in needs exactly
-    one message to be right again.
-    """
-
-    revision: int
-    brainstorm_state: str
-    brainstorm_phase: str
-    brainstorm_detail: str
-    seats: tuple[ControlSeat, ...]
-    accounts: tuple[ControlProvider, ...]
-    models: tuple[ControlModelSlot, ...]
-    login: ControlLogin | None = None
-    notice: str = ""
-
-    def to_wire(self) -> dict[str, Any]:
-        return {
-            "kind": "control.state",
-            "revision": self.revision,
-            "brainstorm": {
-                "state": self.brainstorm_state,
-                "phase": self.brainstorm_phase,
-                "detail": self.brainstorm_detail,
-                "seats": [s.to_wire() for s in self.seats],
-            },
-            "accounts": [a.to_wire() for a in self.accounts],
-            "models": [m.to_wire() for m in self.models],
-            "login": self.login.to_wire() if self.login is not None else None,
-            "notice": self.notice,
-        }
-
-
 DownlinkMessage = (
     AuthAccepted
     | HudText
@@ -2025,7 +1827,6 @@ DownlinkMessage = (
     | HudRebuild
     | HudList
     | MessageUIView
-    | BrainstormHudView
     | AgentTerminalHudView
     | ProductivityHudView
     | AudioControl
@@ -2042,11 +1843,13 @@ DownlinkMessage = (
     | HudNotifications
     | HudPanel
     | NavigationStop
+    | NavigationFix
+    | NavigationResume
     | ConfirmRequest
+    | ConfirmCancel
     | PolicySet
     | Shutdown
     | PairingSet
-    | ControlState
     | LinkPing
 )
 
@@ -2137,11 +1940,11 @@ def _navigation_identifier(value: Any, name: str, maximum: int = 128) -> str:
     return value
 
 
-def _brainstorm_text(
+def _terminal_text(
     value: Any, name: str, maximum: int, *, allow_empty: bool = False,
 ) -> str:
     if not isinstance(value, str) or len(value) > maximum or (not allow_empty and not value):
-        raise ProtocolError(f"Brainstorm HUD {name} is invalid")
+        raise ProtocolError(f"Agent Terminal HUD {name} is invalid")
     return value
 
 
@@ -2288,7 +2091,7 @@ def _navigation_hud_to_wire(view: NavigationHudView) -> dict[str, Any]:
             _navigation_identifier(value, "choiceId", 64) for value in view.choice_ids
         ]
     if view.mode is not None:
-        if view.mode not in ("walking", "cycling"):
+        if view.mode not in ("walking", "cycling", "driving"):
             raise ProtocolError("navigation mode is invalid")
         message["mode"] = view.mode
     if view.maneuver is not None:
@@ -2322,7 +2125,7 @@ def _navigation_coordinate_to_wire(coordinate: NavigationCoordinate) -> dict[str
 
 
 def _navigation_route_plan_to_wire(plan: NavigationRoutePlan) -> dict[str, Any]:
-    if plan.mode not in ("walking", "cycling"):
+    if plan.mode not in ("walking", "cycling", "driving"):
         raise ProtocolError("navigation route mode is invalid")
     if not 2 <= len(plan.geometry) <= 4_096:
         raise ProtocolError("navigation route geometry size is invalid")
@@ -2502,8 +2305,8 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             "type": "frame_timing",
             "frame": _trace_int(event["frame"], "frame", minimum=1, maximum=2_147_483_647),
             "kind": _trace_enum(event["kind"], "kind", (
-                "brainstorm", "confirmation", "list", "messages",
-                "navigation", "overview", "productivity", "prompt_question",
+                "agent_terminal", "confirmation", "list", "messages",
+                "navigation", "overview", "productivity", "prompt_question", "reader", "terminal",
             )),
             "changedTiles": _trace_int(
                 event["changedTiles"], "changedTiles", minimum=0, maximum=4,
@@ -2602,20 +2405,27 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             ),
             "outcome": _trace_enum(event["outcome"], "outcome", ("success", "failed")),
         }
-    if event_type == "brainstorm_action":
-        _trace_shape(event, {"type", "action", "surface", "source", "gesture", "delivery"})
-        return {
-            "type": "brainstorm_action",
-            "action": _trace_enum(
-                event["action"], "action",
-                ("begin_topic_capture", "begin_terminal_input",
-                 "show_terminal", "show_brainstorm", "cancel", "retry_terminal"),
-            ),
-            "surface": _trace_enum(event["surface"], "surface", ("brainstorm", "agent_terminal")),
+    if event_type == "terminal_action":
+        _trace_shape(
+            event,
+            {"type", "action", "source", "gesture", "delivery"},
+            optional=frozenset({"surface"}),
+        )
+        terminal_action_event: dict[str, str | int] = {
+            "type": "terminal_action",
+            "action": _trace_enum(event["action"], "action", TERMINAL_ACTIONS),
             "source": _trace_enum(event["source"], "source", ("left", "right", "ring")),
-            "gesture": _trace_enum(event["gesture"], "gesture", ("tap", "double_press")),
-            "delivery": _trace_enum(event["delivery"], "delivery", ("sys",)),
+            "gesture": _trace_enum(
+                event["gesture"], "gesture",
+                ("tap", "double_press", "long_press", "scroll_up", "scroll_down"),
+            ),
+            "delivery": _trace_enum(event["delivery"], "delivery", ("sys", "text")),
         }
+        if "surface" in event:
+            terminal_action_event["surface"] = _trace_enum(
+                event["surface"], "surface", ("agent_terminal",),
+            )
+        return terminal_action_event
     if event_type == "visual_frame":
         kind = event.get("kind")
         if kind != "messages":
@@ -2657,75 +2467,6 @@ def _parse_g2_diagnostic(event: Any) -> dict[str, str | int]:
             ),
         }
     raise ProtocolError("g2 diagnostic type is invalid")
-
-
-def _control_text(value: Any, field_name: str, maximum: int) -> str:
-    if not isinstance(value, str):
-        raise ProtocolError(f"control {field_name} is invalid")
-    text = " ".join(value.split())
-    if not text or len(text) > maximum or not text.isprintable():
-        raise ProtocolError(f"control {field_name} is invalid")
-    return text
-
-
-def _parse_control_action(payload: dict[str, Any]) -> ControlAction:
-    action = payload.get("action")
-    if not isinstance(action, str) or action not in CONTROL_ACTIONS:
-        raise ProtocolError("control action is invalid")
-    if action in ("refresh", "brainstorm.reset", "account.cancel", "account.dismiss"):
-        allowed = {"kind", "action"}
-    elif action == "account.add":
-        allowed = {"kind", "action", "provider", "label"}
-    elif action == "account.rename":
-        allowed = {"kind", "action", "provider", "profileId", "label"}
-    elif action == "account.code":
-        allowed = {"kind", "action", "code"}
-    elif action == "model.select":
-        allowed = {"kind", "action", "slot", "option"}
-    else:
-        allowed = {"kind", "action", "provider", "profileId"}
-    if set(payload) != allowed:
-        raise ProtocolError("control action has unsupported or missing fields")
-    provider: Literal["claude", "codex"] | None = None
-    if "provider" in allowed:
-        raw_provider = payload["provider"]
-        if raw_provider == "claude":
-            provider = "claude"
-        elif raw_provider == "codex":
-            provider = "codex"
-        else:
-            raise ProtocolError("control provider is invalid")
-    profile_id: str | None = None
-    if "profileId" in allowed:
-        raw_profile = payload["profileId"]
-        if not isinstance(raw_profile, str) or _CONTROL_PROFILE_ID.fullmatch(raw_profile) is None:
-            raise ProtocolError("control profileId is invalid")
-        profile_id = raw_profile
-    label = _control_text(payload["label"], "label", 40) if "label" in allowed else None
-    code: str | None = None
-    if "code" in allowed:
-        raw_code = payload["code"]
-        if not isinstance(raw_code, str):
-            raise ProtocolError("control code is invalid")
-        cleaned = "".join(raw_code.split())
-        if not cleaned or len(cleaned) > 512 or not cleaned.isprintable():
-            raise ProtocolError("control code is invalid")
-        code = cleaned
-    slot: str | None = None
-    option: str | None = None
-    if "slot" in allowed:
-        raw_slot = payload["slot"]
-        if raw_slot not in CONTROL_MODEL_SLOTS:
-            raise ProtocolError("control slot is invalid")
-        slot = str(raw_slot)
-        raw_option = payload["option"]
-        if not isinstance(raw_option, str) or _CONTROL_OPTION.fullmatch(raw_option) is None:
-            raise ProtocolError("control option is invalid")
-        option = raw_option
-    return ControlAction(
-        action=action, provider=provider, profile_id=profile_id,
-        label=label, code=code, slot=slot, option=option,
-    )
 
 
 def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
@@ -2889,13 +2630,13 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 action=action,
                 choice_id=choice_id,
             )
-        case "brainstorm.action":
+        case "terminal.action":
             action = payload.get("action")
-            if not isinstance(action, str) or action not in BRAINSTORM_ACTIONS:
-                raise ProtocolError("brainstorm action is invalid")
+            if not isinstance(action, str) or action not in TERMINAL_ACTIONS:
+                raise ProtocolError("terminal action is invalid")
             if set(payload) != {"kind", "action"}:
-                raise ProtocolError("brainstorm action has unsupported fields")
-            return BrainstormAction(action=action)
+                raise ProtocolError("terminal action has unsupported fields")
+            return TerminalAction(action=action)
         case "navigation.route.ack":
             if set(payload) != {"kind", "sessionId", "routeId", "revision", "outcome"}:
                 raise ProtocolError("navigation route ack has unsupported fields")
@@ -2931,13 +2672,78 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 outcome=outcome,
             )
         case "navigation.state":
-            if set(payload) != {
+            required_state_keys = {
                 "kind", "sessionId", "routeId", "revision", "sequence", "state",
-            }:
+            }
+            optional_state_keys = {
+                "maneuver", "maneuverDistanceM", "instruction",
+                "stepId", "remainingDistanceM", "etaMinutes",
+            }
+            if (
+                not required_state_keys <= set(payload)
+                or not set(payload) <= required_state_keys | optional_state_keys
+            ):
                 raise ProtocolError("navigation state has unsupported fields")
             state = payload.get("state")
             if state not in ("guidance", "uncertain", "wrong_way", "off_route", "arrived"):
                 raise ProtocolError("navigation state is invalid")
+            maneuver_raw = payload.get("maneuver")
+            maneuver: Literal[
+                "depart", "continue", "turn_left", "turn_right", "slight_left",
+                "slight_right", "u_turn", "arrive",
+            ] | None = None
+            if maneuver_raw is not None:
+                if maneuver_raw not in (
+                    "depart", "continue", "turn_left", "turn_right",
+                    "slight_left", "slight_right", "u_turn", "arrive",
+                ):
+                    raise ProtocolError("navigation state maneuver is invalid")
+                maneuver = maneuver_raw
+            maneuver_distance_raw = payload.get("maneuverDistanceM")
+            maneuver_distance_m = (
+                None
+                if maneuver_distance_raw is None
+                else _navigation_number(
+                    maneuver_distance_raw,
+                    "maneuverDistanceM",
+                    minimum=0.0,
+                    maximum=10_000_000.0,
+                )
+            )
+            instruction_raw = payload.get("instruction")
+            instruction: str | None = None
+            if instruction_raw is not None:
+                if not isinstance(instruction_raw, str) or len(instruction_raw) > 256 or "\x00" in instruction_raw:
+                    raise ProtocolError("navigation state instruction is invalid")
+                instruction = instruction_raw
+            step_id_raw = payload.get("stepId")
+            step_id = (
+                None
+                if step_id_raw is None
+                else _navigation_identifier(step_id_raw, "stepId", 64)
+            )
+            remaining_raw = payload.get("remainingDistanceM")
+            remaining_distance_m = (
+                None
+                if remaining_raw is None
+                else _navigation_number(
+                    remaining_raw,
+                    "remainingDistanceM",
+                    minimum=0.0,
+                    maximum=10_000_000.0,
+                )
+            )
+            eta_raw = payload.get("etaMinutes")
+            eta_minutes = (
+                None
+                if eta_raw is None
+                else _navigation_number(
+                    eta_raw,
+                    "etaMinutes",
+                    minimum=0.0,
+                    maximum=1_000_000.0,
+                )
+            )
             return NavigationState(
                 session_id=_navigation_identifier(
                     _require(payload, "sessionId", kind), "sessionId",
@@ -2948,6 +2754,12 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 revision=_navigation_generation(_require(payload, "revision", kind)),
                 sequence=_navigation_generation(_require(payload, "sequence", kind)),
                 state=state,
+                maneuver=maneuver,
+                maneuver_distance_m=maneuver_distance_m,
+                instruction=instruction,
+                step_id=step_id,
+                remaining_distance_m=remaining_distance_m,
+                eta_minutes=eta_minutes,
             )
         case "navigation.reroute.request":
             if set(payload) != {
@@ -3167,8 +2979,6 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
             if resume not in RESUME_POLICIES:
                 raise ProtocolError(f"unknown resume policy {resume!r}")
             return Policy(resume=resume)
-        case "control.action":
-            return _parse_control_action(payload)
         case "places":
             if set(payload) != {"kind", "places"}:
                 raise ProtocolError("places update has unsupported fields")

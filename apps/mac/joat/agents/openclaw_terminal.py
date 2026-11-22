@@ -106,15 +106,18 @@ class OpenClawToolsEnabled(OpenClawGatewayError):
     """The dedicated remote agent exposes at least one effective tool."""
 
 
+#: What the glasses call a Gateway the Mac app has not named.
+DEFAULT_GATEWAY_NAME = "OpenClaw"
+
 # OpenClaw v2026.7.1 packages/gateway-protocol/src/schema/logs-chat.ts
 # defines these coarse error kinds. Free-form provider errorMessage/message
 # fields are never exception text or log data in JOAT.
 _RUN_ERROR_MESSAGES = {
-    "refusal": "OpenClaw declined this instruction.",
-    "timeout": "OpenClaw run timed out. Try again.",
-    "rate_limit": "OpenClaw provider rate limit reached. Try again later.",
-    "context_length": "OpenClaw session context is too long. Shorten the instruction or start a new session.",
-    "unknown": "OpenClaw run failed. Check OpenClaw for details, then try again.",
+    "refusal": "{name} declined this instruction.",
+    "timeout": "{name} run timed out. Try again.",
+    "rate_limit": "{name} provider rate limit reached. Try again later.",
+    "context_length": "{name} session context is too long. Shorten the instruction or start a new session.",
+    "unknown": "{name} run failed. Check {name} for details, then try again.",
 }
 # src/agents/run-termination.ts and agent-run-terminal-outcome.ts document
 # these stop literals. The wire permits other strings; keep those private.
@@ -126,21 +129,27 @@ class OpenClawRunFailed(OpenClawGatewayError):
 
     def __init__(
         self, state: Literal["error", "aborted"], *, kind: str, stop_reason: str,
+        name: str = DEFAULT_GATEWAY_NAME,
     ) -> None:
         self.state = state
+        self.name = name
         self.kind = kind if kind in _RUN_ERROR_MESSAGES else "unknown"
         self.stop_reason = stop_reason if stop_reason in _RUN_STOP_REASONS else "unknown"
         if state == "aborted":
             if self.stop_reason == "restart":
-                message = "OpenClaw interrupted this run for restart. Try again when ready."
+                message = f"{name} interrupted this run for restart. Try again when ready."
             elif self.stop_reason in {"rpc", "stop"}:
-                message = "OpenClaw run was cancelled."
+                message = f"{name} run was cancelled."
             else:
-                message = "OpenClaw stopped this run before completion."
+                message = f"{name} stopped this run before completion."
         else:
             kind = "timeout" if self.kind == "unknown" and self.stop_reason == "timeout" else self.kind
-            message = _RUN_ERROR_MESSAGES[kind]
+            message = _RUN_ERROR_MESSAGES[kind].format(name=name)
         super().__init__(message)
+
+    def renamed(self, name: str) -> OpenClawRunFailed:
+        """The same outcome, worded with the Gateway name set on the Mac."""
+        return OpenClawRunFailed(self.state, kind=self.kind, stop_reason=self.stop_reason, name=name)
 
 
 def _run_failure(

@@ -13,11 +13,9 @@ struct EngineStatus: Decodable {
     var notifications = "off"
     var stt = "off"
     var llm = "off"
-    var debate = "off"
     var openClaw: OpenClaw = .init()
     var agentTerminal: AgentTerminal = .init()
     var a2aConnections: [String: A2AConnection] = [:]
-    var brainstorm: Brainstorm = .init()
     var personalData: PersonalData = .init()
     var lastTranscript = ""
     var lastReply = ""
@@ -81,26 +79,6 @@ struct EngineStatus: Decodable {
         }
     }
 
-    struct Brainstorm: Decodable {
-        var state = "unavailable"
-        var seatCount = 0
-        var phase = "idle"
-
-        enum CodingKeys: String, CodingKey {
-            case state, phase
-            case seatCount = "seat_count"
-        }
-
-        init() {}
-
-        init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: CodingKeys.self)
-            state = (try? c.decodeIfPresent(String.self, forKey: .state)) ?? "unavailable"
-            seatCount = (try? c.decodeIfPresent(Int.self, forKey: .seatCount)) ?? 0
-            phase = (try? c.decodeIfPresent(String.self, forKey: .phase)) ?? "idle"
-        }
-    }
-
     /// The engine's fixed-state proof of access to the app-owned EventKit
     /// bridge. This is deliberately separate from the Mac app's TCC snapshot.
     struct PersonalData: Decodable {
@@ -117,7 +95,7 @@ struct EngineStatus: Decodable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case at, glasses, device, mic, notifications, stt, llm, debate, brainstorm
+        case at, glasses, device, mic, notifications, stt, llm
         case openClaw = "openclaw"
         case agentTerminal = "agent_terminal"
         case a2aConnections = "a2a_connections"
@@ -142,11 +120,9 @@ struct EngineStatus: Decodable {
         notifications = s(.notifications, "off")
         stt = s(.stt, "off")
         llm = s(.llm, "off")
-        debate = s(.debate, "off")
         openClaw = (try? c.decodeIfPresent(OpenClaw.self, forKey: .openClaw)) ?? .init()
         agentTerminal = (try? c.decodeIfPresent(AgentTerminal.self, forKey: .agentTerminal)) ?? .init()
         a2aConnections = (try? c.decodeIfPresent([String: A2AConnection].self, forKey: .a2aConnections)) ?? [:]
-        brainstorm = (try? c.decodeIfPresent(Brainstorm.self, forKey: .brainstorm)) ?? .init()
         personalData = (try? c.decodeIfPresent(PersonalData.self, forKey: .personalData)) ?? .init()
         lastTranscript = s(.lastTranscript, "")
         lastReply = s(.lastReply, "")

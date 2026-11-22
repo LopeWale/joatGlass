@@ -1,5 +1,5 @@
 import type { MacLink } from './MacLink';
-import type { PromptOwnerKind, UplinkMessage } from './types';
+import type { PromptOwnerKind, TerminalAction, UplinkMessage } from './types';
 
 /**
  * The real-G2 diagnostic vocabulary. It deliberately has no text, URLs,
@@ -78,8 +78,8 @@ export type G2TraceEvent =
   | {
     type: 'frame_timing';
     frame: number;
-    kind: 'brainstorm' | 'confirmation' | 'list' | 'messages'
-      | 'navigation' | 'overview' | 'productivity' | 'prompt_question' | 'reader';
+    kind: 'agent_terminal' | 'confirmation' | 'list' | 'messages'
+      | 'navigation' | 'overview' | 'productivity' | 'prompt_question' | 'reader' | 'terminal';
     /** Tiles actually re-sent. 0 means every region was already correct. */
     changedTiles: number;
     /** Waiting to start, behind an in-flight frame. */
@@ -132,15 +132,15 @@ export type G2TraceEvent =
     cue: NavigationCue;
     outcome: 'success' | 'failed';
   }
-  /** A physical-source receipt only after the Brainstorm controller accepted
+  /** A physical-source receipt only after the Terminal controller accepted
    * its fixed, prompt-free action. */
   | {
-    type: 'brainstorm_action';
-    action: 'begin_topic_capture' | 'begin_terminal_input' | 'show_terminal' | 'show_brainstorm' | 'cancel' | 'retry_terminal';
-    surface: 'brainstorm' | 'agent_terminal';
+    type: 'terminal_action';
+    action: TerminalAction;
+    surface?: 'agent_terminal';
     source: 'left' | 'right' | 'ring';
-    gesture: 'tap' | 'double_press';
-    delivery: 'sys';
+    gesture: 'tap' | 'double_press' | 'long_press' | 'scroll_up' | 'scroll_down';
+    delivery: 'sys' | 'text';
   }
   /** A completed four-tile Messages state, bound only to its fixed surface
    * name and raster digest. The digest is not reversible HUD copy. */
@@ -158,8 +158,8 @@ export type G2TraceEvent =
     outcome: 'accepted' | 'declined' | 'timed_out';
   }
   /** Where a spoken answer's question stopped on the glasses (a Messages
-   * reply, a Brainstorm topic, a terminal reply, a page row's question):
-   * which owner, and the step reached. No question text, no words. */
+   * reply, a terminal reply, a page row's question): which owner, and the
+   * step reached. No question text, no words. */
   | {
     type: 'prompt_stage';
     owner: PromptOwnerKind;

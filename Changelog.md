@@ -1,5 +1,263 @@
 # Changelog
 
+## 2026-11-21 — Build JOAT 0.1.154: Mac-pinned `Messages` & `Agent Terminal` split-brain handoff, `/messages` search, and `/terminal` control
+
+- **Seamless split-brain Mac handoff on Even G2** (`apps/hub-plugin/src/types.ts`, `BrainHandoff.ts`, `CapabilityMenu.ts`, `PhoneControlPanel.ts`, `main.ts`, `index.html`):
+  - Added `'Messages'` to `HANDOFF_CAPABILITIES` alongside `'Agent Terminal'` and `'Activity'`, intercepted Mac-pinned menu opens directly on the phone brain with zero loopback round-trip, and added `prepareMacHandoffPage` + `switchBrain(..., { skipDefaultPaint: true })` so dialing the Mac preserves one upfront list frame without extra BLE rebuilds before returning automatically to the phone brain on Home or `hud.rebuild`.
+  - Fixed startup `hello` announcement (`handoff: true, heartbeat: true` sent immediately on connect), fenced departing-socket downlinks (`handoffDepartingGeneration`) so trailing overlays behind `brain.handoff` skip BLE paint, and added the Mac-pinned connection status row in Even Hub's phone sheet.
+  - Packed `0.1.154` (`apps/hub-plugin/joat.ehpk`, 177268 bytes, SHA-256 `3bc1ac5787a42f4994b2fdd702f1904a391518450d0e2f3be23deb580b47bf0c`).
+- **Mac `/messages` query search & `/terminal` execution controls** (`apps/mac/joat/services/messages_endpoint.py`, `terminal_endpoint.py`, `channels/imessage.py`):
+  - Raised `MessagesEndpoint` thread and message page ceilings to `50` and added case-insensitive `?q=<search>&limit=<n>` thread search registering opaque HMAC thread IDs without exposing private handles or chat GUIDs.
+  - Enriched `TerminalEndpoint` `GET /v1/state` with secret-free `recentMessages` and `pendingApprovalItems` per agent, and added `POST /v1/config` actions `send_instruction` (non-blocking async dispatch with optional `newSession`), `cancel_run`, and `decide_approval`.
+- **Always-on-Mac `Messages` & `Agent Terminal` in `JOAT Brain`** (`apps/ios-companion/Sources/CapabilityMenu.swift`, `MacMessages.swift`, `Messages.swift`, `MacTerminal.swift`, `AssistantTools.swift`, `OnPhoneAI.swift`, `Brain.swift`, `Commands.swift`, `AppScreens.swift`):
+  - Defaulted `pluginHandsOff = true` from initial connect, routed `Messages`, `Agent Terminal`, and `Activity` opens to `brain.handoff` while suppressing redundant trailing `hud.receipt` overlays, made Mac `chat.db` authoritative for `Messages` tools with `?q=` sender lookup, and added Tool #29 `agent_terminal_action` (`send_instruction`, `approve`, `deny`, `cancel_run`, `new_session`, `set_model`).
+
+## 2026-11-21 — Omnicapable JOAT Assistant (`JOAT Brain` 1.0 · `202611211537`): 28-tool `PhoneToolBelt`, multi-round SSE tool calling, Calendar access, and polite lead-in normalization
+
+- **28-tool `PhoneToolBelt` & `ConfirmGate`-enforced personal actions** (`apps/ios-companion/Sources/AssistantTools.swift`, `Reminders.swift`, `Messages.swift`, `Mail.swift`, `Recipients.swift`, `QuickNotes.swift`, `CapabilityMenu.swift`, `AppScreens.swift`, `project.yml`, `Info.plist`):
+  - Added `PhoneToolBelt` exposing 28 on-phone tools across Calendar (`calendar_agenda`), Reminders (`open_reminders`, `create_reminder`, `complete_reminder`), Gmail (`get_recent_emails`, `read_email_thread`, `prepare_email`), Messages (`get_recent_messages`, `read_message_thread`, `prepare_message`), Contacts & relationships (`contacts_lookup`, `remember_relationship`), Navigation & location (`start_navigation`, `stop_navigation`, `find_nearby_places`, `where_am_i`, `list_saved_places`), Notes (`read_notes` across QuickNotes, Voice Notes, Apple Pencil Notebook pages, and Prep folders; `create_quicknote`; `control_voice_note`), Timers (`control_timer`), live info (`get_weather`, `news_headlines`, `read_news_article`, `web_search`), surfaces (`open_surface` including `claude`/`codex`/`antigravity` -> `Agent Terminal` and `home`), `terminal_status`, and `notifications_and_voice`.
+  - Enforced `ConfirmGate` hardware touchpad confirmation on every outbound email, text message, and EventKit reminder write/completion, added recursive Gemini `v1beta` schema sanitization (uppercase OpenAPI types, zero unsupported JSON Schema keywords), and added `NSCalendarsFullAccessUsageDescription` + `Calendar` permission management in `JOAT Brain › Home`.
+- **Multi-round SSE tool calling & universal polite lead-in normalization** (`apps/ios-companion/Sources/Brain.swift`, `OnPhoneAI.swift`, `ClaudeLink.swift`, `tests/ios/test_assistant_omnifunction.swift`):
+  - Added `Brain.stripPoliteLeadIn(_:)` stripping conversational prefixes (`"can you"`, `"could you please"`, `"go ahead and"`, `"I'd like you to"`, etc.) and trailing `"please"` ahead of deterministic `VoiceCommand` routing, plus `dismissActiveStreamingConversation()` and `AssistantTurnResult.claimedLens` so lens-claiming tools cleanly dismiss `assistant.conversation` before presenting `confirm.request`, `navigation.view`, `hud.list`, `hud.panel`, `brain.handoff`, or `hud.rebuild`.
+  - Added `GeminiLink.streamWithTools` (`gemini-3.5-flash-lite`, preserving raw candidate `parts` and `thoughtSignature` across `functionCall` -> `functionResponse` rounds with zero `googleSearch` or `thinkingBudget: 0` payloads) and `ClaudeLink.streamWithTools` (`claude-haiku-5-5` `tool_use` + `input_json_delta` streaming).
+
+## 2026-11-21 — Build JOAT 0.1.153: complete turn-by-turn navigation, 4-bit street map tiles, selectable `NAVIGATION` menu, `Drive` mode, and `JOAT Brain` Navigation & Places hub
+
+- **Selectable `NAVIGATION` menu, live `"Where to?"` speech-in-text, `Drive` mode & single-source `navigation.fix`** (`apps/hub-plugin/src/NavigationHud.ts`, `HudCanvasRenderer.ts`, `NavigationController.ts`, `NavigationProgress.ts`, `CapabilityMenu.ts`, `HudPresenter.ts`, `types.ts`, `main.ts`, `index.html`, `apps/mac/joat/core/protocol.py`, `core/navigation.py`, `navigation/policies.py`, `navigation/mapbox.py`, `services/navigation.py`, `services/capabilities.py`):
+  - Removed `'NAVIGATION'` from `TEXT_PAGE_TITLES` so the glasses render a native selectable firmware list (`➤ Show active guidance`, `⏹ Stop navigation`, `➤ Navigate to a place…`, and 1-tap Saved Places), extended `HudPresenter` + `CapabilityMenu` (`noteCapabilityPromptPresented` / `noteCapabilityPromptCancelled`) so `ownerKind === 'capability'` renders live `prompt.partial` speech-in-text with `'tap: search · 2x tap: cancel'` without firing the 12 s selection timeout, and added `{ kind: 'navigation.resume', sessionId }` (`resumeToGlass`) so active guidance reclaims the lens cleanly.
+  - Extended `NavigationMode` to `'walking' | 'cycling' | 'driving'` across Hub, Mac, and iOS (`DRIVE · ROUTE PREVIEW`, `DRIVING · ACTIVE`, zoom `15` / `360 m` tile stride, driving corridor/arrival policy, and mode-aware voice triggers `"walk to …"`, `"bike/cycle to …"`, `"drive to …"`, `"drive home"`).
+  - Added `phoneFixes?: boolean` on `navigation.route` (0 ms `installRoute` skipping `LocationSessionManager`) + `{ kind: 'navigation.fix' }` (`acceptExternalFix`), detached `navigation.origin.request` and `location.refresh` from blocking `MacLink` downlinks, enriched privacy-clean `navigation.state` uplinks with optional `maneuver`, `maneuverDistanceM`, `instruction`, `stepId`, `remainingDistanceM`, and `etaMinutes` (zero coordinates), and simplified Even Hub's WebView (`index.html`) to a single-screen **Connection** sheet with non-destructive legacy place migration (`saved.length > 0`).
+  - Packed `0.1.153` (`apps/hub-plugin/joat.ehpk`, 177639 bytes, SHA-256 `a17da726f673bbbda03f1ec6d30bfab40a9eb283f4faf873bfe7f5a75e23aa56`).
+- **Key-free 4-bit G2 street map tiles, `PhoneLocation` lock-screen GPS & spoken headphone cues** (`apps/ios-companion/Sources/PhoneLocation.swift`, `NavigationMapTiles.swift`, `NavigationMaps.swift`, `Navigation.swift`, `Voice.swift`, `Brain.swift`, `CapabilityMenu.swift`, `project.yml`, `Info.plist`):
+  - Added `PhoneLocation` (`WhenInUse` authorization + active-route-only `CLBackgroundActivitySession` and blue navigation indicator torn down immediately on stop/arrival) and `Voice.sayNavigation` for concise turn, wrong-way/off-route, and arrival prompts in connected headphones (`joat.navigation.voiceCues`).
+  - Added `NavigationMapTiles` rendering `284×220` 4-bit monochrome Web Mercator street tiles aligned to `HudCanvasRenderer.projectMercatorPanel` (`512 * 2^zoom`), strictly gating `MKMapSnapshotter` to `UIApplication.shared.applicationState == .active` (cancelling immediately on `willResignActiveNotification` / `didEnterBackgroundNotification`) and stitching dark Web Mercator slippy tiles strictly on CPU when backgrounded.
+- **Duo-adaptive `Navigation & Places` hub in `JOAT Brain`** (`apps/ios-companion/Sources/NavigationPlacesView.swift`, `AppScreens.swift`, `JOATBrainApp.swift`, `DebugSeed.swift`, `docs/IOS_APP.md`, `scripts/simulator_navigation_flow.py`):
+  - Added `HomeNavigationCard` on `HomeView`, `Location` permission management, and `NavigationPlacesView` with side-by-side split controls + interactive `MapKit.Map` route polylines/pins on unfolded iPhone Duo, `MKLocalSearchCompleter` autocomplete, `Walk | Cycle | Drive` quick launch (`Start on Glasses`), and Saved Places CRUD with one-shot `joat.navigation.migratedPluginPlaceIds.v1` import.
+
+## 2026-11-21 — Build JOAT 0.1.152: standalone multi-account Gmail, streaming JOAT assistant, and iPhone Duo + Apple Pencil redesign
+
+- **Glasses `Mail` surface, 7-row review header generalization & remote `confirm.cancel`** (`apps/hub-plugin/src/types.ts`, `MessagesViewState.ts`, `CapabilityMenu.ts`, `HudPresenter.ts`, `ImuMonitor.ts`, `ConfirmationCommit.ts`, `main.ts`, `apps/mac/joat/core/protocol.py`, `services/capabilities.py`):
+  - Added `Mail` at index 1 of the Even G2 contextual menu (`Messages`, `Mail`, `Reminders`, `Navigation`, `Search`, `Agent Terminal`, `Activity`, `Settings`) and generalized the shared comms list, `ScrollBox` conversation reader (`MAIL · CONVERSATION`), `capmessage` tap-to-reply, `mail-list` / `mail-conversation` / `mail-home` lifecycle events, and `message.ui` draft state machine across `MESSAGES` and `MAIL`.
+  - Generalized `parseMessageDraft` to render `Reply (<acct>) to <recipient>?` and `Email (<acct>) to <recipient>?` on the 7-row review card while preserving `What do you want to say to <recipient>?` for `Send to <recipient>?` SMS drafts and `tap: confirm · 2x tap: retry` hardware gestures.
+  - Added `{ kind: 'confirm.cancel', actionId }` (`ConfirmCancel` in `protocol.py` + `ImuMonitor.disarm`) so spoken cancellations immediately tear down active confirmation cards without emitting an uplink verdict, plus `MAIL · SETUP` fallback on direct Mac connections.
+  - Packed `0.1.152` (`apps/hub-plugin/joat.ehpk`, 179104 bytes, SHA-256 `011b9dee07076c73ce71b0c94ee812128f35bf3ac863020281f114c81e050db4`).
+- **Standalone multi-account Gmail engine on iPhone** (`apps/ios-companion/Sources/GmailKeychain.swift`, `MIMEParser.swift`, `GmailTransport.swift`, `Mail.swift`):
+  - Direct on-phone TLS IMAP (`imap.gmail.com:993`, read-only `EXAMINE "INBOX"`, `UIDVALIDITY`/`UIDNEXT` quota-safe delta sync, `BODY.PEEK` unread preservation, byte-accurate `{N}\r\n` literal framing) and implicit TLS SMTP (`smtp.gmail.com:465`, RFC 5322 `In-Reply-To`/`References` threading, dot-stuffing) backed by normalized 16-character App Passwords in iOS Keychain (`com.joat.brain.gmail`).
+  - Added unified inbox + per-account filtering, silent first-sync watermarks, `directOnlyOnGlasses` bulk/newsletter gating, `SpamCheck` + `MessageHold` integration, account-preserving tap/voice replies, auto-generated subjects, and UTF-16 confirmation ceiling enforcement (`<= 270` code units).
+- **Sub-second SSE streaming JOAT assistant & voice/confirm conflict fixes** (`apps/ios-companion/Sources/OnPhoneAI.swift`, `ClaudeLink.swift`, `MacLink.swift`, `Confirm.swift`, `Brain.swift`, `Messages.swift`, `Navigation.swift`, `Search.swift`, `scripts/build_ios.sh`):
+  - Added `OnPhoneAI` streaming router (`GeminiLink` `gemini-3.5-flash-lite` SSE + multimodal vision without 0-quota `googleSearch` tool calls, `ClaudeLink` SSE, and `MacLink` `/agent` SSE fallback), non-blocking `navigation.cachedArea()`, parallel 2.5 s `Search.snippets` grounding, live volatile speech-in-text on `assistant.conversation`, and mode-safe `Generated/gemini.json` seeding in `build_ios.sh`.
+  - Fixed all 6 voice/confirmation conflicts: `Messages.draft` `diagnosticKind: "messages"` + 270-UTF16-unit `ConfirmGate.fitMessagePrompt`, retired dead 60 s Shortcuts outbox wait, guarded `confirm.hasPending` (spoken cancel -> `confirm.cancel`; spoken yes -> `StatusBar` touchpad reminder; zero `conversationUntil` clobbering), arbitrated unaddressed `"reply"` across `Mail` and `Messages`, prioritized open `QuickNotes` over `PomodoroCommands` for `"pause"`/`"resume"`, and guarded `WakeGate` against self-echo.
+- **4-tab G2 Phosphor Emerald iPhone Duo UI & Apple Pencil Notebook** (`apps/ios-companion/Sources/Theme.swift`, `MailView.swift`, `AppScreens.swift`, `Notebook.swift`, `QuickNotes.swift`, `JOATBrainApp.swift`, `project.yml`, `Info.plist`):
+  - Redesigned `JOAT Brain` into 4 tabs (`Home | Mail | Notes | Agents`) supporting portrait + landscape and two-column `NavigationSplitView` layouts on regular horizontal width (`Mail` and `Notes`), folding `Prep` into `Notes` (`All | Pages | Voice | Prep`) and moving `Diagnostics` into `Home`.
+  - Upgraded `Notebook.swift` with warm `#FAF8F4` stationery, vector `CAShapeLayer` paper templates (`Ruled`, `Dots`, `Grid`, `Blank`), continuous per-`noteId` auto-save, quota-safe 25 s idle / on-close vision OCR via `OnPhoneAI.readHandwriting`, inline page rename, `Undo`/`Redo`, `PhotosPicker` + `PasteButton`, and the `sparkles` AI Insights & Prep inspector.
+
+## 2026-11-20 — Build JOAT 0.1.151: framed dual-brightness Agent Terminal, 3-level session picker, `/terminal` endpoint, and Brainstorm removal
+
+- **5-container framed dual-brightness Agent Terminal on Even G2** (`apps/hub-plugin/src/NativeTerminalSurface.ts`, `HudPageBuilder.ts`, `TerminalController.ts`, `CapabilityMenu.ts`, `HudPresenter.ts`):
+  - Rebuilt the 576×288 Agent Terminal into a 5-container native layout (`terminal-head`, rounded `terminal-card` with `borderWidth: 1, borderColor: 8, borderRadius: 4` as the sole `isEventCapture: 1` owner, 7-row `terminal-dim` at `textColor: 2`, 7-row `terminal-bright` at `textColor: 4`, and 1-line `terminal-foot` at `textColor: 2`), installing once per visit via `RebuildPageContainer` and driving all streaming, live speech partials, scrolling, spinner ticks, and approvals via selective `TextContainerUpgrade` writes (`<= 999` UTF-8 bytes, measured with `@evenrealities/pretext` + `firmwareLineWidth <= 528`).
+  - Formatted user turns as `> ` hanging-indent dim rows, tool invocations as 1-line `>> <tool> · <detail>` dim rows, assistant prose full-width on bright (no `AGENT >`, markdown link URLs or `U+0060` backticks), inline voice partials as `> <words>` (`<= 4` rows, no `QUESTION >` or `YOU >`), pending approvals as a firmware-measured Unicode callout box (`╭── Approve command ──╮` / `tap: approve · swipe: deny · 2x: sessions`), and scrubbed raw model IDs from all glasses HUD surfaces.
+  - Simplified Even Hub's phone sheet (`apps/hub-plugin/index.html`, `main.ts`) to 2 tabs (**Connection** and **Places**) and packed `0.1.151` (`apps/hub-plugin/joat.ehpk`, 177063 bytes, SHA-256 `22faa35c55f42a264e8628968e705cc0252f1e000d09b2e58ae1d6eefb9c073b`).
+- **3-level touch session navigation, multi-session Antigravity, Brainstorm removal & `/terminal` endpoint** (`apps/mac/joat/agents/antigravity_terminal.py`, `services/agent_terminal.py`, `services/capabilities.py`, `services/terminal_endpoint.py`, `core/protocol.py`, `ble/hub_gateway.py`, `services/session.py`, `__main__.py`):
+  - Added `sessions.json` (`0600`) conversation indexing (`list_sessions`, `resume_session`) in `AntigravityTerminalAgent` so `+ New session` starts fresh without erasing prior sessions, and wired 3-level navigation (`AGENT TERMINAL` -> `AGENT TERMINAL · <LANE>` listing `Active · …`, `+ New session`, and saved sessions -> live framed session, with `2x tap` stepping back through Sessions -> Agents -> Overview).
+  - Purged `brainstorm.view`, `brainstorm.action`, `control.state`, `control.action`, `DebateSession`, and `PhoneControlScreen` across the shared wire protocol, Hub plugin, Mac engine, `JOATShell`, and iOS companion, replacing `brainstorm.action` with `terminal.action` (`on_terminal_action`).
+  - Added bearer-authenticated loopback `TerminalEndpoint` (`127.0.0.1:8790`, `~/Library/Application Support/JOAT/terminal-token` at `0600`, served over Tailscale Serve at `/terminal`) with secret-redacted `GET /v1/state` and `POST /v1/config` (`set_model`, `set_cwd`, write-only `set_gemini_key`, `new_session`, `set_assistant_seat`, and CLI account/sign-in actions).
+- **`JOAT Brain` iOS `Agents` tab & simulator visual proof** (`apps/ios-companion/Sources/MacTerminal.swift`, `AppScreens.swift`, `JOATBrainApp.swift`, `scripts/build_ios.sh`, `scripts/simulator_antigravity_flow.py`): replaced the obsolete Shortcuts `Messages` tab in `JOAT Brain` with `AgentsView` backed by `Generated/mac-terminal.json`, and verified the full 3-level Agent Picker -> Session Picker -> `+ New session` -> live speech-in-text -> boxed shell approval -> `2x tap` Sessions -> `2x tap` Agents flow on `evenhub-simulator`.
+
+## 2026-11-20 — Build JOAT 0.1.150: live speech-in-text and fast tap-to-speak in Agent Terminal
+
+- **Live speech-in-text and voice state feedback in Agent Terminal** (`apps/hub-plugin/src/NativeTerminalSurface.ts`, `HudPresenter.ts`, `PromptedInputController.ts`, `EventRouter.ts`):
+  - `HudPresenter.showPromptPartial()` now forwards `prompt.partial` updates for inline terminal prompts instead of limiting partials to Messages reply cards.
+  - `NativeTerminalSurface` renders live `YOU > …` words wrapped to firmware metrics and tail-sliced within `MAX_PROMPT_ROWS` via serialized `TextContainerUpgrade` writes (zero page rebuilds), shows `LISTENING` (`Listening · tap: done · 2x tap: cancel`), transitions immediately to `TRANSCRIBING…` (`Transcribing… · 2x tap: cancel`) when the wearer taps to finish (`prompt-commit`), ticks elapsed `WORKING · Ns` locally while a turn runs, and shows `APPROVAL REQUIRED` alongside `[approval] …` lines in the conversation body.
+  - Packed `0.1.150` (`apps/hub-plugin/joat.ehpk`, 180839 bytes, SHA-256 `72b6a2919a8931e6d53c7ac453f0429be72001c7ed4f7fde2deb4f259349ee01`).
+- **Low-memory Mac STT latency & single-flight locking** (`apps/mac/joat/services/models.py`, `apps/mac/joat/audio/whisper_serve.py`, `apps/mac/joat/services/orchestrator.py`, `apps/mac/joat/__main__.py`):
+  - `recommended_stt_model()` selects WhisperKit `base` (~145 MB, ~0.1 s warm) by default on Macs with <= 12 GiB RAM instead of `large-v3_turbo` (~3 GB, which swapped past 60 s under load), while keeping `large-v3_turbo` on >= 16 GiB Macs and keeping all models switchable at runtime.
+  - `WhisperServeEngine` serializes inference with `_infer_lock` (skipping partial requests when inference is already in flight instead of piling up concurrent HTTP POSTs) and skips the wake-word bias prompt when flushing an armed prompt answer.
+  - `VoiceOrchestrator.commit_prompt_answer()` sends an empty `PromptPartial` when tapped before speech starts so the HUD resets `TRANSCRIBING…` back to `LISTENING`.
+- **Antigravity lane & simulator verification** (`apps/mac/joat/agents/antigravity_terminal.py`, `scripts/simulator_antigravity_flow.py`, `scripts/simulator_harness.py`): added snake_case tool argument formatting (`command_line`, `target_file`, etc.), stripped `<thought>` tags and `file://` markdown links for 576x288 legibility, isolated simulator manifests from live loopback ports, and verified the end-to-end tap-to-speak -> live speech-in-text -> tap-to-done -> confirm -> touchpad approval flow on `evenhub-simulator`.
+
+## 2026-11-20 — Build JOAT 0.1.149: phone brain back in the package allowlist, and Antigravity session persistence
+
+- **Phone brain restored in the packed plugin.** `apps/hub-plugin/.env` on the build Mac omitted `JOAT_RELEASE_ALLOW_LOOPBACK=1`, so 0.1.148 packed only the Tailscale WSS Mac origin and dropped `ws://127.0.0.1:8787/glasses` (`This iPhone · JOAT Brain`) from both the candidate list and the manifest network allowlist. Added `JOAT_RELEASE_ALLOW_LOOPBACK=1` and packed 0.1.149 (`apps/hub-plugin/joat.ehpk`, 180304 bytes, SHA-256 `0926104b7d34bd6f1da0250164f19b4893f24a695f0d572c0880595604da32a4`).
+- **Antigravity lane** (`apps/mac/joat/agents/antigravity_terminal.py`): saves and resumes conversations across JOAT restarts, isolates `save_dir` and `app_data_dir` under `~/Library/Application Support/JOAT/antigravity/`, formats Antigravity tool call and approval arguments (`CommandLine`, `AbsolutePath`, etc.), surfaces retryable 503/429 model delays with a bounded timeout and one-line errors, reads saved session history for `terminal history`, and adds `set-key` / `status` / `check` CLI helpers.
+
+## 2026-11-19 — Brainstorm leaves the menu; OpenClaw and Hermes leave the Agent Terminal (plugin 0.1.147, JOAT Brain 202611182154)
+
+- **Brainstorm** is gone from the glasses menu (`types.ts` CAPABILITIES), the phone's hand-off list and its spoken openers ("open brainstorm" now goes to the assistant). The wearer: the JOAT assistant is good enough for brainstorming. The Mac engine's Brainstorm code is unreachable from the glasses and is left in place for now.
+- **Agent Terminal** lists only the lanes JOAT hosts (Claude Code, Codex, Antigravity). OpenClaw and Hermes lanes and A2A peers are no longer put on the roster; their boot code stays inert.
+- The Mac's `ax-banners` notification source logs its startup "file not there yet" once per spell instead of every 5 s.
+- The phone's Messages page reads the Mac's conversations and history (202611182027); `build_ios.sh` and `pack.sh` run on the mini (Tailscale CLI from the app bundle, the evenhub CLI).
+
+## 2026-11-19 — Texts no longer go missing when the glasses are off or the phone slept
+
+The wearer: texts dropped "if I'm on my phone or the glasses are off". Two causes in JOAT Brain, both fixed:
+
+- **Late texts got no card.** A text more than ten minutes old when the phone caught up (JOAT Brain suspended, or off the tailnet) was saved quietly and summed up in one "N texts while you were away" card. Now every text gets its own card, in order; only the old ones are not read aloud.
+- **A card raised to absent glasses was lost.** A text that arrived while the glasses were off, in the case, or disconnected was painted anyway, and the next card replaced it. `MessageHold` (Messages.swift) now holds such texts and shows each one when the glasses are back on and connected.
+- The phone keeps 50 cards instead of 10, so a backlog stays in the notifications list.
+- Not solved here: if iOS suspends JOAT Brain itself, texts wait on the Mac and arrive when it resumes (now each as its own card).
+
+## 2026-11-19 — The assistant can look up your contacts
+
+- **Mac app** (`PersonalDataBridge/ContactsService.swift`): read-only `contacts.status` and `contacts.search` on the native bridge, from Apple's Contacts store (whatever accounts the Mac syncs). Search by name or nickname, email, or phone number; up to 25 results with phones, emails, company, job title and birthday. The permission prompt only comes from the Mac UI: Access > Contacts > Grant Access (new row). `NSContactsUsageDescription` and the Hardened Runtime `personal-information.addressbook` entitlement are added in `project.yml` (XcodeGen rewrites `JOAT.entitlements` from it).
+- **Engine** (`agents/contact_tools.py`): belt tool `contacts_lookup`, reachable by every assistant seat; results are marked as the wearer's data.
+- Verified live on the mini over the agent endpoint: "what's on my calendar today?" called `calendar_agenda` and answered; a contacts question called `contacts_lookup` and, before access is granted, says how to grant it.
+- Tests: `tests/unit/test_contact_tools.py`.
+
+## 2026-11-19 — Agent Terminal: Claude Code sessions hosted by JOAT
+
+The Agent Terminal's first lane is now Claude Code, run by JOAT itself (Codex and Antigravity follow). It leads the roster ahead of the OpenClaw and Hermes lanes, which stay until those are removed.
+
+- **`apps/mac/joat/agents/claude_code_terminal.py`.** JOAT runs the session through the official Claude Agent SDK (`claude-agent-sdk`, new dependency), which drives the installed `claude` CLI under the wearer's own login. JOAT therefore owns every turn:
+  - streams the reply and each tool call ("⏺ Bash: …") to the lenses;
+  - every permission prompt becomes a terminal approval ("terminal approve" / "terminal deny"), and the turn waits for it;
+  - "terminal cancel" interrupts the turn and reports whether Claude Code confirmed the stop;
+  - each turn continues the same session; "new conversation" starts a fresh one.
+- **Existing sessions.** "terminal discover" lists Claude Code's saved sessions from every folder on this Mac, including ones started in a Terminal window. "terminal resume <name>" continues one in its own folder, in a process JOAT runs. JOAT cannot type into, or approve prompts in, a Terminal window it did not start.
+- **Settings.** One lane named "claude" in the home folder by default. Optional `~/Library/Application Support/JOAT/claude-terminal.json`: `{"lanes": [{"name": "...", "cwd": "...", "permission_mode": "default"}]}`. Nothing is hard-coded.
+- If Claude Code is missing, opening the lane says "Install Claude Code on this Mac and sign in, then retry." instead of a generic dial failure.
+- `scripts/build_ios.sh`: finds the Tailscale CLI inside Tailscale.app when it is not on PATH (without this, a mini build silently left out the Mac links), and falls back to the Apple account signed in to Xcode when there is no issuer ID for the App Store Connect key.
+- **Codex** (`agents/codex_terminal.py`): JOAT starts `codex app-server` and drives the thread over JSON-RPC: streamed command and file-change items and agent messages, command and file-change approvals answered `accept`/`decline` from the glasses, `turn/interrupt` for cancel, `thread/list` + `thread/resume` for saved threads. Optional `codex-terminal.json` (`name`, `cwd`, `sandbox`).
+- **Antigravity** (`agents/antigravity_terminal.py`): Google's `google-antigravity` SDK, hosted by JOAT; shell commands wait for the wearer, cancel stops the turn. It needs a Gemini API key (`GEMINI_API_KEY`, or `~/Library/Application Support/JOAT/gemini-api-key` at 0600): Google meters it, and the SDK does not use the Antigravity app's sign-in. The SDK cannot list sessions, so Antigravity app sessions are not resumable from the glasses.
+- "terminal discover" lists the focused lane's sessions (Claude Code or Codex), and "terminal resume" sends the choice back to the lane that listed it.
+- Tests: `tests/unit/test_claude_code_terminal.py`, `test_codex_terminal.py`, `test_antigravity_terminal.py` (fakes of each SDK/server; output, approvals, cancel, discover/resume through the real roster). Not yet run live: Claude Code and Codex are not installed on the mini, and there is no Gemini key.
+
+## 2026-11-19 — The assistant can read your calendar and reminders
+
+It said it had no access to your calendar because it had no tool for it, and its instructions listed the calendar as unknown. The Mac already read Calendar and Reminders (the Planning page does), so the assistant now gets the same read-only view.
+
+- **Two belt tools** (`apps/mac/joat/agents/planning_tools.py`): `calendar_agenda` (events and dated reminders for a day or up to 31 days) and `open_reminders` (overdue, then upcoming). Every seat reaches them over the same MCP route as the other belt tools: Claude Code, Codex and the local model.
+- Calendar accounts are whatever the Mac holds through EventKit (iCloud, Google, Exchange), so JOAT names none of them. A Google calendar appears once that Google account is added to Calendar on the Mac.
+- Titles are marked as the wearer's data, not instructions to the assistant, because an invite can carry text somebody else wrote.
+- The "their calendar or schedule" entry is gone from the assistant's list of unknowns.
+- Not yet: Contacts (the Mac has no Contacts bridge), and the phone-side Claude path, which has only a search tool.
+- Tests: `tests/unit/test_planning_tools.py`. `tests/integration/test_whisper_cold_start.py::test_shutdown_after_foreground_timeout_reaps_child_and_stops_retries` fails on a clean checkout too and is unrelated.
+
+## 2026-11-18 — Messages through the home Mac: the glasses stay on the iPhone
+
+The glasses connect to the iPhone alone. When a home Mac holds your Messages, JOAT Brain on the phone asks it, over the tailnet, for new texts and sends replies through it. No Shortcuts automation is needed for Messages on such a phone, and nothing switches by hand.
+
+- **The Mac's Messages door** (`apps/mac/joat/services/messages_endpoint.py`, `--messages-endpoint`, on whenever the Private Tailnet setting is).
+  - Loopback only, port 8789, carried over the tailnet by `tailscale serve --bg --set-path /messages http://127.0.0.1:8789` (never Funnel). Its own bearer token lives in `~/Library/Application Support/JOAT/messages-token` (0600, or `JOAT_MESSAGES_TOKEN`).
+  - `GET /v1/events` long-polls for new texts. A phone that has never connected gets only the current position, so a mailbox that iCloud filled with years of history is not replayed.
+  - `GET /v1/threads`, `GET /v1/threads/<id>/messages`, `POST /v1/send` (to a thread or a number or email; a retry with the same `client_id` never texts twice).
+  - Chat GUIDs and numbers stay on the Mac. The phone holds opaque thread ids (an HMAC under the token), so a forged id can't redirect a reply.
+  - `IMessageStore.read_new_texts` is a stateless row-id read, so it does not take the Mac's own reader's change edge.
+- **The phone** (`MacMessages.swift`, `Messages.swift`, `Brain.swift`). It long-polls from now, runs each text through the same spam check and cards as an automation's text, and sends a confirmed reply through the Mac. Group replies work this way, because the Mac replies to the chat itself. A text is never dropped for being late: texts that arrive while the phone was away are saved to Messages, and one card ("N texts while you were away") says so instead of reading each onto the glasses. An address and token that come from the build (`scripts/build_ios.sh` writes git-ignored `Generated/mac-messages.json`); without them the phone keeps the Shortcuts road.
+- If both roads are on, a text can arrive twice: turn the Shortcuts Message automation off on a phone that uses the Mac.
+- Tests: `tests/unit/test_messages_endpoint.py`; the engine-arguments test now expects `--messages-endpoint`.
+
+## 2026-11-14 — JOAT Brain 1.0 (202611140823): a text reaches the glasses even when Find Conversation fails
+
+Build 202611131322 went to TestFlight this morning, once Apple's agreement was accepted. This build follows it. No plugin change.
+
+- **A text never reached the glasses** (`Messages.swift`, `Intents.swift`, `Shortcuts/source/Show Texts on Glasses.plist`). The wearer's screenshot: in Show Texts on Glasses, "The action “Find Conversation” could not run because an unknown error occurred."
+  - Find Conversation was the shortcut's first step, and Shortcuts can't catch a step's error. So the next step, Show Text on Glasses, never ran.
+  - The shortcut is now: Show Text on Glasses (sender and text), Find Conversation, the new Add Group to Text (the conversation's Group Name), Mark as Unread.
+  - JOAT Brain saves the text at the first step and shows it when the group arrives, or after 2.5 s without one. A failed Find Conversation now costs only the group's name.
+  - Simulator: a text whose group came a second later showed as "Fam Jam: Lovely Wifey: Bringing the pie tonight." A text with no group step showed 2.6 s later as one person's (log only, no picture).
+  - The new shortcut imports on the Mac. It is not on the phone yet: it needs this build first, and the Mac's Shortcuts library syncs to the phone.
+  - The in-app "Add Show Texts on Glasses" button still opens the earlier shortcut.
+- **Group sends, what was tried** (no code change):
+  - Messages' own Send Message intent (`com.apple.MobileSMS.SendMessageIntent`) takes a conversation, but a shortcut containing it won't import: "contains features not supported on this device" (macOS 27.2).
+  - The Send Message step Shortcuts offers takes only people (the Mac's Shortcuts tool database), which is the wearer's error of 2026-11-13.
+  - Apple, MacRumors, 9to5Mac and Appdook all say iOS 27 Send Message supports group chats. None says how a shortcut hands it the group.
+  - Group replies from the glasses are still refused.
+
+## 2026-11-13 (afternoon) — Glasses 0.1.146 and JOAT Brain 1.0 (202611131322): texts to one person stop going through the group branch, and Messages answers after Back
+
+JOAT Brain 1.0 (202611131322) archived. The TestFlight upload was refused again for the same reason: Apple's updated agreement has to be accepted in App Store Connect. Glasses 0.1.146 packed (phone brain on the allowlist).
+
+- **Why the texts went to the wrong number, then failed** (`Intents.swift`). The wearer's screenshot of the Send shortcut showed the group branch erroring on a text to his wife: "Send Message failed because Shortcuts couldn't convert from Conversation to Contact, Phone Number, or Email Address."
+  - "Get Text to Send" gave Group as "" for one person, and the shortcut's "If Group has any value" is true for "".
+  - So every text to one person ran Find Conversation, then Send Message to the conversation it returned. Last night that was the DoorDash driver's thread. Today it was one Send Message can't send to at all.
+  - JOAT's own number was right every time (the phone log shows her number queued).
+  - Now Group has no value at all for one person, and a new yes/no field, Is Group, is true only for a group.
+  - The installed shortcut needs no change: its Otherwise branch sends to Recipient, the number JOAT checked.
+  - Not testable in the simulator (no Shortcuts or Messages app there). The first text on the phone tells: the log says `group=none`, then `text out sent`.
+- **Group texts are refused** (`Messages.swift`). Send Message can't send to a conversation, so the group branch never sent a group text. A reply to a group now says "Group texts can't be sent from the glasses yet. Reply to one person instead." before anything is dictated. Simulator: the card showed on the Family thread, and a tap returned to the thread.
+- **"Mac did not answer" in Messages** (`CapabilityMenu.swift`). Opening a conversation emptied JOAT Brain's list of who is on each row.
+  - Back on the list, a tap on a person's row was dropped with no answer, and after 12 s the plugin said "Mac did not answer. Tap to retry Messages." The phone log shows it at 19:01:51.
+  - Now the rows are kept. A row JOAT doesn't know gets the list again, never silence.
+  - Simulator: opened Family, went back, tapped Honey Bun. Her conversation opened and was still there 12 s later.
+- **No more sitting on "Sending…"** (`Messages.swift`). When the Send shortcut stops with an error, it never reaches "Text Sent on Glasses". After 20 s the glasses now say "Not sent: the Send shortcut stopped with an error. Open Shortcuts on the iPhone to see it."
+- **Glasses 0.1.146: no "Mac" when the phone is the brain** (`CapabilityMenu.ts`, `HudCanvasRenderer.ts`):
+  - "JOAT did not answer. Tap to retry Messages."
+  - "No response from JOAT yet."
+  - Offline: "JOAT is not connected. Open JOAT Brain on the iPhone, or JOAT on the Mac."
+  - Reconnecting: "Reconnecting to JOAT…"
+
+## 2026-11-13 — JOAT Brain 1.0 (202611131209): no text to a number that isn't the person's, and a note stays on the glasses
+
+JOAT Brain 1.0 (202611131209) archived. The TestFlight upload was refused: Apple requires an updated agreement to be accepted in App Store Connect (403 FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED). No plugin change.
+
+- **Texts went to the wrong number** (`Messages.swift`, `Recipients.swift`). Five texts the glasses showed as going to the wearer's wife went by SMS to a DoorDash driver's masked number, the one that had texted his order updates that evening. (Found that afternoon: the Send shortcut's group branch picked it, not JOAT; see the entry above.) The guards added here:
+  - A text to one person goes out only to a number or email that Contacts says is theirs. Anything else is refused before the confirmation, with the reason on the glasses ("Not sent: I have no number for …" or "…3963 isn't …'s in Contacts"). A bare name is never handed to Send Message. A number not in Contacts goes out only when the glasses showed that number itself. Group texts are unchanged.
+  - The confirmation shows the number's last four digits: "Send to Lovely Wifey (…0123)?".
+  - A reply never reuses the number an earlier send recorded. A wrong number stored with a sent text was otherwise used for every reply after it.
+  - The log line for each send now says which number it went to (last four digits).
+  - Simulator: New message to a saved contact asked "Send to Lovely Wifey (…0123)?" and queued it. A reply to a sender with no saved number said "Not sent: I have no number for Honey Bun." and asked nothing. A group reply went to the group, as before.
+- **A note "stopped halfway"** (`CapabilityMenu.swift`). Twice in one meeting, the wearer's note stopped partway through.
+  - Simulator: a new plugin page connected mid-recording. That's what happens when the phone locks and Even reloads the plugin in the background, or when the link drops and comes back. The glasses went to Home with nothing saying a note was open, while JOAT Brain went on recording out of sight.
+  - Now a new plugin page with a note open puts the note back on the glasses. Simulator: REC 00:13 then 00:19 after the reconnect.
+  - Not yet confirmed that this was the cause on his phone: his log will say ("rx auth" in the middle of a note).
+- **No swipe stops a note.** On the open note a swipe scrolls the transcript and nothing else. What does pause or stop one:
+  - a tap (record / pause);
+  - 2x tap (Save / Discard / Cancel);
+  - the glasses reporting they're off, which stops the mic. With "Ask first", it stays off until "Resume listening?" is answered.
+
+## 2026-11-12 (later) — Glasses 0.1.145 and JOAT Brain 1.0 (202611122136): Brainstorm opens on the Mac, and the send shortcut fixed
+
+Glasses 0.1.145 packed (`joat.ehpk`; the wearer uploads it to Even Hub). JOAT Brain 1.0 (202611122136) uploaded to TestFlight.
+
+- **Brainstorm on the Mac, from the phone brain** (`BrainHandoff.ts`, `CapabilityMenu.swift`). The wearer chose to keep Brainstorm on the Mac. Until now, with the phone as the brain, Brainstorm said "not on the phone yet".
+  - Now, when he picks Brainstorm, JOAT Brain answers `brain.handoff`. The plugin moves the glasses to the first of the package's Macs that answers, tried in the package's order, with the Mac that answered last time first. No Mac is named in the code. The plugin opens Brainstorm there.
+  - When the wearer goes Home, the glasses go back to the phone brain. They also go back if the Mac stays away for 20 s.
+  - When no Mac answers within 10 s each: "No Mac answered. Is JOAT open there, with Tailscale on?"
+  - The Agent Terminal and Activity, also Mac-only, are handed over the same way.
+  - The glasses hold one brain at a time. That's one plugin connection, and the Mac lets one display hold the glasses. So while Brainstorm is open, phone-only things such as texts, phone reminders and QuickNotes wait until Home. Notification cards are pushed again then, and a reminder that came due is shown again.
+  - A hand-off is never saved as the preferred brain, so a relaunch starts on the phone.
+  - The plugin says `handoff: true` in its hello. An older plugin still gets "not on the phone yet". The Mac ignores the new field.
+  - Simulators: JOAT Brain sent the hand-off and the plugin moved to a stand-in Mac on 127.0.0.1:8798, which drew Brainstorm READY. 2x tap went Home, and the plugin was back on JOAT Brain. The real Mac rightly refused the simulator: it has no pairing token. Unit tests cover the order, no answer, going Home while dialing, a Mac that goes away and comes back, and the wearer's own choice of brain.
+- **Send shortcut: the group search fixed** (`Shortcuts/source/Send Message from JOAT Brain.plist`). On the wearer's iPhone, Find Conversation's group filter showed an empty red field. The file searched by `conversationName`, which iOS doesn't offer as a filter; the filter it offers is Display Name. The filter is now `displayName` is Group.
+  - On his phone the trigger also had an empty "Subtitle contains" row ("Configure 'Subtitle' to enable this automation"). It isn't in the file. Remove the row with ⊖.
+  - The in-app Add to Shortcuts link still installs the earlier copy. The wearer is fixing his on the phone; a new link follows once it sends.
+- **A one-person thread is not a group** (`Messages.swift`). If the show shortcut's Group is the sender's own name, the text is treated as one person's.
+
+## 2026-11-12 — JOAT Brain 1.0 (202611122018): tap records again, a mic check, one-tap Messages shortcuts, white notebook paper
+
+JOAT Brain 1.0 (202611122018) uploaded to TestFlight. No plugin change.
+
+- **Tap records, long press talks** (`QuickNotes.swift`). The wearer: tap is record (he said so on 2026-10-29), with the AI cues in the menu, so tap-to-record and long press both work.
+  - Since 2026-11-07 a tap on the open note opened the AI cues. That left holding the touchpad as the only way to record from the glasses.
+  - Now:
+    - A tap records or pauses.
+    - A long press talks one paragraph.
+    - 2x tap gives Save / Discard / Cancel.
+    - AI cues and Prep notes are in the note's menu (tap, then long press).
+  - The menu opens with a tap and then a long press, and that tap reaches the note first. When the menu opens within 3 s of it, the recording goes back to how it was.
+  - New hints: "tap: record · hold: talk", and "● REC · tap: pause".
+- **Checking the glasses' mic** (`AudioCheck.swift`). A Genesis 26 reading through the car's speakers kept 146 of 345 words (42%). The words it kept were nearly all right; whole stretches of 10 to 30 words were missing. The wearer's own voice comes through whole.
+  - Even says the G2's four mics "isolate the wearer's voice from background noise".
+  - The same chapter, spoken by macOS `say` at 16 kHz and run through the same engine on the Mac, kept 290 of 347 words (84%). No stretch of 5 or more words was missing; the misses were "thee", "thy" and "unto".
+  - So the engine doesn't drop stretches on clear audio. Now JOAT Brain shows what the glasses send:
+    - While a note records, the log gets the glasses' sound level once a second: frames, seconds of sound, RMS and peak in dBFS.
+    - Diagnostics › Save note audio (off by default) keeps each note's audio as a WAV, to share and listen to.
+    - Diagnostics › Share the log sends `brain.log`.
+  - Simulator: the level lines came every second while recording. A 12 s WAV played as 16 kHz mono.
+- **Messages: one-tap install, and a three-action shortcut** (`Intents.swift`, `Messages.swift`, `Shortcuts/`).
+  - The show shortcut is now **Show Texts on Glasses**: Find Conversations (the newest), Show Text on Glasses (From: the sender, Message: the text, Group: the conversation's name) and Mark as Unread. It replaces about a dozen actions.
+  - JOAT Brain looks up the sender's name in Contacts and takes the group from its new **Group** parameter. An older shortcut that sends "Group (Person)" still works.
+  - JOAT Brain › Messages: **Add to Shortcuts** buttons open iCloud links to the two shortcuts, straight into Shortcuts. They were made in Shortcuts on the Mac: Share › Copy iCloud Link. Apple's `shortcuts://import-shortcut` takes only iCloud links.
+  - The in-app steps follow iOS 27, per Apple's guide: Info › Privacy › Allow Running When Locked, then Always Allow if an action asks. On iOS 27 a shared shortcut carries its automation ("Automations are now built directly into shortcuts, including shared shortcuts").
+  - Simulator: a text from a raw number in "Book Club" showed as "Book Club · <the contact's name>: …".
+- **Notebook: white paper in Dark Mode** (`Notebook.swift`). In Dark Mode, PencilKit drew black ink as white on a black page, and the palette showed the black swatch as white (simulator). The page is now always white paper (`overrideUserInterfaceStyle = .light`), and the palette shows its colors as they draw (`colorUserInterfaceStyle = .light`). The note's page preview is ink on white too.
+- **The blank color picker:** not fixed yet, because the cause isn't known.
+  - Apple's color picker is drawn by iOS outside the app. In the wearer's screenshot, the Paste button, also drawn by iOS, was blank as well.
+  - Simulator: no leak. After five pages and three trips to the background, one page view and one tool picker were alive each time, and the picker drew every time.
+  - Apple's forums report system-drawn controls going blank in an app that has run for hours or days.
+  - The page-open log line now gives the page views and tool pickers alive, and how long JOAT Brain has been running.
+  - Next: when the picker is blank, force-quit and reopen JOAT Brain.
+
 ## 2026-11-11 (later) — JOAT Brain 1.0 (202611111326): prep notes are folders, and the glasses pick one
 
 JOAT Brain 1.0 (202611111326) uploaded to TestFlight. No plugin change.

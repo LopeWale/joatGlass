@@ -31,7 +31,7 @@ type NavigationUplinkMessage = Extract<UplinkMessage, {
     | 'navigation.origin.failed';
 }>;
 
-type BrainstormUplinkMessage = Extract<UplinkMessage, { kind: 'brainstorm.action' }>;
+type TerminalUplinkMessage = Extract<UplinkMessage, { kind: 'terminal.action' }>;
 type PhoneLocationUplink = Extract<UplinkMessage, { kind: 'location' }>;
 type PromptBoundUplink = Extract<UplinkMessage, { kind: 'audio' | 'prompt.ack' | 'prompt.cancel' }>;
 
@@ -578,11 +578,11 @@ export class MacLink {
   }
 
   /**
-   * Brainstorm gestures are session-control intents, not durable commands.
+   * Agent Terminal gestures are session-control intents, not durable commands.
    * Dropping one during a reconnect is safer than replaying a stale cancel or
    * retry against the replacement Mac session.
    */
-  sendBrainstorm(msg: BrainstormUplinkMessage): boolean {
+  sendTerminal(msg: TerminalUplinkMessage): boolean {
     if (this.socket?.readyState !== WebSocket.OPEN || !this.authenticated) return false;
     try {
       this.rawSend(msg);

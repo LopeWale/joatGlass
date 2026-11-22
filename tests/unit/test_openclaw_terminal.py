@@ -16,6 +16,7 @@ from joat.agents.openclaw_gateway import (
     OpenClawEventSequenceGap,
     OpenClawGatewayError,
 )
+from joat.agents.openclaw_terminal import OpenClawRunFailed as _RunFailed
 from joat.agents.openclaw_terminal import (
     OpenClawAgentTerminal,
     OpenClawRunFailed,
@@ -1416,3 +1417,14 @@ async def test_run_outcome_ignores_foreign_failures_and_preserves_own_partial_ou
             chunks.append(chunk)
     assert chunks == ["partial output"]
     assert not any(method == "sessions.abort" for method, _ in connection.calls)
+
+
+def test_a_failed_run_is_worded_with_the_gateway_name() -> None:
+    failed = _RunFailed("error", kind="refusal", stop_reason="stop")
+    assert str(failed) == "OpenClaw declined this instruction."
+    renamed = failed.renamed("Hermes")
+    assert str(renamed) == "Hermes declined this instruction."
+    assert (renamed.state, renamed.kind, renamed.stop_reason) == (failed.state, failed.kind, failed.stop_reason)
+    assert str(_RunFailed("error", kind="unknown", stop_reason="x", name="Hermes")) == (
+        "Hermes run failed. Check Hermes for details, then try again."
+    )

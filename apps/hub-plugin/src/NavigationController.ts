@@ -17,6 +17,7 @@ import type {
 type NavigationViewMessage = Extract<DownlinkMessage, { kind: 'navigation.view' }>;
 type NavigationRouteMessage = Extract<DownlinkMessage, { kind: 'navigation.route' }>;
 type NavigationMapMessage = Extract<DownlinkMessage, { kind: 'navigation.map' }>;
+type NavigationFixMessage = Extract<DownlinkMessage, { kind: 'navigation.fix' }>;
 
 /** Decode a Mac-rendered map tile. Isolated so a headless test can supply
  * its own decoder, and so a host without `Image` degrades to no map rather
@@ -96,6 +97,8 @@ interface NavigationHudSink {
   /** A route's progress: repaints when the route owns the glass, and
    * otherwise only updates the retained page and the header chip. */
   updateNavigation?(navigation: NavigationHudModel, statusOverride?: string): Promise<boolean>;
+  /** Whether navigation currently owns the visible glass surface. */
+  isNavigationVisible?(): boolean;
   /** The route ended: its chip leaves every header. */
   navigationEnded?(): void;
 }
@@ -114,6 +117,7 @@ interface NavigationLocationSession {
 interface ActiveRoute {
   message: NavigationRouteMessage;
   tracker: NavigationProgressTracker;
+  phoneFixes: boolean;
   sequence: number;
   lastSignature?: string;
   rerouteRequested: boolean;
@@ -234,7 +238,8 @@ export class NavigationController {
       this.sendRouteAck(message, 'rejected');
       return false;
     }
-    if (!this.location) {
+    const phoneFixes = message.phoneFixes === true;
+    if (!phoneFixes && !this.location) {
       this.sendRouteAck(message, 'rejected');
       return false;
     }
@@ -250,6 +255,7 @@ export class NavigationController {
     const route: ActiveRoute = {
       message,
       tracker,
+      phoneFixes,
       sequence: 0,
       rerouteRequested: false,
       pausedForReroute: false,
@@ -264,41 +270,25 @@ export class NavigationController {
       repaintRequested: false,
       reportedFixShape: false,
     };
+    if (phoneFixes) {
+      if (prior && !prior.phoneFixes) {
+        void this.location?.setNavigationConsumer(undefined).catch(() => false);
+      }
+      if (installEpoch !== this.lifecycleEpoch) return false;
+      this.route = route;
+      this.sendRouteAck(message, 'installed');
+      return true;
+    }
     let started = false;
     try {
-      started = await this.location.setNavigationConsumer((fix, receivedAt) => {
-        if (this.route !== route || route.pausedForReroute) return;
-        const timestamp = locationTimestampMs(fix.timestamp, receivedAt);
-        const safeFix: NavigationFix = {
-          latitude: fix.latitude,
-          longitude: fix.longitude,
-          ...(Number.isFinite(fix.accuracy) ? { accuracy: fix.accuracy } : {}),
-          ...(Number.isFinite(fix.heading) ? { heading: fix.heading } : {}),
-          ...(Number.isFinite(fix.speed) ? { speed: fix.speed } : {}),
-          ...(timestamp !== undefined ? { timestamp } : {}),
-        };
-        if (!route.reportedFixShape) {
-          // The shape of the host's fixes, once per route and without the
-          // position: which optional fields it fills decides whether the
-          // tracker trusts, ages or rejects every fix that follows.
-          route.reportedFixShape = true;
-          console.info('[joat] navigation fix shape', {
-            accuracy: Number.isFinite(fix.accuracy),
-            heading: Number.isFinite(fix.heading),
-            speed: Number.isFinite(fix.speed),
-            timestamp: fix.timestamp === undefined ? 'absent'
-              : timestamp === Math.round(fix.timestamp as number) ? 'milliseconds' : 'seconds',
-            ageMs: timestamp === undefined ? undefined : receivedAt - timestamp,
-          });
-        }
-        const state = route.tracker.accept(safeFix, receivedAt);
-        this.enqueueProgress(route, state, safeFix);
+      started = await this.location!.setNavigationConsumer((fix, receivedAt) => {
+        this.ingestFix(route, fix, receivedAt);
       });
     } catch {
       started = false;
     }
     if (installEpoch !== this.lifecycleEpoch) {
-      if (started) await this.location.setNavigationConsumer(undefined).catch(() => false);
+      if (started) await this.location!.setNavigationConsumer(undefined).catch(() => false);
       return false;
     }
     if (!started) {
@@ -308,6 +298,95 @@ export class NavigationController {
     this.route = route;
     this.sendRouteAck(message, 'installed');
     return true;
+  }
+
+  acceptExternalFix(msg: NavigationFixMessage): void {
+    const route = this.route;
+    if (!route || route.message.sessionId !== msg.sessionId || route.pausedForReroute) return;
+    if (!Number.isFinite(msg.latitude) || !Number.isFinite(msg.longitude)) return;
+    this.ingestFix(route, msg, this.clock());
+  }
+
+  async resumeToGlass(sessionId: string): Promise<boolean> {
+    let model: NavigationHudModel | undefined;
+    let requestId: string | undefined;
+    let generation: number | undefined;
+    const route = this.route;
+    if (route?.message.sessionId === sessionId) {
+      if (route.lastProgress) {
+        model = this.progressModel(route, route.lastProgress.state, route.lastProgress.fix);
+      } else if (this.current?.sessionId === sessionId) {
+        model = this.cloneMessage(this.current).navigation;
+      } else {
+        const firstStep = route.message.plan.steps[0]!;
+        const lastStep = route.message.plan.steps[route.message.plan.steps.length - 1]!;
+        model = this.progressModel(route, {
+          kind: 'guidance',
+          stepId: firstStep.id,
+          progressM: 0,
+          crossTrackM: 0,
+          maneuver: firstStep.maneuver,
+          instruction: firstStep.instruction,
+          maneuverDistanceM: Math.round(Math.max(0, firstStep.distanceAlongRouteM)),
+          remainingDistanceM: Math.round(Math.max(0, lastStep.distanceAlongRouteM)),
+        });
+      }
+      requestId = this.current?.sessionId === sessionId
+        ? this.current.requestId
+        : route.message.requestId;
+      generation = this.current?.sessionId === sessionId
+        ? this.current.generation
+        : route.message.generation;
+    } else if (this.current?.sessionId === sessionId) {
+      const cloned = this.cloneMessage(this.current);
+      model = cloned.navigation;
+      requestId = cloned.requestId;
+      generation = cloned.generation;
+    }
+    if (!model || requestId === undefined || generation === undefined) return false;
+    const lifecycleEpoch = this.lifecycleEpoch;
+    const operation = ++this.presentationOperation;
+    const painted = await this.hud.showNavigation(model);
+    if (!painted || lifecycleEpoch !== this.lifecycleEpoch || operation !== this.presentationOperation) {
+      return false;
+    }
+    this.current = {
+      kind: 'navigation.view',
+      sessionId,
+      requestId,
+      generation,
+      navigation: model,
+    };
+    return true;
+  }
+
+  private ingestFix(route: ActiveRoute, fix: NavigationFix, receivedAt: number): void {
+    if (this.route !== route || route.pausedForReroute) return;
+    const timestamp = locationTimestampMs(fix.timestamp, receivedAt);
+    const safeFix: NavigationFix = {
+      latitude: fix.latitude,
+      longitude: fix.longitude,
+      ...(Number.isFinite(fix.accuracy) ? { accuracy: fix.accuracy } : {}),
+      ...(Number.isFinite(fix.heading) ? { heading: fix.heading } : {}),
+      ...(Number.isFinite(fix.speed) ? { speed: fix.speed } : {}),
+      ...(timestamp !== undefined ? { timestamp } : {}),
+    };
+    if (!route.reportedFixShape) {
+      // The shape of the host's fixes, once per route and without the
+      // position: which optional fields it fills decides whether the
+      // tracker trusts, ages or rejects every fix that follows.
+      route.reportedFixShape = true;
+      console.info('[joat] navigation fix shape', {
+        accuracy: Number.isFinite(fix.accuracy),
+        heading: Number.isFinite(fix.heading),
+        speed: Number.isFinite(fix.speed),
+        timestamp: fix.timestamp === undefined ? 'absent'
+          : timestamp === Math.round(fix.timestamp as number) ? 'milliseconds' : 'seconds',
+        ageMs: timestamp === undefined ? undefined : receivedAt - timestamp,
+      });
+    }
+    const state = route.tracker.accept(safeFix, receivedAt);
+    this.enqueueProgress(route, state, safeFix);
   }
 
   async requestOrigin(
@@ -384,19 +463,22 @@ export class NavigationController {
     const ownsView = this.current?.sessionId === sessionId;
     const ownsPendingView = this.pendingPresentation?.sessionId === sessionId;
     if (!ownsRoute && !ownsView && !ownsPendingView) return false;
+    const visibleOnGlass = this.hud.isNavigationVisible ? this.hud.isNavigationVisible() : true;
     this.lifecycleEpoch += 1;
     if (ownsRoute && route) {
       route.pendingProgress.length = 0;
       this.route = undefined;
-      await this.location?.setNavigationConsumer(undefined).catch(() => false);
+      if (!route.phoneFixes) {
+        await this.location?.setNavigationConsumer(undefined).catch(() => false);
+      }
     }
     if (ownsRoute || ownsView) this.hud.navigationEnded?.();
     if (ownsView) this.current = undefined;
     if (ownsView || ownsPendingView) this.recordCue('stopped', true);
     // The caller uses this result to decide whether to restore Overview. An
-    // old route may be stopped after a newer session already owns the HUD;
-    // never let that stale stop hide the newer navigation view.
-    return ownsView || ownsPendingView;
+    // old route may be stopped after a newer session or menu already owns the
+    // HUD; never let that stop hide the surface on the glass.
+    return (ownsView && visibleOnGlass) || ownsPendingView;
   }
 
   /** Link loss revokes the Mac session that authorized navigation. Keep no
@@ -570,7 +652,7 @@ export class NavigationController {
   ): Promise<void> {
     if (this.route !== route) return;
     const signature = state.kind === 'guidance'
-      ? `${state.kind}:${state.maneuver}:${formatNavigationDistance(state.maneuverDistanceM)}`
+      ? `${state.kind}:${state.stepId}:${state.maneuver}:${formatNavigationDistance(state.maneuverDistanceM)}`
       : state.kind === 'uncertain'
         ? `${state.kind}:${state.reason}`
         : state.kind;
@@ -614,6 +696,14 @@ export class NavigationController {
       revision: route.message.revision,
       sequence: route.sequence,
       state: state.kind,
+      ...(state.kind === 'guidance' ? {
+        maneuver: state.maneuver,
+        maneuverDistanceM: state.maneuverDistanceM,
+        ...(state.instruction.trim() ? { instruction: state.instruction.trim().slice(0, 128) } : {}),
+        stepId: state.stepId,
+        remainingDistanceM: state.remainingDistanceM,
+        ...(navigation.etaMinutes !== undefined ? { etaMinutes: navigation.etaMinutes } : {}),
+      } : {}),
     });
     if (state.kind === 'off_route' && !route.rerouteRequested) {
       route.rerouteRequested = true;
@@ -629,7 +719,7 @@ export class NavigationController {
         longitude: fix.longitude,
       });
     }
-    if (state.kind === 'arrived') {
+    if (state.kind === 'arrived' && !route.phoneFixes) {
       await this.location?.setNavigationConsumer(undefined);
     }
   }

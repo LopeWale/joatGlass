@@ -4,7 +4,7 @@ import { CapabilityMenu } from './CapabilityMenu';
 import type { HudPresenter } from './HudPresenter';
 import type { MacLink } from './MacLink';
 import { Settings } from './Settings';
-import { CAPABILITIES, type BrainstormHudModel, type InputEventPayload } from './types';
+import { CAPABILITIES, type AgentTerminalHudModel, type InputEventPayload } from './types';
 
 interface OpeningBinding {
   requestId: string;
@@ -17,15 +17,16 @@ function deferred() {
   return { promise, release };
 }
 
-const terminal = (state: 'unavailable' | 'ready' = 'ready'): BrainstormHudModel => ({
-  screen: 'agent_terminal', state, topic: 'work', collaborators: ['work'],
-  activity: state === 'ready' ? 'Ready for your instruction.' : 'Connecting to work…',
-  noToolsChecked: false,
+const terminal = (state: 'unavailable' | 'ready' = 'ready'): AgentTerminalHudModel => ({
+  state,
+  focus: 'Claude · idle',
+  lanes: ['Claude · idle'],
+  activity: state === 'ready' ? 'Ready for your instruction.' : 'Connecting to Claude…',
 });
 
 function rig() {
   const sent: Array<{ kind: string; event?: InputEventPayload }> = [];
-  const committed: BrainstormHudModel[] = [];
+  const committed: AgentTerminalHudModel[] = [];
   const guards: Array<(() => boolean) | undefined> = [];
   let screen = 'home';
   let listHold: ReturnType<typeof deferred> | undefined;
@@ -41,12 +42,9 @@ function rig() {
     }),
     showDefault: vi.fn(async () => { screen = 'home'; return true; }),
     setStatus: vi.fn(async () => true),
-    showBrainstorm: vi.fn(async (
-      model: BrainstormHudModel, _status?: string, isCurrent?: () => boolean,
+    showTerminal: vi.fn(async (
+      model: AgentTerminalHudModel, _status?: string, isCurrent?: () => boolean,
     ) => {
-      // The renderer's guarded commit is a controlled dependency here.
-      // These tests prove the menu supplies a live ownership predicate;
-      // separate HudPresenter tests must prove the real bridge behavior.
       guards.push(isCurrent);
       if (isCurrent && !isCurrent()) return false;
       const hold = paintHold;
@@ -67,7 +65,7 @@ function rig() {
     hud as unknown as HudPresenter, new Settings(), link as unknown as MacLink,
   );
 
-  async function present(model: BrainstormHudModel, binding: OpeningBinding, isCurrent = () => true) {
+  async function present(model: AgentTerminalHudModel, binding: OpeningBinding, isCurrent = () => true) {
     return menu.presentTerminalOpening(model, binding, isCurrent);
   }
 
@@ -206,8 +204,8 @@ describe('Terminal opening ownership', () => {
     expect(current.selectionId).not.toBe(old.selectionId);
     expect(await fixture.present(terminal(), old)).toBe(false);
     expect(fixture.committed).toEqual([]);
-    expect(await fixture.present({ ...terminal(), topic: 'calendar' }, current)).toBe(true);
-    expect(fixture.committed.map((model) => model.topic)).toEqual(['calendar']);
+    expect(await fixture.present({ ...terminal(), focus: 'Codex · idle' }, current)).toBe(true);
+    expect(fixture.committed.map((model) => model.focus)).toEqual(['Codex · idle']);
   });
 
   it('rejects old opening frames after another capability or a new Terminal visit', async () => {
@@ -233,21 +231,20 @@ describe('Terminal opening ownership', () => {
     expect(fixture.committed.map((model) => model.state)).toEqual(['unavailable']);
   });
 
-  it('does not let an old opening replace a deliberate Brainstorm handoff', async () => {
+  it('does not let an old opening replace an external live-session release', async () => {
     const fixture = rig();
     const binding = await fixture.choose();
     expect(await fixture.present(terminal('unavailable'), binding)).toBe(true);
-    await fixture.menu.beginLiveSession('brainstorm');
-    await fixture.hud.showBrainstorm({ ...terminal(), screen: 'brainstorm', topic: 'current topic' });
+    fixture.menu.releaseToLiveSession();
     expect(await fixture.present(terminal(), binding)).toBe(false);
-    expect(fixture.committed[fixture.committed.length - 1]?.screen).toBe('brainstorm');
+    expect(fixture.committed.map((model) => model.state)).toEqual(['unavailable']);
   });
 
   it('rejects an already-aborted transport before changing the picker', async () => {
     const fixture = rig();
     const binding = await fixture.choose();
     expect(await fixture.present(terminal(), binding, () => false)).toBe(false);
-    expect(fixture.hud.showBrainstorm).not.toHaveBeenCalled();
+    expect(fixture.hud.showTerminal).not.toHaveBeenCalled();
     expect(fixture.screen()).toBe('list:AGENT TERMINAL');
   });
 
@@ -309,7 +306,7 @@ describe('Terminal opening ownership', () => {
     expect(fixture.menu.mayPresentUnboundTerminal()).toBe(true);
     await fixture.openTerminal();
     expect(fixture.menu.mayPresentUnboundTerminal()).toBe(true);
-    await fixture.menu.beginLiveSession('brainstorm');
+    fixture.menu.releaseToLiveSession();
     expect(fixture.menu.mayPresentUnboundTerminal()).toBe(true);
   });
 
@@ -325,7 +322,7 @@ describe('Terminal opening ownership', () => {
     expect(fixture.menu.mayPresentUnboundTerminal()).toBe(false);
   });
 
-  it.each(['Messages', 'Brainstorm'] as const)(
+  it.each(['Messages'] as const)(
     'rejects unbound Terminal frames before and after a new %s feature paints', async (feature) => {
       const fixture = rig();
       const binding = await fixture.choose();
@@ -368,7 +365,7 @@ describe('Terminal opening ownership', () => {
       let current = true;
       const pending = fixture.present(terminal(), binding, () => current);
       await settle();
-      expect(fixture.hud.showBrainstorm).toHaveBeenCalledTimes(1);
+      expect(fixture.hud.showTerminal).toHaveBeenCalledTimes(1);
       let releaseList: (() => void) | undefined;
       let replacement: Promise<void> | undefined;
       try {

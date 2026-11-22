@@ -78,6 +78,18 @@ final class OpenClawRuntimeConfigurationTests: XCTestCase {
         XCTAssertThrowsError(try OpenClawRuntimeConfiguration.load(from: path))
     }
 
+    func testSaveKeepsTheGatewayNameTheGlassesShow() throws {
+        let path = directory.appendingPathComponent("openclaw.json")
+        let named = try OpenClawRuntimeConfiguration(gatewayURL: "wss://mac-mini.example.ts.net", name: " Hermes ")
+        try named.save(to: path)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: String]
+        )
+        XCTAssertEqual(object["name"], "Hermes")
+        XCTAssertEqual(try OpenClawRuntimeConfiguration.load(from: path)?.name, "Hermes")
+        XCTAssertThrowsError(try OpenClawRuntimeConfiguration(gatewayURL: "wss://mac-mini.example.ts.net", name: "  "))
+    }
+
     func testLoadRejectsGroupReadableConfigAndSaveRepairsItAtomically() throws {
         let path = directory.appendingPathComponent("openclaw.json")
         try Data(

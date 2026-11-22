@@ -55,13 +55,16 @@ targets:
         # HTTPS only (exempt): TestFlight skips the export-compliance question.
         ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
-        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         # The `audio` background mode is what keeps the brain running while
-        # the Even app is in front and the screen is locked (Spike 2).
-        UIBackgroundModes: [audio]
+        # the Even app is in front and the screen is locked (Spike 2);
+        # `location` is armed only during an active turn-by-turn route.
+        UIBackgroundModes: [audio, location]
+        NSLocationWhenInUseUsageDescription: JOAT Brain uses your location for turn-by-turn glasses navigation, nearby searches, and saving places.
         NSMicrophoneUsageDescription: JOAT Brain keeps an audio session open so it can keep working while the Even app is in front.
         NSSpeechRecognitionUsageDescription: JOAT Brain turns what you say to the glasses into text, on this phone.
         NSRemindersFullAccessUsageDescription: JOAT Brain creates, lists and completes your reminders when you ask through the glasses.
+        NSCalendarsFullAccessUsageDescription: JOAT Brain reads your calendar events when you ask about your schedule through the glasses.
         NSContactsUsageDescription: JOAT Brain finds the number of the person you text or reply to from the glasses.
         # Share › JOAT Brain on a PDF or text file: prep notes for the AI
         # cues (Prep.swift). A copy lands in Documents/Inbox.

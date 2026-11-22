@@ -1,0 +1,598 @@
+"""Unit tests for Mac /terminal HTTP endpoint (services/terminal_endpoint.py)."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import stat
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from joat.agents.antigravity_terminal import AntigravityTerminalAgent, gemini_api_key, store_gemini_api_key
+from joat.agents.claude_code_terminal import ClaudeCodeTerminalAgent, ClaudeTerminalLaneConfig
+from joat.agents.cli_accounts import AccountProfile, AccountRegistry
+from joat.agents.cli_signin import AccountStatus, LoginSnapshot
+from joat.agents.codex_terminal import CodexTerminalAgent, CodexTerminalLaneConfig
+from joat.services.agent_terminal import AgentTerminalRoster
+from joat.services.models import ModelRegistry, assistant_slot, default_slots
+from joat.services.terminal_endpoint import TerminalEndpoint, terminal_token
+
+TOKEN = "test-terminal-bearer-token"
+RAW_SECRET_KEY = "test-gemini-secret-never-leak-999"
+
+
+class FakeSignIn:
+    def __init__(self, registry: AccountRegistry) -> None:
+        self._registry = registry
+        self.current: LoginSnapshot | None = None
+        self.started: list[str] = []
+        self.submitted_codes: list[str] = []
+        self.cancelled = 0
+
+    def binary(self, provider: str) -> str | None:
+        return f"/usr/local/bin/{provider}"
+
+    async def status(self, profile: AccountProfile) -> AccountStatus:
+        return AccountStatus("logged_in", email=f"{profile.profile_id}@example.com", plan="Max")
+
+    async def sign_out(self, profile: AccountProfile) -> bool:
+        return True
+
+    def start(self, profile: AccountProfile) -> LoginSnapshot:
+        self.started.append(f"{profile.provider}:{profile.profile_id}")
+        self.current = LoginSnapshot(
+            provider=profile.provider,
+            profile_id=profile.profile_id,
+            stage="enter_code" if profile.provider == "claude" else "open_link",
+            url="https://example.com/login",
+            code=None if profile.provider == "claude" else "ABCD-1234",
+            needs_code=profile.provider == "claude",
+            message="Open the link to sign in.",
+        )
+        return self.current
+
+    def submit_code(self, code: str) -> bool:
+        if self.current is None or not self.current.needs_code:
+            return False
+        self.submitted_codes.append(code)
+        self.current = LoginSnapshot(
+            provider=self.current.provider,
+            profile_id=self.current.profile_id,
+            stage="done",
+            message="Signed in.",
+        )
+        return True
+
+    def cancel(self, *, publish: bool = True) -> None:
+        self.cancelled += 1
+        if self.current is not None and self.current.stage not in ("done", "failed", "cancelled"):
+            self.current = LoginSnapshot(
+                provider=self.current.provider,
+                profile_id=self.current.profile_id,
+                stage="cancelled",
+                message="Sign-in cancelled.",
+            )
+
+    def dismiss(self) -> None:
+        self.current = None
+
+
+async def _call(
+    endpoint: TerminalEndpoint,
+    method: str,
+    target: str,
+    body: dict[str, Any] | None = None,
+    token: str | None = TOKEN,
+) -> tuple[int, dict[str, Any]]:
+    reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+    payload = json.dumps(body).encode("utf-8") if body is not None else b""
+    lines = [f"{method} {target} HTTP/1.1", "Host: 127.0.0.1", f"Content-Length: {len(payload)}"]
+    if token is not None:
+        lines.append(f"Authorization: Bearer {token}")
+    if body is not None:
+        lines.append("Content-Type: application/json")
+    writer.write(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + payload)
+    await writer.drain()
+    raw = await reader.read()
+    writer.close()
+    await writer.wait_closed()
+    head, _, rest = raw.partition(b"\r\n\r\n")
+    return int(head.split()[1]), json.loads(rest or b"{}")
+
+
+@pytest.fixture
+async def terminal_service(tmp_path: Path):
+    work_a = tmp_path / "work_a"
+    work_b = tmp_path / "work_b"
+    work_a.mkdir()
+    work_b.mkdir()
+    joat_dir = tmp_path / "JOAT"
+    joat_dir.mkdir(mode=0o700)
+    key_path = joat_dir / "gemini-api-key"
+    store_gemini_api_key(RAW_SECRET_KEY, key_path)
+
+    claude = ClaudeCodeTerminalAgent(
+        ClaudeTerminalLaneConfig("claude", str(work_a)),
+        cli_path=lambda: "/usr/local/bin/claude",
+    )
+    codex = CodexTerminalAgent(
+        CodexTerminalLaneConfig("codex", str(work_a)),
+        binary=lambda: "/usr/local/bin/codex",
+    )
+    antigravity = AntigravityTerminalAgent(
+        "antigravity",
+        str(work_a),
+        api_key=lambda: gemini_api_key(key_path, env={}),
+        state_dir=joat_dir / "antigravity" / "antigravity",
+    )
+    roster = AgentTerminalRoster(
+        [("claude", claude), ("codex", codex), ("antigravity", antigravity)],
+        visible_lanes=("claude", "codex", "antigravity"),
+    )
+    registry = AccountRegistry(root=joat_dir / "accounts")
+    signin = FakeSignIn(registry)
+    models = ModelRegistry([*default_slots(), assistant_slot("claude")])
+
+    endpoint = TerminalEndpoint(
+        roster=roster,
+        models=models,
+        registry=registry,
+        signin=signin,  # type: ignore[arg-type]
+        token=TOKEN,
+        port=0,
+        config_dir=joat_dir,
+        gemini_key_path=key_path,
+        antigravity_installed=lambda: True,
+    )
+    await endpoint.probe_all()
+    await endpoint.start()
+    try:
+        yield endpoint, joat_dir, work_a, work_b, signin
+    finally:
+        await endpoint.stop()
+
+
+def test_terminal_token_mints_private_file_and_respects_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("JOAT_TERMINAL_TOKEN", raising=False)
+    path = tmp_path / "JOAT" / "terminal-token"
+    minted = terminal_token(path)
+    assert minted
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert terminal_token(path) == minted
+    monkeypatch.setenv("JOAT_TERMINAL_TOKEN", "override-token")
+    assert terminal_token(path) == "override-token"
+
+
+async def test_health_is_public_and_state_requires_bearer_auth(terminal_service) -> None:
+    endpoint, *_ = terminal_service
+    status, body = await _call(endpoint, "GET", "/health", token=None)
+    assert status == 200 and body["ok"] is True
+
+    # Also works behind Tailscale Serve /terminal prefix
+    status, body = await _call(endpoint, "GET", "/terminal/health", token=None)
+    assert status == 200 and body["ok"] is True
+
+    assert (await _call(endpoint, "GET", "/v1/state", token=None))[0] == 401
+    assert (await _call(endpoint, "GET", "/v1/state", token="wrong-token"))[0] == 401
+    assert (await _call(endpoint, "POST", "/v1/config", {"action": "refresh"}, token=None))[0] == 401
+
+
+async def test_state_never_exposes_raw_gemini_api_key(terminal_service) -> None:
+    endpoint, *_ = terminal_service
+    status, body = await _call(endpoint, "GET", "/terminal/v1/state")
+    assert status == 200
+    serialized = json.dumps(body)
+    assert RAW_SECRET_KEY not in serialized
+
+    agents = {a["provider"]: a for a in body["agents"]}
+    assert set(agents) == {"claude", "codex", "antigravity"}
+    assert agents["antigravity"]["loggedIn"] is True
+    assert "API key" in agents["antigravity"]["statusDetail"]
+    assert body["assistantSeat"] == "claude"
+    assert "claude" in body["assistantOptions"]
+
+
+async def test_config_updates_model_cwd_gemini_key_session_and_accounts(terminal_service) -> None:
+    endpoint, joat_dir, _work_a, work_b, signin = terminal_service
+
+    # 1. set_model persists and updates state
+    status, body = await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "set_model", "provider": "antigravity", "model": "gemini-2.5-pro"},
+    )
+    assert status == 200
+    ag_item = next(a for a in body["agents"] if a["provider"] == "antigravity")
+    assert ag_item["currentModel"] == "gemini-2.5-pro"
+    saved_ag = json.loads((joat_dir / "antigravity-terminal.json").read_text())
+    assert saved_ag["model"] == "gemini-2.5-pro"
+
+    # 2. set_cwd validates directory and updates config + live lane
+    bad_status, _ = await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "set_cwd", "provider": "claude", "cwd": str(joat_dir / "does-not-exist")},
+    )
+    assert bad_status == 400
+
+    status, body = await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "set_cwd", "provider": "claude", "cwd": str(work_b)},
+    )
+    assert status == 200
+    claude_item = next(a for a in body["agents"] if a["provider"] == "claude")
+    assert claude_item["cwd"] == str(work_b)
+
+    # 3. set_gemini_key writes 0600 key without echoing it back
+    new_secret = "test-gemini-rotated-never-echoed-12345"
+    status, body = await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "set_gemini_key", "key": new_secret},
+    )
+    assert status == 200
+    assert new_secret not in json.dumps(body)
+    assert gemini_api_key(joat_dir / "gemini-api-key", env={}) == new_secret
+
+    # 4. set_assistant_seat switches voice assistant seat
+    status, body = await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "set_assistant_seat", "seat": "codex"},
+    )
+    assert status == 200
+    assert body["assistantSeat"] == "codex"
+
+    # 5. new_session resets lane conversation
+    status, body = await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "new_session", "lane": "claude"},
+    )
+    assert status == 200
+
+    # 6. account.add + login.code + account.select + account.remove
+    status, body = await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "account.add", "provider": "claude", "label": "Work Max"},
+    )
+    assert status == 200
+    assert body["login"]["stage"] == "enter_code"
+    assert body["login"]["needsCode"] is True
+
+    oauth_code = "oauth-one-time-code-xyz"
+    status, body = await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "login.code", "code": oauth_code},
+    )
+    assert status == 200
+    assert oauth_code not in json.dumps(body)
+    assert signin.submitted_codes == [oauth_code]
+    assert body["login"]["stage"] == "done"
+
+    claude_group = next(g for g in body["accounts"] if g["provider"] == "claude")
+    added = next(p for p in claude_group["profiles"] if p["label"] == "Work Max")
+    status, body = await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "account.select", "provider": "claude", "profileId": added["profileId"]},
+    )
+    assert status == 200
+    claude_group = next(g for g in body["accounts"] if g["provider"] == "claude")
+    assert claude_group["activeProfileId"] == added["profileId"]
+
+    status, body = await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "account.remove", "provider": "claude", "profileId": added["profileId"]},
+    )
+    assert status == 200
+    claude_group = next(g for g in body["accounts"] if g["provider"] == "claude")
+    assert all(p["profileId"] != added["profileId"] for p in claude_group["profiles"])
+
+
+class _ScriptedTerminalAgent:
+    """Controllable terminal agent double for live instruction, cancel, and approval tests."""
+
+    def __init__(self, provider: str, cwd: str) -> None:
+        self.provider = provider
+        self.cwd = cwd
+        self.model: str | None = None
+        self.prompts: list[str] = []
+        self.resets = 0
+        self.chunks: list[str] = ["All unit tests passed.\n"]
+        self.gate: asyncio.Event | None = None
+        self.cancellation_status = "none"
+        self.resolved_approvals: list[tuple[str, str, str]] = []
+        self._approval_cb: Any = None
+        self._pending: dict[str, asyncio.Future[str]] = {}
+        self.trigger_approval: tuple[str, str, str] | None = None
+
+    def set_approval_callback(self, callback: Any) -> None:
+        self._approval_cb = callback
+
+    async def reset_conversation(self) -> None:
+        self.resets += 1
+
+    async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> str | None:
+        self.resolved_approvals.append((approval_id, kind, decision))
+        fut = self._pending.pop(approval_id, None)
+        if fut is not None and not fut.done():
+            fut.set_result(decision)
+        return decision
+
+    async def stream(self, prompt: str):
+        self.prompts.append(prompt)
+        self.cancellation_status = "none"
+        try:
+            if self.trigger_approval is not None:
+                appr_id, kind, summary = self.trigger_approval
+                fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+                self._pending[appr_id] = fut
+                if self._approval_cb is not None:
+                    self._approval_cb(appr_id, kind, summary)
+                verdict = await fut
+                yield f"Approval verdict: {verdict}\n"
+            for chunk in self.chunks:
+                yield chunk
+            if self.gate is not None:
+                await self.gate.wait()
+                yield "Finished long job.\n"
+        except asyncio.CancelledError:
+            self.cancellation_status = "confirmed"
+            raise
+
+
+@pytest.fixture
+async def controllable_terminal(tmp_path: Path):
+    work = tmp_path / "work"
+    work.mkdir()
+    joat_dir = tmp_path / "JOAT"
+    joat_dir.mkdir(mode=0o700)
+    key_path = joat_dir / "gemini-api-key"
+    store_gemini_api_key(RAW_SECRET_KEY, key_path)
+
+    claude = _ScriptedTerminalAgent("claude-code", str(work))
+    codex = _ScriptedTerminalAgent("codex", str(work))
+    antigravity = _ScriptedTerminalAgent("antigravity", str(work))
+    roster = AgentTerminalRoster(
+        [("claude", claude), ("codex", codex), ("antigravity", antigravity)],
+        visible_lanes=("claude", "codex", "antigravity"),
+    )
+    for lane_name, agent in (("claude", claude), ("codex", codex), ("antigravity", antigravity)):
+        agent.set_approval_callback(
+            lambda appr_id, kind, summary, ln=lane_name: roster.note_approval(ln, appr_id, kind, summary)
+        )
+    registry = AccountRegistry(root=joat_dir / "accounts")
+    signin = FakeSignIn(registry)
+    models = ModelRegistry([*default_slots(), assistant_slot("claude")])
+    endpoint = TerminalEndpoint(
+        roster=roster,
+        models=models,
+        registry=registry,
+        signin=signin,  # type: ignore[arg-type]
+        token=TOKEN,
+        port=0,
+        config_dir=joat_dir,
+        gemini_key_path=key_path,
+        antigravity_installed=lambda: True,
+    )
+    await endpoint.probe_all()
+    await endpoint.start()
+    try:
+        yield endpoint, roster, {"claude": claude, "codex": codex, "antigravity": antigravity}, key_path
+    finally:
+        for name in roster.names():
+            lane = roster.lane(name)
+            if lane is not None and lane.task is not None and not lane.task.done():
+                lane.task.cancel()
+                await asyncio.gather(lane.task, return_exceptions=True)
+        await endpoint.stop()
+
+
+async def test_state_exposes_recent_messages_and_pending_approval_items(controllable_terminal) -> None:
+    endpoint, roster, _agents, _key_path = controllable_terminal
+    claude_lane = roster.lane("claude")
+    assert claude_lane is not None
+    for idx in range(8):
+        role = "user" if idx % 2 == 0 else "assistant"
+        text = f"turn-{idx}-" + ("x" * 700)
+        claude_lane.conversation.append(role, text)  # type: ignore[arg-type]
+
+    # Codex has empty conversation.messages -> falls back to tail lines
+    codex_lane = roster.lane("codex")
+    assert codex_lane is not None
+    codex_lane.tail.extend(["> run linter", "[status] checking", "0 warnings found"])
+
+    roster.note_approval("claude", "cc-42", "Bash", "Bash: " + ("rm -rf dist/" * 30))
+
+    status, body = await _call(endpoint, "GET", "/v1/state")
+    assert status == 200
+    by_prov = {a["provider"]: a for a in body["agents"]}
+
+    claude_msgs = by_prov["claude"]["recentMessages"]
+    assert len(claude_msgs) == 6  # capped at 6 newest (turn-3..turn-7 + approval status)
+    assert claude_msgs[0]["text"].startswith("turn-3-")
+    assert claude_msgs[-2]["role"] == "assistant"
+    assert len(claude_msgs[-2]["text"]) == 600  # truncated at 600 chars
+    assert claude_msgs[-1]["role"] == "status"
+
+    approvals = by_prov["claude"]["pendingApprovalItems"]
+    assert len(approvals) == 1
+    assert approvals[0]["id"] == "cc-42"
+    assert approvals[0]["kind"] == "Bash"
+    assert len(approvals[0]["summary"]) == 240
+
+    codex_msgs = by_prov["codex"]["recentMessages"]
+    assert codex_msgs == [
+        {"role": "user", "text": "run linter"},
+        {"role": "status", "text": "[status] checking"},
+        {"role": "assistant", "text": "0 warnings found"},
+    ]
+
+
+async def test_send_instruction_returns_promptly_supports_new_session_and_rejects_invalid_or_busy(
+    controllable_terminal,
+) -> None:
+    endpoint, roster, agents, key_path = controllable_terminal
+
+    # Invalid inputs -> 400
+    for bad_payload in (
+        {"action": "send_instruction", "provider": "claude", "instruction": "   "},
+        {"action": "send_instruction", "provider": "claude"},
+        {"action": "send_instruction", "provider": "claude", "instruction": "x" * 4097},
+        {"action": "send_instruction", "provider": "unknown-agent", "instruction": "hi"},
+        {"action": "send_instruction", "provider": "claude", "instruction": "hi", "newSession": "yes"},
+    ):
+        bad_status, _ = await _call(endpoint, "POST", "/v1/config", bad_payload)
+        assert bad_status == 400
+
+    # Gated turn on Claude returns 200 immediately without waiting for completion
+    gate = asyncio.Event()
+    agents["claude"].gate = gate
+    agents["claude"].chunks = ["Inspecting repository...\n"]
+
+    status, body = await asyncio.wait_for(
+        _call(
+            endpoint, "POST", "/v1/config",
+            {"action": "send_instruction", "provider": "claude-code", "instruction": "  check git status  "},
+        ),
+        timeout=1.0,
+    )
+    assert status == 200
+    assert body["notice"] == "Sent instruction to Claude."
+    assert roster.focused == "claude"
+    claude_item = next(a for a in body["agents"] if a["provider"] == "claude")
+    assert claude_item["busy"] is True
+    assert claude_item["recentMessages"][0] == {"role": "user", "text": "check git status"}
+
+    # Sending again while busy -> 409 Conflict (does not overwrite or queue)
+    busy_status, busy_body = await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "send_instruction", "provider": "claude", "instruction": "second instruction"},
+    )
+    assert busy_status == 409
+    assert busy_body["ok"] is False
+
+    # Let the turn finish and confirm assistant reply appears in recentMessages
+    gate.set()
+    task = roster.lane("claude").task  # type: ignore[union-attr]
+    assert task is not None
+    await task
+    await asyncio.sleep(0)
+
+    _, settled = await _call(endpoint, "GET", "/v1/state")
+    claude_settled = next(a for a in settled["agents"] if a["provider"] == "claude")
+    assert claude_settled["busy"] is False
+    assert any(
+        m["role"] == "assistant" and "Finished long job." in m["text"]
+        for m in claude_settled["recentMessages"]
+    )
+
+    # newSession=True resets the lane conversation first before submitting
+    agents["claude"].gate = None
+    agents["claude"].chunks = ["Fresh session answer.\n"]
+    status, reset_body = await _call(
+        endpoint, "POST", "/v1/config",
+        {
+            "action": "send_instruction",
+            "provider": "claude",
+            "instruction": "start clean",
+            "newSession": True,
+        },
+    )
+    assert status == 200
+    assert agents["claude"].resets == 1
+    new_task = roster.lane("claude").task  # type: ignore[union-attr]
+    if new_task is not None:
+        await new_task
+    await asyncio.sleep(0)
+    _, after_new = await _call(endpoint, "GET", "/v1/state")
+    claude_after = next(a for a in after_new["agents"] if a["provider"] == "claude")
+    texts = [m["text"] for m in claude_after["recentMessages"]]
+    assert "check git status" not in " ".join(texts)
+    assert any("Fresh session answer." in t for t in texts)
+
+    # Unavailable Antigravity (missing Gemini key) -> 409
+    key_path.unlink()
+    unavail_status, _ = await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "send_instruction", "provider": "antigravity", "instruction": "hello"},
+    )
+    assert unavail_status == 409
+
+
+async def test_cancel_run_and_decide_approval_approve_and_deny(controllable_terminal) -> None:
+    endpoint, roster, agents, _key_path = controllable_terminal
+
+    # 1. Start a long-running Codex job, while focusing Claude, then cancel_run without provider
+    gate = asyncio.Event()
+    agents["codex"].gate = gate
+    await _call(
+        endpoint, "POST", "/v1/config",
+        {"action": "send_instruction", "provider": "codex", "instruction": "long refactor"},
+    )
+    roster.focus("claude")
+
+    status, cancelled = await _call(endpoint, "POST", "/v1/config", {"action": "cancel_run"})
+    assert status == 200
+    assert "Codex" in (cancelled["notice"] or "")
+    codex_item = next(a for a in cancelled["agents"] if a["provider"] == "codex")
+    assert codex_item["busy"] is False
+    assert agents["codex"].cancellation_status == "confirmed"
+
+    # Cancelling again when idle returns 200 with clear idle notice
+    idle_status, idle_body = await _call(
+        endpoint, "POST", "/v1/config", {"action": "cancel_run", "provider": "codex"},
+    )
+    assert idle_status == 200
+    assert "nothing running" in (idle_body["notice"] or "")
+
+    # 2. decide_approval: invalid decision -> 400; nothing pending -> 409
+    assert (await _call(
+        endpoint, "POST", "/v1/config", {"action": "decide_approval", "decision": "maybe"},
+    ))[0] == 400
+    assert (await _call(
+        endpoint, "POST", "/v1/config", {"action": "decide_approval", "decision": "approve", "provider": "claude"},
+    ))[0] == 409
+
+    # 3. decide_approval: approve & deny live tool requests
+    for decision in ("approve", "deny"):
+        agents["antigravity"].trigger_approval = (f"ag-{decision}", "run_command", "pytest -q")
+        agents["antigravity"].chunks = []
+        send_status, _ = await _call(
+            endpoint, "POST", "/v1/config",
+            {"action": "send_instruction", "provider": "antigravity", "instruction": f"test {decision}"},
+        )
+        assert send_status == 200
+        for _ in range(50):
+            if roster.lane("antigravity").approvals:  # type: ignore[union-attr]
+                break
+            await asyncio.sleep(0.01)
+
+        _, state_waiting = await _call(endpoint, "GET", "/v1/state")
+        ag_waiting = next(a for a in state_waiting["agents"] if a["provider"] == "antigravity")
+        assert ag_waiting["pendingApprovalItems"] == [
+            {"id": f"ag-{decision}", "kind": "run_command", "summary": "pytest -q"},
+        ]
+
+        # Blocked on approval -> send_instruction returns 409
+        blocked_status, _ = await _call(
+            endpoint, "POST", "/v1/config",
+            {"action": "send_instruction", "provider": "antigravity", "instruction": "interrupt"},
+        )
+        assert blocked_status == 409
+
+        # Resolve approval (omit provider on 'deny' to test automatic waiting-lane selection!)
+        roster.focus("claude")
+        payload: dict[str, Any] = {"action": "decide_approval", "decision": decision}
+        if decision == "approve":
+            payload["provider"] = "antigravity"
+        dec_status, dec_body = await _call(endpoint, "POST", "/v1/config", payload)
+        assert dec_status == 200
+        assert f"recorded {decision}" in (dec_body["notice"] or "")
+        ag_after = next(a for a in dec_body["agents"] if a["provider"] == "antigravity")
+        assert ag_after["pendingApprovalItems"] == []
+
+        ag_task = roster.lane("antigravity").task  # type: ignore[union-attr]
+        if ag_task is not None:
+            await ag_task
+        await asyncio.sleep(0)
+        assert agents["antigravity"].resolved_approvals[-1] == (f"ag-{decision}", "run_command", decision)

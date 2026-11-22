@@ -34,7 +34,6 @@ from ..core.protocol import (
     SavedPlace,
     VOICE_REQUEST_PREFIX,
     AgentTerminalHudView,
-    BrainstormHudView,
     EventType,
     HudList,
     InputEvent,
@@ -52,7 +51,6 @@ from ..persistence.actions import ActionActivity, ActionJournal
 from ..persistence.notes import NoteSource, NoteStore, QuickNote
 from ..persistence.voice_notes import VoiceNote, VoiceNoteStore
 from .hud import HudWriter
-from .sinks import DebateSnapshot
 from .voice_note_capture import (
     LiveLine,
     NoteMode,
@@ -101,27 +99,27 @@ _AGENT_TERMINAL_RECOVERY_COPY: dict[tuple[str, str], str] = {
     (
         "approval_required",
         "write_scope_required",
-    ): "Approve the JOAT device in OpenClaw, then tap retry.",
+    ): "Approve the JOAT device in {name}, then tap retry.",
     (
         "unavailable",
         "gateway_not_ready",
-    ): "Hermes is unavailable; retry when the Mac connection recovers.",
+    ): "{name} is unavailable; retry when the Mac connection recovers.",
     (
         "blocked",
         "tools_enabled",
-    ): "Hermes tools are enabled; this JOAT session remains blocked.",
+    ): "{name} tools are enabled; this JOAT session remains blocked.",
     (
         "blocked",
         "dedicated_session_not_proven",
-    ): "Hermes session isolation is not proven yet; tap retry.",
+    ): "{name} session isolation is not proven yet; tap retry.",
     (
         "blocked",
         "history_recovery_required",
-    ): "Hermes needs recovery before it can continue; tap retry.",
+    ): "{name} needs recovery before it can continue; tap retry.",
 }
 
 
-def _agent_terminal_instruction(state: str, reason: str) -> str:
+def _agent_terminal_instruction(state: str, reason: str, name: str = "OpenClaw") -> str:
     """Translate a safe terminal reason into a wearable next action.
 
     This never forwards a gateway exception, URL, or pairing identifier. A
@@ -131,13 +129,13 @@ def _agent_terminal_instruction(state: str, reason: str) -> str:
 
     fixed = _AGENT_TERMINAL_RECOVERY_COPY.get((state, reason))
     if fixed is not None:
-        return fixed
+        return fixed.format(name=name)
     if state == "approval_required":
-        return "Approve JOAT in OpenClaw, then tap retry."
+        return f"Approve JOAT in {name}, then tap retry."
     if state == "unavailable":
-        return "Hermes is unavailable; retry when the Mac connection recovers."
+        return f"{name} is unavailable; retry when the Mac connection recovers."
     if state == "blocked":
-        return "Hermes is not ready; correct it, then tap retry."
+        return f"{name} is not ready; correct it, then tap retry."
     return ""
 
 
@@ -311,7 +309,7 @@ class _NoteReaderState:
 
 
 _SCROLLING_READER_TITLES = frozenset({
-    "QUICKNOTES · NOTE", "QUICKNOTES · DETAIL", "BRAINSTORM · ROOM",
+    "QUICKNOTES · NOTE", "QUICKNOTES · DETAIL",
 })
 """Readers sent whole and read in the glasses' own scroll box (the Hub's
 ScrollBox): the glasses scroll them a line a swipe, so the Mac pages
@@ -352,24 +350,6 @@ def _age(unix: float) -> str:
     return f"{hours}h" if hours < 24 else f"{hours // 24}d"
 
 
-_NEW_BRAINSTORM_ROW = "+ New brainstorm"
-
-
-def _session_row(past: Any) -> str:
-    """One stored session, as the wearer would pick it out of a list.
-
-    Title first because that is what they scan for; the metadata is
-    budgeted after it so a long question cannot push the age off the end.
-    """
-    count = len(past.turns)
-    meta = f" · {count} turn{'' if count == 1 else 's'} · {past.age()}"
-    room = max(8, 46 - len(meta))
-    title = past.title
-    if len(title) > room:
-        title = title[:room - 1].rstrip() + "…"
-    return f"{title}{meta}"
-
-
 def system_home_zone() -> tzinfo:
     """This Mac's zone, as a real IANA ZoneInfo where the OS exposes one.
 
@@ -406,27 +386,29 @@ class CapabilityRouter:
         voice_capture: VoiceCaptureControls | None = None,
         actions: ActionJournal | None = None,
         terminal_view: Callable[[], Awaitable[None]] | None = None,
-        brainstorm_recap: Callable[[], DebateSnapshot] | None = None,
-        brainstorm_replay: Callable[[], Awaitable[bool]] | None = None,
-        brainstorm_sessions: Callable[[], list[Any]] | None = None,
-        brainstorm_continue: Callable[[str], Awaitable[bool]] | None = None,
         terminal_rows: Callable[[], list[tuple[str, str]]] | None = None,
         terminal_focus: Callable[[str], Awaitable[None]] | None = None,
         terminal_busy: Callable[[], bool] | None = None,
-        brainstorm_recent: Callable[..., list[str]] | None = None,
-        brainstorm_unavailable: Callable[[], BrainstormHudView | None] | None = None,
         panels: PanelPublisher | None = None,
         wearer_zone: WearerZone | None = None,
         terminal_open: Callable[[str, str | None, str, Callable[[], bool]], Awaitable[None]] | None = None,
         terminal_current: Callable[[], str | None] | None = None,
+        terminal_sessions: Callable[[str], Awaitable[list[dict[str, str]]]] | None = None,
+        terminal_resume: Callable[[str, str], Awaitable[bool]] | None = None,
+        terminal_new_session: Callable[[str], Awaitable[bool]] | None = None,
+        terminal_active_summary: Callable[[str], str | None] | None = None,
+        terminal_roster: Any | None = None,
         message_ui: MessageUIController | None = None,
         complete_reminder: Callable[[str], Awaitable[str | None]] | None = None,
         ask: AskWearer | None = None,
         navigate: Callable[[str], Awaitable[str | None]] | None = None,
         places: Callable[[], Sequence[SavedPlace]] | None = None,
         note_reminders: Callable[[str], Awaitable[str]] | None = None,
+        gateway_name: str = "OpenClaw",
     ) -> None:
         self._hud = hud
+        # What the glasses call the Gateway in its recovery copy (Mac app setting).
+        self._gateway_name = gateway_name
         # A tapped control row asks its own question on the lens and routes
         # the answer; `navigate` starts a route to a spoken destination.
         self._ask = ask
@@ -452,27 +434,34 @@ class CapabilityRouter:
         self._voice_capture = voice_capture
         self._actions = actions
         self._terminal_view = terminal_view
-        self._brainstorm_recap = brainstorm_recap
-        # Restores a LIVE session's own frame — see _show_brainstorm.
-        self._brainstorm_replay = brainstorm_replay
-        self._brainstorm_sessions = brainstorm_sessions
-        self._brainstorm_continue = brainstorm_continue
-        #: What the picker last drew, so a row tap resolves to a
-        #: session id rather than to a row number that may have moved.
-        self._brainstorm_rows: list[Any] = []
-        self._terminal_rows = terminal_rows
+        self._terminal_rows = terminal_rows or (
+            terminal_roster.picker_rows if terminal_roster is not None else None
+        )
         self._terminal_focus = terminal_focus
         self._terminal_open = terminal_open
-        self._terminal_current = terminal_current
+        self._terminal_current = terminal_current or (
+            (lambda: terminal_roster.focused) if terminal_roster is not None else None
+        )
+        self._terminal_sessions = terminal_sessions or (
+            terminal_roster.list_lane_sessions if terminal_roster is not None else None
+        )
+        self._terminal_resume = terminal_resume or (
+            terminal_roster.resume_lane_session if terminal_roster is not None else None
+        )
+        self._terminal_new_session = terminal_new_session or (
+            terminal_roster.start_new_lane_session if terminal_roster is not None else None
+        )
+        self._terminal_active_summary = terminal_active_summary or (
+            terminal_roster.lane_active_summary if terminal_roster is not None else None
+        )
         self._terminal_opening_revision = 0
         self._terminal_selection_id: str | None = None
-        self._terminal_busy = terminal_busy
+        self._terminal_busy = terminal_busy or (
+            (lambda: terminal_roster.busy) if terminal_roster is not None else None
+        )
         self._terminal_row_names: list[str] = []
-        self._brainstorm_recent = brainstorm_recent
-        # The host's own word on a missing seat: when it answers with a frame,
-        # the idle row and NEW show that frame instead of a promise the tap
-        # cannot keep.
-        self._brainstorm_unavailable = brainstorm_unavailable
+        self._terminal_session_lane: str | None = None
+        self._terminal_session_rows: list[tuple[Literal["active", "new", "resume"], str | None]] = []
         # The overview's News / Pomodoro / Search tabs. Their rows are
         # pushed, not requested, so their taps carry a content revision
         # instead of one of this router's request generations.
@@ -566,6 +555,7 @@ class CapabilityRouter:
                 self._note_rows = []
                 self._note_page = None
                 self._note_finish = False
+                self._clear_terminal_session_picker()
                 self.clear_message_selection("surface-departure")
                 return
         if event.container_name == "capmenu" and event.selected_name:
@@ -626,7 +616,7 @@ class CapabilityRouter:
                         lambda: epoch == self._message_selection_epoch
                         and event.request_id == self._active_request_id
                         and self._active_capability == "MESSAGES")
-            if event.selected_name == "AGENT TERMINAL":
+            if self._canonical_capability(event.selected_name or "") == "AGENT TERMINAL":
                 if (event.request_id != self._active_request_id
                         or self._active_capability != "AGENT TERMINAL"):
                     return
@@ -777,11 +767,45 @@ class CapabilityRouter:
                 self._terminal_selection_id = None
                 self._active_capability = None
                 self._active_request_id = None
+                self._clear_terminal_session_picker()
+        elif (event.container_name == "capability-lifecycle"
+              and event.selected_name == "terminal-agents"):
+            if event.request_id is None or event.request_id == self._active_request_id:
+                self._terminal_opening_revision += 1
+                self._terminal_selection_id = None
+                self._active_capability = "AGENT TERMINAL"
+                if event.request_id is not None:
+                    self._active_request_id = event.request_id
+                self._clear_terminal_session_picker()
+                if self._terminal_rows is not None:
+                    self._terminal_row_names = [name for name, _row in self._terminal_rows()]
+        elif (event.container_name == "capability-lifecycle"
+              and event.selected_name == "terminal-sessions"):
+            if (event.request_id is not None and self._active_request_id is not None
+                    and event.request_id != self._active_request_id):
+                return
+            if (event.trace_id is not None and self._terminal_selection_id is not None
+                    and event.trace_id != self._terminal_selection_id):
+                return
+            self._terminal_opening_revision += 1
+            revision = self._terminal_opening_revision
+            self._terminal_selection_id = None
+            self._active_capability = "AGENT TERMINAL"
+            request_id = event.request_id or self._active_request_id or voice_request_id()
+            self._active_request_id = request_id
+            lane_name = self._terminal_session_lane or (
+                self._terminal_current() if self._terminal_current is not None else None
+            )
+            if lane_name is not None:
+                asyncio.get_running_loop().create_task(
+                    self._refresh_terminal_sessions(lane_name, request_id, revision)
+                )
         elif event.container_name == "menu" and event.selected_name == "closed":
             self._terminal_opening_revision += 1
             self._active_capability = None
             self._active_request_id = None
             self._note_reader = None
+            self._clear_terminal_session_picker()
             self.clear_message_selection("home")
             asyncio.get_running_loop().create_task(self.repaint_home())
 
@@ -817,8 +841,13 @@ class CapabilityRouter:
         self._active_capability = None
         self._active_request_id = None
         self._contextual_menu_open = False
+        self._clear_terminal_session_picker()
         self.clear_message_selection("disconnect")
         self._note_reader = None
+
+    def _clear_terminal_session_picker(self) -> None:
+        self._terminal_session_lane = None
+        self._terminal_session_rows = []
 
     async def open(
         self,
@@ -849,12 +878,18 @@ class CapabilityRouter:
             match name:
                 case "Messages":
                     await self._show_messages()
+                case "Mail":
+                    await self._show_focus(
+                        "MAIL · SETUP",
+                        [
+                            "Mail runs on your iPhone in JOAT Brain.",
+                            "Connect JOAT to This iPhone · JOAT Brain.",
+                        ],
+                        hint=BACK_HINT,
+                        selectable=False,
+                    )
                 case "Notifications":
                     await self._show_notifications()
-                # Both spellings: a wearer's installed plugin build may still send
-                # "Debate", and a rename must not make the menu row inert.
-                case "Brainstorm" | "Debate":
-                    await self._show_brainstorm()
                 case "Agent Terminal":
                     await self._show_agent_terminal()
                 # Old installed packages can still send either label. All
@@ -882,15 +917,7 @@ class CapabilityRouter:
                 self._planning_context.reset(planning_token)
 
     async def reattach_open_note(self) -> bool:
-        """Give a new connection back the open note's page.
-
-        The plugin keeps showing a note's page across a reconnect, but the
-        Mac had let go of it, so every tap on it was dropped as stale and the
-        note looked frozen (the wearer, 2026-10-13: "the quick note just
-        freezes if I am quiet for a bit", with it paused; brain.log 08:08 and
-        08:16). The page is sent again under a fresh Mac-minted generation,
-        which the plugin adopts, and taps on it count again.
-        """
+        """Give a new connection back the open note's page."""
         capture = self._voice_capture
         if not self._reattach_note or capture is None or not capture.active:
             self._reattach_note = False
@@ -899,98 +926,15 @@ class CapabilityRouter:
         log.info("open note's page given back to the new connection")
         return True
 
-    async def _show_brainstorm(self) -> None:
-        """Open Brainstorm on its LAST session, or on an invitation.
-
-        This used to refuse unless the Hermes terminal was ready and to
-        seat Hermes beside Codex and Claude. Both contradict the boundary:
-        Brainstorm's collaborators are the Codex and Claude CLIs, and
-        Hermes/OpenClaw are Agent Terminal workers that neither participate
-        nor gate. A wearer opening this row was told to go fix a daemon
-        their conversation never speaks to.
-
-        When a session has run, the row shows what was actually said —
-        the snapshot exists precisely so the wearer can re-read the
-        synthesis they walked away with.
-
-        And when one is RUNNING, opening this row returns the wearer to it.
-        docs/SESSION_MODEL.md:46 says so in one line — "open Brainstorm
-        during an active run → restore the current conversation" — and the
-        opposite shipped: any non-empty transcript painted state="settled",
-        which renders DONE on the glass and makes the tap a no-op. A wearer
-        who opened the menu mid-session was told their live conversation had
-        finished, and had no way back into it.
-        """
-        # The live session's own sink is the authority for its frame, so
-        # ask it to repaint rather than rebuilding one from the snapshot:
-        # a reconstruction would drop the streaming turn in progress.
-        if self._brainstorm_replay is not None and await self._brainstorm_replay():
-            return
-        # A missing CLI seat used to be invisible here: the row opened on
-        # "Ready for a question", the tap went to the Mac, and only then did
-        # the unavailable frame appear. Say it on the first screen.
-        unavailable = self._brainstorm_unavailable() if self._brainstorm_unavailable else None
-        if unavailable is not None:
-            await self._hud.begin_brainstorm()
-            await self._hud.show_brainstorm(unavailable)
-            return
-        # IDLE: the picker. docs/SESSION_MODEL.md:47 — "open Brainstorm while
-        # idle → show recent sessions plus NEW."
-        #
-        # This was four lines of dead text inside an activity string: the
-        # wearer could SEE that past sessions existed and could not open one,
-        # because nothing carried an id to select them by. The record does
-        # now, so these are real rows on the same selectable surface every
-        # other data view uses — no new frame, no new gesture to learn.
-        history = self._brainstorm_sessions() if self._brainstorm_sessions else []
-        if history:
-            # The picker, WHENEVER idle — docs/SESSION_MODEL.md:47 has no
-            # other condition. This was gated on the in-process recap
-            # having zero rows, so the moment any session closed in this
-            # process the idle view became that session's dead text and
-            # the picker was unreachable until a restart. The last session
-            # is not lost: it is the top row, and tapping it reopens the
-            # real conversation instead of a snapshot.
-            self._brainstorm_rows = list(history)
-            await self._show_focus(
-                "BRAINSTORM",
-                [_NEW_BRAINSTORM_ROW, *(_session_row(p) for p in history)],
-                hint="tap: open · left x2: back",
-                selectable=True,
-            )
-            return
-        recap = self._brainstorm_recap() if self._brainstorm_recap else None
-        rows = recap.rows() if recap is not None else []
-        if not rows and self._brainstorm_recent is not None:
-            past = self._brainstorm_recent(4)
-            if past:
-                rows = ["Recent:", *past]
-        # The plugin paints a Brainstorm frame only after the Mac has claimed
-        # the surface with this rebuild — a spoken start always sends it
-        # (DebateStateSink.open). The idle frame did not, so a voice-opened
-        # Brainstorm showed nothing and its tap went nowhere.
-        await self._hud.begin_brainstorm()
-        await self._hud.show_brainstorm(BrainstormHudView(
-            state="settled" if rows else "ready",
-            topic=(recap.topic[:40] if recap is not None and recap.topic
-                   else "Ready for a question"),
-            collaborators=list(recap.speakers[:3]) if recap is not None and recap.speakers
-            else ["Codex", "Claude"],
-            activity=("\n".join(rows) if rows
-                      else "Tap to speak a topic."),
-        ))
-
     async def _show_agent_terminal(self) -> None:
         """Always open the agent chooser, including while another agent is busy."""
+        self._clear_terminal_session_picker()
         rows = self._terminal_rows() if self._terminal_rows else []
         if rows:
             self._terminal_row_names = [name for name, _row in rows]
             await self._show_focus(
                 "AGENT TERMINAL",
                 [row for _name, row in rows],
-                # Short enough to RENDER. The longer form
-                # ("terminal <instruction>") was cut mid-word on the lens —
-                # a hint that does not fit teaches nothing.
                 hint="tap: choose agent · double-click: back",
                 selectable=True,
             )
@@ -1016,18 +960,58 @@ class CapabilityRouter:
         reason = str(terminal["reason"])
         await self._hud.show_agent_terminal(AgentTerminalHudView(
             state=state,
-            # The lane name, in the same shape the roster sends
-            # ("<lane> · <state>"): the renderer reads the first segment as
-            # the summary spine's focus label. "Hermes Agent Terminal" put
-            # HERMES AGENT TERMINAL > UNAVAILABLE under a screen already
-            # titled Agent Terminal.
-            focus="hermes",
+            focus="claude",
             lanes=[],
             activity="No terminal sessions are configured on this Mac.",
-            endpoint_host=str(terminal["endpoint_host"]),
-            reason=_agent_terminal_instruction(state, reason),
-            no_tools_checked=bool(terminal["no_tools_checked"]),
+            reason=_agent_terminal_instruction(state, reason, self._gateway_name),
         ))
+
+    async def _show_terminal_sessions(self, lane_name: str) -> None:
+        """Show Level-2 session picker ('AGENT TERMINAL · <LANE>') for `lane_name`."""
+        if self._terminal_sessions is None:
+            await self._show_agent_terminal()
+            return
+        summary = (
+            self._terminal_active_summary(lane_name)
+            if self._terminal_active_summary is not None
+            else None
+        )
+        sessions = await self._terminal_sessions(lane_name)
+        if not self._request_is_current() or self._active_capability != "AGENT TERMINAL":
+            return
+        items: list[str] = []
+        actions: list[tuple[Literal["active", "new", "resume"], str | None]] = []
+        if summary:
+            items.append(f"Active · {summary}")
+            actions.append(("active", None))
+        items.append("+ New session")
+        actions.append(("new", None))
+        for session in sessions:
+            key = str(session.get("key") or "").strip()
+            if not key:
+                continue
+            label = str(session.get("label") or key).strip() or key
+            items.append(label)
+            actions.append(("resume", key))
+        self._terminal_session_lane = lane_name
+        self._terminal_session_rows = actions
+        await self._send_list(HudList(
+            items=items,
+            title=f"AGENT TERMINAL · {lane_name.upper()}",
+            hint="tap: open · 2x tap: agents",
+            selectable=True,
+        ))
+
+    async def _refresh_terminal_sessions(
+        self, lane_name: str, request_id: str, revision: int,
+    ) -> None:
+        if revision != self._terminal_opening_revision or self._active_request_id != request_id:
+            return
+        token = self._request_context.set(request_id)
+        try:
+            await self._show_terminal_sessions(lane_name)
+        finally:
+            self._request_context.reset(token)
 
     async def _show_messages(self) -> None:
         # A new Messages visit is a new consent context. Never leave a voice
@@ -1072,23 +1056,80 @@ class CapabilityRouter:
             selectable=True,
         ))
 
-    async def _select_terminal(self, index: int, trace_id: str = "hud") -> None:
-        """Focus the work session the wearer tapped, and show it."""
+    async def _select_terminal(
+        self,
+        index: int,
+        trace_id: str = "hud",
+        *,
+        selected_name: str = "AGENT TERMINAL",
+        terminal_revision: int | None = None,
+    ) -> None:
+        """Navigate Level-1 agent picker -> Level-2 session picker -> Level-3 terminal."""
+        if self._terminal_sessions is not None and self._terminal_session_lane is not None:
+            lane_name = self._terminal_session_lane
+            normalized = selected_name.strip().upper()
+            if (
+                normalized.startswith("AGENT TERMINAL · ")
+                and normalized != f"AGENT TERMINAL · {lane_name.upper()}"
+            ):
+                return
+            if not 0 <= index < len(self._terminal_session_rows):
+                log.info("terminal session row %d is no longer on screen", index)
+                await self._hud.assistant(
+                    "That session is no longer listed — open the terminal again.",
+                    answers_wearer=True,
+                )
+                return
+            kind, session_key = self._terminal_session_rows[index]
+            if kind == "new":
+                if self._terminal_new_session is not None:
+                    started = await self._terminal_new_session(lane_name)
+                    if not started:
+                        await self._hud.assistant(
+                            "Finish or cancel the running turn before starting a new session.",
+                            answers_wearer=True,
+                        )
+                        return
+                if terminal_revision is not None and terminal_revision != self._terminal_opening_revision:
+                    return
+            elif kind == "resume":
+                if session_key is None or (
+                    self._terminal_resume is not None
+                    and not await self._terminal_resume(lane_name, session_key)
+                ):
+                    await self._hud.assistant(
+                        "That session could not be reopened.",
+                        answers_wearer=True,
+                    )
+                    return
+                if terminal_revision is not None and terminal_revision != self._terminal_opening_revision:
+                    return
+            if self._terminal_open is not None:
+                await self._open_terminal_lane(lane_name, trace_id)
+            elif self._terminal_focus is not None:
+                await self._terminal_focus(lane_name)
+            return
+
         names = self._terminal_row_names
-        if not 0 <= index < len(names) or (self._terminal_focus is None and self._terminal_open is None):
-            # A session can finish between the paint and the tap. Saying so
-            # is the difference between "the list moved" and "the glasses
-            # ignored me".
+        if not 0 <= index < len(names) or (
+            self._terminal_focus is None
+            and self._terminal_open is None
+            and self._terminal_sessions is None
+        ):
             log.info("terminal row %d is no longer on screen", index)
             await self._hud.assistant(
                 "That session is no longer listed — open the terminal again.",
                 answers_wearer=True,
             )
             return
+        lane_name = names[index]
+        if self._terminal_sessions is not None:
+            await self._show_terminal_sessions(lane_name)
+            return
         if self._terminal_open is not None:
-            await self._open_terminal_lane(names[index], trace_id)
+            await self._open_terminal_lane(lane_name, trace_id)
         elif self._terminal_focus is not None:
-            await self._terminal_focus(names[index])
+            await self._terminal_focus(lane_name)
 
     def claim_terminal_voice(
         self, request_id: str | None = None, selection_id: str | None = None,
@@ -1107,32 +1148,11 @@ class CapabilityRouter:
         return self._terminal_opening_revision
 
     @property
-    def brainstorm_view_current(self) -> bool:
-        """A running discussion is not necessarily the wearer's current view."""
-        return self._active_capability == "BRAINSTORM" and not self._contextual_menu_open
-
-    @property
     def terminal_view_current(self) -> bool:
         return self._active_capability == "AGENT TERMINAL" and not self._contextual_menu_open
 
-    def claim_brainstorm_view(self) -> None:
-        """Only an explicit start or return may reclaim the discussion view."""
-        self._terminal_opening_revision += 1
-        if self._active_capability != "BRAINSTORM":
-            self.clear_message_selection("brainstorm-open")
-            self._note_reader = None
-            self._active_request_id = None
-        self._active_capability = "BRAINSTORM"
-
     async def review_message(self, recipient_label: str, body: str, *, timeout_s: float = 90.0) -> bool:
-        """Show a whole draft before its confirmation; True when the wearer taps.
-
-        The audit's M7: a draft longer than the confirmation prompt's 120
-        UTF-16 units was rejected outright ("shorten it and try again").
-        The wearer said what they said; they should read it, in full, and
-        then confirm. Back, Home, another selection or the timeout all
-        return False and nothing is sent.
-        """
+        """Show a whole draft before its confirmation; True when the wearer taps."""
         reviewed = await self._review_draft(
             "MESSAGES · REVIEW", f"To {recipient_label}", body,
             capability="MESSAGES", tap_hint="tap: confirm", timeout_s=timeout_s,
@@ -1140,13 +1160,7 @@ class CapabilityRouter:
         return reviewed is True
 
     async def review_terminal_input(self, lane: str, body: str, *, timeout_s: float = 90.0) -> bool | None:
-        """Show spoken terminal input too long for the confirmation prompt.
-
-        True when the wearer taps to send, False when they leave the page,
-        None when it timed out. The words go nowhere until the tap.
-        """
-        # The title's family must be the capability's: the Hub keys a page
-        # to its capability by the words before the first "·".
+        """Show spoken terminal input too long for the confirmation prompt."""
         return await self._review_draft(
             "AGENT TERMINAL · CHECK", f"To {lane}", body,
             capability="AGENT TERMINAL", tap_hint="tap: send", timeout_s=timeout_s,
@@ -1155,20 +1169,8 @@ class CapabilityRouter:
     async def review_note_reminders(
         self, note_title: str, lines: tuple[str, ...], *, timeout_s: float = 90.0,
     ) -> bool | None:
-        """Show every reminder a note would add, whole, before the one confirmation.
-
-        True when the wearer taps to go on to the confirmation, False when they
-        leave the page, None when it timed out. This page writes nothing: the
-        confirmation that follows is what approves the reminders. It is the
-        glasses' own scroll box (a line a swipe), so there is no last page to
-        reach before the tap is offered.
-        """
+        """Show every reminder a note would add, whole, before the one confirmation."""
         count = len(lines)
-        # From a note's own page the list answers that tap, in the same visit.
-        # Said from anywhere else ("create reminders from the last note") there
-        # is no such visit, and the glasses show a note's page only to the visit
-        # that opened it: the list is then a request of its own, which they take
-        # like any spoken page.
         reader = self._note_reader
         from_note_page = reader is not None and reader.title == "QUICKNOTES · NOTE"
         return await self._review_draft(
@@ -1195,9 +1197,6 @@ class CapabilityRouter:
                     and not decided.done()):
                 decided.set_result(True)
 
-        # Reviewing this draft is an internal step of the same action. A new
-        # request ID makes the Hub retire its selected-message owner; clearing
-        # selection here also cancels the prepared action calling this method.
         request_id = (self._active_request_id if self._active_capability == capability
                       and self._active_request_id and not fresh_request
                       else voice_request_id())
@@ -1226,47 +1225,6 @@ class CapabilityRouter:
             if reader is not None and self._note_reader is reader:
                 self._note_reader = None
 
-    #: What the Brainstorm reader promises: the room is waiting on the wearer.
-    BRAINSTORM_ROOM_HINT = "speak: your move"
-
-    async def show_brainstorm_room(self, text: str) -> bool:
-        """Put the whole Brainstorm conversation up to read.
-
-        The room has finished a round and is waiting on the wearer, so this
-        is a reader, not a status frame: every turn so far, whole, scrolled
-        by the glasses like a News article. The room's next frame takes the
-        page back. True when it was put up.
-        """
-        if not self.brainstorm_view_current:
-            return False
-        request_id = (self._active_request_id if self._active_capability == "BRAINSTORM"
-                      and self._active_request_id else voice_request_id())
-        self._active_capability = "BRAINSTORM"
-        self._active_request_id = request_id
-        token = self._request_context.set(request_id)
-        try:
-            await self._open_note_reader(
-                "BRAINSTORM · ROOM", "", text, "brainstorm-room",
-                capability="BRAINSTORM", tap_hint=self.BRAINSTORM_ROOM_HINT,
-            )
-        finally:
-            self._request_context.reset(token)
-        return True
-
-    def hide_brainstorm_room(self) -> None:
-        """The room has moved on: the reader is no longer the page."""
-        reader = self._note_reader
-        if reader is not None and reader.title == "BRAINSTORM · ROOM":
-            self._note_reader = None
-
-    async def open_terminal_from_brainstorm(self) -> bool:
-        """Use the same picker and lane preparation as an ordinary Terminal open."""
-        if not self.brainstorm_view_current:
-            return False
-        request_id = voice_request_id()
-        await self.open("Agent Terminal", request_id=request_id)
-        return self.terminal_view_current and self._active_request_id == request_id
-
     async def prepare_terminal_instruction(self, name: str, request_id: str) -> bool:
         """Open one explicitly named lane through the normal owned visit."""
         names = [lane for lane, _row in self._terminal_rows()] if self._terminal_rows else []
@@ -1275,11 +1233,10 @@ class CapabilityRouter:
             return False
         self.clear_message_selection("terminal-open")
         self._note_reader = None
+        self._terminal_session_lane = name
         current = self.claim_terminal_voice(request_id, request_id)
         token = self._request_context.set(request_id)
         try:
-            # The existing voice list establishes the same request/selection
-            # binding as a picker tap, before the first prepared lane frame.
             await self._show_focus(
                 "AGENT TERMINAL", [f"Opening {name}…"], hint=BACK_HINT,
             )
@@ -1311,69 +1268,6 @@ class CapabilityRouter:
                 if current():
                     await self._hud.assistant("That session did not open. Tap retry.", answers_wearer=True)
         return False
-
-    async def _select_brainstorm(self, index: int) -> None:
-        """Open the session the wearer picked.
-
-        Row 0 is NEW. The rest resolve through the rows this surface last
-        DREW rather than through the store, because a session can finish
-        between the paint and the tap — indexing the store again would open
-        whatever had shifted into that position.
-        """
-        if index == 0:
-            unavailable = self._brainstorm_unavailable() if self._brainstorm_unavailable else None
-            # NEW from the picker claims the surface exactly as a spoken start.
-            await self._hud.begin_brainstorm()
-            if unavailable is not None:
-                await self._hud.show_brainstorm(unavailable)
-                return
-            await self._hud.show_brainstorm(BrainstormHudView(
-                state="ready",
-                topic="Ready for a question",
-                collaborators=["Codex", "Claude"],
-                activity="Tap to speak a topic.",
-                ))
-            return
-        rows = self._brainstorm_rows
-        picked = index - 1
-        if not 0 <= picked < len(rows) or self._brainstorm_continue is None:
-            log.info("brainstorm row %d is no longer on screen", index)
-            await self._hud.assistant(
-                "That session is no longer listed — open Brainstorm again.",
-                answers_wearer=True,
-            )
-            return
-        past = rows[picked]
-        turns = getattr(past, "turns", ())
-        if turns and self._note_reader is None:
-            # Read first, continue on purpose (the audit's B3): selecting a
-            # saved session used to start a continuation — two subscription
-            # CLIs — before the wearer had seen a word of it. The exact
-            # reader shows the whole transcript; a tap continues it.
-            session_id = past.session_id
-            continue_session = self._brainstorm_continue
-
-            async def continue_saved() -> None:
-                self._note_reader = None
-                if not await continue_session(session_id):
-                    await self._show_focus(
-                        "BRAINSTORM",
-                        ["That session could not be reopened.",
-                         f"Tap “{_NEW_BRAINSTORM_ROW}” to start another."],
-                    )
-
-            body = "\n\n".join(f"[{label}]\n{text}" for label, text in turns)
-            await self._open_note_reader(
-                "BRAINSTORM · SAVED", getattr(past, "title", "session"), body, "brainstorm",
-                capability="BRAINSTORM", on_tap=continue_saved, tap_hint="tap: continue",
-            )
-            return
-        if not await self._brainstorm_continue(past.session_id):
-            await self._show_focus(
-                "BRAINSTORM",
-                ["That session could not be reopened.",
-                 f"Tap “{_NEW_BRAINSTORM_ROW}” to start another."],
-            )
 
     async def _select_message(self, index: int, trace_id: str, selection_epoch: int | None = None) -> None:
         if (
@@ -1784,20 +1678,19 @@ class CapabilityRouter:
             return
         token = self._request_context.set(request_id)
         try:
-            match name:
-                case "BRAINSTORM":
-                    await self._select_brainstorm(index)
+            match self._canonical_capability(name):
                 case "AGENT TERMINAL":
-                    await self._select_terminal(index, trace_id)
+                    await self._select_terminal(
+                        index,
+                        trace_id,
+                        selected_name=name,
+                        terminal_revision=terminal_revision,
+                    )
                 case "MESSAGES":
                     await self._select_message(index, trace_id, message_epoch)
                 case "NOTIFICATIONS":
                     await self._select_notification(index)
-                # ``Reminders`` was a first-level name in an older installed
-                # HUD.  ``open`` already maps it to the single Planning
-                # projection, so its row taps must use that same handler.
-                # Otherwise the rendered legacy page looks live but is inert.
-                case "PLANNING" | "CALENDAR" | "TASKS" | "REMINDERS":
+                case "PLANNING" | "CALENDAR" | "TASKS":
                     await self._select_planning(index)
                 case "QUICKNOTES":
                     await self._select_note(index, trace_id, quick_notes_page_index)
@@ -3032,7 +2925,7 @@ class CapabilityRouter:
         self._place_rows = places[:_NAVIGATION_PLACE_ROWS]
         rows = [f"➤ {place.name}" for place in self._place_rows] + [
             _NAVIGATION_CONTROL_ROW,
-            "I’ll confirm the place. Then choose Walk or Cycle."
+            "I’ll confirm the place. Then choose Walk, Cycle, or Drive."
             if not self._place_rows
             else "Add places on the phone page.",
         ]
@@ -3159,8 +3052,8 @@ class CapabilityRouter:
         normalized = name.strip().upper()
         if normalized == "REMINDERS":
             return "TASKS"
-        if normalized == "DEBATE":
-            return "BRAINSTORM"
+        if normalized.startswith("AGENT TERMINAL · "):
+            return "AGENT TERMINAL"
         return normalized
 
     async def _repeat(self) -> None:
@@ -3186,14 +3079,10 @@ def voice_request_id() -> str:
 
 _OPEN_CAPABILITY = re.compile(
     r"^(?:open|show|read)(?:\s+(?:my|the))?\s+(?P<name>"
-    r"messages|texts|conversations|quick\s?notes|notes|planning|calendar|"
+    r"messages|texts|conversations|mail|emails?|inbox|gmail|"
+    r"quick\s?notes|notes|planning|calendar|"
     r"tasks|reminders|notifications|activity|"
-    # The two surfaces that had no spoken opener. 'agent terminal' before
-    # 'terminal' so the longer name wins the alternation.
-    r"brainstorm|debate|agent\s?terminal|terminal|"
-    # Navigation sat in the sidebar with no spoken door (the audit's NAV1).
-    # "navigate to <place>" still starts a route directly; this only opens
-    # the feature's own surface.
+    r"agent\s?terminal|terminal|"
     r"navigation|directions|map)$",
     re.IGNORECASE,
 )
@@ -3202,6 +3091,11 @@ _SPOKEN_CAPABILITY = {
     "messages": "Messages",
     "texts": "Messages",
     "conversations": "Messages",
+    "mail": "Mail",
+    "email": "Mail",
+    "emails": "Mail",
+    "inbox": "Mail",
+    "gmail": "Mail",
     "quicknotes": "QuickNotes",
     "quick notes": "QuickNotes",
     "notes": "QuickNotes",
@@ -3211,10 +3105,6 @@ _SPOKEN_CAPABILITY = {
     "reminders": "Reminders",
     "notifications": "Notifications",
     "activity": "Activity",
-    # Brainstorm and Agent Terminal are DIFFERENT features; both need a
-    # spoken opener, and neither maps to the other.
-    "brainstorm": "Brainstorm",
-    "debate": "Brainstorm",
     "agent terminal": "Agent Terminal",
     "agentterminal": "Agent Terminal",
     "terminal": "Agent Terminal",

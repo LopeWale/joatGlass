@@ -3,7 +3,7 @@ import type { ImuMonitor } from './ImuMonitor';
 import {
   CANVAS,
   ContainerId,
-  type BrainstormHudModel,
+  type AgentTerminalHudModel,
   type PanelContentTab,
 } from './types';
 import type { HudPanelMessage } from './PanelRail';
@@ -49,98 +49,68 @@ export const PRODUCTIVITY_VISUAL_STATES = [
   'activity',
   'activity-detail',
   'action',
-  // The two pickers. Both surfaces used to tell the wearer to SAY a phrase
-  // to see what already existed; these are what they show instead, and
-  // they need to be visually checkable like every other list.
-  'brainstorm-sessions',
   'terminal-sessions',
 ] as const;
 
 export type ProductivityVisualState = (typeof PRODUCTIVITY_VISUAL_STATES)[number];
 
-export const BRAINSTORM_VISUAL_STATES = [
-  'brainstorm-ready',
-  'brainstorm-live',
+export const TERMINAL_VISUAL_STATES = [
   'agent-terminal-ready',
+  'agent-terminal-working',
+  'agent-terminal-approval',
   'agent-terminal-blocked',
 ] as const;
 
-export type BrainstormVisualState = (typeof BRAINSTORM_VISUAL_STATES)[number];
+export type TerminalVisualState = (typeof TERMINAL_VISUAL_STATES)[number];
 
-export function isBrainstormVisualState(value: string | null): value is BrainstormVisualState {
-  return BRAINSTORM_VISUAL_STATES.some((state) => state === value);
+export function isTerminalVisualState(value: string | null): value is TerminalVisualState {
+  return TERMINAL_VISUAL_STATES.some((state) => state === value);
 }
 
-export function brainstormVisualFixture(state: BrainstormVisualState): BrainstormHudModel {
-  const terminalReady = {
-    screen: 'agent_terminal' as const,
-    state: 'ready' as const,
-    // The LANE, in the roster's "<lane> · <state>" shape — which is what
-    // AgentTerminalRoster.frame() actually sends. This fixture said
-    // "Hermes Agent Terminal", so the header rendered
-    // "HERMES AGENT TERMINAL > READY · NO TOOLS CHECKED BEFOR…" and I was
-    // reading a truncation that production never produces.
-    topic: 'work · ready',
-    // Lane chips: every concurrent session, so one glance covers the
-    // roster. Empty here meant the strip could not be seen at all.
-    collaborators: ['work·idle', 'calendar·run', 'gateway·idle'],
-    // Not an instruction to recite a phrase. The wearer asked what "say
-    // terminal sessions to choose a work session" even meant — opening the
-    // terminal shows the sessions now, and this is the empty case.
-    activity: 'No work sessions yet. Say “terminal <instruction>” to start one.',
-    endpointHost: 'home-mac.example-tailnet.ts.net',
+export function terminalVisualFixture(state: TerminalVisualState): AgentTerminalHudModel {
+  const terminalReady: AgentTerminalHudModel = {
+    state: 'ready',
+    focus: 'Claude · idle',
+    lanes: ['Claude · idle', 'Codex · working', 'Antigravity · idle'],
+    activity: 'Ready',
     terminalReason: 'Dedicated JOAT session',
-    noToolsChecked: true,
+    conversationId: 'fixture-claude-session',
+    messages: [],
   };
   switch (state) {
-    case 'brainstorm-ready':
+    case 'agent-terminal-working':
       return {
-        screen: 'brainstorm', state: 'ready', topic: 'How should JOAT plan today?',
-        collaborators: ['Codex · proposer', 'Claude · critic'],
-        activity: 'Say “JOAT, brainstorm …” to begin.',
+        ...terminalReady,
+        state: 'running',
+        focus: 'Claude · working',
+        messages: [
+          { id: 'u1', role: 'user', text: 'Read pyproject.toml and summarize the runtime dependencies.' },
+          {
+            id: 'a1',
+            role: 'assistant',
+            text: [
+              '⏺ read_file: pyproject.toml',
+              'The Mac engine runs on Python 3.12 with asyncio, google-antigravity, and aiohttp for the local endpoints.',
+            ].join('\n'),
+          },
+        ],
       };
-    case 'brainstorm-live':
+    case 'agent-terminal-approval':
       return {
-        screen: 'brainstorm', state: 'running', topic: 'How should JOAT plan today?',
-        collaborators: ['Codex · proposer', 'Claude · critic'],
-        activeSpeaker: 'Claude · critic',
-        // Only the SEATED collaborators speak here. This fixture used to
-        // put HERMES in the Brainstorm transcript, which is the one thing
-        // the two surfaces are defined against each other by: Codex and
-        // Claude are Brainstorm collaborators, Hermes and OpenClaw are
-        // exclusively Agent Terminal workers. A fixture is what the HUD
-        // gets verified against, so a wrong one verifies the wrong screen.
-        //
-        // These are WHOLE utterances with no hand-inserted breaks. The
-        // previous version wrapped them by hand into short lines, which
-        // made the lens look two-thirds empty and — worse — meant the
-        // wrapper under test was never once exercised by the fixture used
-        // to check it. Let the renderer wrap; that is the thing being
-        // verified. It ends on the marker the renderer animates.
-        activity: [
-          'JOAT > Round 1 — independent reviews. Codex first.',
-          'CODEX > Cache the last synthesis and replay it on reconnect, so the wearer never has to watch a round they already read a second time.',
-          'CLAUDE > That assumes the reconnect resumes the same session. After a lens handoff it does not: the seven-packet auth replay resets the page and the id with it.',
-          'JOAT > Unsupported claim: "never watch a round twice". Returning to Codex for repair.',
-          'CODEX > Withdrawn. Cache keyed on session id and replayed only while that id survives; a handoff starts a new one and redraws from the top.',
-          'JOAT > Verified. Round 2 — cross-review.',
-          'CLAUDE > Then the cache buys nothing on the one path that needed it. Ship the redraw and drop the cache entirely.',
-          'CODEX > Agreed for reconnect. It still pays on foreground return, which is the common case and keeps the same id.',
-          'JOAT > Round 3 — meta-review.',
-          'CLAUDE > Thinking…',
-        ].join('\n'),
-        // No endpointHost, terminalReason, noToolsChecked — or
-        // terminalState, which is gone from the render model entirely
-        // (it always mirrored `state` on real frames): the wire stopped
-        // carrying them on a Brainstorm frame when the two features were
-        // split (docs/SESSION_MODEL.md:74-75), so a fixture that sets
-        // them is drawing a screen the engine cannot produce. `screen`
-        // stays: the RENDER model uses it to pick the surface.
+        ...terminalReady,
+        state: 'running',
+        focus: 'Claude · approval needed',
+        approvals: 1,
+        messages: [
+          { id: 'u1', role: 'user', text: 'Check git status in the repository.' },
+          { id: 's1', role: 'status', text: '[approval] run_command: git status --short' },
+        ],
       };
     case 'agent-terminal-blocked':
       return {
         ...terminalReady,
-        state: 'blocked', noToolsChecked: false,
+        state: 'blocked',
+        focus: 'Claude · blocked',
         terminalReason: 'Dedicated session is not ready.',
       };
     case 'agent-terminal-ready':
@@ -231,32 +201,14 @@ export class BrowserHudPreview implements HudFramePainter {
  * canvas renderer. No fixture can call the Mac or mutate a native store. */
 export function visualListFixture(state: ProductivityVisualState): VisualListFixture {
   const fixtures: Record<ProductivityVisualState, VisualListFixture> = {
-    // The thread picker speaks the dense focus-list language: dim age chip,
-    // ● only on unread threads, sender bright-ish, preview as quiet detail.
-    'brainstorm-sessions': {
-      title: 'BRAINSTORM',
-      hint: 'tap: open · say “JOAT, brainstorm …” to start',
-      selectable: true,
-      items: [
-        '+ New brainstorm',
-        'cold-start latency · 11 turns · 7h ago',
-        'BLE handoff retries · 13 turns · 8h ago',
-        'naming the mic gate · 12 turns · 8h ago',
-        'whether the verifier should block · 14 turns · 1d ago',
-        'tabs or spaces · 6 turns · 2d ago',
-        'wake-word false positives · 9 turns · 3d ago',
-        'why the handoff drops a frame · 11 turns · 4d ago',
-      ],
-    },
     'terminal-sessions': {
       title: 'AGENT TERMINAL',
-      // capabilities._show_agent_terminal over picker_rows' visible-lane
-      // form ("<agent> · <state>"), the one __main__ wires up.
-      hint: 'tap: choose agent · double-click: back',
+      hint: 'tap: sessions · 2x tap: home',
       selectable: true,
       items: [
-        'Hermes · Working',
-        'OpenClaw · Needs approval',
+        'Claude · idle',
+        'Codex · working',
+        'Antigravity · approval needed',
       ],
     },
     messages: {

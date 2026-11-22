@@ -1196,5 +1196,20 @@ def test_load_still_answers_single_host_callers_from_a_list(tmp_path) -> None:
     assert config is not None and config.profile.url == "wss://first.ts.net"
 
 
+def test_the_gateway_name_set_on_the_mac_reaches_the_engine(tmp_path) -> None:
+    path = tmp_path / "openclaw.json"
+    path.write_text('{"gateway_url":"wss://example.ts.net","agent_id":"hermes","name":" Hermes "}', encoding="utf-8")
+    path.chmod(0o600)
+    config = OpenClawRuntimeConfig.load(path)
+    assert config is not None and config.name == "Hermes"
+    path.write_text('{"gateway_url":"wss://example.ts.net","agent_id":"hermes"}', encoding="utf-8")
+    config = OpenClawRuntimeConfig.load(path)
+    assert config is not None and config.name == "OpenClaw"
+    for bad in ('""', '"   "', '"' + 'x' * 33 + '"', '7', '"bad\\u0007name"'):
+        path.write_text('{"gateway_url":"wss://example.ts.net","agent_id":"hermes","name":' + bad + '}', encoding="utf-8")
+        with pytest.raises(ValueError):
+            OpenClawRuntimeConfig.load(path)
+
+
 def test_a_missing_config_is_no_hosts_not_an_error(tmp_path) -> None:
     assert OpenClawRuntimeConfig.load_all(tmp_path / "absent.json") == []

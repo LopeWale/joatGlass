@@ -17,13 +17,13 @@ final class MacLink {
 
     enum Failure: Error {
         case notConfigured, unreachable, refused, tooSlow, failed(Int), empty
-        /// Claude's own failure, already said for the wearer.
+        /// On-phone AI's own failure message, already phrased for the wearer.
         case claude(String)
     }
 
+    static let deltaThrottleSeconds: TimeInterval = 0.12
+
     let config: Config?
-    /// Claude, asked directly when the build carries a key (the wearer's
-    /// choice, 2026-10-23); the Mac only when it does not.
     let claude = ClaudeLink()
 
     init() {
@@ -34,7 +34,9 @@ final class MacLink {
         Log.add(config == nil ? "mac link: not configured" : "mac link: \(URL(string: config!.url)?.host ?? "?")")
     }
 
-    var configured: Bool { claude.configured || config != nil }
+    var macConfigured: Bool { config != nil }
+    var hostLabel: String? { config.flatMap { URL(string: $0.url)?.host } }
+    var configured: Bool { OnPhoneAI.shared.anyConfigured || claude.configured || config != nil }
 
     private lazy var session: URLSession = {
         let c = URLSessionConfiguration.default
@@ -44,17 +46,120 @@ final class MacLink {
         return URLSession(configuration: c)
     }()
 
-    /// Ask the Mac's assistant. `turns` are the conversation so far
-    /// (role "user" / "assistant"), the newest user turn last. `raw` asks
-    /// for the whole answer with its lines (a note's summary) instead of
-    /// lens-sized text.
-    func ask(_ turns: [[String: String]], raw: Bool = false,
-             completion: @escaping (Result<String, Failure>) -> Void) {
-        if claude.configured, !raw {
-            claude.ask(turns, completion: completion)
+    /// Streams SSE chunks (`"stream": true`, `choices[0].delta.content`) from the Mac's
+    /// `/agent/v1/chat/completions` endpoint, throttling `onDelta` callbacks at ~120 ms.
+    func stream(
+        _ turns: [[String: String]],
+        onDelta: @escaping @MainActor (String) -> Void,
+        completion: @escaping @MainActor (Result<String, Failure>) -> Void
+    ) {
+        guard let config, let url = URL(string: config.url) else {
+            Task { @MainActor in completion(.failure(.notConfigured)) }
             return
         }
-        guard let config, let url = URL(string: config.url) else { completion(.failure(.notConfigured)); return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+        let messages = turns.map { ["role": $0["role"] ?? "user", "content": $0["text"] ?? $0["content"] ?? ""] }
+        let body: [String: Any] = [
+            "model": "joat",
+            "stream": true,
+            "messages": messages,
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        let client = session
+        let started = Date()
+        Task { @MainActor in
+            do {
+                let (bytes, response) = try await client.bytes(for: request)
+                if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                    let code = http.statusCode
+                    let failure: Failure = code == 401 ? .refused : (code == 504 ? .tooSlow : .failed(code))
+                    Log.add("mac link stream failed in \(Int(Date().timeIntervalSince(started) * 1000)) ms: HTTP \(code)")
+                    completion(.failure(failure))
+                    return
+                }
+
+                var accumulated = ""
+                var lastEmitted = ""
+                var lastEmitAt = Date.distantPast
+
+                for try await rawLine in bytes.lines {
+                    let line = rawLine.trimmingCharacters(in: CharacterSet(charactersIn: "\r "))
+                    guard line.hasPrefix("data:") else { continue }
+                    let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                    if payload.isEmpty { continue }
+                    if payload == "[DONE]" { break }
+                    guard let data = payload.data(using: .utf8),
+                          let doc = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let choices = doc["choices"] as? [[String: Any]],
+                          let first = choices.first else { continue }
+
+                    let piece = ((first["delta"] as? [String: Any])?["content"] as? String)
+                        ?? ((first["message"] as? [String: Any])?["content"] as? String)
+                        ?? ""
+                    guard !piece.isEmpty else { continue }
+                    accumulated += piece
+
+                    let clean = ClaudeLink.lensText(accumulated)
+                    guard !clean.isEmpty, clean != lastEmitted else { continue }
+                    let now = Date()
+                    if lastEmitAt == .distantPast || now.timeIntervalSince(lastEmitAt) >= Self.deltaThrottleSeconds {
+                        lastEmitted = clean
+                        lastEmitAt = now
+                        onDelta(clean)
+                    }
+                }
+
+                let final = ClaudeLink.lensText(accumulated)
+                let ms = Int(Date().timeIntervalSince(started) * 1000)
+                Log.add("mac link streamed in \(ms) ms (\(final.count) chars)")
+                if final.isEmpty {
+                    completion(.failure(.empty))
+                } else {
+                    if final != lastEmitted { onDelta(final) }
+                    completion(.success(final))
+                }
+            } catch {
+                Log.add("mac link stream unreachable: \((error as NSError).code)")
+                completion(.failure(.unreachable))
+            }
+        }
+    }
+
+    /// Ask the Mac's assistant (or on-phone AI when configured and `!raw`).
+    func ask(_ turns: [[String: String]], raw: Bool = false,
+             completion: @escaping (Result<String, Failure>) -> Void) {
+        if !raw {
+            if claude.configured {
+                claude.ask(turns, completion: completion)
+                return
+            }
+            if OnPhoneAI.shared.anyConfigured {
+                OnPhoneAI.shared.streamChat(
+                    turns: turns,
+                    area: nil,
+                    macLink: self,
+                    search: nil,
+                    onDelta: { _ in },
+                    completion: { result in completion(result) }
+                )
+                return
+            }
+        }
+        askMacDirect(turns, raw: raw, completion: completion)
+    }
+
+    /// Direct non-streaming call to the Mac's `/agent` endpoint.
+    func askMacDirect(_ turns: [[String: String]], raw: Bool = false,
+                      completion: @escaping (Result<String, Failure>) -> Void) {
+        guard let config, let url = URL(string: config.url) else {
+            DispatchQueue.main.async { completion(.failure(.notConfigured)) }
+            return
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -84,19 +189,17 @@ final class MacLink {
         }.resume()
     }
 
-    /// A one-shot task: instructions, then the material (a transcript).
+    /// A one-shot task: instructions, then the material (a transcript or note).
+    /// Routes through `OnPhoneAI.shared` so summaries, questions, and commitments
+    /// work with Gemini, Claude, or the Mac.
     func complete(instructions: String, text: String, completion: @escaping (Result<String, Failure>) -> Void) {
-        if claude.configured {
-            claude.complete(instructions: instructions, text: text, completion: completion)
-            return
-        }
-        ask([["role": "user", "text": "\(instructions)\n\n\(text)"]], raw: true, completion: completion)
+        OnPhoneAI.shared.complete(instructions: instructions, text: text, macLink: self, completion: completion)
     }
 
-    /// What to tell the wearer when the Mac did not answer.
+    /// What to tell the wearer when the assistant did not answer.
     static func explain(_ failure: Failure) -> String {
         switch failure {
-        case .notConfigured: return "This phone has no link to the Mac set up yet."
+        case .notConfigured: return "Add a Gemini or Claude API key in JOAT Brain › Home, or connect your Mac over Tailscale."
         case .unreachable: return "I can't reach the Mac right now. Is it awake, with JOAT running and Tailscale on?"
         case .refused: return "The Mac refused this phone's key. Rebuild JOAT Brain on the Mac."
         case .tooSlow: return "The Mac took too long to answer."

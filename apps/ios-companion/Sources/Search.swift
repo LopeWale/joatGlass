@@ -39,7 +39,65 @@ final class Search: PanelProvider, VoiceCommand {
         return URLSession(configuration: c)
     }()
 
+    private let snippetSession: URLSession = {
+        let c = URLSessionConfiguration.default
+        c.timeoutIntervalForRequest = 2.5
+        c.timeoutIntervalForResource = 2.5
+        c.waitsForConnectivity = false
+        return URLSession(configuration: c)
+    }()
+
     // MARK: - Lookup
+
+    /// Fast 2.5 s bounded DuckDuckGo snippet lookup for grounding live assistant
+    /// answers without clobbering the Search panel's current state.
+    func snippets(for raw: String, limit: Int = 3) async -> String? {
+        let cleaned = raw.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: " ?.!"))
+        guard !cleaned.isEmpty, limit > 0 else { return nil }
+        var request = URLRequest(url: URL(string: "https://html.duckduckgo.com/html/")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 2.5
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+                         forHTTPHeaderField: "User-Agent")
+        var form = URLComponents()
+        form.queryItems = [URLQueryItem(name: "q", value: cleaned)]
+        request.httpBody = form.percentEncodedQuery?.data(using: .utf8)
+
+        let client = snippetSession
+        let started = Date()
+        let found: [Result]? = await withTaskGroup(of: [Result]??.self) { group in
+            group.addTask {
+                do {
+                    let (data, response) = try await client.data(for: request)
+                    guard (response as? HTTPURLResponse)?.statusCode == 200 else { return .some(nil) }
+                    let html = String(decoding: data, as: UTF8.self)
+                    return .some(Array(Self.parse(html).prefix(limit)))
+                } catch {
+                    return .some(nil)
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first ?? nil
+        }
+        guard let found, !found.isEmpty else {
+            Log.add("search snippets: none in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
+            return nil
+        }
+        let lines = found.prefix(limit).enumerated().map { idx, r -> String in
+            let domain = r.domain.isEmpty ? "" : " (\(r.domain))"
+            let detail = r.snippet.isEmpty ? "" : " — \(News.shorten(r.snippet, 180))"
+            return "\(idx + 1). \(r.title)\(domain)\(detail)"
+        }
+        Log.add("search snippets: \(lines.count) result(s) in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
+        return lines.joined(separator: "\n")
+    }
 
     /// SearchService.lookup: run the query, return what JOAT should say.
     func lookup(_ raw: String, completion: @escaping (String) -> Void) {

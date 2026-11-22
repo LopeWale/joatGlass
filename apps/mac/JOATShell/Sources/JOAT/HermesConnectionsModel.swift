@@ -8,6 +8,7 @@ final class HermesConnectionsModel {
     struct Draft: Identifiable {
         let id = UUID()
         var gatewayURL: String
+        var name: String
     }
 
     var drafts: [Draft] = []
@@ -16,7 +17,7 @@ final class HermesConnectionsModel {
     private(set) var savedAt: Date?
     private(set) var loadFailed = false
     private(set) var recoveryBackupURL: URL?
-    private var savedURLs: [String] = []
+    private var saved: [OpenClawRuntimeConfiguration] = []
     private let url: URL
 
     init(url: URL = OpenClawRuntimeConfiguration.defaultURL) {
@@ -25,7 +26,7 @@ final class HermesConnectionsModel {
     }
 
     var configurations: [OpenClawRuntimeConfiguration]? {
-        let values = drafts.compactMap { try? OpenClawRuntimeConfiguration(gatewayURL: $0.gatewayURL) }
+        let values = drafts.compactMap { try? OpenClawRuntimeConfiguration(gatewayURL: $0.gatewayURL, name: $0.name) }
         guard (1...16).contains(values.count), values.count == drafts.count,
               Set(values.map(\.gatewayURL)).count == values.count else { return nil }
         return values
@@ -33,7 +34,7 @@ final class HermesConnectionsModel {
 
     var canSave: Bool {
         guard !loadFailed, let configurations else { return false }
-        return configurations.map(\.gatewayURL) != savedURLs
+        return configurations != saved
     }
 
     func requiresRestart(after lastStart: Date?) -> Bool {
@@ -44,7 +45,7 @@ final class HermesConnectionsModel {
 
     func addHost() {
         guard drafts.count < 16 else { return }
-        drafts.append(Draft(gatewayURL: ""))
+        drafts.append(Draft(gatewayURL: "", name: ""))
     }
 
     func removeHost(id: UUID) {
@@ -55,12 +56,12 @@ final class HermesConnectionsModel {
     func reload() {
         do {
             let configurations = try OpenClawRuntimeConfiguration.loadAll(from: url)
-            savedURLs = configurations.map(\.gatewayURL)
-            drafts = savedURLs.map { Draft(gatewayURL: $0) }
-            if drafts.isEmpty { drafts = [Draft(gatewayURL: "")] }
+            saved = configurations
+            drafts = saved.map { Draft(gatewayURL: $0.gatewayURL, name: $0.name) }
+            if drafts.isEmpty { drafts = [Draft(gatewayURL: "", name: "")] }
             failed = false
             loadFailed = false
-            notice = savedURLs.isEmpty ? "No Gateway configured yet." : nil
+            notice = saved.isEmpty ? "No Gateway configured yet." : nil
         } catch {
             loadFailed = true
             failed = true
@@ -98,16 +99,19 @@ final class HermesConnectionsModel {
     func save() {
         guard canSave, let configurations else { return }
         do {
-            let currentURLs = try OpenClawRuntimeConfiguration.loadAll(from: url).map(\.gatewayURL)
-            guard currentURLs == savedURLs else {
+            let current = try OpenClawRuntimeConfiguration.loadAll(from: url)
+            guard current == saved else {
                 failed = true
                 notice = "The saved Gateways changed elsewhere. Reload Saved before editing them again. Your draft is still shown."
                 return
             }
             try OpenClawRuntimeConfiguration.saveAll(configurations, to: url)
-            savedURLs = configurations.map(\.gatewayURL)
-            // Preserve each row's identity while normalizing its displayed URL.
-            for index in drafts.indices { drafts[index].gatewayURL = configurations[index].gatewayURL }
+            saved = configurations
+            // Preserve each row's identity while normalizing its displayed URL and name.
+            for index in drafts.indices {
+                drafts[index].gatewayURL = configurations[index].gatewayURL
+                drafts[index].name = configurations[index].name
+            }
             savedAt = Date()
             failed = false
             notice = "Saved. These Gateways will be used on the next engine start."

@@ -3,7 +3,10 @@ import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/
 import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter, parseMessageDraft, setNativeOverviewForTest } from './HudPresenter';
-import { ContainerId } from './types';
+import { handleConfirmCancel } from './ConfirmationCommit';
+import { ImuMonitor } from './ImuMonitor';
+import type { MacLink } from './MacLink';
+import { ContainerId, MESSAGE_REVIEW_PROMPT_MAX_UNITS, type UplinkMessage } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
 
 // These tests pin the IMAGE overview (VITE_NATIVE_OVERVIEW=0). The text
@@ -144,15 +147,24 @@ describe('HudPresenter native confirmation over the visual HUD', () => {
 });
 
 describe('parseMessageDraft', () => {
-  it('splits the plain reply consent into recipient and body', () => {
+  it('splits the plain reply consent into the JOAT question and body', () => {
     expect(parseMessageDraft('Send to Adele? “On my way, see you at 6.”')).toEqual({
-      recipient: 'Adele', body: 'On my way, see you at 6.',
+      question: 'What do you want to say to Adele?', body: 'On my way, see you at 6.',
     });
   });
 
   it('splits the reviewed form, dropping the review marker from the body', () => {
     expect(parseMessageDraft('Send to Ada Lovelace? (reviewed) “The opening words…”')).toEqual({
-      recipient: 'Ada Lovelace', body: 'The opening words…',
+      question: 'What do you want to say to Ada Lovelace?', body: 'The opening words…',
+    });
+  });
+
+  it('preserves Mail Reply and Email account headers on the JOAT row', () => {
+    expect(parseMessageDraft('Reply (Work) to sarah@example.com? “Sounds great, ship it.”')).toEqual({
+      question: 'Reply (Work) to sarah@example.com?', body: 'Sounds great, ship it.',
+    });
+    expect(parseMessageDraft('Email (Personal) to alex@example.com? (reviewed) “Dinner at 7?”')).toEqual({
+      question: 'Email (Personal) to alex@example.com?', body: 'Dinner at 7?',
     });
   });
 
@@ -163,6 +175,8 @@ describe('parseMessageDraft', () => {
     'Send to Adele? “   ”',
     'Send to work? "plain quotes"',
     'Delete to Adele? “words”',
+    'Reply () to sarah@example.com? “words”',
+    'Email (   ) to sarah@example.com? “words”',
   ])('returns undefined for anything else: %s', (prompt) => {
     expect(parseMessageDraft(prompt)).toBeUndefined();
   });
@@ -212,6 +226,90 @@ describe('HudPresenter Messages reply in the conversation card', () => {
     expect(text(gate, 'wearer-turns')).not.toContain('(reviewed)');
     // The footer names the review state's gestures: tap confirms, 2x tap retries.
     expect(text(gate, 'generation')?.trim()).toBe('tap: confirm · 2x tap: retry');
+  });
+
+  it.each([
+    ['Mail reply', 'Reply (Work) to sarah@example.com? “Sounds great, ship it.”', 'Reply (Work) to sarah@example.com?', 'Sounds great, ship it.'],
+    ['Mail compose', 'Email (Personal) to alex@example.com? “Let us meet at noon.”', 'Email (Personal) to alex@example.com?', 'Let us meet at noon.'],
+  ])('draws %s on the 7-row review card while keeping Send to Alex backwards-compatible', async (_label, prompt, expectedHeader, expectedBody) => {
+    const r = rig();
+    expect(await r.hud.showConfirmation(prompt, 'mail-consent', 'messages')).toBe(true);
+    const gate = r.rebuilds[r.rebuilds.length - 1];
+    expect(gate?.imageObject ?? []).toHaveLength(0);
+    expect(gate?.textObject?.map((c) => c.containerName)).toEqual(CARD);
+    expect(text(gate, 'joat-turns')).toContain(expectedHeader);
+    expect(text(gate, 'joat-turns')).not.toContain(expectedBody);
+    expect(text(gate, 'wearer-turns')).toContain('JOAT:');
+    expect(text(gate, 'wearer-turns')).toContain(expectedBody);
+    expect(text(gate, 'generation')?.trim()).toBe('tap: confirm · 2x tap: retry');
+    expect(await r.hud.dismissConfirmation('mail-consent')).toBe(true);
+
+    expect(await r.hud.showConfirmation('Send to Alex? “On my way”', 'sms-consent', 'messages')).toBe(true);
+    const smsGate = r.rebuilds[r.rebuilds.length - 1];
+    expect(text(smsGate, 'joat-turns')).toContain('What do you want to say to Alex?');
+    expect(text(smsGate, 'wearer-turns')).toContain('On my way');
+  });
+
+  it('enforces the 280-UTF16-unit ceiling on astral emoji review prompts', async () => {
+    const r = rig();
+    const prefix = 'Reply (Work) to sarah@example.com? “';
+    const suffix = '”';
+    const roomUnits = MESSAGE_REVIEW_PROMPT_MAX_UNITS - prefix.length - suffix.length;
+    // Each 🚀 is 2 UTF-16 code units (surrogate pair).
+    const exactEmojiBody = '🚀'.repeat(Math.floor(roomUnits / 2)) + (roomUnits % 2 === 1 ? '!' : '');
+    const exactPrompt = `${prefix}${exactEmojiBody}${suffix}`;
+    expect(exactPrompt.length).toBe(MESSAGE_REVIEW_PROMPT_MAX_UNITS);
+    expect(await r.hud.showConfirmation(exactPrompt, 'emoji-ok', 'messages')).toBe(true);
+    expect(await r.hud.dismissConfirmation('emoji-ok')).toBe(true);
+
+    const overPrompt = `${prefix}${exactEmojiBody}🚀${suffix}`;
+    expect(overPrompt.length).toBeGreaterThan(MESSAGE_REVIEW_PROMPT_MAX_UNITS);
+    expect(await r.hud.showConfirmation(overPrompt, 'emoji-over', 'messages')).toBe(false);
+  });
+
+  it('dismisses an active confirmation on confirm.cancel, disarms ImuMonitor and retry without sending an uplink confirm frame', async () => {
+    const r = rig();
+    const sent: UplinkMessage[] = [];
+    const link = { send: (msg: UplinkMessage) => sent.push(msg) } as unknown as MacLink;
+    const imu = new ImuMonitor({} as BridgeClient, link);
+    await r.hud.showText('inbox underlying card', ContainerId.Main);
+
+    const actionId = 'confirm-mail-1';
+    let retrySlot: { actionId: string; run: () => boolean } | undefined = {
+      actionId,
+      run: () => true,
+    };
+    const onResult = vi.fn();
+    expect(await r.hud.showConfirmation(
+      'Reply (Work) to sarah@example.com? “Sounds great, ship it.”', actionId, 'messages',
+    )).toBe(true);
+    imu.prepare(actionId, onResult);
+    expect(imu.activate(actionId, 8_000)).toBe(true);
+
+    // Mismatched confirm.cancel leaves the active confirmation untouched.
+    expect(await handleConfirmCancel({
+      actionId: 'confirm-other',
+      imu,
+      hud: r.hud,
+      clearRetry: (id) => { if (retrySlot?.actionId === id) retrySlot = undefined; },
+    })).toBe(false);
+    expect(imu.isPending()).toBe(true);
+    expect(retrySlot).toBeDefined();
+
+    // Matching confirm.cancel tears down the gate cleanly with zero uplink traffic.
+    expect(await handleConfirmCancel({
+      actionId,
+      imu,
+      hud: r.hud,
+      clearRetry: (id) => { if (retrySlot?.actionId === id) retrySlot = undefined; },
+    })).toBe(true);
+    expect(imu.isPending()).toBe(false);
+    expect(retrySlot).toBeUndefined();
+    expect(onResult).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+    expect(r.frames[r.frames.length - 1]).toMatchObject({
+      kind: 'overview', main: 'inbox underlying card',
+    });
   });
 
   it('keeps the plain decision page for a non-messages confirmation and an unparsed messages one', async () => {

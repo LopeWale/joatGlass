@@ -29,8 +29,8 @@ describe('the spine word', () => {
   });
 
   it('is bounded, and wide enough for Planning\'s own titles', () => {
-    const label = hudStatusLabel({ ...rest, macState: 'brainstorm connection test preparing reconnect' });
-    expect(label).toBe('JOAT · BRAINSTORM CONNECTION TEST PREPA…');
+    const label = hudStatusLabel({ ...rest, macState: 'background connection test preparing reconnect' });
+    expect(label).toBe('JOAT · BACKGROUND CONNECTION TEST PREPA…');
     expect(label.length).toBeLessThanOrEqual(40);
     expect(hudStatusLabel(rest, 'PLANNING · PLAN · AUG 31–SEP 6')).toBe('PLANNING · PLAN · AUG 31–SEP 6');
   });

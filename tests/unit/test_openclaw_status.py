@@ -32,11 +32,8 @@ def test_status_defaults_do_not_infer_openclaw_readiness(tmp_path: Path) -> None
         "state": "unavailable",
         "reason": "gateway_not_ready",
     }
-    assert snapshot["brainstorm"] == {
-        "state": "unavailable",
-        "seat_count": 0,
-        "phase": "idle",
-    }
+    assert "brainstorm" not in snapshot
+    assert "debate" not in snapshot
 
 
 def test_openclaw_status_accepts_only_sanitized_fields(tmp_path: Path) -> None:
@@ -53,7 +50,6 @@ def test_openclaw_status_accepts_only_sanitized_fields(tmp_path: Path) -> None:
         state="approval_required",
         reason="write_scope_required",
     )
-    status.set_brainstorm(state="ready", seat_count=2, phase="idle")
 
     snapshot = _snapshot(path)
     assert snapshot["openclaw"] == {
@@ -73,7 +69,6 @@ def test_openclaw_status_accepts_only_sanitized_fields(tmp_path: Path) -> None:
     [
         ("openclaw", {"token": "secret"}),
         ("agent_terminal", {"prompt": "private"}),
-        ("brainstorm", {"transcript": "private"}),
     ],
 )
 def test_generic_status_set_cannot_bypass_sanitized_projection(

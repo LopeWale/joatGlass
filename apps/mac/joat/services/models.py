@@ -19,6 +19,7 @@ the next turn rather than the next launch.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -34,6 +35,24 @@ the point of the slot — but the DEFAULT has to be a seat that can speak, or
 the proposer is silent at boot for a reason no log explains."""
 
 DEFAULT_STT_MODEL = "large-v3_turbo"
+LOW_MEMORY_STT_BYTES = 12 * 1024 * 1024 * 1024
+
+
+def recommended_stt_model(physical_bytes: int | None = None) -> str:
+    """Choose the default resident WhisperKit model for this Mac's RAM.
+
+    On 8 GB Macs ``large-v3_turbo`` (~3 GB CoreML weights) swaps under load and
+    stalls partial + tap-to-commit transcription past 60 s, whereas ``base``
+    (~145 MB) runs warm in ~0.1 s. Macs with >= 16 GB keep ``large-v3_turbo``.
+    """
+    if physical_bytes is None:
+        try:
+            physical_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        except (AttributeError, OSError, ValueError):
+            return DEFAULT_STT_MODEL
+    if 0 < physical_bytes <= LOW_MEMORY_STT_BYTES:
+        return "base"
+    return DEFAULT_STT_MODEL
 
 DEFAULT_ASSISTANT_SEAT = "claude"
 """Which subscription answers the wearer (agents/cli_reply_engine.py):

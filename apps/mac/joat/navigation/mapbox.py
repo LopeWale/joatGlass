@@ -139,7 +139,7 @@ class MapboxNavigationProvider(NavigationProvider):
         destination: NavigationCandidate,
         mode: NavigationMode,
     ) -> ProviderRoute:
-        profile = "walking" if mode == "walking" else "cycling"
+        profile = mode
         coordinates = (
             f"{origin.longitude},{origin.latitude};"
             f"{destination.point.longitude},{destination.point.latitude}"

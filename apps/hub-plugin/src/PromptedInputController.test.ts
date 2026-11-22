@@ -628,7 +628,7 @@ describe('PromptedInputController strict runtime boundary', () => {
 });
 
 describe('PromptedInputController with actual AudioStreamer', () => {
-  it.each(['brainstorm', 'terminal', 'messages', 'capability'] as const)(
+  it.each(['terminal', 'messages', 'capability'] as const)(
     'opens the selected phone microphone from muted for %s and restores mute on cancellation', async (ownerKind) => {
       const r = rig();
       const controls: Array<[boolean, AudioInputSource | undefined]> = [];

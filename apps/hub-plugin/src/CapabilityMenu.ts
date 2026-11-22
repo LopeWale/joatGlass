@@ -7,27 +7,34 @@ import {
   POMODORO_EXPANDED_HINT,
 } from './HudCanvasRenderer';
 import type { ReminderCard } from './ReminderCard';
-import { resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
+import { isCommsTitle, resolveMessagesViewState, type MessagesScreen } from './MessagesViewState';
 import { PANEL_TAB_TITLES, panelTabForTitle, pomodoroBlockLabel, pomodoroRemainingMs, type PanelPageTab } from './PanelRail';
+
+export { isCommsTitle };
 
 /** Readers and plain text pages drawn as one firmware text page instead of
  * four image tiles: a reader the Mac pages, a result, a setup notice. A tap
- * on one of them reaches the Mac as its row zero (the Navigation control,
- * a reader's "tap: continue" / "tap: confirm"). */
+ * on one of them reaches the Mac as its row zero (a reader's "tap: continue"
+ * / "tap: confirm"). */
 const TEXT_PAGE_TITLES = new Set([
-  'MESSAGES · CONVERSATION', 'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL', QUICKNOTES_NOTE_TITLE,
+  'MESSAGES · CONVERSATION', 'MAIL · CONVERSATION',
+  'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL', QUICKNOTES_NOTE_TITLE,
   'QUICKNOTES · CUE', 'QUICKNOTES · PREP',
-  'NOTIFICATIONS · DETAIL', 'NAVIGATION', 'NEWS · ARTICLE', 'SEARCH · RESULT',
+  'NOTIFICATIONS · DETAIL', 'NEWS · ARTICLE', 'SEARCH · RESULT',
   'MESSAGES · REVIEW', 'MESSAGES · COMPOSE', 'MESSAGES · SETUP', 'MESSAGES · ACCESS',
   'MESSAGES · RETRY', 'MESSAGES · SENT', 'MESSAGES · FAILED', 'MESSAGES · CANCELLED',
-  'MESSAGES · UNCERTAIN', 'BRAINSTORM · SAVED', 'BRAINSTORM · ROOM', 'ACTIVITY · EMPTY',
+  'MESSAGES · UNCERTAIN',
+  'MAIL · REVIEW', 'MAIL · COMPOSE', 'MAIL · SETUP', 'MAIL · ACCESS',
+  'MAIL · RETRY', 'MAIL · SENT', 'MAIL · FAILED', 'MAIL · CANCELLED',
+  'MAIL · UNCERTAIN',
+  'ACTIVITY · EMPTY',
   'PLANNING · REFRESH', 'PLANNING · REMINDER', 'AGENT TERMINAL · CHECK',
 ]);
 
 /** Readers that are a review: the tap sends what the wearer has just read,
  * so it counts only on the very last page — the Mac's last page and the
  * last firmware page cut from it (the Mac's `_LAST_PAGE_TAP_TITLES`). */
-const REVIEW_READER_TITLES = new Set(['MESSAGES · REVIEW', 'AGENT TERMINAL · CHECK']);
+const REVIEW_READER_TITLES = new Set(['MESSAGES · REVIEW', 'MAIL · REVIEW', 'AGENT TERMINAL · CHECK']);
 
 /** The capability a page belongs to: its title before the first "·". */
 function titleFamily(title: string): string {
@@ -91,12 +98,14 @@ function isQuickNotesReaderTitle(title: string): boolean {
 import { reminderDueCompleteFor } from './ReminderDueReceipt';
 import {
   CAPABILITIES,
+  HANDOFF_CAPABILITIES,
   QUICKNOTES_NOTE_TITLE,
   VOICE_REQUEST_PREFIX,
   type InputEventPayload,
   type MessageUIMessage,
   type PromptPresentMessage,
-  type BrainstormHudModel,
+  type AgentTerminalHudModel,
+  type HandoffCapability,
   type HudPanelPomodoro,
   type PanelContentTab,
   type ProductivityHudModel,
@@ -144,6 +153,7 @@ interface TerminalOpeningBinding {
 }
 
 interface MessageSelectionBinding {
+  readonly capability: 'MESSAGES' | 'MAIL';
   readonly requestId: string;
   readonly selectionId: string;
   readonly retiredActionIds: Set<string>;
@@ -263,6 +273,10 @@ export class CapabilityMenu {
   private terminalOpening?: TerminalOpeningBinding;
   private terminalPaintRevision = 0;
   private terminalPreludeRevision = 0;
+  private terminalSessionSurface?: DataSurfaceSnapshot;
+  private terminalAgentSurface?: DataSurfaceSnapshot;
+  private terminalReturnRequestId?: string;
+  private terminalOwnsSurface = false;
   private messageSelection?: MessageSelectionBinding;
   private messageLifecycleBinding?: TerminalOpeningBinding;
   private messagePaintRevision = 0;
@@ -284,13 +298,16 @@ export class CapabilityMenu {
    * countdown); a tap below them maps back to the Mac's own index. */
   private panelRowOffset = 0;
   private transitionId = 0;
-  private brainstormVisit = 0;
-  private brainstormOwnsSurface = false;
   private contextualMenuOpen = false;
   /** Retire the gesture controller before any replacement paint can wait. */
   onSurfaceDeparture: () => void = () => {};
+  /** The wearer is Home again (after close()'s paint): a page handed to a
+   * Mac (main.ts BrainHandoff) goes back to the phone brain here. */
+  onHome: () => void = () => {};
   /** Live mic state, injected so the restored status line tells the truth. */
   micIsOpen: () => boolean = () => false;
+  /** Intercept Mac-pinned capabilities when connected to the phone brain. */
+  handoffCapability: (capability: HandoffCapability) => boolean = () => false;
 
   constructor(
     private readonly hud: HudPresenter,
@@ -314,41 +331,54 @@ export class CapabilityMenu {
     return this.pendingRequestId !== undefined;
   }
 
-  /** Capture at ingress: queued frames lose authority on local departure. */
-  captureBrainstormVisit(): () => boolean {
-    const visit = this.brainstormVisit;
-    return () => visit === this.brainstormVisit;
-  }
-
-  /** Only an explicit local open or Mac start/replay rebuild grants focus. */
-  claimBrainstormVisit(isCurrent: () => boolean): boolean {
-    if (!isCurrent()) return false;
-    this.brainstormOwnsSurface = true;
-    return true;
-  }
-
-  mayPresentBrainstorm(isCurrent: () => boolean): boolean {
-    return isCurrent() && this.brainstormOwnsSurface && !this.contextualMenuOpen;
-  }
-
-  /** Mac-authored replacement frames retire focus without echoing a request.
-   * Do not increment the local visit: an explicit rebuild already queued
-   * after that replacement must still be able to open Brainstorm. */
-  retireBrainstormSurface(): void {
-    this.brainstormOwnsSurface = false;
+  /** Mac-authored replacement frames retire live terminal gesture focus. */
+  retireTerminalSurface(): void {
+    this.terminalOwnsSurface = false;
     this.onSurfaceDeparture();
+  }
+
+  private clearStashedTerminalPickers(): void {
+    this.terminalSessionSurface = undefined;
+    this.terminalAgentSurface = undefined;
+    this.terminalReturnRequestId = undefined;
+  }
+
+  private cloneSurfaceSnapshot(surface: DataSurfaceSnapshot): DataSurfaceSnapshot {
+    return {
+      ...surface,
+      items: [...surface.items],
+      ...(surface.reminderCard ? { reminderCard: { ...surface.reminderCard } } : {}),
+      ...(surface.pageControls ? { pageControls: { ...surface.pageControls } } : {}),
+      ...(surface.readerPage ? { readerPage: { ...surface.readerPage } } : {}),
+      ...(surface.quickNotesPage ? { quickNotesPage: { ...surface.quickNotesPage } } : {}),
+      ...(surface.planningNavigation ? { planningNavigation: { ...surface.planningNavigation } } : {}),
+    };
+  }
+
+  private stashTerminalPickers(requestId?: string): void {
+    if (requestId) this.terminalReturnRequestId = requestId;
+    if (this.view === 'data' && this.pendingTitle === 'AGENT TERMINAL' && this.dataSurface) {
+      const normalized = this.dataSurface.title.trim().toUpperCase();
+      if (normalized.startsWith('AGENT TERMINAL · ') && !usesTextPage(normalized)) {
+        this.terminalSessionSurface = this.cloneSurfaceSnapshot(this.dataSurface);
+        if (this.dataReturn) {
+          this.terminalAgentSurface = this.cloneSurfaceSnapshot(this.dataReturn);
+        }
+      } else if (normalized === 'AGENT TERMINAL' && this.dataSurface.selectable) {
+        this.terminalAgentSurface = this.cloneSurfaceSnapshot(this.dataSurface);
+      }
+    }
   }
 
   setContextualMenuOpen(open: boolean): void {
     if (open === this.contextualMenuOpen) return;
     this.contextualMenuOpen = open;
-    this.brainstormVisit += 1;
     this.sendSurfaceLifecycle(open ? 'surface-context-menu-open' : 'surface-context-menu-closed');
   }
 
   private departSurface(surface: 'home' | 'settings' | 'news' | 'search' | 'pomodoro' | 'feature'): void {
-    this.brainstormVisit += 1;
-    this.retireBrainstormSurface();
+    this.clearStashedTerminalPickers();
+    this.retireTerminalSurface();
     this.sendSurfaceLifecycle(`surface-${surface}`);
   }
 
@@ -387,6 +417,20 @@ export class CapabilityMenu {
   isMessagePromptCurrent(message: Readonly<PromptPresentMessage>): boolean {
     if (!message.ownerId.startsWith(MESSAGE_UI_PREFIX)) return true;
     return message.ownerKind === 'messages' && this.isMessageActionCurrent(message.ownerId);
+  }
+
+  /** Disarm the 12 s selection timeout when a capability row opens a live
+   * voice prompt (e.g. Navigation's "Where to?"), so dictation is never
+   * interrupted by a false RETRY screen. */
+  noteCapabilityPromptPresented(): void {
+    this.clearResponseTimeout();
+    this.dataSelectionPending = false;
+  }
+
+  /** Leave the capability list selectable again after a capability prompt
+   * is cancelled (e.g. 2x tap on "Where to?"). */
+  noteCapabilityPromptCancelled(): void {
+    this.dataSelectionPending = false;
   }
 
   isMessageActionCurrent(actionId: string): boolean {
@@ -448,7 +492,7 @@ export class CapabilityMenu {
     const reader = this.dataSurface?.readerPage;
     const parent = this.dataReturn;
     if (this.view !== 'data' || this.messagesScreen !== 'review'
-      || this.pendingTitle !== 'MESSAGES' || !this.dataSelectionPending
+      || !isCommsTitle(this.pendingTitle) || !this.dataSelectionPending
       || !reader || reader.index !== reader.count - 1 || !parent
       || this.reviewVisit?.requestId !== this.pendingRequestId
       || this.reviewVisit?.activeId !== reader.id) return;
@@ -502,17 +546,23 @@ export class CapabilityMenu {
     } });
   }
 
+  private commsLifecyclePrefix(title = this.pendingTitle): 'mail' | 'messages' | undefined {
+    if (title === 'MAIL') return 'mail';
+    if (title === 'MESSAGES') return 'messages';
+    return undefined;
+  }
+
   private leaveMessages(): void {
-    const leaving = this.pendingTitle === 'MESSAGES';
+    const prefix = this.commsLifecyclePrefix();
     const binding = this.messageLifecycleBinding;
     this.retireMessageUI(true);
     this.messageLifecycleBinding = undefined;
-    if (leaving) this.messagesLifecycle('messages-home', binding);
+    if (prefix) this.messagesLifecycle(`${prefix}-home`, binding);
   }
 
   private messageSelectionIsCurrent(selection: MessageSelectionBinding): boolean {
     return this.messageSelection === selection && this.view !== 'closed'
-      && this.pendingTitle === 'MESSAGES' && this.pendingRequestId === selection.requestId;
+      && this.pendingTitle === selection.capability && this.pendingRequestId === selection.requestId;
   }
 
   async presentMessageUI(message: MessageUIMessage, isCurrent: () => boolean): Promise<boolean> {
@@ -564,36 +614,60 @@ export class CapabilityMenu {
   /** The request is reused by picker rows; only their trace IDs distinguish
    * two selections within the same visit. Never infer one from a frame. */
   async presentTerminalOpening(
-    model: BrainstormHudModel,
+    model: AgentTerminalHudModel,
     binding: TerminalOpeningBinding,
     isCurrent: () => boolean,
   ): Promise<boolean> {
     const opening = this.terminalOpening;
     if (
-      !opening || model.screen !== 'agent_terminal'
+      !opening
       || !binding.requestId || !binding.selectionId
       || opening.requestId !== binding.requestId
       || opening.selectionId !== binding.selectionId
       || !isCurrent()
     ) return false;
 
-    this.retireBrainstormSurface();
+    this.retireTerminalSurface();
     const revision = ++this.terminalPaintRevision;
     const stillCurrent = () => this.terminalOpening === opening
       && this.terminalPaintRevision === revision && isCurrent();
-    const shown = await this.hud.showBrainstorm(model, undefined, stillCurrent);
+    const shown = await this.hud.showTerminal(model, undefined, stillCurrent);
     if (!shown || !stillCurrent()) return false;
-    // Commit input ownership only after the exact frame paints. A failed
-    // paint leaves the picker and its bounded response timeout available.
-    // Releasing the menu must retain this opening for its later ready frame.
+    // Stash Session Picker + Agent Picker snapshots before releasing menu
+    // state so `2x tap` from the live terminal returns to `AGENT TERMINAL · <AGENT>`.
+    this.stashTerminalPickers(opening.requestId);
     this.releaseMenuToLiveSession();
+    this.terminalOwnsSurface = true;
+    return true;
+  }
+
+  /** Present an unbound/direct terminal frame when permitted, stashing any active
+   * picker snapshots before transitioning into the live terminal session. */
+  async presentTerminal(
+    model: AgentTerminalHudModel,
+    isCurrent: () => boolean = () => true,
+  ): Promise<boolean> {
+    if (!this.mayPresentUnboundTerminal() || !isCurrent()) return false;
+    const requestId = this.terminalOpening?.requestId ?? this.pendingRequestId;
+    this.stashTerminalPickers(requestId);
+    this.retireTerminalSurface();
+    this.terminalOpening = undefined;
+    const revision = ++this.terminalPaintRevision;
+    const stillCurrent = () => this.terminalPaintRevision === revision && isCurrent();
+    this.releaseMenuToLiveSession();
+    const shown = await this.hud.showTerminal(model, undefined, stillCurrent);
+    if (!shown || !stillCurrent()) return false;
+    this.terminalOwnsSurface = true;
     return true;
   }
 
   /** Local departure wins synchronously, including an in-flight paint. A
    * disconnected link must retire locally without queuing a lifecycle event. */
   retireTerminalOpening(notifyMac = true): void {
-    if (!notifyMac) this.terminalPreludeRevision += 1;
+    if (!notifyMac) {
+      this.terminalPreludeRevision += 1;
+      this.clearStashedTerminalPickers();
+    }
     const opening = this.terminalOpening;
     this.terminalOpening = undefined;
     if (!opening || !notifyMac) return;
@@ -606,14 +680,6 @@ export class CapabilityMenu {
     });
   }
 
-  async beginLiveSession(session: 'brainstorm'): Promise<void> {
-    void session;
-    // The caller immediately paints its live frame. Painting Overview here
-    // doubled tile traffic and exposed unrelated quadrants between updates.
-    this.retireTerminalOpening();
-    this.releaseMenuToLiveSession();
-  }
-
   /** An external live surface (Navigation) is taking the lenses. Clear menu
    * input ownership, timers, and any pending capability request WITHOUT
    * painting: the session's own frame is the replacement, and an extra
@@ -621,7 +687,8 @@ export class CapabilityMenu {
    * response timeout armed for the menu request from later repainting a
    * retry list over the live session's frame. */
   releaseToLiveSession(): void {
-    this.retireBrainstormSurface();
+    this.clearStashedTerminalPickers();
+    this.retireTerminalSurface();
     this.retireTerminalOpening();
     this.releaseMenuToLiveSession();
   }
@@ -703,7 +770,8 @@ export class CapabilityMenu {
     // tap, a delayed detail cannot replace its restored agenda.
     if (title?.trim().toUpperCase() === 'PLANNING · EVENT'
       && requestId === this.pendingRequestId && !this.dataSelectionPending) return true;
-    const isReview = title?.trim().toUpperCase() === 'MESSAGES · REVIEW';
+    const normalizedTitle = title?.trim().toUpperCase();
+    const isReview = normalizedTitle === 'MESSAGES · REVIEW' || normalizedTitle === 'MAIL · REVIEW';
     const reviewVisit = this.reviewVisit;
     if (isReview && reviewVisit && reviewVisit.requestId === requestId
       && (!readerPage || reviewVisit.retired.has(readerPage.id)
@@ -757,13 +825,8 @@ export class CapabilityMenu {
       }
       return true;
     }
-    // The conversation reader is a page the room waits on the wearer to
-    // answer: its Back and gestures belong to that reader, not to the room
-    // page it replaced (whose tap is "show terminal" and whose Back is
-    // "cancel"). The room's own next frame takes the page back
-    // (hud.rebuild 'brainstorm'). Simulator 2026-10-15.
-    if (this.pendingTitle !== 'BRAINSTORM' || normalized === 'BRAINSTORM · ROOM') this.retireBrainstormSurface();
-    const messagesState = this.pendingTitle === 'MESSAGES'
+    this.retireTerminalSurface();
+    const messagesState = isCommsTitle(this.pendingTitle)
       ? resolveMessagesViewState(title, selectable)
       : undefined;
     const effectiveSelectable = messagesState?.selectable ?? selectable;
@@ -807,7 +870,12 @@ export class CapabilityMenu {
     const expectedRequestId = this.pendingRequestId;
     const receiptRefresh = this.planningReceiptRefresh?.requestId === expectedRequestId
       ? this.planningReceiptRefresh : undefined;
-    const transition = this.beginTransition();
+    const keepTerminalVisit = this.pendingTitle === 'AGENT TERMINAL';
+    if (keepTerminalVisit) {
+      this.terminalOpening = undefined;
+      this.terminalPaintRevision += 1;
+    }
+    const transition = this.beginTransition(!keepTerminalVisit);
     if (conversationalTerminal && requestId) {
       // Bind after beginTransition retires the old view, and before awaiting
       // paint so a local Home can synchronously revoke this new visit.
@@ -923,6 +991,21 @@ export class CapabilityMenu {
       messagesScreen: this.messagesScreen,
       ...(railTab ? { railTab } : {}),
     };
+    if (this.pendingTitle === 'AGENT TERMINAL') {
+      if (normalized === 'AGENT TERMINAL' && effectiveSelectable) {
+        this.terminalAgentSurface = this.cloneSurfaceSnapshot(this.dataSurface);
+        this.terminalSessionSurface = undefined;
+        this.terminalReturnRequestId = requestId;
+      } else if (normalized.startsWith('AGENT TERMINAL · ') && !usesTextPage(normalized)) {
+        this.terminalSessionSurface = this.cloneSurfaceSnapshot(this.dataSurface);
+        if (this.dataReturn) {
+          this.terminalAgentSurface = this.cloneSurfaceSnapshot(this.dataReturn);
+        } else if (this.terminalAgentSurface) {
+          this.dataReturn = this.cloneSurfaceSnapshot(this.terminalAgentSurface);
+        }
+        this.terminalReturnRequestId = requestId;
+      }
+    }
     if (receiptRefresh?.monitoring) {
       this.scheduleMonitoringReceipt(receiptRefresh.monitoring, expectedRequestId);
     }
@@ -939,7 +1022,7 @@ export class CapabilityMenu {
     hint?: string,
   ): Promise<boolean> {
     if (!isActionLifecycleTitle(title)) return false;
-    this.retireBrainstormSurface();
+    this.retireTerminalSurface();
     this.leaveMessages();
     const transition = this.beginTransition();
     this.dataRowsSelectable = false;
@@ -973,7 +1056,7 @@ export class CapabilityMenu {
           item: this.dataSurface.items[this.selectedIndex]!, index: this.selectedIndex }
         : undefined;
     }
-    this.retireBrainstormSurface();
+    this.retireTerminalSurface();
     this.leaveMessages();
     this.clearResponseTimeout();
     const transition = this.beginTransition();
@@ -1038,14 +1121,18 @@ export class CapabilityMenu {
   async toggle(): Promise<void> {
     this.terminalPreludeRevision += 1;
     if (this.view === 'closed') {
-      if (this.terminalOpening) {
-        this.retireTerminalOpening();
-        await this.openCapability('Agent Terminal', CAPABILITIES.indexOf('Agent Terminal'));
-      } else if (this.brainstormOwnsSurface) {
-        // A resting Brainstorm frame (ready, settled, unavailable) has no
-        // run to cancel, so Back used to do nothing and the frame stayed up.
-        // It is a page like any other: Back is Home.
-        await this.close();
+      if (this.terminalOpening || this.terminalOwnsSurface) {
+        if (this.terminalSessionSurface) {
+          await this.returnFromTerminalToSessions();
+        } else if (this.terminalOpening) {
+          this.clearStashedTerminalPickers();
+          this.retireTerminalSurface();
+          this.retireTerminalOpening();
+          await this.openCapability('Agent Terminal', CAPABILITIES.indexOf('Agent Terminal'));
+        } else {
+          this.clearStashedTerminalPickers();
+          await this.close();
+        }
       }
       return;
     } else if (this.view === 'productivity' && this.productivityReturn) {
@@ -1268,8 +1355,9 @@ export class CapabilityMenu {
 
   private selectDataRow(): true {
     if (this.messagesRetry) {
+      const retryCapability = this.pendingTitle === 'MAIL' ? 'Mail' : 'Messages';
       this.messagesRetry = false;
-      void this.openCapability('Messages', 0);
+      void this.openCapability(retryCapability, CAPABILITIES.indexOf(retryCapability));
       return true;
     }
     // A review sends what the wearer read, and its last Mac page may span
@@ -1309,7 +1397,7 @@ export class CapabilityMenu {
         return true;
       }
       this.link.send({ kind: 'input', event: {
-        containerName: 'capdata', selectedName: 'MESSAGES', selectedIndex: reader.index,
+        containerName: 'capdata', selectedName: this.pendingTitle, selectedIndex: reader.index,
         requestId: this.pendingRequestId, traceId: reader.id,
       } });
       return true;
@@ -1325,7 +1413,6 @@ export class CapabilityMenu {
       ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     const traceId = `hud-${random}`;
     if (this.pendingTitle === 'AGENT TERMINAL' && this.pendingRequestId) {
-      this.retireTerminalOpening();
       this.terminalOpening = { requestId: this.pendingRequestId, selectionId: traceId };
     }
     if (this.pendingTitle === 'QUICKNOTES' && this.dataSurface?.title.trim().toUpperCase() === 'QUICKNOTES') {
@@ -1333,18 +1420,22 @@ export class CapabilityMenu {
     }
     // A tap on the thread replies to it — the one thing a tap does there.
     // Only the tap travels: the Mac keeps which conversation it is.
-    const replyingToThread = this.pendingTitle === 'MESSAGES'
+    const commsCapability = this.pendingTitle === 'MESSAGES' || this.pendingTitle === 'MAIL'
+      ? this.pendingTitle
+      : undefined;
+    const replyingToThread = commsCapability !== undefined
       && this.messagesScreen === 'conversation';
-    if (this.pendingTitle === 'MESSAGES' && !replyingToThread && this.pendingRequestId) {
+    if (commsCapability && !replyingToThread && this.pendingRequestId) {
       this.retireMessageUI(true);
       this.messageSelection = {
+        capability: commsCapability,
         requestId: this.pendingRequestId, selectionId: traceId, retiredActionIds: new Set(),
       };
       this.messageLifecycleBinding = { requestId: this.pendingRequestId, selectionId: traceId };
     }
     const stage = replyingToThread
       ? 'message-reply-requested'
-      : this.pendingTitle === 'MESSAGES'
+      : commsCapability
         ? 'message-selected'
       : 'capability-row-selected';
     console.info(`[joat trace] trace=${traceId} stage=${stage} index=${this.selectedIndex}`);
@@ -1363,11 +1454,11 @@ export class CapabilityMenu {
     // A row tap has left the currently rendered frame visible while the Mac
     // loads the replacement, and `dataSelectionPending` blocks further taps
     // meanwhile. Do not leave that frame permanently tap-dead if the bridge
-    // drops the response: every selectable data surface (Messages,
+    // drops the response: every selectable data surface (Messages, Mail,
     // Planning drill-downs, Notifications, Activity, QuickNotes) reuses the
     // same truthful retry state as an initial menu request.
     if (this.pendingTitle && this.pendingRequestId
-      && !(this.pendingTitle === 'MESSAGES' && this.messageSelection?.action)) {
+      && !(commsCapability && this.messageSelection?.action)) {
       this.armResponseTimeout(this.pendingTitle, this.pendingRequestId);
     }
     return true;
@@ -1521,7 +1612,7 @@ export class CapabilityMenu {
    */
   async openPanelTab(tab: PanelPageTab, keepSelection = 0, notifyMac = true): Promise<void> {
     if (notifyMac) this.departSurface(tab);
-    else this.retireBrainstormSurface();
+    else this.retireTerminalSurface();
     this.leaveMessages();
     this.retireQuickNotesReader('home');
     this.clearResponseTimeout();
@@ -1719,9 +1810,9 @@ export class CapabilityMenu {
     this.armResponseTimeout('QUICKNOTES', this.pendingRequestId);
   }
 
-  /** A reader the Mac pages that has no request of its own above (a saved
-   * Brainstorm, a spoken terminal reply under check): QuickNotes and the
-   * Messages review keep theirs. */
+  /** A reader the Mac pages that has no request of its own above (such as a
+   * spoken terminal reply under check): QuickNotes and the Messages review
+   * keep theirs. */
   private isMacPagedReader(): boolean {
     return this.dataSurface?.nativeTextPage === true
       && this.dataSurface.readerPage !== undefined
@@ -1781,11 +1872,19 @@ export class CapabilityMenu {
     },
     initialSelectedIndex = 0,
   ): Promise<void> {
+    if (
+      (HANDOFF_CAPABILITIES as readonly string[]).includes(picked)
+      && this.handoffCapability(picked as HandoffCapability)
+    ) {
+      return;
+    }
     this.departSurface('feature');
-    if (picked === 'Brainstorm') this.claimBrainstormVisit(this.captureBrainstormVisit());
-    // Retrying an unopened Messages picker replaces its request on the Mac.
+    // Retrying an unopened Messages or Mail picker replaces its request on the brain.
     // There is no selected conversation or draft requiring a second Home.
-    if (picked !== 'Messages' || this.messageLifecycleBinding) this.leaveMessages();
+    const retryingUnopenedComms = !this.messageLifecycleBinding
+      && ((picked === 'Messages' && this.pendingTitle === 'MESSAGES')
+        || (picked === 'Mail' && this.pendingTitle === 'MAIL'));
+    if (!retryingUnopenedComms) this.leaveMessages();
     this.retireQuickNotesReader('home');
     if (picked === 'Reminders') this.planningDrillDown = false;
     this.clearResponseTimeout();
@@ -1841,7 +1940,7 @@ export class CapabilityMenu {
       event,
     });
     // Every capability answers over the same lossy path (hud.list,
-    // brainstorm.view, or navigation.view). Arm the honest retry state for
+    // agent_terminal.view, or navigation.view). Arm the honest retry state for
     // all of them: a dropped response must never strand the wearer on a
     // "Loading…" frame with only Back as an undocumented escape.
     this.armResponseTimeout(title, requestId);
@@ -1906,7 +2005,7 @@ export class CapabilityMenu {
       || this.pendingRequestId !== requestId
     ) return;
 
-    const isMessagesRetry = title === 'MESSAGES';
+    const isCommsRetry = isCommsTitle(title);
     // The guidance must name the row exactly as the sidebar prints it
     // ('QuickNotes', 'Agent Terminal'), so map the timeout title back through
     // CAPABILITIES instead of case-folding it.
@@ -1914,15 +2013,15 @@ export class CapabilityMenu {
       ?? title.charAt(0) + title.slice(1).toLowerCase();
     this.dataRowsSelectable = false;
     this.dataItemCount = 0;
-    const shown = await this.hud.showList(isMessagesRetry
-      ? ['Mac did not answer. Tap to retry Messages.']
+    const shown = await this.hud.showList(isCommsRetry
+      ? [`JOAT did not answer. Tap to retry ${readable}.`]
       : [
-        'No response from the Mac yet.',
+        'No response from JOAT yet.',
         `Return to Overview, then open ${readable} to retry.`,
       ], {
       title: `${title} · RETRY`,
-      hint: isMessagesRetry ? 'tap: retry · 2x tap: back' : '2x tap: back',
-      selectable: isMessagesRetry,
+      hint: isCommsRetry ? 'tap: retry · 2x tap: back' : '2x tap: back',
+      selectable: isCommsRetry,
       // The timeout page replaced a firmware page with four image tiles.
       nativeTextPage: true,
     });
@@ -1935,14 +2034,14 @@ export class CapabilityMenu {
       await this.close();
       return;
     }
-    this.messagesRetry = isMessagesRetry;
+    this.messagesRetry = isCommsRetry;
     // The timeout page has replaced the old controls. Back must never
     // interpret an abandoned discard dialog as the still-visible surface.
     this.dataSurface = undefined;
-    this.dataRowsSelectable = isMessagesRetry;
-    this.dataItemCount = isMessagesRetry ? 1 : 0;
-    this.messagesScreen = isMessagesRetry ? 'retry' : undefined;
-    this.dataHint = isMessagesRetry ? 'tap: retry · 2x tap: back' : undefined;
+    this.dataRowsSelectable = isCommsRetry;
+    this.dataItemCount = isCommsRetry ? 1 : 0;
+    this.messagesScreen = isCommsRetry ? 'retry' : undefined;
+    this.dataHint = isCommsRetry ? 'tap: retry · 2x tap: back' : undefined;
     this.dataPagePending = false;
     // A tap whose response was lost must not keep swallowing later taps on
     // the replacement retry surface.
@@ -1973,11 +2072,12 @@ export class CapabilityMenu {
     this.dataPagePending = true;
     const traceId = reader.id;
     console.info(`[joat trace] trace=${traceId} stage=message-page-requested event=${eventType}`);
+    const capability = isCommsTitle(this.pendingTitle) ? this.pendingTitle! : 'MESSAGES';
     this.link.send({
       kind: 'input',
       event: {
         containerName: 'cappage',
-        selectedName: 'MESSAGES',
+        selectedName: capability,
         selectedIndex: reader.index,
         eventType,
         traceId,
@@ -1986,13 +2086,14 @@ export class CapabilityMenu {
     });
     // A dropped bridge response must not leave the wearer on a dead-end
     // conversation card. The existing timeout replaces it with the honest
-    // Messages retry action; a matching page frame clears this timer.
-    this.armResponseTimeout('MESSAGES', this.pendingRequestId);
+    // retry action; a matching page frame clears this timer.
+    this.armResponseTimeout(capability, this.pendingRequestId);
   }
 
-  private beginTransition(): number {
+  private beginTransition(notifyTerminalHome = true): number {
     this.planningBackPending = false;
-    this.retireTerminalOpening();
+    if (notifyTerminalHome) this.retireTerminalOpening();
+    else this.terminalOpening = undefined;
     this.clearProductivityReturn();
     this.view = 'transition';
     this.transitionId += 1;
@@ -2045,7 +2146,8 @@ export class CapabilityMenu {
       return;
     }
     const messagesBinding = this.messageLifecycleBinding;
-    if (this.pendingTitle === 'MESSAGES' && parent.title.trim().toUpperCase() === 'MESSAGES') {
+    const commsPrefix = this.commsLifecyclePrefix();
+    if (commsPrefix && parent.title.trim().toUpperCase() === this.pendingTitle) {
       this.retireMessageUI(true);
     }
     if (this.pendingTitle === 'QUICKNOTES') this.retireQuickNotesReader('list');
@@ -2062,7 +2164,12 @@ export class CapabilityMenu {
     this.dataReturn = this.dataGrandparent;
     this.dataGrandparent = undefined;
     this.clearResponseTimeout();
-    const transition = this.beginTransition();
+    const keepTerminalVisit = this.pendingTitle === 'AGENT TERMINAL';
+    if (keepTerminalVisit) {
+      this.terminalOpening = undefined;
+      this.terminalPaintRevision += 1;
+    }
+    const transition = this.beginTransition(!keepTerminalVisit);
     // Back lands on the parent as the page type it was shown as: a firmware
     // list (the Messages thread, Activity) or a text page keeps that type,
     // or the return would redraw it as four image tiles.
@@ -2096,14 +2203,85 @@ export class CapabilityMenu {
     // A firmware list comes back with row one highlighted; so does the cursor.
     this.selectedIndex = parentFirmwareList ? 0 : parent.selectedIndex;
     this.dataSurface = parent;
-    if (this.pendingTitle === 'MESSAGES') {
+    if (commsPrefix && this.pendingTitle) {
       const returnedTitle = parent.title.trim().toUpperCase();
-      if (returnedTitle === 'MESSAGES') {
-        this.messagesLifecycle('messages-list', messagesBinding);
-      } else if (returnedTitle === 'MESSAGES · CONVERSATION') {
-        this.messagesLifecycle('messages-conversation', messagesBinding);
+      if (returnedTitle === this.pendingTitle) {
+        this.messagesLifecycle(`${commsPrefix}-list`, messagesBinding);
+      } else if (returnedTitle === `${this.pendingTitle} · CONVERSATION`) {
+        this.messagesLifecycle(`${commsPrefix}-conversation`, messagesBinding);
       }
     }
+    if (this.pendingTitle === 'AGENT TERMINAL' && this.pendingRequestId) {
+      const returnedTitle = parent.title.trim().toUpperCase();
+      if (returnedTitle === 'AGENT TERMINAL') {
+        this.terminalSessionSurface = undefined;
+        this.link.send({
+          kind: 'input',
+          event: {
+            containerName: 'capability-lifecycle',
+            selectedName: 'terminal-agents',
+            requestId: this.pendingRequestId,
+          },
+        });
+      }
+    }
+  }
+
+  private async returnFromTerminalToSessions(): Promise<void> {
+    const sessionSurface = this.terminalSessionSurface;
+    const agentSurface = this.terminalAgentSurface;
+    const requestId = this.terminalOpening?.requestId ?? this.terminalReturnRequestId;
+    if (!sessionSurface) {
+      await this.close();
+      return;
+    }
+    this.retireTerminalSurface();
+    this.terminalOpening = undefined;
+    this.terminalSessionSurface = undefined;
+    this.terminalAgentSurface = undefined;
+    this.terminalReturnRequestId = undefined;
+    this.terminalPaintRevision += 1;
+    this.clearResponseTimeout();
+    const transition = this.beginTransition(false);
+    const firmwareList = usesFirmwareList(sessionSurface);
+    const shown = await this.hud.showList(sessionSurface.items, {
+      title: sessionSurface.title,
+      initialSelectedIndex: sessionSurface.selectedIndex,
+      ...(firmwareList ? { nativeFirmwareList: true } : {}),
+      ...(sessionSurface.nativeTextPage ? { nativeTextPage: true } : {}),
+      contextLabel: sessionSurface.contextLabel,
+      controlStartIndex: sessionSurface.controlStartIndex,
+      planningEntries: sessionSurface.planningEntries,
+      hint: sessionSurface.hint,
+      selectable: sessionSurface.selectable,
+    });
+    if (!this.isCurrentTransition(transition)) return;
+    if (!shown) {
+      await this.close();
+      return;
+    }
+    this.view = 'data';
+    this.pendingTitle = 'AGENT TERMINAL';
+    this.pendingRequestId = requestId;
+    this.dataItemCount = sessionSurface.items.length;
+    this.dataRowsSelectable = sessionSurface.selectable;
+    this.dataSelectionPending = false;
+    this.messagesRetry = false;
+    this.messagesScreen = undefined;
+    this.dataHint = sessionSurface.hint;
+    this.dataPagePending = false;
+    this.selectedIndex = firmwareList ? 0 : sessionSurface.selectedIndex;
+    this.dataSurface = this.cloneSurfaceSnapshot(sessionSurface);
+    this.dataReturn = agentSurface ? this.cloneSurfaceSnapshot(agentSurface) : undefined;
+    this.dataGrandparent = undefined;
+    this.link.send({
+      kind: 'input',
+      event: {
+        containerName: 'capability-lifecycle',
+        selectedName: 'terminal-sessions',
+        ...(requestId ? { requestId } : {}),
+      },
+    });
   }
 
   private scheduleProductivityReturn(phase: ProductivityHudModel['phase']): void {
@@ -2214,5 +2392,129 @@ export class CapabilityMenu {
     await this.hud.setStatus(this.micIsOpen() ? 'JOAT · listening' : 'JOAT · mic off');
     // HudPresenter restores the buffered dashboard atomically. Asking the Mac
     // to repaint here used to overwrite a newer card with an older last_reply.
+    this.onHome();
+  }
+
+  /** Paint ONE focus list frame upfront before dialing the Mac so HudPresenter's
+   * surface is already 'list' before the Mac socket sends on_connect clears. */
+  async prepareMacHandoffPage(name: HandoffCapability): Promise<boolean> {
+    this.departSurface('feature');
+    this.leaveMessages();
+    this.retireQuickNotesReader('home');
+    this.planningDrillDown = false;
+    this.clearResponseTimeout();
+    this.messagesRetry = false;
+    const transition = this.beginTransition();
+    const title = name.toUpperCase();
+    const shown = await this.hud.showList([`Opening ${name} on your Mac…`], {
+      title,
+      hint: '2x tap: back',
+      selectable: false,
+      ...(usesTextPage(title) ? { nativeTextPage: true } : { nativeFirmwareList: true }),
+    });
+    if (!this.isCurrentTransition(transition)) return false;
+    this.view = 'data';
+    this.pendingTitle = title;
+    this.pendingRequestId = undefined;
+    this.notificationRefreshSelection = undefined;
+    this.planningReceiptRefresh = undefined;
+    this.selectedIndex = 0;
+    this.dataItemCount = 0;
+    this.dataRowsSelectable = false;
+    this.dataSelectionPending = false;
+    this.messagesScreen = undefined;
+    this.dataHint = '2x tap: back';
+    this.dataPagePending = false;
+    this.dataSurface = undefined;
+    this.dataReturn = undefined;
+    this.dataGrandparent = undefined;
+    return shown;
+  }
+
+  /** Open a page a phone brain handed over, on the Mac now connected. */
+  async openOnMac(name: HandoffCapability): Promise<void> {
+    const title = name.toUpperCase();
+    const index = CAPABILITIES.indexOf(name);
+    const alreadyPrepared = this.view === 'data' && this.pendingTitle === title;
+    if (!alreadyPrepared) {
+      this.departSurface('feature');
+      this.leaveMessages();
+      this.retireQuickNotesReader('home');
+      this.planningDrillDown = false;
+    } else {
+      this.clearStashedTerminalPickers();
+      this.retireTerminalSurface();
+    }
+    this.clearResponseTimeout();
+    this.messagesRetry = false;
+    const transition = this.beginTransition();
+    const requestId = `hud-request-${this.randomId()}`;
+    if (!alreadyPrepared) {
+      await this.hud.showList([`Loading recent ${name.toLowerCase()}…`], {
+        title,
+        hint: '2x tap: back',
+        ...(usesTextPage(title) ? { nativeTextPage: true } : { nativeFirmwareList: true }),
+      });
+      if (!this.isCurrentTransition(transition)) return;
+    }
+    this.view = 'data';
+    this.pendingTitle = title;
+    this.pendingRequestId = requestId;
+    this.notificationRefreshSelection = undefined;
+    this.planningReceiptRefresh = undefined;
+    if (name === 'Agent Terminal') {
+      this.terminalOpening = { requestId, selectionId: requestId };
+    }
+    this.dataItemCount = 0;
+    this.dataRowsSelectable = false;
+    this.dataSelectionPending = false;
+    this.messagesScreen = undefined;
+    this.dataHint = alreadyPrepared ? this.dataHint : undefined;
+    this.dataPagePending = false;
+    this.selectedIndex = 0;
+    this.dataSurface = undefined;
+    this.dataReturn = undefined;
+    this.dataGrandparent = undefined;
+    this.link.send({
+      kind: 'input',
+      event: {
+        containerName: 'capmenu',
+        eventType: 0,
+        selectedIndex: index,
+        selectedName: name,
+        requestId,
+      },
+    });
+    this.armResponseTimeout(title, requestId);
+  }
+
+  /** A page the plugin draws itself, with Back to Home: the hand-off's
+   * "Opening Agent Terminal on your Mac…" and its "No Mac answered". */
+  async showLocalPage(title: string, items: string[]): Promise<boolean> {
+    this.leaveMessages();
+    this.retireQuickNotesReader('home');
+    this.clearResponseTimeout();
+    this.messagesRetry = false;
+    const transition = this.beginTransition();
+    const shown = await this.hud.showList(items, { title, hint: '2x tap: back', selectable: false, nativeTextPage: true });
+    if (!this.isCurrentTransition(transition)) return false;
+    if (!shown) {
+      await this.close();
+      return false;
+    }
+    this.view = 'data';
+    this.pendingTitle = title;
+    this.pendingRequestId = undefined;
+    this.selectedIndex = 0;
+    this.dataItemCount = 0;
+    this.dataRowsSelectable = false;
+    this.dataSelectionPending = false;
+    this.messagesScreen = undefined;
+    this.dataHint = undefined;
+    this.dataPagePending = false;
+    this.dataSurface = undefined;
+    this.dataReturn = undefined;
+    this.dataGrandparent = undefined;
+    return true;
   }
 }

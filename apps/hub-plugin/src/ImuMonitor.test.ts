@@ -141,6 +141,24 @@ describe('ImuMonitor confirms', () => {
     expect(settled).toHaveBeenCalledWith(false);
     expect(sent).toEqual([]);
   });
+
+  it('disarm clears only the matching pending confirmation without invoking onResult or sending confirm uplink', () => {
+    vi.useFakeTimers();
+    const { imu, sent } = make();
+    const settled = vi.fn();
+    imu.prepare('confirm-1', settled);
+    expect(imu.activate('confirm-1', 8000)).toBe(true);
+
+    expect(imu.disarm('other-action')).toBe(false);
+    expect(imu.isPending()).toBe(true);
+
+    expect(imu.disarm('confirm-1')).toBe(true);
+    expect(imu.isPending()).toBe(false);
+    vi.advanceTimersByTime(10000);
+    expect(settled).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+    vi.useRealTimers();
+  });
 });
 
 describe('ImuMonitor trace mode', () => {

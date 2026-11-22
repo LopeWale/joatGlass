@@ -516,6 +516,8 @@ class AgentTerminalRoster:
         self._focus: str | None = next(iter(self._lanes), None)
         self._focus_revision = 0
         self._discovered: list[dict[str, str]] = []
+        self._discovered_from: TerminalLane | None = None
+        self._lane_session_labels: dict[tuple[str, str], str] = {}
         # Last chip text painted per lane, so a background lane
         # repaints on a STATE change and not on every line.
         self._marks: dict[str, str] = {}
@@ -761,28 +763,35 @@ class AgentTerminalRoster:
         return any(lane.busy for lane in self._lanes.values())
 
     def picker_rows(self) -> list[tuple[str, str]]:
-        """(lane name, row text) for every session, newest state first.
-
-        The idle terminal used to say: Say "terminal sessions" to choose a
-        work session. That is not a chooser, it is homework — the wearer
-        asked what it even meant. A list of the sessions that exist, that
-        you tap, is the chooser; the spoken phrase stays for hands-busy.
-        """
+        """(lane name, row text) for every session, newest state first."""
         rows: list[tuple[str, str]] = []
         for lane in self._lanes.values():
             if self._visible_lanes is not None and lane.key not in self._visible_lanes:
                 continue
-            mark = "▸ " if lane.key == self._focus else "  "
-            if self._visible_lanes is not None:
-                name = str(getattr(lane.agent, "label", lane.name))
-                state = {
-                    "idle": "Ready", "working": "Working", "unprepared": "Tap to connect",
-                    "preparing": "Connecting", "approval_required": "Needs approval",
-                    "failed": "Connection failed", "needs recovery": "Needs attention",
-                    "needs input": "Needs your answer", "check task": "Check task status",
-                }.get(lane.state, "Needs attention")
-                rows.append((lane.key, _one_row(f"{name} · {state}", HUD_COLUMNS)))
+            provider = getattr(lane.agent, "provider", None)
+            if self._visible_lanes is not None or provider in {"claude-code", "codex", "antigravity"}:
+                if provider in {"claude-code", "codex", "antigravity"}:
+                    display = lane.name.title()
+                else:
+                    raw = str(getattr(lane.agent, "label", None) or lane.name).strip()
+                    display = raw.title() if raw.islower() else raw
+                if lane.approvals or lane.state == "approval_required":
+                    state = "approval needed"
+                elif lane.busy or lane.state == "working":
+                    state = "working"
+                elif lane.state in ("idle", "unprepared"):
+                    state = "idle"
+                elif lane.state == "preparing":
+                    state = "connecting"
+                elif lane.state == "failed":
+                    state = "unavailable"
+                elif lane.state == "needs input":
+                    state = "needs input"
+                else:
+                    state = "needs attention"
+                rows.append((lane.key, _one_row(f"{display} · {state}", HUD_COLUMNS)))
                 continue
+            mark = "▸ " if lane.key == self._focus else "  "
             last = (lane.tail[-1] if lane.tail else "").strip()
             waiting = (f" · {len(lane.approvals)} waiting"
                        if lane.approvals else "")
@@ -793,6 +802,133 @@ class AgentTerminalRoster:
                          HUD_COLUMNS),
             ))
         return rows
+
+    def lane_active_summary(self, lane_name: str) -> str | None:
+        """Short summary for 'Active · <summary>' when the lane has an active session."""
+        lane = self._lanes.get(lane_name)
+        if lane is None:
+            return None
+        has_messages = bool(lane.conversation.messages) or bool(lane.tail)
+        if not (lane.busy or lane.approvals or has_messages):
+            return None
+        if lane.approvals:
+            _approval_id, kind, detail = lane.approvals[0]
+            raw = f"approval needed ({detail or kind})"
+        elif lane.busy:
+            last_user = next(
+                (m.text for m in reversed(lane.conversation.messages) if m.role == "user"),
+                "",
+            )
+            raw = f"working · {last_user}" if last_user.strip() else "working"
+        else:
+            last_user = next(
+                (m.text for m in reversed(lane.conversation.messages) if m.role == "user"),
+                "",
+            )
+            fallback = (
+                lane.conversation.messages[-1].text
+                if lane.conversation.messages
+                else (lane.tail[-1] if lane.tail else "current session")
+            )
+            raw = last_user.strip() or fallback.strip() or "current session"
+        cleaned = " ".join(raw.split())
+        return cleaned if len(cleaned) <= 38 else cleaned[:37] + "…"
+
+    async def list_lane_sessions(self, lane_name: str, limit: int = 16) -> list[dict[str, str]]:
+        """List saved sessions for a specific lane (newest first)."""
+        lane = self._lanes.get(lane_name)
+        if lane is None or not _is_roster_lane(lane):
+            return []
+        lister = getattr(lane.agent, "list_sessions", None)
+        if lister is None:
+            return []
+        try:
+            rows = await lister(limit)
+        except Exception as exc:
+            log.debug("session listing failed for %s: %s", lane_name, exc)
+            return []
+        normalized: list[dict[str, str]] = []
+        for row in rows[:max(1, limit)]:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("key") or "").strip()
+            if not key:
+                continue
+            label = _listed_name(row, rows)
+            self._lane_session_labels[(lane_name, key)] = label
+            item: dict[str, str] = {"key": key, "label": label}
+            if isinstance(row.get("cwd"), str) and row["cwd"]:
+                item["cwd"] = row["cwd"]
+            normalized.append(item)
+        return normalized
+
+    async def resume_lane_session(self, lane_name: str, session_key: str) -> bool:
+        """Resume a specific session key on `lane_name` and hydrate its transcript."""
+        lane = self._lanes.get(lane_name)
+        if lane is None or lane.busy:
+            return False
+        resumer = getattr(lane.agent, "resume_session", None)
+        if resumer is None:
+            return False
+        lane.capture_revision += 1
+        try:
+            await resumer(session_key)
+        except Exception as exc:
+            lane.last_error = str(exc) or exc.__class__.__name__
+            return False
+        lane.queued, lane.queued_context = "", None
+        lane.last_error = ""
+        lane.approvals.clear()
+        lane.tail.clear()
+        lane.conversation = TerminalConversation()
+        label = self._lane_session_labels.get((lane_name, session_key), session_key)
+        lane.tail.append(f"[resumed] {label}")
+        lane.conversation.append("status", f"Resumed {label}")
+        reader = getattr(lane.agent, "history", None)
+        if reader is not None:
+            try:
+                for role, text in await reader(10):
+                    lane.conversation.append("user" if role == "user" else "assistant", text)
+                    prefix = "> " if role == "user" else ""
+                    first_line = text.split("\n", 1)[0][:200]
+                    lane.tail.append(f"{prefix}{first_line}")
+            except Exception as exc:
+                lane.tail.append(
+                    f"[history unavailable — {str(exc) or exc.__class__.__name__}]"
+                )
+        if self._focus != lane.key:
+            self._focus_revision += 1
+            self._focus = lane.key
+        return True
+
+    async def start_new_lane_session(self, lane_name: str) -> bool:
+        """Reset `lane_name` to a fresh conversation without deleting saved session history."""
+        lane = self._lanes.get(lane_name)
+        if lane is None or lane.busy:
+            return False
+        reset = getattr(lane.agent, "reset_conversation", None)
+        lane.capture_revision += 1
+        if reset is not None:
+            try:
+                await reset()
+            except Exception as exc:
+                lane.last_error = str(exc) or exc.__class__.__name__
+                return False
+        lane.queued, lane.queued_context = "", None
+        lane.last_error = ""
+        lane.approvals.clear()
+        lane.tail.clear()
+        lane.conversation = TerminalConversation()
+        if lane.key in self._persistence:
+            try:
+                self._persist_lane(lane)
+            except Exception:
+                self.block_persistence(lane.key)
+                return False
+        if self._focus != lane.key:
+            self._focus_revision += 1
+            self._focus = lane.key
+        return True
 
     def overview(self) -> str:
         """One line per session — the spoken (and later HUD) roster."""
@@ -1070,11 +1206,18 @@ class AgentTerminalRoster:
                     attempt.reason = "Agent connection failed. Check its endpoint on the Mac, then retry."
             elif isinstance(exc, (OpenClawScopeMismatch, OpenClawPairingRequired)):
                 attempt.requires_authorization = True
+                name = getattr(lane.agent, "display_name", None)
+                if not isinstance(name, str) or not name:
+                    name = "OpenClaw"
                 attempt.reason = (
-                    "Approve Work permissions in OpenClaw, then retry."
+                    f"Approve Work permissions in {name}, then retry."
                     if isinstance(exc, OpenClawScopeMismatch)
-                    else "Approve this device in OpenClaw, then retry."
+                    else f"Approve this device in {name}, then retry."
                 )
+            elif isinstance(getattr(exc, "wearer_reason", None), str) and exc.wearer_reason:
+                # A local runtime that knows the fix says it plainly
+                # ("Install Claude Code on this Mac, then retry.").
+                attempt.reason = exc.wearer_reason
             else:
                 # Say which way the dial died (2026-09-06): the lane frame
                 # read "Could not connect to work. Tap retry." whether the
@@ -1498,6 +1641,17 @@ class AgentTerminalRoster:
 
     # ── discovery (T1) ───────────────────────────────────────────────────
 
+    def _roster_lane(self) -> TerminalLane | None:
+        """The focused lane when it can list sessions, else the first that can.
+
+        With Claude Code and Codex both on the roster, "terminal discover"
+        lists the sessions of the runtime the wearer is looking at.
+        """
+        focused = self._lanes.get(self._focus or "")
+        if focused is not None and _is_roster_lane(focused):
+            return focused
+        return next((lane for lane in self._lanes.values() if _is_roster_lane(lane)), None)
+
     async def discover(self) -> str:
         """List the wearer's existing gateway sessions — 'choose' made real.
 
@@ -1507,10 +1661,7 @@ class AgentTerminalRoster:
         marked; the rest are visible but watch-only until the send policy
         learns resumable keys — shown honestly rather than pretended at.
         """
-        lister = next(
-            (lane for lane in self._lanes.values() if _is_roster_lane(lane)),
-            None,
-        )
+        lister = self._roster_lane()
         if lister is None:
             return "No terminal lane on this Mac can enumerate sessions."
         try:
@@ -1520,6 +1671,9 @@ class AgentTerminalRoster:
             reason = str(exc) or exc.__class__.__name__
             return f"Session listing failed — {reason}"
         self._discovered = rows
+        # Resume goes to the lane that listed these rows: a Codex thread id
+        # means nothing to Claude Code.
+        self._discovered_from = lister
         if not rows:
             self._record(self._visible_lane(lister),
                          "[discover] no sessions involving you")
@@ -1564,10 +1718,7 @@ class AgentTerminalRoster:
             )
             return f"{len(matches)} sessions match — say one exactly: {named}"
         match = matches[0]
-        lane = next(
-            (lane for lane in self._lanes.values() if _is_roster_lane(lane)),
-            None,
-        )
+        lane = self._discovered_from if self._discovered_from in self._lanes.values() else None
         if lane is None:
             return "No terminal lane on this Mac can resume a session."
         if lane.busy:
@@ -1626,6 +1777,7 @@ class AgentTerminalRoster:
         lane.approvals.append((approval_id, kind, summary))
         line = f"[approval] {kind}: {summary or approval_id} — say 'terminal approve' or 'terminal deny'"
         lane.tail.append(line)
+        lane.conversation.append("status", f"[approval] {kind}: {summary or approval_id}")
         loop = asyncio.get_running_loop()
         if lane.name == self._focus:
             loop.create_task(self._narrate(lane, line))

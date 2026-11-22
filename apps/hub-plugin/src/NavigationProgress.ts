@@ -50,6 +50,7 @@ export interface NavigationRoutePlan {
 export type NavigationProgressState =
   | {
     kind: 'guidance';
+    stepId: string;
     progressM: number;
     crossTrackM: number;
     maneuver: NavigationManeuver;
@@ -236,6 +237,7 @@ export class NavigationProgressTracker {
     ) ?? this.route.steps[this.route.steps.length - 1]!;
     return {
       kind: 'guidance',
+      stepId: step.id,
       progressM: Math.round(best.alongM),
       crossTrackM: Math.round(best.crossTrackM),
       maneuver: step.maneuver,

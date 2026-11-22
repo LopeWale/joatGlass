@@ -9,7 +9,6 @@ import {
 import chatCircleSvg from '@phosphor-icons/core/regular/chat-circle-dots.svg?raw';
 import bellSvg from '@phosphor-icons/core/regular/bell.svg?raw';
 import calendarSvg from '@phosphor-icons/core/regular/calendar-dots.svg?raw';
-import scalesSvg from '@phosphor-icons/core/regular/scales.svg?raw';
 import gearSvg from '@phosphor-icons/core/regular/gear.svg?raw';
 import taskSvg from '@phosphor-icons/core/regular/check-square-offset.svg?raw';
 import moreSvg from '@phosphor-icons/core/regular/dots-three-circle.svg?raw';
@@ -64,6 +63,7 @@ import {
   type NavigationMapModel,
   type NavigationMapPanelModel,
   type NavigationManeuver,
+  type NavigationMode,
 } from './NavigationHud';
 
 import {
@@ -429,7 +429,6 @@ export type HudIconName =
   | 'planner'
   | 'more'
   | 'quicknotes'
-  | 'brainstorm'
   | 'activity'
   | 'navigation'
   | 'settings'
@@ -455,7 +454,6 @@ const ICON_SOURCES: Readonly<Record<HudIconName, string>> = {
   planner: taskSvg,
   more: moreSvg,
   quicknotes: quickNoteSvg,
-  brainstorm: scalesSvg,
   activity: activitySvg,
   navigation: navigationSvg,
   settings: gearSvg,
@@ -684,8 +682,8 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
     return {
       kind: 'empty',
       title: 'Offline',
-      primary: 'JOAT on your Mac is unavailable.',
-      recovery: 'Open JOAT on your Mac to reconnect.',
+      primary: 'JOAT is not connected.',
+      recovery: 'Open JOAT Brain on the iPhone, or JOAT on the Mac.',
       hint: '2x tap: menu',
     };
   }
@@ -693,7 +691,7 @@ export function resolveHudOverview(input: HudOverviewInput): ResolvedHudOverview
     return {
       kind: 'empty',
       title: 'Reconnecting',
-      primary: 'Restoring JOAT on your Mac…',
+      primary: 'Reconnecting to JOAT…',
       recovery: 'This screen will refresh automatically.',
       hint: '2x tap: menu',
     };
@@ -870,6 +868,7 @@ export type NavigationMapCentre = Pick<NavigationMapPanelModel, 'latitude' | 'lo
 
 /** The map's own zoom: the Mac's tiles are rendered at it (map_image.py). */
 const NAVIGATION_MAP_ZOOM = 16;
+const NAVIGATION_DRIVING_MAP_ZOOM = 15;
 
 /**
  * Where to centre the pane when no street tile has arrived: on the wearer
@@ -879,10 +878,14 @@ const NAVIGATION_MAP_ZOOM = 16;
  * "bare route shape" the comments promised was never reachable — so any
  * Mapbox failure took the map away entirely.
  */
-export function navigationMapFallbackCentre(map: NavigationMapModel): NavigationMapCentre | undefined {
+export function navigationMapFallbackCentre(
+  map: NavigationMapModel,
+  mode?: NavigationMode,
+): NavigationMapCentre | undefined {
   if (map.geometry.length < 2) return undefined;
+  const targetZoom = mode === 'driving' ? NAVIGATION_DRIVING_MAP_ZOOM : NAVIGATION_MAP_ZOOM;
   if (map.position) {
-    return { latitude: map.position.latitude, longitude: map.position.longitude, zoom: NAVIGATION_MAP_ZOOM };
+    return { latitude: map.position.latitude, longitude: map.position.longitude, zoom: targetZoom };
   }
   const latitudes = map.geometry.map((point) => point.latitude);
   const longitudes = map.geometry.map((point) => point.longitude);
@@ -892,7 +895,7 @@ export function navigationMapFallbackCentre(map: NavigationMapModel): Navigation
   };
   // Zoom out until the route's bounding box fits the pane, at most to a
   // district-scale 12; the fit is checked by projecting, not estimated.
-  for (let zoom = NAVIGATION_MAP_ZOOM; zoom > 12; zoom -= 1) {
+  for (let zoom = targetZoom; zoom > 12; zoom -= 1) {
     const probe = { ...centre, zoom };
     const fits = map.geometry.every((point) => {
       const [x, y] = projectMercatorPanel(point, probe, NAVIGATION_MAP_PANEL);
@@ -1681,8 +1684,6 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.restore();
   }
 
-  /** Scrollback state for the brainstorm/terminal transcript.
-
   /** The one navigation frame that is pixels: live guidance with its map.
    * Every frame before and around it (confirm the place, the mode, the
    * preview, the warnings, arrival, an error) is a firmware text page
@@ -1700,7 +1701,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   ): void {
     const panel = navigation.map?.panel;
     const centre = navigation.map
-      ? (panel ?? navigationMapFallbackCentre(navigation.map))
+      ? (panel ?? navigationMapFallbackCentre(navigation.map, navigation.mode))
       : undefined;
     const projection = navigation.map && centre
       ? projectNavigationMapToPanel(navigation.map, centre)
@@ -1716,7 +1717,12 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.textAlign = 'left';
     context.fillStyle = gray(CHROME);
     context.font = TYPE.label;
-    context.fillText(`${navigation.mode === 'cycling' ? 'CYCLING' : 'WALKING'} · ACTIVE`, 36, 44);
+    const activeHeading = navigation.mode === 'driving'
+      ? 'DRIVING'
+      : navigation.mode === 'cycling'
+        ? 'CYCLING'
+        : 'WALKING';
+    context.fillText(`${activeHeading} · ACTIVE`, 36, 44);
 
     this.drawManeuver(context, navigation.maneuver ?? 'continue', 60, 90, BRIGHT);
     context.fillStyle = gray(BRIGHT);
@@ -1742,7 +1748,11 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     // next usable frame can finish.
     const liveBandWidth = projection ? actWidth : 504;
     this.drawNavigationProgress(context, navigation.progress ?? 0, liveBandWidth);
-    const mode = navigation.mode === 'cycling' ? 'Cycling' : 'Walking';
+    const mode = navigation.mode === 'driving'
+      ? 'Driving'
+      : navigation.mode === 'cycling'
+        ? 'Cycling'
+        : 'Walking';
     const arrival = this.arrivalClock(navigation.etaMinutes);
     const compactFacts = `${formatNavigationDistance(navigation.remainingDistanceM ?? 0)} left · ${navigation.etaMinutes ?? 0} min`;
     const facts = projection ? compactFacts : `${mode} · ${compactFacts}`;

@@ -25,6 +25,13 @@ from .agents.a2a_config import load_a2a_profiles, native_token_loader
 from .agents.a2a_terminal import A2ATerminalAgent
 from .agents.feature_tools import feature_tools, quicknote_reader_tool, terminal_sessions_tool
 from .agents.message_tools import message_tools
+from .agents.planning_tools import calendar_agenda_tool, open_reminders_tool
+from .agents.contact_tools import contacts_lookup_tool
+from .agents.claude_code_terminal import build_claude_lanes, load_lane_configs
+from .agents.codex_terminal import build_codex_lanes, load_codex_lane_configs
+from .agents.antigravity_terminal import (
+    AntigravityTerminalAgent, load_antigravity_lane, load_antigravity_model,
+)
 from .agents.grounding import (
     Grounding,
     device_facts,
@@ -57,17 +64,17 @@ from .agents.openclaw_runtime import (
     terminal_ready_activity,
 )
 from .agents.openclaw_terminal import (
+    DEFAULT_GATEWAY_NAME,
     OpenClawToolInventoryUnsettled,
     OpenClawToolsEnabled,
 )
 from .agents.claude_completer import ClaudeCompleter
-from .agents.subprocess_agent import critic, find_claude_binary, proposer
+from .agents.subprocess_agent import find_claude_binary
 from .agents.cli_accounts import AccountRegistry
 from .audio.router import AudioRouter
 from .audio.whisper_serve import WhisperServeEngine
 from .audio.whisperkit import WhisperKitEngine
 from .ble.hub_gateway import HubGatewayTransport
-from .services.brainstorm_control import BrainstormControl, BrainstormRoom
 from .core.pairing import PairingStore, ShellPairingStore
 from .channels.biome import DEFAULT_STREAM_DIR, BiomeNotificationStore
 from .channels.cards import CardLog
@@ -83,9 +90,7 @@ from .core.protocol import (
     CONFIRM_PROMPT_MAX_UTF16_UNITS,
     AudioControl,
     Device,
-    BrainstormAction,
     AgentTerminalHudView,
-    BrainstormHudView,
     Hello,
     InputEvent,
     Location,
@@ -120,10 +125,6 @@ from .persistence.voice_notes import VoiceNoteStore
 from .services.hud import HudWriter
 from .services.g2_diagnostics import G2DiagnosticStore
 from .services.imu_trace import ImuTraceRecorder
-from .services.brainstorm_history import (
-    BrainstormHistory,
-    BrainstormHistoryCommands,
-)
 from .services.status import StatusPublisher
 from .services.orchestrator import WAKE_WORDS, VoiceOrchestrator
 from .services.prompted_speech import PromptedSpeechRuntime
@@ -184,8 +185,10 @@ from .services.task_monitor import (
     evaluate_reminder_occurrence,
 )
 from .services.session import (
-    BrainstormStartResult,
-    DebateSession, Session, SessionManager, notification_stack, seat_participants,
+    Session,
+    SessionManager,
+    SessionStartResult,
+    notification_stack,
 )
 from .services.shutdown import (
     install_shutdown_handlers,
@@ -193,13 +196,20 @@ from .services.shutdown import (
     wait_for_supervisor_exit,
 )
 from .services.agent_endpoint import AgentEndpoint, agent_token
+from .services.messages_endpoint import (
+    DEFAULT_PORT as MESSAGES_DEFAULT_PORT,
+    MessagesEndpoint,
+    messages_token,
+)
+from .services.terminal_endpoint import (
+    DEFAULT_PORT as TERMINAL_DEFAULT_PORT,
+    TerminalEndpoint,
+    terminal_token,
+)
 from .services.models import (
     DEFAULT_CODEX_MODEL, ModelRegistry, assistant_slot, default_slots,
+    recommended_stt_model,
 )
-from .services.sinks import Broadcast, DebateStateSink, HudSink, TerminalSink
-from .verifier.fetcher import fetch_page_text, wayback_page_text
-from .verifier.nli import MiniCheckJudge, minicheck_available
-from .verifier.gate import VerifierGate
 
 log = logging.getLogger("joat")
 
@@ -256,7 +266,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stt-binary", default="whisperkit-cli")
-    parser.add_argument("--stt-model", default="large-v3_turbo")
+    parser.add_argument("--stt-model", default=recommended_stt_model())
     parser.add_argument("--stt-mode", choices=["serve", "batch"], default="serve",
                         help="serve = resident model (~1s/utterance); batch = CLI per utterance (~7s)")
     parser.add_argument("--stt-port", type=int, default=50060)
@@ -277,6 +287,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
                              "Agent Configure dials (exposed by Tailscale Serve)")
     parser.add_argument("--no-agent-endpoint", action="store_true",
                         help="do not serve the Even AI agent endpoint")
+    parser.add_argument("--messages-endpoint", action="store_true",
+                        help="serve this Mac's Messages to the wearer's iPhone "
+                             "(services/messages_endpoint.py); loopback only, "
+                             "exposed by Tailscale Serve")
+    parser.add_argument("--messages-port", type=int, default=MESSAGES_DEFAULT_PORT,
+                        help="loopback port of the Messages relay")
+    parser.add_argument("--terminal-endpoint", action="store_true",
+                        help="serve this Mac's Agent Terminal settings to the wearer's iPhone "
+                             "(services/terminal_endpoint.py); loopback only, "
+                             "auto-enabled with --private-tailnet-gateway")
+    parser.add_argument("--terminal-port", type=int, default=TERMINAL_DEFAULT_PORT,
+                        help="loopback port of the Terminal configuration endpoint")
     parser.add_argument("--wearer-name", default=os.environ.get("JOAT_WEARER", ""),
                         help="the wearer's name, grounded into every reply "
                              "(env JOAT_WEARER)")
@@ -535,8 +557,8 @@ async def main() -> None:
     # The shared secret for the Even AI door AND the MCP route the CLI seats
     # use to reach the belt; created once at first boot (0600).
     agent_secret = agent_token()
-    # Which saved subscription account each CLI seat runs as — chosen on the
-    # phone's control screen (services/brainstorm_control.py), read per
+    # Which saved subscription account each CLI seat runs as — chosen via the
+    # iOS companion /terminal endpoint (services/terminal_endpoint.py), read per
     # spawn, so a switch lands on the next turn with no restart.
     account_registry = AccountRegistry()
     claude_env = account_registry.env_provider("claude")
@@ -563,9 +585,9 @@ async def main() -> None:
             # infer "it is not listed, so I should decline" does not — it
             # invents. Weather, messages and location have sources now —
             # the assistant's job is to go get them, not disclaim.
-            unknowns=[
-                "their calendar or schedule",
-            ],
+            # The calendar is no longer unknown: calendar_agenda and
+            # open_reminders on the belt read it from the Mac's EventKit.
+            unknowns=[],
         )
         if args.wearer_name:
             grounding.add(static_fact(f"The wearer's name is {args.wearer_name}"))
@@ -589,6 +611,12 @@ async def main() -> None:
             web_search_tool(search, panels),
             pomodoro_status_tool(pomodoro),
             pomodoro_set_tool(pomodoro),
+            # The schedule: events and dated reminders from every calendar
+            # account on the Mac (iCloud, Google, work), read-only.
+            calendar_agenda_tool(personal_data, wearer_zone.current),
+            open_reminders_tool(personal_data, wearer_zone.current),
+            # People: names, numbers, emails from the Mac's Contacts.
+            contacts_lookup_tool(personal_data),
         ]
         # Availability can change after startup; the tools report access
         # failures and retry the same read-only store on each request.
@@ -726,6 +754,8 @@ async def main() -> None:
         )
         status.set_agent_terminal(state="blocked", reason="gateway_not_ready")
         log.warning("OpenClaw Agent Terminal config failed validation")
+    # What the glasses call this Gateway; the Mac app sets it per Gateway.
+    gateway_name = openclaw_config.name if openclaw_config is not None else DEFAULT_GATEWAY_NAME
     if openclaw_config is not None:
         endpoint_host = urlsplit(openclaw_config.profile.url).hostname or ""
         requested_scopes = ("operator.read", "operator.write")
@@ -779,6 +809,7 @@ async def main() -> None:
                     profile=openclaw_config.profile,
                     credentials=credentials,
                     agent_id=openclaw_config.agent_id,
+                    display_name=openclaw_config.name,
                     # The agent-terminal status projection belongs to the
                     # Brainstorm-era hermes terminal; the work lane reports
                     # through the roster instead of clobbering it.
@@ -789,6 +820,7 @@ async def main() -> None:
                     profile=openclaw_config.profile,
                     credentials=credentials,
                     agent_id=openclaw_config.agent_id,
+                    display_name=openclaw_config.name,
                     state_changed=publish_terminal_state,
                 )
                 openclaw_retry_candidate = candidate
@@ -893,6 +925,7 @@ async def main() -> None:
                 calendar_candidate = OpenClawTerminalAgent(
                     client=calendar_client,
                     agent_id=openclaw_config.agent_id,
+                    display_name=openclaw_config.name,
                     policy=CALENDAR_PROPOSAL_TERMINAL_POLICY,
                 )
                 try:
@@ -961,6 +994,7 @@ async def main() -> None:
                     profile=host_config.profile,
                     credentials=host_credentials,
                     agent_id=host_config.agent_id,
+                    display_name=host_config.name,
                     state_changed=None,
                     on_approval=on_work_approval,
                 ),
@@ -969,52 +1003,6 @@ async def main() -> None:
             log.info(
                 "Agent Terminal spans %d Macs", len(extra_host_lanes) + 1,
             )
-    def build_seats() -> list[tuple[str, str, object]]:
-        # Re-run on demand (phone: Refresh / Reset Brainstorm / account
-        # switch), never only at boot: a ChatGPT app update that moved the
-        # bundled Codex used to leave Brainstorm dead until a restart.
-        return [
-            ("codex", "proposer", proposer(models.provider("codex"), codex_env)),
-            ("claude", "critic", critic(models.provider("claude"), claude_env)),
-        ]
-
-    seats: list[tuple[str, str, object]] = build_seats()
-
-    def current_seated() -> list[tuple[str, str, object]]:
-        return [(name, role, agent) for name, role, agent in seats if agent]
-
-    def missing_seats() -> list[str]:
-        return [name for name, _role, agent in seats if not agent]
-
-    def brainstorm_available() -> bool:
-        # A Brainstorm needs someone to disagree with — two CLI seats. It
-        # must NOT count any Agent Terminal runtime: an earlier build gated
-        # this on the Hermes terminal being ready, which made the wearer's
-        # local Codex/Claude conversation hostage to a remote daemon it
-        # never speaks to.
-        return len(current_seated()) >= 2
-
-    initial_seated = current_seated()
-    if brainstorm_available():
-        log.info("round table: %s",
-                 ", ".join(f"{n} ({r})" for n, r, _ in initial_seated))
-    else:
-        log.warning("brainstorm unavailable — need the codex and claude CLIs; "
-                    "missing: %s", ", ".join(missing_seats()) or "none")
-
-    claim_judge = MiniCheckJudge() if minicheck_available() else None
-    if claim_judge:
-        log.info("NLI claim judge ready (MiniCheck flan-t5-large; loads on first use)")
-    else:
-        log.info("NLI claim judge absent — install the 'nli' extra to enable")
-    gate = VerifierGate(fetch_page_text, wayback_page_text, claim_judge=claim_judge)
-
-    # One snapshot outlives any single debate: the wearer opens the Debate
-    # panel after the fact and must still see what was said.
-    # Finished sessions outlive the process: the synthesis the wearer
-    # walked away with survives a restart, and Recent has a source.
-    brainstorm_history = BrainstormHistory()
-    debate_state = DebateStateSink(history=brainstorm_history)
 
     navigation_provider: NavigationProvider | None = mapbox_provider
     if navigation_provider is not None:
@@ -1023,12 +1011,7 @@ async def main() -> None:
         log.info("navigation provider unavailable (MAPBOX_ACCESS_TOKEN not configured)")
 
     async def joat_transform(instruction: str, material: str) -> str:
-        """JOAT doing what was asked WITH a collaborator's answer.
-
-        The worker seat, not the wearer's conversation: this fires while a
-        session is already running two subscriptions, and the rewording
-        prompt must not become a turn of the wearer's chat.
-        """
+        """JOAT doing what was asked WITH the last reply."""
         if worker is None:
             return "No model is loaded, so I cannot do that here."
         answer = await worker.reply(
@@ -1040,58 +1023,6 @@ async def main() -> None:
         )
         return (answer or "").strip()
 
-    def make_continuation(
-        topic: str, prior: tuple[tuple[str, str], ...],
-    ) -> Session | None:
-        """A continuation is an ordinary session that remembers.
-
-        SESSION_MODEL.md:49 — "continue <title>" resumes the stored
-        conversation, so the earlier turns become context the collaborators
-        can see. They are NOT counted as positions taken this run; see
-        DebateSession._prior.
-        """
-        session = make_debate(topic)
-        if isinstance(session, DebateSession) and prior:
-            return DebateSession(
-                topic,
-                seat_participants(current_seated()),
-                Broadcast([HudSink(
-                    hud,
-                    open_terminal=lambda: capabilities.open_terminal_from_brainstorm(),
-                    brainstorm_view_current=lambda: capabilities.brainstorm_view_current,
-                    show_room=capabilities.show_brainstorm_room,
-                    hide_room=capabilities.hide_brainstorm_room,
-                ),
-                           TerminalSink(), debate_state]),
-                gate=gate,
-                on_phase=publish_brainstorm_phase,
-                prior=prior,
-            )
-        return session
-
-    def make_debate(topic: str) -> Session | None:
-        # The SessionManager has already painted the unavailable frame if
-        # this is false; retain the guard for direct/internal callers.
-        if not brainstorm_available():
-            return None
-        # A Brainstorm needs someone to disagree with; one seat is a monologue.
-        seated = current_seated()
-        if len(seated) < 2:
-            return None
-        return DebateSession(
-            topic,
-            seat_participants(seated),
-            Broadcast([HudSink(
-                hud,
-                open_terminal=lambda: capabilities.open_terminal_from_brainstorm(),
-                brainstorm_view_current=lambda: capabilities.brainstorm_view_current,
-                show_room=capabilities.show_brainstorm_room,
-                hide_room=capabilities.hide_brainstorm_room,
-            ), TerminalSink(), debate_state]),
-            gate=gate,
-            on_phase=publish_brainstorm_phase,
-        )
-
     def make_navigation(text: str) -> Session | None:
         """The spoken door: "navigate to <place>" and its siblings."""
         destination = navigation_query(text)
@@ -1100,12 +1031,7 @@ async def main() -> None:
         return make_navigation_session(destination)
 
     def make_navigation_session(destination: str) -> Session | None:
-        """One route session for a destination, however it was asked for.
-
-        The mind's start_navigation tool and the spoken grammar both land
-        here, so "help me walk to the library" and "navigate to the
-        library" open the identical confirm-place / choose-mode flow.
-        """
+        """One route session for a destination, however it was asked for."""
         session_id = f"nav-{uuid.uuid4().hex[:20]}"
         provider = navigation_provider
         if provider is None:
@@ -1114,9 +1040,6 @@ async def main() -> None:
                 session_id=session_id,
                 reason="Mapbox is not configured on this Mac",
             )
-        # Ordinary named destinations may use a recent connected-phone fix as
-        # a relevance hint. Explicit nearest/near-me requests refresh through
-        # ``refresh_navigation_proximity`` inside NavigationSession.
         location = transport.fresh_location()
         proximity = (
             NavigationPoint(location.latitude, location.longitude)
@@ -1130,101 +1053,43 @@ async def main() -> None:
             session_id=session_id,
             proximity=proximity,
             refresh_proximity=refresh_navigation_proximity,
-            # Same credential as search/routing, and it stays on this Mac:
-            # the session sends rendered pixels, never a tile URL.
             map_token=mapbox_token,
             places=place_store.list,
         )
 
-    def publish_brainstorm_phase(phase: str) -> None:
-        status.set_brainstorm(
-            state="running",
-            seat_count=len(current_seated()),
-            phase=phase,
-        )
-        notify_control()
-
-    def publish_brainstorm_state(state: str) -> None:
-        if state == "running":
-            capabilities.claim_brainstorm_view()
-        status.set_brainstorm(
-            state=state,
-            seat_count=len(current_seated()),
-            phase="opening" if state == "running" else "closing",
-        )
-        notify_control()
-
     def wearer_terminal_reason(terminal: dict[str, str | bool]) -> str:
-        """Translate compact engine state into the exact G2 recovery copy.
-
-        The status projection deliberately stores fixed reason codes. Those
-        are useful to the engine but are not an instruction a wearer should
-        have to decode on the lenses.
-        """
-
+        """Translate compact engine state into the exact G2 recovery copy."""
         state = str(terminal["state"])
         reason = str(terminal["reason"])
         if state == "approval_required":
-            return "Approve the JOAT device in OpenClaw, then tap retry."
+            return f"Approve the JOAT device in {gateway_name}, then tap retry."
         if state == "unavailable" and reason == "endpoint_missing":
-            return "Hermes is not configured on this home brain."
+            return "No agent Gateway is configured on this home brain."
         if state == "unavailable" and reason == "endpoint_refused":
-            # The host answered and refused: the mini's Tailscale Serve
-            # front is down. The gateway process behind it may be alive
-            # (it kept answering Telegram through the 2026-09-06 outage),
-            # so the copy must not tell the wearer to restart the wrong
-            # thing.
             return "The home brain refused the connection — restore its Tailscale Serve, then tap retry."
         if state == "unavailable" and reason == "host_unreachable":
             return "The home brain is unreachable — check Tailscale on both Macs, then tap retry."
         if state == "unavailable" and reason == "native_credentials_unavailable":
             return "JOAT's gateway credentials are unavailable — restart JOAT on the Mac."
         if state == "unavailable":
-            return "Hermes is unavailable; retry when the Mac connection recovers."
+            return f"{gateway_name} is unavailable; retry when the Mac connection recovers."
         if state == "blocked" and reason == "tools_enabled":
-            return "Hermes tools are enabled; this JOAT session remains blocked."
+            return f"{gateway_name} tools are enabled; this JOAT session remains blocked."
         if state == "blocked" and reason == "dedicated_session_not_proven":
-            return "Hermes session isolation is not proven yet; tap retry."
+            return f"{gateway_name} session isolation is not proven yet; tap retry."
         if state == "running":
-            return "Hermes is finishing its current response; wait for ready."
-        return "Hermes needs recovery before it can begin a Brainstorm."
-
-    def topic_capture_view(armed: bool) -> BrainstormHudView:
-        """Show the explicit one-utterance capture or its cleared recovery."""
-        if not brainstorm_available():
-            # A missing CLI seat is a Mac-side install problem — name the
-            # seat so the wearer knows which binary is gone, and never
-            # route them to the Agent Terminal, which has nothing to do
-            # with a Brainstorm's availability.
-            gone = ", ".join(missing_seats()) or "collaborators"
-            return BrainstormHudView(
-                state="unavailable",
-                topic="Brainstorm",
-                collaborators=[n.capitalize() for n, _r, _a in current_seated()],
-                activity=f"{gone} CLI missing on the Mac — install to enable.",
-            )
-        labels = [name.capitalize() for name, _role, _agent in current_seated()]
-        return BrainstormHudView(
-            state="topic_capture" if armed else "ready",
-            topic="Speak your question" if armed else "Ready for a question",
-            collaborators=labels[:3],
-            activity=(
-                "Your next spoken phrase starts this Brainstorm."
-                if armed else "Tap to choose a question, then speak."
-            ),
-        )
+            return f"{gateway_name} is finishing its current response; wait for ready."
+        return f"{gateway_name} needs recovery before it can continue; tap retry."
 
     async def show_terminal_retry_view(activity: str) -> None:
         """A retry is visible on the lenses; it is never a silent redial."""
         terminal = status.agent_terminal_projection()
         await hud.show_agent_terminal(AgentTerminalHudView(
             state=str(terminal["state"]),
-            focus="hermes",
+            focus="claude",
             lanes=[],
             activity=activity,
-            endpoint_host=str(terminal["endpoint_host"]),
             reason=str(terminal["reason"]),
-            no_tools_checked=bool(terminal["no_tools_checked"]),
         ))
 
     async def perform_terminal_retry(*, show_on_glasses: bool) -> None:
@@ -1236,7 +1101,7 @@ async def main() -> None:
 
         candidate = openclaw_retry_candidate
         if candidate is None:
-            await present_retry("Open JOAT on the Mac to configure or approve Hermes.")
+            await present_retry("Open JOAT on the Mac to configure or approve the Gateway.")
             return
         # Local pending state belongs to the command receipt. An attestation
         # does not make the established service active or disconnected.
@@ -1248,7 +1113,7 @@ async def main() -> None:
                 reason="checking_pairing",
             )
             status.set_agent_terminal(state="running", reason="")
-        await present_retry("Checking the dedicated Hermes session…")
+        await present_retry(f"Checking the dedicated {gateway_name} session…")
         was_initialized = candidate.initialized
         try:
             if was_initialized:
@@ -1263,25 +1128,25 @@ async def main() -> None:
                 reason="device_approval_required",
             )
             status.set_agent_terminal(state="approval_required", reason="write_scope_required")
-            await present_retry("Approve the JOAT device in OpenClaw, then tap retry.")
+            await present_retry(f"Approve the JOAT device in {gateway_name}, then tap retry.")
         except OpenClawToolsEnabled:
             status.set_openclaw(
                 state="disconnected", endpoint_host=endpoint_host, scopes=(), reason="gateway_not_ready",
             )
             status.set_agent_terminal(state="blocked", reason="tools_enabled")
-            await present_retry("Hermes tools are enabled; this JOAT session remains blocked.")
+            await present_retry(f"{gateway_name} tools are enabled; this JOAT session remains blocked.")
         except OpenClawToolInventoryUnsettled:
             status.set_openclaw(
                 state="disconnected", endpoint_host=endpoint_host, scopes=(), reason="gateway_not_ready",
             )
             status.set_agent_terminal(state="blocked", reason="dedicated_session_not_proven")
-            await present_retry("Hermes session isolation is not proven yet.")
+            await present_retry(f"{gateway_name} session isolation is not proven yet.")
         except OpenClawGatewayError:
             status.set_openclaw(
                 state="failed", endpoint_host=endpoint_host, scopes=(), reason="protocol_rejected",
             )
             status.set_agent_terminal(state="unavailable", reason="gateway_not_ready")
-            await present_retry("Hermes rejected the dedicated session protocol.")
+            await present_retry(f"{gateway_name} rejected the dedicated session protocol.")
         except (
             NativeBridgeError,
             NativeBridgeProtocolError,
@@ -1331,15 +1196,6 @@ async def main() -> None:
                     status.set_agent_terminal(state="unavailable", reason="connection_closed")
                 raise
 
-    initial_count = len(current_seated())
-    initial_brainstorm_ready = brainstorm_available()
-    status.set(debate=f"{initial_count} seats" if initial_brainstorm_ready
-               else f"missing: {', '.join(missing_seats()) or 'seats'}")
-    status.set_brainstorm(
-        state="ready" if initial_brainstorm_ready else "unavailable",
-        seat_count=initial_count,
-        phase="idle",
-    )
     def retry_selected_terminal() -> Awaitable[None]:
         retry = terminal_opening.retry()
 
@@ -1362,51 +1218,33 @@ async def main() -> None:
 
         return publish()
 
-    async def save_brainstorm_reply(who: str | None) -> str:
-        """"Save Claude's reply as a note" — the discussion feeds the notes."""
-        found = debate_state.snapshot.last_reply(who)
+    def latest_assistant_reply(_who: str | None) -> tuple[str, str] | None:
+        recent = status.get("last_reply")
+        return ("Assistant", recent) if recent else None
+
+    async def save_last_reply(who: str | None) -> str:
+        found = latest_assistant_reply(who)
         if found is None:
-            seat = who.capitalize() if who else "any collaborator"
-            return f"No reply from {seat} to save yet."
+            return "No recent reply to save yet."
         label, text = found
-        receipt = note_commands.save_text(f"{label.split(' (')[0]}: {text}")
-        log.info("brainstorm reply saved as note from %s", label)
-        return receipt
+        return note_commands.save_text(f"{label}: {text}")
 
     sessions = SessionManager(
         hud,
-        make_debate,
         card_log=card_log,
         terminal_capture=arm_terminal_capture,
         terminal_view_current=lambda: terminal_opening.current,
-        brainstorm_view_current=lambda: capabilities.brainstorm_view_current,
         surface_revision=lambda: capabilities.view_revision,
-        on_state=publish_brainstorm_state,
         starters=[make_navigation],
         navigation_factory=make_navigation_session,
         terminal_retry=retry_selected_terminal,
         terminal_cancel=lambda: terminal_commands.cancel_from_glasses(),
-        topic_capture_view=topic_capture_view,
-        brainstorm_available=brainstorm_available,
-        # "Send Claude's last reply to Hermes", spoken into a live
-        # Brainstorm. terminal_commands is composed further down; the
-        # lambda defers the lookup to call time, same as capability_opens.
         route_reply=lambda who, lane: terminal_commands.route_reply(who, lane),
-        save_reply=save_brainstorm_reply,
-        history=brainstorm_history,
-        # A tap approves, a swipe denies — see BrainstormController.
+        save_reply=save_last_reply,
         terminal_decide=lambda verdict: agent_terminal.decide_receipt(verdict, None),
-        # A tap on a busy terminal with no Brainstorm to return to cycles
-        # the focused lane: "switch among sessions" without speaking.
         terminal_cycle=lambda: terminal_opening.cycle(),
-        # Resolves "that" once the room has closed. The snapshot outlives
-        # the session precisely so a finished answer can still be acted on.
-        last_reply=lambda who: debate_state.snapshot.last_reply(who),
+        last_reply=latest_assistant_reply,
         transform=joat_transform,
-        continuation_factory=make_continuation,
-        # Bound after the message controller/audio router are composed;
-        # SessionManager invokes this only for a wearer-requested question.
-        publish_topic_capture=lambda capture: prompted_speech.publish_topic_capture(capture),
     )
 
     def active_navigation() -> NavigationSession | NavigationUnavailableSession | None:
@@ -1451,85 +1289,13 @@ async def main() -> None:
             active.accept_reroute(request)
 
     transport.on_navigation_action(on_navigation_action)
+    transport.on_terminal_action(sessions.handle_terminal_action)
 
-    def on_brainstorm_action(action: BrainstormAction) -> None:
-        if (action.action == "begin_topic_capture" and not sessions.active) or (
-            action.action == "show_brainstorm"
-            and isinstance(sessions.active_session, DebateSession)
-        ):
-            capabilities.claim_brainstorm_view()
-        sessions.handle_brainstorm_action(action)
-
-    transport.on_brainstorm_action(on_brainstorm_action)
-
-    def refresh_seats() -> None:
-        """Find the CLIs again and forget sessions from the old login."""
-        seats[:] = build_seats()
+    def refresh_cli_seats() -> None:
         for cli_seat in cli_seats:
             cli_seat.rediscover()
-        if not sessions.active:
-            ready = brainstorm_available()
-            status.set(debate=f"{len(current_seated())} seats" if ready
-                       else f"missing: {', '.join(missing_seats()) or 'seats'}")
-            status.set_brainstorm(
-                state="ready" if ready else "unavailable",
-                seat_count=len(current_seated()),
-                phase="idle",
-            )
-        log.info("brainstorm seats refreshed: %s",
-                 ", ".join(n for n, _r, _a in current_seated()) or "none")
 
-    async def warm_cli_seats() -> None:
-        for cli_seat in cli_seats:
-            try:
-                await cli_seat.warm()
-            except Exception:
-                log.warning("%s seat warm-up failed", cli_seat.name, exc_info=False)
-
-    async def reset_brainstorm_room() -> bool:
-        cancelled = await sessions.reset_brainstorm()
-        if capabilities.brainstorm_view_current:
-            await hud.show_brainstorm(topic_capture_view(False))
-        return cancelled
-
-    def brainstorm_room() -> BrainstormRoom:
-        projection = status.brainstorm_projection()
-        ready = brainstorm_available()
-        detail = (
-            "Codex and Claude are seated." if ready
-            else f"{', '.join(n.capitalize() for n in missing_seats()) or 'A seat'} "
-                 "isn't available on the Mac."
-        )
-        return BrainstormRoom(
-            state=str(projection["state"]),
-            phase=str(projection["phase"]),
-            detail=detail,
-            seats=tuple((name, agent is not None) for name, _role, agent in seats),
-        )
-
-    brainstorm_control = BrainstormControl(
-        registry=account_registry,
-        models=models,
-        send=transport.send,
-        room=brainstorm_room,
-        refresh_seats=refresh_seats,
-        reset_room=reset_brainstorm_room,
-        warm_seats=warm_cli_seats,
-        observed=lambda: dict(accounts),
-    )
-    control_listeners.append(brainstorm_control.publish_soon)
-    transport.on_control_action(brainstorm_control.handle)
-
-    async def publish_control_on_connect() -> None:
-        await brainstorm_control.probe_all()
-        await brainstorm_control.publish()
-
-    def on_hello_publish_control(_hello: Hello) -> None:
-        # The phone screen fills in as soon as the plugin connects, with
-        # fresh sign-in state rather than whatever was true at boot.
-        asyncio.get_running_loop().create_task(publish_control_on_connect())
-
-    transport.on_hello(on_hello_publish_control)
+    account_registry.on_change(refresh_cli_seats)
     transport.on_navigation_origin(on_navigation_origin)
     transport.on_navigation_origin_failure(on_navigation_origin_failure)
     transport.on_navigation_view_ack(on_navigation_view_ack)
@@ -1728,6 +1494,49 @@ async def main() -> None:
             renamed.append((address, existing_agent))
         terminal_lanes = list(a2a_agents.items()) + renamed
 
+    # Claude Code lanes: JOAT hosts the session itself (the Agent SDK drives
+    # the installed CLI under the wearer's login), so output, approvals,
+    # interrupts and resume are all JOAT's. They lead the roster; a later
+    # lane that shares a name is renamed, as A2A peers are above.
+    try:
+        claude_lane_configs = load_lane_configs()
+    except ValueError as exc:
+        claude_lane_configs = []
+        log.warning("Claude Code terminal settings invalid: %s", exc)
+    claude_terminals: dict[str, object] = dict(build_claude_lanes(
+        claude_lane_configs, cli_path=find_claude_binary, env_provider=claude_env,
+    ))
+    # Codex the same way, through `codex app-server` (JOAT drives the thread).
+    try:
+        codex_lane_configs = load_codex_lane_configs()
+    except ValueError as exc:
+        codex_lane_configs = []
+        log.warning("Codex terminal settings invalid: %s", exc)
+    for codex_name, codex_agent in build_codex_lanes(
+        codex_lane_configs, binary=find_codex_binary, env_provider=codex_env,
+    ).items():
+        if codex_name in claude_terminals:
+            log.warning("Codex terminal lane %r shares a Claude Code lane's name; skipped", codex_name)
+            continue
+        claude_terminals[codex_name] = codex_agent
+    # Antigravity, last: it runs on a Gemini API key the wearer adds.
+    try:
+        antigravity_name, antigravity_cwd = load_antigravity_lane()
+    except ValueError as exc:
+        antigravity_name = ""
+        log.warning("Antigravity terminal settings invalid: %s", exc)
+    if antigravity_name and antigravity_name not in claude_terminals:
+        claude_terminals[antigravity_name] = AntigravityTerminalAgent(
+            antigravity_name, antigravity_cwd, model=load_antigravity_model(),
+        )
+    if claude_terminals:
+        # The wearer's ruling (2026-11-18): Claude Code, Codex and Antigravity
+        # REPLACE OpenClaw and Hermes in the Agent Terminal. Their lanes and
+        # A2A peers are left out of the roster; their boot wiring stays inert.
+        terminal_lanes = list(claude_terminals.items())
+        a2a_agents = {}
+        a2a_profiles = []
+
     async def terminal_announce(line: str) -> None:
         # The SessionManager owns the HUD while a session runs; terminal
         # narration must never fight a live Brainstorm for the lenses. The
@@ -1741,28 +1550,15 @@ async def main() -> None:
         frame: TerminalFrame, opening_request_id: str | None = None,
         opening_selection_id: str | None = None,
     ) -> None:
-        """Put the roster's own tail on the lenses, densely.
-
-        The agent_terminal screen already reserves a multi-row transcript
-        area; before this it only ever carried a status/retry line, so the
-        wearer could HEAR their sessions but not SEE them. Same wire, same
-        frame kind — the rows were simply never filled.
-        """
-        # A live Brainstorm owns the lenses — EXCEPT while the wearer has
-        # tapped away to the terminal, which is precisely when these frames
-        # are the screen they are looking at.
+        """Put the roster's own tail on the lenses, densely."""
         if not capabilities.terminal_view_current:
             return
-        terminal = status.agent_terminal_projection()
-        focused_a2a = a2a_agents.get(agent_terminal.focused or "")
         await hud.show_agent_terminal(AgentTerminalHudView(
             state=frame.state,
             focus=frame.topic,
             lanes=frame.lanes,
             activity="\n".join(frame.lines),
-            endpoint_host="" if focused_a2a is not None else str(terminal["endpoint_host"]),
             reason=frame.reason,
-            no_tools_checked=False if focused_a2a is not None else bool(terminal["no_tools_checked"]),
             approvals=frame.approvals,
             opening_request_id=opening_request_id,
             opening_selection_id=opening_selection_id,
@@ -1774,10 +1570,15 @@ async def main() -> None:
 
     agent_terminal = AgentTerminalRoster(
         terminal_lanes,  # type: ignore[arg-type]
-        visible_lanes=tuple(a2a_agents),
+        visible_lanes=(*claude_terminals, *a2a_agents),
         announce=terminal_announce,
         paint=lambda frame: terminal_opening.paint(frame),
     )
+    for claude_lane_name, claude_agent in claude_terminals.items():
+        claude_agent.set_approval_callback(  # type: ignore[attr-defined]
+            lambda approval_id, kind, summary, lane_name=claude_lane_name:
+                agent_terminal.note_approval(lane_name, approval_id, kind, summary)
+        )
     terminal_opening = TerminalOpeningController(
         agent_terminal, paint=terminal_paint,
         connection_generation=lambda: transport.audio_connection_generation,
@@ -1799,9 +1600,7 @@ async def main() -> None:
 
     terminal_commands = AgentTerminalCommands(
         agent_terminal,
-        # The Brainstorm snapshot answers "what did Claude just say?" with
-        # the whole reply — live during a session and after it settles.
-        last_reply=lambda who: debate_state.snapshot.last_reply(who),
+        last_reply=latest_assistant_reply,
         on_explicit_view=lambda: terminal_opening.claim_legacy(capabilities.claim_terminal_voice),
     )
     # The capability router is composed later; the provider defers the
@@ -1816,7 +1615,6 @@ async def main() -> None:
         note_insights=note_insight_commands,
         hermes=hermes_productivity,
         terminal=terminal_commands,
-        brainstorm_history=BrainstormHistoryCommands(brainstorm_history),
         capability_opens=capability_opens,
         news=NewsCommands(news, panels),
         pomodoro=PomodoroCommands(pomodoro, panels),
@@ -1862,12 +1660,12 @@ async def main() -> None:
     async def start_route_from_tap(destination: str) -> str | None:
         """The Navigation page's control row answered: start the route."""
         result = sessions.start_navigation(destination)
-        if result is BrainstormStartResult.STARTED or result is BrainstormStartResult.CLOSED:
+        if result is SessionStartResult.STARTED or result is SessionStartResult.CLOSED:
             return None
         return {
-            BrainstormStartResult.BUSY: "Finish the current session first.",
-            BrainstormStartResult.UNAVAILABLE: "Navigation is unavailable on this Mac.",
-            BrainstormStartResult.INVALID: "I didn't catch a destination.",
+            SessionStartResult.BUSY: "Finish the current session first.",
+            SessionStartResult.UNAVAILABLE: "Navigation is unavailable on this Mac.",
+            SessionStartResult.INVALID: "I didn't catch a destination.",
         }.get(result, None)
 
     # The Search tab's control row asks for its query through the same
@@ -1925,7 +1723,6 @@ async def main() -> None:
         # A topic armed on a replaced Hub connection is no longer an action
         # from the current wearer surface. The new G2 must tap again.
         prompted_speech.revoke_current()
-        sessions.clear_topic_capture()
         # Newest-wins socket replacement does not emit the last-disconnect
         # callback. The replacement renderer has no installed route, so the
         # prior Mac session must not continue believing guidance is active.
@@ -1953,7 +1750,6 @@ async def main() -> None:
         # disconnected row look like the G2 was still attached.
         status.set(glasses="disconnected", device="", mic="off")
         prompted_speech.revoke_current()
-        sessions.clear_topic_capture()
         # A replaced WebContent process has lost its phone-side tracker. Until
         # route rehydration has evidence, keeping the Mac session "installed"
         # would be a stale-direction safety bug.
@@ -2008,6 +1804,7 @@ async def main() -> None:
     # Notifications / Calendar / Tasks / More), the contextual menu's repeat, and
     # the repaint after a menu close blanked the regions.
     capabilities = CapabilityRouter(
+        gateway_name=gateway_name,
         hud=hud, transport=transport, status=status,
         messages=imessage, cards=card_log,
         replies=message_replies,
@@ -2025,33 +1822,14 @@ async def main() -> None:
         terminal_view=(
             agent_terminal.repaint if terminal_lanes else None
         ),
-        # Opening Brainstorm shows the LAST session, not an invitation the
-        # wearer has already accepted. The snapshot outlives the session
-        # for exactly this.
-        brainstorm_recap=lambda: debate_state.snapshot,
-        # SESSION_MODEL.md:46 — opening the row during an active run
-        # restores that conversation instead of declaring it finished.
-        brainstorm_replay=sessions.replay_active_hud,
-        # SESSION_MODEL.md:47 — the idle row is a picker of real sessions.
-        # NINE, plus the NEW row, is exactly what the list surface draws:
-        # planningFocusRows gives ten (baselines 60..246 on a 20px pitch).
-        # Six left four rows of the wearer's own history unused on a screen
-        # they have twice told me is too small to waste.
-        brainstorm_sessions=lambda: brainstorm_history.sessions(9),
-        brainstorm_continue=sessions.resume_by_id,
-        # Tap a work session instead of reciting "terminal sessions".
         terminal_rows=agent_terminal.picker_rows,
         terminal_open=terminal_opening.open,
         terminal_current=lambda: agent_terminal.focused,
         terminal_busy=lambda: agent_terminal.busy,
-        brainstorm_recent=brainstorm_history.rows,
-        brainstorm_unavailable=lambda: None if brainstorm_available() else topic_capture_view(False),
+        terminal_roster=agent_terminal,
         # The News / Pomodoro / Search tabs answer their own taps.
         panels=panels,
         wearer_zone=wearer_zone,
-        # A page opened by hand is a control surface: a tapped row asks its
-        # own question on the lens ("Where to?", "What should I note?") and
-        # routes the answer. Voice works from anywhere and needs no row.
         ask=prompted_speech.ask_capability,
         navigate=start_route_from_tap,
         places=place_store.list,
@@ -2063,13 +1841,10 @@ async def main() -> None:
             notes=note_commands,
             pomodoro=pomodoro,
             panels=panels,
-            brainstorm=sessions,
             terminal=lambda lane, instruction, operation_id: terminal_opening.submit_instruction(
                 lane, instruction, operation_id, capabilities.prepare_terminal_instruction,
             ),
             terminal_lanes=agent_terminal.names(),
-            # "Help me walk to the library": the same destination flow the
-            # spoken "navigate to" grammar opens, reached by conversation.
             navigation=sessions,
         ):
             belt.register(tool)
@@ -2101,7 +1876,6 @@ async def main() -> None:
         )
         if departing or (event.container_name == "menu" and event.selected_name == "closed"):
             prompted_speech.revoke_current()
-            sessions.clear_topic_capture()
         if event.container_name == "prompt-commit":
             # A tap on the listening box: review what was heard so far. The
             # tap names the question; the orchestrator closes its utterance
@@ -2370,6 +2144,41 @@ async def main() -> None:
                      "(expose with: tailscale serve --bg --set-path /agent "
                      "http://127.0.0.1:%d)", agent_endpoint.port, agent_endpoint.port)
 
+    # The wearer's iPhone is the one brain the glasses talk to; when this Mac
+    # holds the wearer's Messages, the phone reads and sends through this door.
+    messages_endpoint: MessagesEndpoint | None = None
+    if args.messages_endpoint:
+        messages_endpoint = MessagesEndpoint(
+            imessage, messages_sender, messages_token(), port=args.messages_port,
+        )
+        try:
+            await messages_endpoint.start()
+        except OSError as exc:
+            messages_endpoint = None
+            log.warning("messages endpoint not started (%s) — the iPhone cannot "
+                        "reach this Mac's Messages until it is", exc)
+
+    terminal_endpoint: TerminalEndpoint | None = None
+    if args.private_tailnet_gateway or args.terminal_endpoint:
+        terminal_endpoint = TerminalEndpoint(
+            roster=agent_terminal,
+            models=models,
+            registry=account_registry,
+            token=terminal_token(),
+            port=args.terminal_port,
+        )
+        try:
+            await terminal_endpoint.probe_all()
+            await terminal_endpoint.start()
+        except OSError as exc:
+            terminal_endpoint = None
+            log.warning("terminal endpoint not started (%s) — the iPhone cannot "
+                        "configure Agent Terminal until it is", exc)
+        else:
+            log.info("Terminal config endpoint: http://127.0.0.1:%d/v1/state "
+                     "(expose with: tailscale serve --bg --set-path /terminal "
+                     "http://127.0.0.1:%d)", terminal_endpoint.port, terminal_endpoint.port)
+
 
     # Diagnostic: a starved loop delays every reply, and looks exactly
     # like a slow model in the logs unless it is measured directly.
@@ -2409,11 +2218,12 @@ async def main() -> None:
                 llm_warm_task.cancel()
             await asyncio.gather(llm_warm_task, return_exceptions=True)
         await sessions.close()
-        # A sign-in CLI runs in its own session (start_new_session) and
-        # outlived the brain until this was called.
-        await brainstorm_control.close()
+        if terminal_endpoint is not None:
+            await terminal_endpoint.stop()
         if agent_endpoint is not None:
             await agent_endpoint.stop()
+        if messages_endpoint is not None:
+            await messages_endpoint.stop()
         await message_replies.aclose()
         await message_ui.aclose()
         await prompted_speech.aclose()
@@ -2424,6 +2234,7 @@ async def main() -> None:
             # alive after shutdown. The last committed send intent remains.
             log.error("Terminal checkpoint shutdown failed; continuing engine cleanup")
         await asyncio.gather(*(agent.close() for agent in a2a_agents.values()), return_exceptions=True)
+        await asyncio.gather(*(getattr(agent, "close")() for agent in claude_terminals.values()), return_exceptions=True)
         await transport.stop()
         if notif_task is not None:
             if notification_mux is not None:

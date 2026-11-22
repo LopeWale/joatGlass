@@ -199,12 +199,13 @@ final class Reminders: BrainFeature, VoiceCommand, PanelProvider {
         // Reminders keeps minutes, not seconds: "in 20 minutes" lands on the
         // whole minute, so the read-back and the due monitor compare equal.
         let due = Date(timeIntervalSince1970: (rawDue.timeIntervalSince1970 / 60).rounded(.down) * 60)
-        guard store.authorized else {
+        if Bundle.main.bundleIdentifier != nil,
+           [.denied, .restricted].contains(RemindersStore.status) {
             tell("Allow Reminders for JOAT Brain in Settings, then ask again.")
             return
         }
         let title = String(rawTitle.prefix(200))
-        let list = store.store.defaultCalendarForNewReminders()?.title ?? "Reminders"
+        let list = store.authorized ? (store.store.defaultCalendarForNewReminders()?.title ?? "Reminders") : "Reminders"
         let zone = TimeZone.current.identifier
         var prompt = "Create reminder + JOAT alert “\(title)”? \(list) · \(Self.display(due)) · \(zone)"
         if prompt.utf16.count > ConfirmGate.promptMaxUnits {
@@ -224,9 +225,51 @@ final class Reminders: BrainFeature, VoiceCommand, PanelProvider {
                 self.view("not_saved", title: title, kind: "create", anchor: dueMs)
                 self.finish("Reminder was not saved because confirmation could not be verified.")
             case .accepted:
-                self.write(title: title, due: due, dueMs: dueMs)
+                if self.store.authorized {
+                    self.write(title: title, due: due, dueMs: dueMs)
+                } else {
+                    Task { @MainActor in
+                        _ = await self.store.requestAccess()
+                        self.write(title: title, due: due, dueMs: dueMs)
+                    }
+                }
             }
         }
+    }
+
+    @MainActor
+    func prepareCreateFromTool(title rawTitle: String, due: Date?) -> PhoneToolOutcome {
+        let cleaned = ReminderTime.cleanTitle(rawTitle)
+        let title = cleaned.isEmpty ? rawTitle.trimmingCharacters(in: .whitespacesAndNewlines) : cleaned
+        guard !title.isEmpty else {
+            return PhoneToolOutcome("error: title is required to create a reminder.", claimsLens: false)
+        }
+        if let due {
+            confirmCreate(title: title, due: due)
+            if confirm.hasPending {
+                return PhoneToolOutcome(
+                    "Reminder “\(title)” for \(Self.display(due)) is awaiting touchpad confirmation on the glasses.",
+                    claimsLens: true
+                )
+            }
+            return PhoneToolOutcome(
+                "Allow Reminders for JOAT Brain in Settings, then ask again.",
+                claimsLens: true
+            )
+        }
+        let loweredLead = title.prefix(1).lowercased() + title.dropFirst()
+        let question = "When should I remind you to \(loweredLead)?"
+        askFollowUp?(question) { [weak self] answer in
+            guard let self else { return }
+            if let parsed = ReminderTime.parse(answer) {
+                self.confirmCreate(title: title, due: parsed.due)
+            } else {
+                let text = "I didn't catch a time. Say: remind me to \(title.lowercased()) tomorrow at 9."
+                self.hud.receipt(text)
+                self.say?(text)
+            }
+        }
+        return PhoneToolOutcome("Asked the wearer on the glasses: \(question)", claimsLens: true)
     }
 
     private func write(title: String, due: Date, dueMs: Int) {
@@ -255,6 +298,46 @@ final class Reminders: BrainFeature, VoiceCommand, PanelProvider {
     }
 
     // MARK: - Complete (productivity_actions._complete_reminder)
+
+    @MainActor
+    func completeFromTool(spokenTitle: String) async -> PhoneToolOutcome {
+        let trimmed = spokenTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return PhoneToolOutcome("error: title is required to complete a reminder.", claimsLens: false)
+        }
+        if RemindersStore.status == .notDetermined, Bundle.main.bundleIdentifier != nil {
+            _ = await store.requestAccess()
+        }
+        guard store.authorized else {
+            let msg = "Allow Reminders for JOAT Brain in Settings, then ask again."
+            tell(msg)
+            return PhoneToolOutcome(msg, claimsLens: true)
+        }
+        let open = await store.incomplete()
+        let wanted = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: " .,!?")).lowercased()
+        var matches = open.filter { ($0.title ?? "").lowercased() == wanted }
+        if matches.isEmpty {
+            matches = open.filter {
+                let t = ($0.title ?? "").lowercased()
+                return !t.isEmpty && (t.contains(wanted) || wanted.contains(t))
+            }
+        }
+        guard matches.count == 1, let target = matches.first else {
+            let msg = matches.isEmpty
+                ? "No open reminder is named \(trimmed)."
+                : "More than one open reminder matches \(trimmed). Say its full name."
+            tell(msg)
+            return PhoneToolOutcome(msg, claimsLens: true)
+        }
+        confirmComplete(target)
+        let targetTitle = target.title ?? trimmed
+        return PhoneToolOutcome(
+            confirm.hasPending
+                ? "Completion of reminder “\(targetTitle)” is awaiting touchpad confirmation on the glasses."
+                : "Reminder completion could not be started.",
+            claimsLens: true
+        )
+    }
 
     private func beginComplete(spokenTitle: String) {
         Task { @MainActor in

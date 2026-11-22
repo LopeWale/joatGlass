@@ -39,16 +39,15 @@ import { ImuMonitor, imuReportPaceFromMs } from './ImuMonitor';
 import { EventRouter, type LifecycleHandler } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
-import { PhoneControlPanel } from './PhoneControlPanel';
-import { PhoneControlScreen } from './PhoneControlScreen';
+import { PhoneControlPanel, isPhoneBrain } from './PhoneControlPanel';
 import { Places, placesToWire } from './Places';
-import { PlacesPanel } from './PlacesPanel';
 import { CapabilityMenu, usesFirmwareList } from './CapabilityMenu';
 import {
   CAPABILITIES,
   ContainerId,
+  HANDOFF_CAPABILITIES,
   VOICE_REQUEST_PREFIX,
-  type BrainstormHudModel,
+  type AgentTerminalHudModel,
   type CapabilityName,
   type DownlinkMessage,
   type ProductivityHudModel,
@@ -57,8 +56,8 @@ import {
   ASSISTANT_OVERLAY_VISUAL_TEXT,
   BrowserHudPreview,
   VISUAL_CONFIRMATION_PROMPT,
-  brainstormVisualFixture,
-  isBrainstormVisualState,
+  terminalVisualFixture,
+  isTerminalVisualState,
   isPanelVisualState,
   isProductivityVisualState,
   panelArticleFixture,
@@ -68,7 +67,7 @@ import {
   visualListFixture,
   type PanelVisualState,
   type ProductivityVisualState,
-  type BrainstormVisualState,
+  type TerminalVisualState,
 } from './VisualFixtures';
 import { MacG2DiagnosticTrace, type G2TraceEvent } from './G2DiagnosticTrace';
 import { readerRows } from './EvenFont';
@@ -79,10 +78,15 @@ import {
   type NavigationVisualState,
 } from './NavigationHud';
 import { NavigationController } from './NavigationController';
-import { BrainstormController } from './BrainstormController';
+import { TerminalController } from './TerminalController';
+import { BrainHandoff, HANDOFF_LAST_MAC_KEY } from './BrainHandoff';
 import { reminderDueAckFor } from './ReminderDueReceipt';
 import { productivityViewAckFor } from './ProductivityViewReceipt';
-import { confirmationDecisionWindowMs, deliverAfterConfirmationDismissal } from './ConfirmationCommit';
+import {
+  confirmationDecisionWindowMs,
+  deliverAfterConfirmationDismissal,
+  handleConfirmCancel,
+} from './ConfirmationCommit';
 import {
   replaySyntheticAudioFixture,
   syntheticAudioFixtureUrl,
@@ -137,7 +141,7 @@ type VisualState =
   | 'notification-card'
   | ProductivityVisualState
   | ProductivityLifecycleVisualState
-  | BrainstormVisualState
+  | TerminalVisualState
   | PanelVisualState
   | NavigationVisualState;
 
@@ -185,7 +189,7 @@ const VISUAL_STATE = ((): VisualState | undefined => {
     || requested === 'notification-card'
     || isProductivityVisualState(requested)
     || isProductivityLifecycleVisualState(requested)
-    || isBrainstormVisualState(requested)
+    || isTerminalVisualState(requested)
     || isPanelVisualState(requested)
     || (requested !== null && isNavigationVisualState(requested))
     ? requested
@@ -218,21 +222,6 @@ const LIVE_PROMPT_WITHOUT_MIC = import.meta.env.DEV
   && new URLSearchParams(window.location.search).get('joatTestPromptMic') === '1';
 
 /** Webview status panel (index.html). Absent ids are a no-op by design. */
-/** The phone page's two tabs: Connection (the existing form) and Places. */
-function installPhoneTabs(): void {
-  const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('nav.tabs [role="tab"]'));
-  for (const tab of tabs) {
-    tab.addEventListener('click', () => {
-      for (const other of tabs) {
-        const selected = other === tab;
-        other.setAttribute('aria-selected', String(selected));
-        const panel = document.getElementById(other.getAttribute('aria-controls') ?? '');
-        if (panel) panel.hidden = !selected;
-      }
-    });
-  }
-}
-
 function setPanel(id: string, text: string): void {
   const el = document.getElementById(id);
   if (el) el.textContent = text;
@@ -345,17 +334,21 @@ async function boot(): Promise<void> {
   // Declared early: the link/mic callbacks below are registered before the
   // page exists, and must not paint into a page that is not there yet.
   let chromeRef: Chrome | undefined;
-  let brainstormRef: BrainstormController | undefined;
+  let terminalRef: TerminalController | undefined;
   let promptedInputRef: PromptedInputController | undefined;
   let menuRef: CapabilityMenu | undefined;
+  let activeCapabilityPromptId: string | undefined;
+  // The open reply draft's "say it again", while its consent is up.
+  let confirmationRetry: { actionId: string; run: () => boolean } | undefined;
+  const cancelledConfirmations = new Set<string>();
   let displayYielded = false;
   let exiting = false;
   let phonePanel: PhoneControlPanel | undefined;
-  // The phone-side Brainstorm/Accounts screen. It only ever sends
-  // `control.action`; everything it shows comes from the Mac.
-  const controlScreen = new PhoneControlScreen({ send: (message) => link.send(message) });
+  // Mac-pinned pages (Messages, Agent Terminal, Activity), opened from the phone
+  // brain (BrainHandoff). Created once the HUD and menu exist.
+  let handoffRef: BrainHandoff | undefined;
+  let handoffDepartingGeneration = -1;
   link.onState((state) => {
-    controlScreen.setConnected(state === 'connected' && !link.wasReplaced);
     if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'link', state);
     setPanel('p-link', link.wasReplaced ? 'Another JOAT display connected. Use Reconnect to take over.' : state);
     phonePanel?.updateLink(state);
@@ -372,20 +365,28 @@ async function boot(): Promise<void> {
     }
     chromeRef?.setLink(state);
     setPanel('p-url', link.activeUrl); // failover rotation, made visible
+    handoffRef?.linkState(state);
     if (state === 'connected') {
+      handoffDepartingGeneration = -1;
       const active = link.activeUrl;
-      try {
-        localStorage.setItem(PREFERRED_BRAIN_KEY, active);
-      } catch {
-        // The active authenticated session remains usable without storage.
+      // A Mac holding a handed-off page is not the brain to come back to.
+      if (handoffRef?.active !== true) {
+        try {
+          localStorage.setItem(PREFERRED_BRAIN_KEY, active);
+        } catch {
+          // The active authenticated session remains usable without storage.
+        }
+        void client.storage.set(PREFERRED_BRAIN_KEY, active);
       }
-      void client.storage.set(PREFERRED_BRAIN_KEY, active);
       announce?.();
     }
     else {
+      activeCapabilityPromptId = undefined;
       promptedInputRef?.cancel('connection', false);
+      confirmationRetry = undefined;
+      cancelledConfirmations.clear();
       menuRef?.retireTerminalOpening(false);
-      menuRef?.retireBrainstormSurface();
+      menuRef?.retireTerminalSurface();
       menuRef?.retireMessageUI(false);
       // A disconnected or replacement brain no longer authorizes either
       // opt-in diagnostic path. A fresh authenticated session will send its
@@ -396,12 +397,13 @@ async function boot(): Promise<void> {
       void imuRef?.stop();
       void location.revokeRemoteControl();
       // A control gesture must never cross a MacLink generation boundary.
-      brainstormRef?.clear();
+      terminalRef?.clear();
       void navigationRef?.stopAll().then((hadView) => {
         if (
           hadView
           && link.linkState !== 'connected'
           && !navigationRef?.isActive()
+          && !handoffRef?.active
         ) void hudRef?.showDefault();
       });
     }
@@ -497,6 +499,10 @@ async function boot(): Promise<void> {
       if (reason === 'back' && message.ownerKind === 'messages') {
         menuRef?.cancelMessageAction(message.ownerId);
       }
+      if (message.ownerKind === 'capability') {
+        if (activeCapabilityPromptId === message.promptId) activeCapabilityPromptId = undefined;
+        menuRef?.noteCapabilityPromptCancelled();
+      }
     },
     onStage: (owner, stage) => g2Diagnostics.record({ type: 'prompt_stage', owner, stage }),
   });
@@ -512,40 +518,88 @@ async function boot(): Promise<void> {
     setPanel('p-policy', policy);
     phonePanel?.updatePolicy(policy);
   });
-  // The wearer's saved places: edited on the phone page, mirrored to the
-  // Even host's storage, and sent whole to the Mac on every change and on
-  // every connect, so "navigate home" resolves there.
+  // Legacy WebView saved places: migrated once to JOAT Brain when non-empty.
   const places = new Places();
   places.load();
   places.onChange((list) => {
-    link.send({ kind: 'places', places: placesToWire(list) });
+    if (list.length > 0) {
+      link.send({ kind: 'places', places: placesToWire(list) });
+    }
   });
-  new PlacesPanel({ places, currentLocation: () => location.requestNavigationOrigin() });
-  installPhoneTabs();
+  /** Move the glasses to another of the package's brains. Every old
+   * actionable surface is retired before the next brain can authorize input
+   * (the phone page's choice, and a hand-off of a Mac-pinned page). Automatic
+   * reconnect is unchanged. */
+  const switchBrain = async (
+    url: string,
+    options?: { skipDefaultPaint?: boolean },
+  ): Promise<boolean> => {
+    if (exiting || !MAC_WS_URLS.includes(url)) return false;
+    const skipDefaultPaint = options?.skipDefaultPaint === true;
+    link.close();
+    if (!skipDefaultPaint) {
+      menuRef?.releaseToLiveSession();
+    }
+    chromeRef?.stop();
+    if (!skipDefaultPaint) {
+      hud.suspendDisplay();
+    }
+    let stopTimer: ReturnType<typeof setTimeout> | undefined;
+    const stopped = await Promise.race([
+      Promise.all([audio.stop(), imu.stop(), navigationRef?.stopAll()]).then(() => true),
+      new Promise<false>((resolve) => { stopTimer = setTimeout(() => resolve(false), 5000); }),
+    ]).finally(() => { if (stopTimer !== undefined) clearTimeout(stopTimer); });
+    if (!stopped || exiting) return false;
+    hud.resumeDisplay();
+    if (!skipDefaultPaint) {
+      const cleared = await hud.showDefault();
+      if (!cleared || exiting) return false;
+    }
+    chromeRef?.start();
+    return link.selectUrl(url);
+  };
+  const menu = new CapabilityMenu(hud, settings, link);
+  menuRef = menu;
+  const navigation = new NavigationController(hud, link, location, g2Diagnostics);
+  const terminal = new TerminalController(link);
+  menu.onSurfaceDeparture = () => terminal.clear();
+  const handoff = new BrainHandoff({
+    urls: MAC_WS_URLS,
+    link,
+    switchBrain,
+    menu,
+    lastMac: {
+      get: () => {
+        try { return localStorage.getItem(HANDOFF_LAST_MAC_KEY); } catch { return null; }
+      },
+      set: (url) => {
+        try { localStorage.setItem(HANDOFF_LAST_MAC_KEY, url); } catch { /* order only */ }
+      },
+    },
+    isExiting: () => exiting,
+    onChange: () => phonePanel?.updateLink(link.linkState),
+    log: (line) => console.info(`[joat] ${line}`),
+  });
+  handoffRef = handoff;
+  menu.handoffCapability = (capability) => {
+    if (handoff.active || !isPhoneBrain(link.activeUrl)) return false;
+    void handoff.start(capability);
+    return true;
+  };
+  menu.onHome = () => handoff.home();
+  terminalRef = terminal;
+  navigationRef = navigation;
+  menu.micIsOpen = () => audio.isOpen;
   phonePanel = new PhoneControlPanel({
     link,
     urls: MAC_WS_URLS,
     settings,
+    handoff,
     canReconnect: () => !exiting,
     selectBrain: async (url) => {
-      if (exiting || !MAC_WS_URLS.includes(url)) return false;
-      // Explicit phone migration retires every old actionable surface before
-      // the next Mac can authorize input. Automatic reconnect is unchanged.
-      link.close();
-      menuRef?.releaseToLiveSession();
-      chromeRef?.stop();
-      hud.suspendDisplay();
-      let stopTimer: ReturnType<typeof setTimeout> | undefined;
-      const stopped = await Promise.race([
-        Promise.all([audio.stop(), imu.stop(), navigationRef?.stopAll()]).then(() => true),
-        new Promise<false>((resolve) => { stopTimer = setTimeout(() => resolve(false), 5000); }),
-      ]).finally(() => { if (stopTimer !== undefined) clearTimeout(stopTimer); });
-      if (!stopped || exiting) return false;
-      hud.resumeDisplay();
-      const cleared = await hud.showDefault();
-      if (!cleared || exiting) return false;
-      chromeRef?.start();
-      const selected = link.selectUrl(url);
+      // The wearer's own choice ends any hand-off: no way back to arrange.
+      handoffRef?.cancel();
+      const selected = await switchBrain(url);
       if (selected) {
         // Remember user intent before authentication, including an offline Mac.
         // A stale host mirror must not replace this choice on the next launch.
@@ -565,14 +619,6 @@ async function boot(): Promise<void> {
   // localStorage mirror. Best-effort and async — boot never waits on it.
   void settings.attachHostStorage(client.storage);
   void places.attachHostStorage(client.storage);
-  const menu = new CapabilityMenu(hud, settings, link);
-  menuRef = menu;
-  const navigation = new NavigationController(hud, link, location, g2Diagnostics);
-  const brainstorm = new BrainstormController(link);
-  menu.onSurfaceDeparture = () => brainstorm.clear();
-  brainstormRef = brainstorm;
-  navigationRef = navigation;
-  menu.micIsOpen = () => audio.isOpen;
   // Mic truth leaves the phone on every change — the Mac's pill used to
   // latch "streaming" at hello and never verify.
   audio.onState = (open, micPromptId) => {
@@ -587,7 +633,7 @@ async function boot(): Promise<void> {
   const lifecycle: LifecycleHandler = {
     onContextualMenu: (open) => {
       menu.setContextualMenuOpen(open);
-      brainstorm.setSuspended(open);
+      terminal.setSuspended(open);
       // Closing firmware UI may clear its underlay. Restore the current
       // surface, including a capability chosen from this menu.
       if (!open && !exiting) void hud.repaintRestoredSurface();
@@ -624,8 +670,6 @@ async function boot(): Promise<void> {
     },
   };
 
-  // The open reply draft's "say it again", while its consent is up.
-  let confirmationRetry: (() => boolean) | undefined;
   new EventRouter(
     client,
     link,
@@ -640,11 +684,11 @@ async function boot(): Promise<void> {
       handleScroll: direction => navigation.handleScroll(direction),
       handleCancel: () => navigation.handleCancel(),
     },
-    brainstorm,
+    terminal,
     hud,
     (direction) => hud.scrollTranscript(direction),
     promptedInput,
-    () => confirmationRetry,
+    () => confirmationRetry?.run,
   ).attach();
 
   // Official-simulator visual gate. This is DEV-only and drives the same
@@ -661,12 +705,8 @@ async function boot(): Promise<void> {
   devices.attach();
 
   const terminalPreludeGuards = new WeakMap<DownlinkMessage, () => boolean>();
-  const brainstormVisitGuards = new WeakMap<DownlinkMessage, () => boolean>();
   link.onMessageIngress((msg, context) => {
     if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'ingress', msg.kind);
-    if (msg.kind === 'brainstorm.view' || (msg.kind === 'hud.rebuild' && msg.reason === 'brainstorm')) {
-      brainstormVisitGuards.set(msg, menu.captureBrainstormVisit());
-    }
     if (msg.kind === 'hud.list' && msg.selectable !== true
       && msg.title?.trim().toUpperCase() === 'AGENT TERMINAL'
       && msg.requestId?.startsWith(VOICE_REQUEST_PREFIX)) {
@@ -679,6 +719,21 @@ async function boot(): Promise<void> {
     if (msg.kind === 'message.ui'
       && menu.observeMessageUI(msg, () => !context.signal.aborted)) {
       promptedInput.isActive();
+    }
+    if (msg.kind === 'confirm.cancel' && typeof msg.actionId === 'string' && msg.actionId.length > 0) {
+      cancelledConfirmations.add(msg.actionId);
+      if (cancelledConfirmations.size > 128) {
+        cancelledConfirmations.delete(cancelledConfirmations.values().next().value!);
+      }
+      if (confirmationRetry?.actionId === msg.actionId) confirmationRetry = undefined;
+      imu.disarm(msg.actionId);
+    }
+    if (msg.kind === 'prompt.present' && msg.ownerKind === 'capability') {
+      activeCapabilityPromptId = msg.promptId;
+      menu.noteCapabilityPromptPresented();
+    } else if (msg.kind === 'prompt.cancel' && msg.promptId === activeCapabilityPromptId) {
+      activeCapabilityPromptId = undefined;
+      menu.noteCapabilityPromptCancelled();
     }
     promptedInput.observe(msg, context);
     const currentConfirmation = msg.kind === 'confirm.request'
@@ -695,7 +750,7 @@ async function boot(): Promise<void> {
 
   link.onMessage(async (msg: DownlinkMessage, context) => {
     const ensureCurrent = (): void => {
-      if (context.signal.aborted) {
+      if (context.signal.aborted || context.generation === handoffDepartingGeneration) {
         throw new Error(`stale downlink generation ${context.generation}`);
       }
     };
@@ -706,11 +761,39 @@ async function boot(): Promise<void> {
     };
     ensureCurrent();
     switch (msg.kind) {
+      case 'brain.handoff': {
+        // A Mac-pinned page. Not awaited: the hand-off closes this very link,
+        // so its handler must return first; retire this socket generation now
+        // so any trailing receipt queued behind brain.handoff skips BLE paint.
+        const capability = msg.capability;
+        if ((HANDOFF_CAPABILITIES as readonly string[]).includes(capability) && !handoff.active) {
+          const departingGen = context.generation;
+          handoffDepartingGeneration = departingGen;
+          setTimeout(() => {
+            void handoff.start(capability).finally(() => {
+              if (handoffDepartingGeneration === departingGen && !context.signal.aborted && !handoff.active) {
+                handoffDepartingGeneration = -1;
+              }
+            });
+          }, 0);
+        }
+        break;
+      }
       case 'message.ui':
         await awaitCurrent(menu.presentMessageUI(msg, () => !context.signal.aborted));
         break;
       case 'prompt.present':
+        if (msg.ownerKind === 'capability') {
+          activeCapabilityPromptId = msg.promptId;
+          menu.noteCapabilityPromptPresented();
+        }
+        await awaitCurrent(promptedInput.handle(msg, context));
+        break;
       case 'prompt.cancel':
+        if (msg.promptId === activeCapabilityPromptId) {
+          activeCapabilityPromptId = undefined;
+          menu.noteCapabilityPromptCancelled();
+        }
         await awaitCurrent(promptedInput.handle(msg, context));
         break;
       case 'prompt.partial':
@@ -729,60 +812,21 @@ async function boot(): Promise<void> {
         await awaitCurrent(location.setProbeEnabled(msg.enabled, context.signal));
         break;
       case 'location.refresh':
-        await awaitCurrent(location.requestAssistantLocation(msg.requestId, context.signal));
+        void location.requestAssistantLocation(msg.requestId, context.signal);
         break;
       case 'navigation.view':
-        brainstorm.clear();
+        terminal.clear();
         // Navigation owns the lenses as one live session. Release any open
         // menu/capability state (and its armed response timeout) without an
         // extra Overview paint racing this frame on the BLE lane.
         menu.releaseToLiveSession();
         await awaitCurrent(navigation.present(msg, undefined, context.signal));
         break;
-      case 'brainstorm.view': {
-        // The WIRE dropped `screen` when the two features were split, but
-        // the render model still keys on it — and every gesture check in
-        // BrainstormController starts with `model.screen === 'brainstorm'`.
-        // Passing the wire frame straight through left it undefined, so a
-        // tap matched neither branch and did nothing at all. The
-        // acceptance flow caught it; no unit test did, because they all
-        // build the render model directly.
-        const model: BrainstormHudModel = {
-          ...msg.brainstorm,
-          screen: 'brainstorm',
-        };
-        const visitCurrent = brainstormVisitGuards.get(msg);
-        brainstormVisitGuards.delete(msg);
-        const mayPaint = () => !context.signal.aborted
-          && visitCurrent !== undefined && menu.mayPresentBrainstorm(visitCurrent);
-        if (!mayPaint()) break;
-        await awaitCurrent(menu.beginLiveSession('brainstorm'));
-        if (mayPaint() && await awaitCurrent(hud.showBrainstorm(model, undefined, mayPaint)) && mayPaint()) {
-          brainstorm.present(model);
-        }
-        break;
-      }
       case 'agent_terminal.view': {
-        // The WIRE is split — the Agent Terminal has its own frame kind and
-        // no longer rides the Brainstorm one, which docs/SESSION_MODEL.md:74-75
-        // forbids. The render model stays unified behind `screen`, so this
-        // adapts one to the other in a single place instead of duplicating
-        // the drawing code.
-        const model: BrainstormHudModel = {
-          screen: 'agent_terminal',
-          state: msg.terminal.state,
-          topic: msg.terminal.focus,
-          collaborators: msg.terminal.lanes,
-          activity: msg.terminal.activity,
-          endpointHost: msg.terminal.endpointHost,
-          terminalReason: msg.terminal.terminalReason,
-          noToolsChecked: msg.terminal.noToolsChecked,
-          approvals: msg.terminal.approvals,
-          conversationId: msg.terminal.conversationId,
-          messages: msg.terminal.messages?.map(message => ({...message})),
-          historyTruncated: msg.terminal.historyTruncated,
-          inputRequired: msg.terminal.inputRequired,
-          taskRecovery: msg.terminal.taskRecovery,
+        const model: AgentTerminalHudModel = {
+          ...msg.terminal,
+          lanes: [...msg.terminal.lanes],
+          messages: msg.terminal.messages?.map((message) => ({ ...message })),
         };
         const openingRequestId = msg.terminal.openingRequestId;
         const openingSelectionId = msg.terminal.openingSelectionId;
@@ -791,19 +835,16 @@ async function boot(): Promise<void> {
           if (await awaitCurrent(menu.presentTerminalOpening(
             model, { requestId: openingRequestId, selectionId: openingSelectionId },
             () => !context.signal.aborted,
-          ))) brainstorm.present(model);
+          ))) terminal.present(model);
           break;
         }
-        if (!menu.mayPresentUnboundTerminal()) break;
-        menu.retireTerminalOpening();
-        menu.releaseToLiveSession();
-        if (await awaitCurrent(hud.showBrainstorm(model))) {
-          brainstorm.present(model);
+        if (await awaitCurrent(menu.presentTerminal(model, () => !context.signal.aborted))) {
+          terminal.present(model);
         }
         break;
       }
       case 'productivity.view':
-        brainstorm.clear();
+        terminal.clear();
         {
           const receipt = productivityViewAckFor(msg.productivity)
             ?? reminderDueAckFor(msg.productivity);
@@ -828,10 +869,18 @@ async function boot(): Promise<void> {
         }
         break;
       case 'navigation.origin.request':
-        await awaitCurrent(navigation.requestOrigin(msg, context.signal));
+        void navigation.requestOrigin(msg, context.signal);
         break;
       case 'navigation.route':
         await awaitCurrent(navigation.installRoute(msg));
+        break;
+      case 'navigation.fix':
+        navigation.acceptExternalFix(msg);
+        break;
+      case 'navigation.resume':
+        terminal.clear();
+        menu.releaseToLiveSession();
+        await awaitCurrent(navigation.resumeToGlass(msg.sessionId));
         break;
       case 'hud.ambient':
         await awaitCurrent(hud.setAmbient({
@@ -850,7 +899,7 @@ async function boot(): Promise<void> {
         // page is already on the glass repaints that page in place.
         await awaitCurrent(hud.acceptPanel(msg));
         if (msg.activate && msg.tab !== 'quicknotes' && msg.tab !== 'planner') {
-          brainstorm.clear();
+          terminal.clear();
           await awaitCurrent(menu.openPanelTab(msg.tab, 0, false));
         } else {
           await awaitCurrent(menu.presentPanelContent(msg.tab));
@@ -862,7 +911,7 @@ async function boot(): Promise<void> {
         void navigation.installMapPanel(msg);
         break;
       case 'navigation.stop':
-        brainstorm.clear();
+        terminal.clear();
         if (await awaitCurrent(navigation.stopRoute(msg.sessionId))) {
           await awaitCurrent(hud.showDefault());
         }
@@ -919,7 +968,7 @@ async function boot(): Promise<void> {
         const preludeCurrent = terminalPreludeGuards.get(msg);
         terminalPreludeGuards.delete(msg);
         if (preludeCurrent && !preludeCurrent()) break;
-        // CapabilityMenu retires Brainstorm only after accepting this list's
+        // CapabilityMenu retires Terminal only after accepting this list's
         // owner. A stale response must not clear the current controller.
         if (await awaitCurrent(menu.presentList(
           msg.title,
@@ -942,18 +991,13 @@ async function boot(): Promise<void> {
         break;
       }
       case 'hud.rebuild':
-        if (msg.reason === 'brainstorm') {
-          const visitCurrent = brainstormVisitGuards.get(msg);
-          brainstormVisitGuards.delete(msg);
-          if (visitCurrent && menu.claimBrainstormVisit(visitCurrent)) {
-            await awaitCurrent(menu.beginLiveSession('brainstorm'));
-          }
-        } else {
-          menu.retireBrainstormSurface();
-          // A fresh brain is a fresh start: the resting screen reopens on
-          // its first tab, the one that shows what that brain now says.
-          hud.resetTab();
-          await awaitCurrent(hud.showDefault());
+        menu.releaseToLiveSession();
+        // A fresh brain is a fresh start: the resting screen reopens on
+        // its first tab, the one that shows what that brain now says.
+        hud.resetTab();
+        await awaitCurrent(hud.showDefault());
+        if (handoffRef?.active) {
+          setTimeout(() => { handoffRef?.home(); }, 0);
         }
         break;
       case 'audio.control':
@@ -979,8 +1023,9 @@ async function boot(): Promise<void> {
         imu.setTrace(msg.enabled);
         break;
       case 'confirm.request': {
-        const ownerCurrent = () => !context.signal.aborted && (msg.messageUIActionId === undefined
-          || menu.isMessageActionCurrent(msg.messageUIActionId));
+        const ownerCurrent = () => !context.signal.aborted
+          && !cancelledConfirmations.has(msg.actionId)
+          && (msg.messageUIActionId === undefined || menu.isMessageActionCurrent(msg.messageUIActionId));
         if (!ownerCurrent()) break;
         const rendered = hud.showConfirmation(msg.prompt, msg.actionId, msg.diagnosticKind,
           msg.messageUIActionId === undefined ? undefined : ownerCurrent, msg.purpose);
@@ -997,9 +1042,9 @@ async function boot(): Promise<void> {
             return true;
           }
           : undefined;
-        confirmationRetry = retry;
+        confirmationRetry = retry ? { actionId: msg.actionId, run: retry } : undefined;
         imu.prepare(msg.actionId, (accepted) => {
-          if (confirmationRetry === retry) confirmationRetry = undefined;
+          if (confirmationRetry?.actionId === msg.actionId) confirmationRetry = undefined;
           void deliverAfterConfirmationDismissal({
             accepted,
             dismiss: () => hud.dismissConfirmation(msg.actionId),
@@ -1035,12 +1080,27 @@ async function boot(): Promise<void> {
           // simulator. Vite removes this branch from packed builds.
           if (import.meta.env.DEV) console.info('[joat] acceptance confirmation-visible');
           imu.activate(msg.actionId, confirmationDecisionWindowMs(msg.expiresAtMs));
+        } else if (cancelledConfirmations.has(msg.actionId)) {
+          if (confirmationRetry?.actionId === msg.actionId) confirmationRetry = undefined;
+          imu.disarm(msg.actionId);
+          await hud.dismissConfirmation(msg.actionId);
         } else {
+          if (confirmationRetry?.actionId === msg.actionId) confirmationRetry = undefined;
           imu.cancel(msg.actionId);
           if (msg.messageUIActionId !== undefined) await hud.dismissConfirmation(msg.actionId);
         }
         break;
       }
+      case 'confirm.cancel':
+        await awaitCurrent(handleConfirmCancel({
+          actionId: msg.actionId,
+          imu,
+          hud,
+          clearRetry: (id) => {
+            if (confirmationRetry?.actionId === id) confirmationRetry = undefined;
+          },
+        }));
+        break;
       case 'pairing.set':
         handlePairingOffer(msg.token, link, (encoded) => {
           try {
@@ -1050,9 +1110,6 @@ async function boot(): Promise<void> {
           }
           mirrorPairingTokens(encoded);
         });
-        break;
-      case 'control.state':
-        controlScreen.update(msg);
         break;
       case 'policy.set':
         // Mac-side config path; the wearer's on-glasses menu is the other.
@@ -1065,6 +1122,38 @@ async function boot(): Promise<void> {
         break;
     }
   });
+
+  let resolvedDevice: Awaited<ReturnType<ReturnType<BridgeClient['require']>['getDeviceInfo']>> | null = null;
+  let resolvedUser: Awaited<ReturnType<ReturnType<BridgeClient['require']>['getUserInfo']>> | null = null;
+  const sendHello = (): void => {
+    link.send({
+      kind: 'hello',
+      sn: resolvedDevice?.sn || 'unknown',
+      model: resolvedDevice?.model || 'unknown',
+      launchSource: client.getLaunchSource() ?? 'unknown',
+      // MacLink answers link.ping, so the Mac may hold this page to it.
+      heartbeat: true,
+      // A phone brain may hand Messages, Agent Terminal, or Activity to a Mac (BrainHandoff).
+      handoff: true,
+      ...(resolvedUser?.name ? { userName: resolvedUser.name } : {}),
+      // Read at announce time, not at module load: `announce` fires again on
+      // every reconnect, so a wearer who landed while the link was down is
+      // corrected by the reconnect itself.
+      ...(phoneTimeZone() ? { timeZone: phoneTimeZone() } : {}),
+    });
+  };
+  announce = () => {
+    sendHello();
+    // Announce the persisted policy so the Mac's session logic starts in sync,
+    // and any legacy WebView saved places so JOAT Brain / Mac can migrate them.
+    link.send({ kind: 'policy', resume: settings.resumePolicy });
+    const saved = places.list();
+    if (saved.length > 0) {
+      link.send({ kind: 'places', places: placesToWire(saved) });
+    }
+    link.send({ kind: 'device', connect: 'connected', mic: audio.isOpen,
+      micSource: audio.lastSource === AudioInputSource.Phone ? 'phone' : 'glasses' });
+  };
 
   link.connect();
 
@@ -1085,28 +1174,11 @@ async function boot(): Promise<void> {
     client.require().getUserInfo(),
     new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
   ]).catch(() => null);
-  announce = () => {
-    link.send({
-      kind: 'hello',
-      sn: device?.sn ?? 'unknown',
-      model: device?.model ?? 'unknown',
-      launchSource: client.getLaunchSource() ?? 'unknown',
-      // MacLink answers link.ping, so the Mac may hold this page to it.
-      heartbeat: true,
-      ...(user?.name ? { userName: user.name } : {}),
-      // Read at announce time, not at module load: `announce` fires again on
-      // every reconnect, so a wearer who landed while the link was down is
-      // corrected by the reconnect itself.
-      ...(phoneTimeZone() ? { timeZone: phoneTimeZone() } : {}),
-    });
-    // Announce the persisted policy so the Mac's session logic starts in sync,
-    // and the saved places so a route to "home" resolves on this Mac.
-    link.send({ kind: 'policy', resume: settings.resumePolicy });
-    link.send({ kind: 'places', places: placesToWire(places.list()) });
-    link.send({ kind: 'device', connect: 'connected', mic: audio.isOpen,
-      micSource: audio.lastSource === AudioInputSource.Phone ? 'phone' : 'glasses' });
-  };
-  announce();
+  resolvedDevice = device;
+  resolvedUser = user;
+  if (link.linkState === 'connected' && (Boolean(device?.sn) || Boolean(user?.name))) {
+    sendHello();
+  }
 
   // Both starts degrade to false on hosts missing the capability (the desktop
   // simulator has no IMU at all) — boot must survive either being absent.
@@ -1389,13 +1461,9 @@ async function renderVisualState(
     return;
   }
 
-  if (isBrainstormVisualState(state)) {
-    await hud.showBrainstorm(
-      brainstormVisualFixture(state),
-      // A LINK status, not a feature name: the spine names the surface
-      // itself now. This fixture used to hand both screens the string
-      // "JOAT brainstorm", which is how the Agent Terminal came to be
-      // captured with BRAINSTORM printed across its top.
+  if (isTerminalVisualState(state)) {
+    await hud.showTerminal(
+      terminalVisualFixture(state),
       '9:41       JOAT READY       bat 87%',
     );
     return;

@@ -69,6 +69,14 @@ final class NativeBridgeServer: @unchecked Sendable {
         try await router.requestFullAccessFromMacUI(entity: entity)
     }
 
+    func contactsStatus() async -> ContactsStatusDTO {
+        await router.contactsStatus()
+    }
+
+    func requestContactsAccess() async throws -> ContactsStatusDTO {
+        try await router.requestContactsAccessFromMacUI()
+    }
+
     /// Admit only the exact app-launched engine process. A same-UID process
     /// cannot replace the engine merely by discovering the owner-only path.
     /// Changing or revoking the PID also invalidates the existing connection.

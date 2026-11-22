@@ -1,11 +1,20 @@
+import { HANDOFF_LAST_MAC_KEY } from './BrainHandoff';
 import type { LinkState, MacLink } from './MacLink';
 import type { Settings } from './Settings';
 import type { ResumePolicy } from './types';
 
-interface PhoneControlOptions {
-  link: MacLink;
+export interface PhoneControlHandoffView {
+  readonly active: boolean;
+  readonly capability?: string;
+  readonly homeUrl?: string;
+  readonly lastMacUrl?: string | null;
+}
+
+export interface PhoneControlOptions {
+  link: Pick<MacLink, 'activeUrl' | 'linkState' | 'wasReplaced'>;
   urls: readonly string[];
-  settings: Settings;
+  settings: Pick<Settings, 'resumePolicy'>;
+  handoff?: PhoneControlHandoffView;
   changePolicy: (policy: ResumePolicy) => void;
   checkLocation: () => Promise<{ accuracy?: number } | null>;
   canReconnect: () => boolean;
@@ -15,6 +24,7 @@ interface PhoneControlOptions {
 /** Phone-only controls. No HUD ownership, microphone stream or credentials. */
 export class PhoneControlPanel {
   private switching = false;
+  private userEditedBrain = false;
   private readonly brain = document.querySelector<HTMLSelectElement>('#p-brain');
   private readonly policy = document.querySelector<HTMLSelectElement>('#p-resume');
   private readonly connect = document.querySelector<HTMLButtonElement>('#p-connect');
@@ -27,9 +37,12 @@ export class PhoneControlPanel {
       this.brain?.append(option);
     }
     if (this.brain) {
-      this.brain.value = options.link.activeUrl;
+      this.brain.value = this.primaryUrl();
       this.brain.disabled = false;
-      this.brain.addEventListener('change', () => this.updateLink(options.link.linkState));
+      this.brain.addEventListener('change', () => {
+        this.userEditedBrain = this.brain !== null && this.brain.value !== this.primaryUrl();
+        this.updateLink(options.link.linkState);
+      });
     }
     if (this.policy) this.policy.disabled = false;
     const locationButton = document.querySelector<HTMLButtonElement>('#p-location-check');
@@ -55,23 +68,95 @@ export class PhoneControlPanel {
 
   updateLink(state: LinkState): void {
     const link = this.options.link;
+    const handoff = this.options.handoff;
+    const handoffActive = handoff?.active === true;
+    const primaryUrl = this.primaryUrl();
+    const pinnedMacUrl = this.resolvePinnedMacUrl();
+
+    const pinnedRow = document.getElementById('p-mac-pinned-row');
+    if (pinnedRow) pinnedRow.hidden = pinnedMacUrl === undefined;
+    this.write('p-mac-pinned', pinnedMacUrl ? `${brainLabel(pinnedMacUrl)} (always)` : '');
+
+    if (this.brain && !this.userEditedBrain && this.brain.value !== primaryUrl) {
+      this.brain.value = primaryUrl;
+    }
+
     this.write('p-link', link.wasReplaced ? 'Another display active' : state === 'connected'
       ? 'Connected' : state === 'closed' ? 'Disconnected' : 'Connecting…');
     this.write('p-url', link.activeUrl);
     this.write('p-active-brain', brainLabel(link.activeUrl));
+
+    const handoffSummary = handoffActive
+      ? this.describeHandoff(state, link.activeUrl, handoff?.capability, handoff?.homeUrl)
+      : undefined;
+
     this.write('p-recovery', link.wasReplaced
       ? 'Reconnect here to make this phone display active again.'
-      : state === 'connected'
-        ? 'The Mac connection is authenticated. AI and feature availability still depend on the services configured in that Mac’s JOAT app.'
-        : isPhoneBrain(link.activeUrl)
-          ? 'Open JOAT Brain on this iPhone, then reconnect.'
-          : 'Open JOAT on the Mac shown here and keep it awake. For a Tailscale connection, connect both devices to Tailscale. Check pairing approval in the Mac app, then reconnect.');
+      : handoffSummary !== undefined
+        ? handoffSummary
+        : state === 'connected'
+          ? isPhoneBrain(link.activeUrl)
+            ? pinnedMacUrl
+              ? `JOAT Brain is active on this iPhone. Messages & Agent Terminal stay connected to ${brainLabel(pinnedMacUrl)}.`
+              : 'JOAT Brain is active on this iPhone. Add your Mac connection when packaging to use Messages & Agent Terminal.'
+            : 'The Mac connection is authenticated. AI and feature availability still depend on the services configured in that Mac’s JOAT app.'
+          : isPhoneBrain(link.activeUrl)
+            ? 'Open JOAT Brain on this iPhone, then reconnect.'
+            : 'Open JOAT on the Mac shown here and keep it awake. For a Tailscale connection, connect both devices to Tailscale. Check pairing approval in the Mac app, then reconnect.');
+
     if (this.connect) this.connect.disabled = this.switching || !this.options.canReconnect();
-    if (this.connect) this.connect.textContent = this.switching ? 'Connecting…'
-      : this.brain?.value === link.activeUrl && state === 'connected' ? 'Reconnect' : 'Connect';
-    if (!this.switching && this.brain && this.brain.value !== link.activeUrl) {
-      this.write('p-action', `Tap Connect to switch to ${brainLabel(this.brain.value)}. Current connection: ${brainLabel(link.activeUrl)}.`);
-    } else if (state === 'connected' && !this.switching) this.write('p-action', '');
+    if (this.connect) {
+      this.connect.textContent = this.switching
+        ? 'Connecting…'
+        : this.brain?.value === primaryUrl && state === 'connected' ? 'Reconnect' : 'Connect';
+    }
+
+    if (!this.switching) {
+      if (this.brain && this.brain.value !== primaryUrl) {
+        this.write('p-action', `Tap Connect to switch to ${brainLabel(this.brain.value)}. Current connection: ${brainLabel(link.activeUrl)}.`);
+      } else if (handoffSummary !== undefined) {
+        this.write('p-action', handoffSummary);
+      } else if (state === 'connected') {
+        this.write('p-action', '');
+      }
+    }
+  }
+
+  private primaryUrl(): string {
+    const handoff = this.options.handoff;
+    if (handoff?.active && handoff.homeUrl) return handoff.homeUrl;
+    return this.options.link.activeUrl;
+  }
+
+  private resolvePinnedMacUrl(): string | undefined {
+    const hasPhone = this.options.urls.some((url) => isPhoneBrain(url));
+    const macUrls = this.options.urls.filter((url) => !isPhoneBrain(url));
+    if (!hasPhone || macUrls.length === 0) return undefined;
+    const remembered = this.options.handoff?.lastMacUrl ?? this.readStoredLastMac();
+    if (remembered && macUrls.includes(remembered)) return remembered;
+    return macUrls[0];
+  }
+
+  private readStoredLastMac(): string | null {
+    try {
+      return typeof localStorage !== 'undefined' ? localStorage.getItem(HANDOFF_LAST_MAC_KEY) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private describeHandoff(
+    state: LinkState,
+    macUrl: string,
+    capability: string | undefined,
+    homeUrl: string | undefined,
+  ): string {
+    const feature = capability ?? 'Mac feature';
+    const macLabel = brainLabel(macUrl);
+    const homeLabel = homeUrl ? brainLabel(homeUrl) : 'This iPhone · JOAT Brain';
+    return state === 'connected'
+      ? `${feature} is active on ${macLabel}. 2× tap back to Home returns to ${homeLabel}.`
+      : `Opening ${feature} on ${macLabel}… 2× tap back to Home returns to ${homeLabel}.`;
   }
 
   private async selectBrain(url: string): Promise<void> {
@@ -81,8 +166,11 @@ export class PhoneControlPanel {
     this.write('p-action', 'Switching connection…');
     try {
       const selected = await this.options.selectBrain(url);
+      this.userEditedBrain = false;
       this.write('p-action', selected
-        ? 'Connecting. Approve pairing on the Mac if prompted.'
+        ? isPhoneBrain(url)
+          ? 'Connecting to JOAT Brain on this iPhone…'
+          : 'Connecting. Approve pairing on the Mac if prompted.'
         : 'The display could not be cleared safely. Keep Even Hub open and try Reconnect again.');
     } catch {
       this.write('p-action', 'Reconnect could not finish. Keep Even Hub open and try again.');
@@ -117,14 +205,14 @@ export class PhoneControlPanel {
 
 /** JOAT Brain on the phone itself (apps/ios-companion), the lab packages'
  * loopback candidate. */
-function isPhoneBrain(url: string): boolean {
+export function isPhoneBrain(url: string): boolean {
   try {
     const parsed = new URL(url);
     return parsed.protocol === 'ws:' && (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost');
   } catch { return false; }
 }
 
-function brainLabel(url: string): string {
+export function brainLabel(url: string): string {
   if (isPhoneBrain(url)) return 'This iPhone · JOAT Brain';
   try {
     const parsed = new URL(url);

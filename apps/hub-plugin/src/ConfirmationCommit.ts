@@ -31,6 +31,24 @@ export async function deliverAfterConfirmationDismissal(
   return true;
 }
 
+export interface ConfirmationCancelTarget {
+  actionId: string;
+  imu: { disarm: (actionId: string) => boolean };
+  hud: { dismissConfirmation: (id?: string) => Promise<boolean> };
+  clearRetry: (actionId: string) => void;
+}
+
+/**
+ * Tear down an active confirmation gate on brain-issued `confirm.cancel`
+ * without emitting an uplink `confirm` verdict.
+ */
+export async function handleConfirmCancel(target: ConfirmationCancelTarget): Promise<boolean> {
+  if (typeof target.actionId !== 'string' || target.actionId.length === 0) return false;
+  target.clearRetry(target.actionId);
+  target.imu.disarm(target.actionId);
+  return target.hud.dismissConfirmation(target.actionId);
+}
+
 /** The wearer's decision clock on a Mac challenge, once the gate is visible. */
 export const CONFIRMATION_DECISION_WINDOW_MS = 8_000;
 /**

@@ -109,7 +109,7 @@ export interface SavedPlaceWire {
   longitude?: number;
 }
 export type HudContentKind = 'assistant' | 'notification' | 'calendar' | 'system';
-/** A transient JOAT response is never a Messages, Brainstorm, or Hermes page. */
+/** A transient JOAT response is never a Messages or Agent Terminal page. */
 export type AssistantOverlayOperation = 'replace' | 'append' | 'settle' | 'dismiss';
 export type AssistantConversationState = 'thinking' | 'answering' | 'ready';
 export interface AssistantConversationTurn {
@@ -126,47 +126,18 @@ export interface AssistantConversationSnapshot {
 }
 export type G2DiagnosticEvent = import('./G2DiagnosticTrace').G2TraceEvent;
 export type NavigationHudModel = import('./NavigationHud').NavigationHudModel;
+export type NavigationManeuver = import('./NavigationHud').NavigationManeuver;
 export type NavigationRoutePlan = import('./NavigationProgress').NavigationRoutePlan;
-/** Safe projection of the live Brainstorm / Hermes terminal state. */
-/** Which surface a diagnostic gesture came from. This is receipt metadata
- * ONLY — it is no longer a frame discriminator, because the two surfaces no
- * longer share a frame (`docs/SESSION_MODEL.md:74-75`). */
-export type BrainstormHudScreen = 'brainstorm' | 'agent_terminal';
 
-export type BrainstormHudState =
+export type TerminalHudState =
   | 'unavailable'
   | 'approval_required'
   | 'ready'
-  | 'topic_capture'
   | 'running'
   | 'settled'
   | 'cancelled'
   | 'failed'
   | 'blocked';
-/** The Brainstorm conversation. Deliberately carries NO Agent Terminal,
- * Hermes, OpenClaw, endpoint, approval or tool-policy field —
- * `docs/SESSION_MODEL.md:74-75` states that as a requirement, and the two
- * surfaces shared one frame in violation of it until this split.
- *
- * That violation was not academic. It is why the Agent Terminal printed
- * "JOAT · BRAINSTORM" across its spine, why a healthy terminal spent four
- * rows on connection chrome, and why a tap on the terminal was gated on the
- * BRAINSTORM lane's readiness. One frame, two features, three bugs. */
-/** The `brainstorm.view` WIRE payload — exactly the five fields
- * `core/protocol.py`'s BrainstormHudView.to_wire() emits, and nothing
- * else. docs/SESSION_MODEL.md:84-88: the Brainstorm frame "contains no
- * Agent Terminal, Hermes, OpenClaw, endpoint, approval, or tool-policy
- * fields." The engine held that; THIS file still declared the payload as
- * the render-side union below, so the plugin's half of the duplicated
- * protocol claimed fields the wire forbids — and the two protocol files
- * disagreed about the frame they both describe. */
-export interface BrainstormViewPayload {
-  state: BrainstormHudState;
-  topic: string;
-  collaborators: string[];
-  activeSpeaker?: string;
-  activity: string;
-}
 
 export interface TerminalConversationMessage {
   id: string;
@@ -182,87 +153,42 @@ export interface TerminalConversationFields {
   taskRecovery?: boolean;
 }
 
-/** RENDER model, not a wire frame: the union one renderer draws. Built in
- * main.ts from whichever of the two wire payloads arrived, plus the
- * `screen` discriminator that exists only on this side. */
-export interface BrainstormHudModel extends TerminalConversationFields {
-  /** Local exact prompt publication, never part of the terminal wire frame. */
-  terminalPrompt?: { id: string; question: string };
-  /** WHICH of the two surfaces this frame is. Brainstorm (Codex proposes,
-   * Claude critiques) and the Agent Terminal (Hermes and OpenClaw work) are
-   * two features that share a frame shape, not one screen with two moods.
-   * The renderer reads this to title the spine; without it the spine fell
-   * through to the link status and the Terminal was captured reading
-   * "JOAT · BRAINSTORM", which is exactly the confusion they are kept
-   * apart to prevent. This is a RENDER-side discriminator: the wire still
-   * carries `brainstorm.view` and `agent_terminal.view` separately. */
-  screen: 'brainstorm' | 'agent_terminal';
-  state: BrainstormHudState;
-  topic: string;
-  collaborators: string[];
-  activeSpeaker?: string;
-  activity: string;
-  /** Where the dedicated session lives, shown so the wearer can tell a
-   * local session from a remote one without leaving the surface. */
-  endpointHost?: string;
-  terminalReason?: string;
-  /** Whether the no-tools policy was verified for this session. */
-  noToolsChecked?: boolean;
-  /** Tool requests the focused lane is blocked on — see
-   * AgentTerminalHudModel. A connection awaiting device approval is a
-   * different problem with the opposite remedy, so the tap keys on this. */
-  approvals?: number;
-}
-
-/** The Agent Terminal: Hermes and OpenClaw work sessions. Its own frame,
- * with the connection and tool-policy facts that belong to it and to no
- * other surface. */
+/** The Agent Terminal HUD model on the wire (`agent_terminal.view`). */
 export interface AgentTerminalHudModel extends TerminalConversationFields {
   /** Opaque visit and row-selection identity; both are present together. */
   openingRequestId?: string;
   openingSelectionId?: string;
-  state: BrainstormHudState;
+  state: TerminalHudState;
   /** The focused lane, in the roster's "<lane> · <state>" shape. */
   focus: string;
   /** Lane chips: every concurrent session, so one glance covers the roster. */
   lanes: string[];
   activity: string;
-  endpointHost?: string;
   terminalReason?: string;
-  /** Local preflight only; this is never an atomic remote guarantee. */
-  noToolsChecked: boolean;
   /** Tool requests the focused lane is blocked on.
    *
    * Distinct from `state === 'approval_required'`, which also describes a
-   * CONNECTION whose device has not been approved in OpenClaw — a
-   * different problem whose remedy is retry, not approve. A tap needs to
-   * know which, and only this count says so. */
+   * CONNECTION whose device has not been approved — a different problem
+   * whose remedy is retry, not approve. */
   approvals?: number;
 }
 
 /**
- * Bounded wearer intents while the live Brainstorm surface owns the HUD.
- * These are deliberately not free-form prompts: spoken language remains the
- * sole topic source, while gestures only control the local session lifecycle.
+ * Bounded wearer intents while the live Agent Terminal surface owns the HUD.
+ * Spoken language remains the prompt source, while gestures control the
+ * focused terminal session lifecycle.
  */
-export type BrainstormAction =
-  | 'begin_topic_capture'
-  /** Arm ONE utterance as input to the focused Agent Terminal session.
-   * Distinct from begin_topic_capture: that starts a Brainstorm, which is
-   * a different feature with different collaborators. */
+export type TerminalAction =
   | 'begin_terminal_input'
-  | 'show_terminal'
-  | 'show_brainstorm'
-  | 'cancel'
   | 'retry_terminal'
-  /** Long-press on a running work session cancels it (2026-10-06): the
-   * gesture for "terminal cancel", which stays as the spoken form. */
   | 'cancel_terminal'
-  /** Answer the tool request the focused work session is blocked on.
-   * Voice ("terminal approve") was the only way, so a wearer looking at a
-   * blocked session had no gesture for the decision in front of them. */
   | 'approve_terminal'
   | 'deny_terminal';
+
+export interface TerminalActionMessage {
+  kind: 'terminal.action';
+  action: TerminalAction;
+}
 
 /** What a decision gate is for, when it is not a generic action: a spoken
  * terminal reply is CHECKED, so the page says "send" and its swipe asks for
@@ -380,90 +306,10 @@ export interface PromptAckMessage {
   audioEpoch?: string | null;
 }
 
-/**
- * The phone's JOAT control screen (the plugin page inside the Even app, not
- * the lenses): Brainstorm reset, saved subscription accounts, seat models.
- * Mirrors `ControlAction` / `ControlState` in core/protocol.py — the two
- * must change together (tests/unit/test_protocol.py pins the Mac side).
- */
-export type ControlProviderName = 'claude' | 'codex';
-export type ControlModelSlotKey = 'codex' | 'claude' | 'assistant';
-
-export type ControlActionMessage =
-  | { kind: 'control.action'; action: 'refresh' | 'brainstorm.reset' | 'account.cancel' | 'account.dismiss' }
-  | { kind: 'control.action'; action: 'account.add'; provider: ControlProviderName; label: string }
-  | {
-    kind: 'control.action';
-    action: 'account.activate' | 'account.signin' | 'account.signout' | 'account.remove';
-    provider: ControlProviderName;
-    profileId: string;
-  }
-  | { kind: 'control.action'; action: 'account.rename'; provider: ControlProviderName; profileId: string; label: string }
-  /** A one-time code the Claude sign-in page showed. Never stored or logged. */
-  | { kind: 'control.action'; action: 'account.code'; code: string }
-  | { kind: 'control.action'; action: 'model.select'; slot: ControlModelSlotKey; option: string };
-
-/** logged_in · logged_out · limited · missing · unknown */
-export type ControlAccountState = string;
-
-export interface ControlSeatView {
-  name: string;
-  title: string;
-  installed: boolean;
-  account: ControlAccountState;
-  accountLabel: string;
-  model: string;
-}
-
-export interface ControlProfileView {
-  id: string;
-  label: string;
-  state: ControlAccountState;
-  isDefault: boolean;
-  active: boolean;
-  email?: string;
-  plan?: string;
-}
-
-export interface ControlProviderView {
-  provider: ControlProviderName;
-  title: string;
-  installed: boolean;
-  profiles: ControlProfileView[];
-}
-
-export interface ControlModelSlotView {
-  key: string;
-  title: string;
-  current: string;
-  options: string[];
-}
-
-export interface ControlLoginView {
-  provider: ControlProviderName;
-  profileId: string;
-  /** starting · open_link · enter_code · completing · done · failed · cancelled */
-  stage: string;
-  message: string;
-  needsCode: boolean;
-  url?: string;
-  code?: string;
-}
-
-export interface ControlStateView {
-  revision: number;
-  brainstorm: { state: string; phase: string; detail: string; seats: ControlSeatView[] };
-  accounts: ControlProviderView[];
-  models: ControlModelSlotView[];
-  login: ControlLoginView | null;
-  notice: string;
-}
-
 /** Messages sent plugin → Mac. */
 export type UplinkMessage =
   | PromptAckMessage
   | PromptCancelMessage
-  | ControlActionMessage
   /** First application frame on every socket. Credentials never belong in a URL. */
   | { kind: 'auth'; token: string | null }
   | {
@@ -473,6 +319,9 @@ export type UplinkMessage =
     timeZone?: string;
     /** This page answers link.ping (MacLink); the Mac may then hold it to it. */
     heartbeat?: true;
+    /** This page follows `brain.handoff`: a phone brain may send a Mac-pinned
+     * page (Messages, Agent Terminal, Activity) to a Mac instead of saying it is not there. */
+    handoff?: true;
   }
   | { kind: 'link.pong'; seq: number }
   | { kind: 'audio'; source: 'glasses' | 'phone'; seq: number; pcm: number[]; speaker?: string; audioEpoch?: string }
@@ -500,10 +349,7 @@ export type UplinkMessage =
   | { kind: 'pairing'; token: string }
   /** Opt-in and content-free; the Mac validates this allowlisted schema again. */
   | { kind: 'g2.diagnostic'; event: G2DiagnosticEvent }
-  | {
-    kind: 'brainstorm.action';
-    action: BrainstormAction;
-  }
+  | TerminalActionMessage
   | {
     kind: 'navigation.action';
     sessionId: string;
@@ -533,6 +379,12 @@ export type UplinkMessage =
     revision: number;
     sequence: number;
     state: 'guidance' | 'uncertain' | 'wrong_way' | 'off_route' | 'arrived';
+    maneuver?: NavigationManeuver;
+    maneuverDistanceM?: number;
+    instruction?: string;
+    stepId?: string;
+    remainingDistanceM?: number;
+    etaMinutes?: number;
   }
   | {
     kind: 'navigation.reroute.request';
@@ -617,6 +469,10 @@ export type DownlinkMessage =
   /** The socket is usable only after this frame. */
   | { kind: 'auth.accepted' }
   | { kind: 'link.ping'; seq: number }
+  /** From the phone brain (JOAT Brain): the wearer opened a page only a Mac
+   * has. The plugin opens it on one of the package's Macs and comes back to
+   * the phone when the wearer goes Home (main.ts BrainHandoff). */
+  | { kind: 'brain.handoff'; capability: HandoffCapability; requestId?: string }
   | { kind: 'hud.text'; containerId: ContainerId; text: string; offset?: number; length?: number; append?: boolean; textColor?: number; contentKind?: HudContentKind; traceId?: string }
   | {
     kind: 'assistant.overlay';
@@ -626,9 +482,7 @@ export type DownlinkMessage =
     /** Explicit visual meaning; older Mac brains omit it and default to an answer. */
     presentation?: 'answer' | 'receipt';
     /** This overlay ANSWERS something the wearer just asked on the surface
-     * they are looking at, so the Brainstorm refusal does not apply. That
-     * refusal exists to stop unrelated queued chatter stamping itself over
-     * a synthesis — not to silence the reply to an instruction. */
+     * they are looking at, rather than queued background chatter. */
     answersWearer?: boolean;
   }
   | ({ kind: 'assistant.conversation'; operation: 'replace' } & AssistantConversationSnapshot)
@@ -638,7 +492,7 @@ export type DownlinkMessage =
     conversationId: string;
     revision: number;
   }
-  | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image'; reason?: 'brainstorm' }
+  | { kind: 'hud.rebuild'; layout: 'default' | 'list' | 'image'; reason?: 'terminal' | 'brainstorm' }
   | {
     kind: 'hud.list';
     /** Opaque reader visit and source-page cursor, separate from reply ownership. */
@@ -673,7 +527,6 @@ export type DownlinkMessage =
      * counterpart: HudList.page_controls in core/protocol.py. */
     pageControls?: { newerIndex?: number; olderIndex?: number };
   }
-  | { kind: 'brainstorm.view'; brainstorm: BrainstormViewPayload }
   | { kind: 'agent_terminal.view'; terminal: AgentTerminalHudModel }
   | { kind: 'productivity.view'; productivity: ProductivityHudModel }
   | { kind: 'audio.control'; open: boolean; source?: 'glasses' | 'phone' }
@@ -681,6 +534,7 @@ export type DownlinkMessage =
   /** Calibration only: relay every raw IMU sample uplink (~10/s at P100). */
   | { kind: 'imu.trace'; enabled: boolean }
   | { kind: 'confirm.request'; actionId: string; prompt: string; challengeId: string; sessionId: string; payloadDigest: string; previewDigest: string; expiresAtMs: number; diagnosticKind?: 'messages'; messageUIActionId?: string; purpose?: ConfirmationPurpose }
+  | { kind: 'confirm.cancel'; actionId: string }
   | { kind: 'policy.set'; resume: ResumePolicy }
   /** Explicit-window pairing: issued only after an auth frame with a null token. */
   | { kind: 'pairing.set'; token: string }
@@ -713,7 +567,19 @@ export type DownlinkMessage =
     destinationLabel: string;
     etaMinutes: number;
     plan: NavigationRoutePlan;
+    phoneFixes?: boolean;
   }
+  | {
+    kind: 'navigation.fix';
+    sessionId: string;
+    latitude: number;
+    longitude: number;
+    accuracy?: number;
+    heading?: number;
+    speed?: number;
+    timestamp?: number;
+  }
+  | { kind: 'navigation.resume'; sessionId: string }
   | {
     kind: 'navigation.map';
     sessionId: string;
@@ -757,7 +623,6 @@ export type DownlinkMessage =
     activate?: boolean;
   }
   | { kind: 'navigation.stop'; sessionId: string }
-  | ({ kind: 'control.state' } & ControlStateView)
   | { kind: 'shutdown'; exitMode?: 0 | 1 };
 
 export interface InputEventPayload {
@@ -796,13 +661,19 @@ export type Unsubscribe = () => void;
 export const CAPABILITIES = [
   // Reminders replaced Planning and its calendar (2026-10-24); a Mac
   // brain answers it with its Planning pages (capabilities.py).
-  'Messages', 'Reminders', 'Navigation', 'Brainstorm',
+  // Brainstorm left the menu (2026-11-18, the wearer: the JOAT assistant
+  // is good enough for brainstorming).
+  'Messages', 'Mail', 'Reminders', 'Navigation',
   // Search took QuickNotes' place (2026-10-11): QuickNotes moved onto the
   // overview's rail, and Search opens its page from here.
   'Search', 'Agent Terminal', 'Activity', 'Settings',
 ] as const;
 
 export type CapabilityName = (typeof CAPABILITIES)[number];
+
+/** Pages a phone brain hands to a Mac (`brain.handoff`). */
+export const HANDOFF_CAPABILITIES = ['Messages', 'Agent Terminal', 'Activity'] as const;
+export type HandoffCapability = (typeof HANDOFF_CAPABILITIES)[number];
 
 /** Firmware menu ids for the rows above; item 0 is reserved by the protocol,
  * and 1-5 are the retired internal controls, so capabilities start at 10. */

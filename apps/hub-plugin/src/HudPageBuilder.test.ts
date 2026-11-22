@@ -68,6 +68,18 @@ const LAYOUTS: ReadonlyArray<[string, Page]> = [
     brightText: ' \nWhy did the byte cross the bus?\n ',
     footerText: '■ □',
   }) as Page],
+  ['native-terminal', builder.nativeTerminalLayout({
+    headText: '3:45 · CLAUDE · ● · ▇',
+    dimLines: ['> Check git status', '>> run_command · git status', ' ', ' ', ' ', ' ', ' '],
+    brightLines: [' ', ' ', 'Working tree is clean.', ' ', ' ', ' ', ' '],
+    dimText: '> Check git status\n>> run_command · git status\n \n \n \n \n ',
+    brightText: ' \n \nWorking tree is clean.\n \n \n \n ',
+    footText: 'tap: speak · 2x: sessions',
+    conversationKey: 'claude-1',
+    older: 0,
+    newer: 0,
+    state: 'ready',
+  }) as Page],
 ];
 
 describe('HudPageBuilder invariants', () => {

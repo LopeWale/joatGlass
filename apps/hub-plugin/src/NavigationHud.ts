@@ -29,7 +29,7 @@ export type NavigationView =
   | 'arrived'
   | 'error';
 
-export type NavigationMode = 'walking' | 'cycling';
+export type NavigationMode = 'walking' | 'cycling' | 'driving';
 
 export type NavigationManeuver =
   | 'depart'
@@ -169,8 +169,8 @@ export function navigationVisualFixture(state: NavigationVisualState): Navigatio
         secondary: 'Cajun Corner · 1.2 km',
         hint: 'swipe: choose · tap: continue',
         interaction: 'stationary',
-        options: ['Walk · 18 min', 'Cycle · 7 min'],
-        choiceIds: ['walking', 'cycling'],
+        options: ['Walk · 18 min', 'Cycle · 7 min', 'Drive · 4 min'],
+        choiceIds: ['walking', 'cycling', 'driving'],
         selectedIndex: 0,
       };
     case 'nav-preview':
@@ -365,8 +365,14 @@ export function navigationNativeHeading(model: NavigationHudModel): string {
     case 'destination': return 'CONFIRM DESTINATION';
     case 'repair': return 'REPAIR DESTINATION';
     case 'mode': return 'TRAVEL MODE';
-    case 'preview': return `${model.mode === 'cycling' ? 'CYCLE' : 'WALK'} · ROUTE PREVIEW`;
-    case 'guidance': return `${model.mode === 'cycling' ? 'CYCLING' : 'WALKING'} · ACTIVE`;
+    case 'preview': {
+      const prefix = model.mode === 'driving' ? 'DRIVE' : model.mode === 'cycling' ? 'CYCLE' : 'WALK';
+      return `${prefix} · ROUTE PREVIEW`;
+    }
+    case 'guidance': {
+      const prefix = model.mode === 'driving' ? 'DRIVING' : model.mode === 'cycling' ? 'CYCLING' : 'WALKING';
+      return `${prefix} · ACTIVE`;
+    }
     case 'uncertain': return 'UNCERTAIN';
     case 'wrong_way': return 'WRONG WAY';
     case 'off_route': return 'OFF ROUTE';
@@ -389,7 +395,9 @@ function navigationNativeFacts(model: NavigationHudModel): string | undefined {
     return isNavigationSetupStatus(model) ? undefined : 'Route held';
   }
   const facts: string[] = [];
-  if (model.mode) facts.push(model.mode === 'cycling' ? 'Cycling' : 'Walking');
+  if (model.mode) {
+    facts.push(model.mode === 'driving' ? 'Driving' : model.mode === 'cycling' ? 'Cycling' : 'Walking');
+  }
   facts.push(`${formatNavigationDistance(model.remainingDistanceM)} left`);
   if (model.etaMinutes !== undefined && Number.isFinite(model.etaMinutes)) {
     facts.push(`${model.etaMinutes} min`);

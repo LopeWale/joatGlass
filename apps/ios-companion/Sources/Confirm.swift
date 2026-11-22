@@ -15,6 +15,8 @@ final class ConfirmGate: BrainFeature {
     static let windowSeconds: Double = 20
     /// protocol.py CONFIRM_PROMPT_MAX_UTF16_UNITS
     static let promptMaxUnits = 120
+    /// 7-row message/mail review card ceiling (< 280 UTF-16 units in HudPresenter).
+    static let messagePromptMaxUnits = 270
 
     private struct Pending {
         let challengeId: String
@@ -29,9 +31,90 @@ final class ConfirmGate: BrainFeature {
     private let sessionId = ConfirmGate.hex(16)
     private var pending: [String: Pending] = [:]
 
+    var hasPending: Bool { !pending.isEmpty }
+
     init(link: PluginLink) { self.link = link }
 
     func pluginConnected() {}
+
+    /// Declines all active confirmation challenges and instructs the glasses
+    /// plugin to dismiss the confirmation card immediately.
+    @discardableResult
+    func declineActive(reason: String) -> Bool {
+        guard !pending.isEmpty else { return false }
+        let actionIds = Array(pending.keys)
+        for actionId in actionIds {
+            link.send(["kind": "confirm.cancel", "actionId": actionId])
+            Log.add("tx confirm.cancel \(actionId) (\(reason))")
+            resolve(actionId, .declined, reason: reason)
+        }
+        return true
+    }
+
+    /// Formats `"<cleanHeader>? “<fitBody>”"` guaranteed to stay within `maxUnits`
+    /// UTF-16 code units without splitting UTF-16 surrogate pairs.
+    static func fitMessagePrompt(header: String, body: String, maxUnits: Int = 270) -> String {
+        let cap = max(0, maxUnits)
+        guard cap >= 6 else {
+            return "\(header)? “\(body)”".utf16Prefix(cap)
+        }
+        var cleanHeader = header
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "?: "))
+        if cleanHeader.isEmpty { cleanHeader = "Send" }
+
+        let rawBody = body
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        let cleanBody = rawBody.isEmpty ? "…" : rawBody
+
+        // Wrapper `"? “"` (3 units) + `"”"` (1 unit) = 4 UTF-16 code units.
+        let wrapperUnits = 4
+        let available = cap - wrapperUnits
+        if cleanHeader.utf16.count + cleanBody.utf16.count <= available {
+            return "\(cleanHeader)? “\(cleanBody)”"
+        }
+
+        // Reserve space for the body first so long headers never starve the preview.
+        let minBodyReserve = min(cleanBody.utf16.count, max(1, min(24, available / 2)))
+        let headerBudget = max(1, available - minBodyReserve)
+        let fitHeader = fitHeaderPreservingPrefix(cleanHeader, units: headerBudget)
+        let bodyBudget = max(1, available - fitHeader.utf16.count)
+        let fitBody = utf16Fit(cleanBody, units: bodyBudget)
+        let combined = "\(fitHeader)? “\(fitBody)”"
+        return combined.utf16.count <= cap ? combined : combined.utf16Prefix(cap)
+    }
+
+    private static func fitHeaderPreservingPrefix(_ header: String, units: Int) -> String {
+        guard header.utf16.count > units else { return header }
+        for verb in ["Reply (", "Email ("] where header.hasPrefix(verb) {
+            let afterVerb = header.dropFirst(verb.count)
+            if let closeRange = afterVerb.range(of: ") to ") {
+                let acct = String(afterVerb[..<closeRange.lowerBound])
+                let recipient = String(afterVerb[closeRange.upperBound...])
+                let fixedOverhead = verb.utf16.count + ") to ".utf16.count
+                if units > fixedOverhead + 2 {
+                    let innerBudget = units - fixedOverhead
+                    let acctBudget = max(1, min(acct.utf16.count, innerBudget / 3))
+                    let fitAcct = utf16Fit(acct, units: acctBudget)
+                    let recBudget = max(1, innerBudget - fitAcct.utf16.count)
+                    let fitRec = utf16Fit(recipient, units: recBudget)
+                    let candidate = "\(verb)\(fitAcct)) to \(fitRec)"
+                    if candidate.utf16.count <= units { return candidate }
+                }
+            }
+        }
+        return utf16Fit(header, units: units)
+    }
+
+    private static func utf16Fit(_ text: String, units: Int) -> String {
+        guard units > 0 else { return "" }
+        if text.utf16.count <= units { return text }
+        if units == 1 { return "…" }
+        let trimmed = text.utf16Prefix(units - 1).trimmingCharacters(in: .whitespaces)
+        return (trimmed.isEmpty ? text.utf16Prefix(units - 1) : trimmed) + "…"
+    }
 
     /// Ask on the glasses; `completion` runs exactly once on the main queue.
     /// `messageUIActionId`: the Messages draft this confirms (the plugin

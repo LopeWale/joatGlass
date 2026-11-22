@@ -17,7 +17,7 @@ function make(
   menuConsumesLists = false,
   diagnostics?: { record: (event: unknown) => void },
   navigationActive = false,
-  brainstormActive = false,
+  terminalActive = false,
   assistantOverlayVisible = false,
   notificationVisible = false,
   panelSwipeOwned = false,
@@ -73,18 +73,18 @@ function make(
     handleScroll: vi.fn(async () => navigationActive),
     handleCancel: vi.fn(() => navigationActive),
   };
-  const brainstorm = {
-    isActive: vi.fn(() => brainstormActive),
-    handleClick: vi.fn(() => brainstormActive),
-    handleCancel: vi.fn(() => brainstormActive),
-    // False by default: only the topic-capture state claims a swipe as a
-    // backout; every test that wants that behaviour flips it explicitly.
+  const terminal = {
+    isActive: vi.fn(() => terminalActive),
+    handleClick: vi.fn(() => terminalActive),
+    handleCancel: vi.fn(() => false),
+    // False by default: only a pending tool approval claims a swipe as deny;
+    // otherwise swipes scroll the conversation viewport.
     handleSwipe: vi.fn(() => false),
     // False by default: only a running work session claims a long-press.
     handleLongPress: vi.fn(() => false),
-    consumeAcceptedAction: vi.fn(() => brainstormActive ? {
-      action: 'show_terminal' as const,
-      surface: 'brainstorm' as const,
+    consumeAcceptedAction: vi.fn(() => terminalActive ? {
+      action: 'begin_terminal_input' as const,
+      surface: 'agent_terminal' as const,
     } : undefined),
   };
   const assistantOverlay = {
@@ -139,7 +139,7 @@ function make(
     lifecycle,
     diagnostics,
     navigation,
-    brainstorm,
+    terminal,
     assistantOverlay,
     transcriptScroll,
     promptedInput,
@@ -153,7 +153,7 @@ function make(
     imu,
     menu,
     navigation,
-    brainstorm,
+    terminal,
     assistantOverlay,
     lifecycle,
     link,
@@ -535,8 +535,8 @@ describe('EventRouter — double press', () => {
     expect(sent).toEqual([]);
   });
 
-  it('left temple cancels a live Brainstorm instead of opening a hidden sidebar', () => {
-    const { fire, menu, brainstorm, sent } = make(false, undefined, false, true);
+  it('left temple double press on a live Agent Terminal backs out to sessions via menu.toggle', () => {
+    const { fire, menu, terminal, sent } = make(false, undefined, false, true);
     fire({
       sysEvent: {
         eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
@@ -544,8 +544,8 @@ describe('EventRouter — double press', () => {
       },
     });
 
-    expect(brainstorm.handleCancel).toHaveBeenCalledTimes(1);
-    expect(menu.toggle).not.toHaveBeenCalled();
+    expect(terminal.handleCancel).toHaveBeenCalledTimes(1);
+    expect(menu.toggle).toHaveBeenCalledTimes(1);
     expect(sent).toEqual([]);
   });
 
@@ -566,8 +566,8 @@ describe('EventRouter — double press', () => {
     expect(sent).toEqual([]);
   });
 
-  it('a right double press on a live Brainstorm cancels the run, never exits', () => {
-    const { fire, brainstorm, menu, sent, shutDownPageContainer } = make(false, undefined, false, true);
+  it('a right double press on a live Agent Terminal backs out to sessions, never exits', () => {
+    const { fire, terminal, menu, sent, shutDownPageContainer } = make(false, undefined, false, true);
 
     fire({
       sysEvent: {
@@ -576,10 +576,8 @@ describe('EventRouter — double press', () => {
       },
     });
 
-    // The right double press is the same Back as the left: it cancels the
-    // live run and never reaches the OS exit dialog.
-    expect(brainstorm.handleCancel).toHaveBeenCalledTimes(1);
-    expect(menu.toggle).not.toHaveBeenCalled();
+    expect(terminal.handleCancel).toHaveBeenCalledTimes(1);
+    expect(menu.toggle).toHaveBeenCalledTimes(1);
     expect(shutDownPageContainer).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
   });
@@ -778,8 +776,8 @@ describe('EventRouter — text and list', () => {
     expect(sent).toEqual([]);
   });
 
-  it('pages a visible assistant reply before a hidden Brainstorm swipe action', () => {
-    const { fire, sent, brainstorm, assistantOverlay } = make(
+  it('pages a visible assistant reply before a hidden Agent Terminal swipe action', () => {
+    const { fire, sent, terminal, assistantOverlay } = make(
       false, undefined, false, true, true,
     );
 
@@ -787,7 +785,7 @@ describe('EventRouter — text and list', () => {
 
     expect(assistantOverlay.scrollAssistantOverlay).toHaveBeenCalledWith('down');
     expect(assistantOverlay.dismissAssistantOverlay).not.toHaveBeenCalled();
-    expect(brainstorm.handleCancel).not.toHaveBeenCalled();
+    expect(terminal.handleSwipe).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
   });
 
@@ -799,48 +797,40 @@ describe('EventRouter — text and list', () => {
     expect(sent).toEqual([]);
   });
 
-  it('maps a right-temple tap to the live Brainstorm owner before menu or relay', () => {
-    const { fire, sent, menu, brainstorm } = make(false, undefined, false, true);
+  it('maps a right-temple tap to the live Agent Terminal owner before menu or relay', () => {
+    const { fire, sent, menu, terminal } = make(false, undefined, false, true);
     fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
-    expect(brainstorm.handleClick).toHaveBeenCalledTimes(1);
+    expect(terminal.handleClick).toHaveBeenCalledTimes(1);
     expect(menu.handleClick).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
   });
 
-  it('records a redacted Brainstorm action only after the controller accepts it', () => {
+  it('records a redacted Agent Terminal action only after the controller accepts it', () => {
     const events: unknown[] = [];
     const { fire } = make(false, { record: (event) => events.push(event) }, false, true);
 
     fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R));
 
     expect(events).toContainEqual({
-      type: 'brainstorm_action', action: 'show_terminal', surface: 'brainstorm',
+      type: 'terminal_action', action: 'begin_terminal_input', surface: 'agent_terminal',
       source: 'right', gesture: 'tap', delivery: 'sys',
     });
     expect(JSON.stringify(events)).not.toMatch(/topic|prompt|payload|token|https?:/i);
   });
 
-  it('maps G2 swipes on a live Brainstorm to the transcript, never to cancel', () => {
-    // The wearer, watching this live: "can i scroll up and down to see the
-    // replies?" A downward swipe used to CANCEL the session — the harshest
-    // possible answer to someone trying to re-read a reply. Cancel is the
-    // deliberate left double-press only.
-    const { fire, sent, menu, brainstorm, transcriptScroll } = make(false, undefined, false, true);
-    fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
-    fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_TOP_EVENT } });
+  it('maps G2 swipes on a live Agent Terminal to the transcript when no approval is pending', () => {
+    const { fire, sent, menu, terminal, transcriptScroll } = make(false, undefined, false, true);
+    fire({ textEvent: { containerID: 12, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
+    fire({ textEvent: { containerID: 12, eventType: OsEventTypeList.SCROLL_TOP_EVENT } });
     expect(transcriptScroll).toHaveBeenNthCalledWith(1, 'down');
     expect(transcriptScroll).toHaveBeenNthCalledWith(2, 'up');
-    expect(brainstorm.handleCancel).not.toHaveBeenCalled();
+    expect(terminal.handleCancel).not.toHaveBeenCalled();
     expect(menu.handleScroll).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
   });
 
-  it('a left single on a live Brainstorm is the footer action, not menu or cancel', () => {
-    // Even's input reference gives BOTH temples the same gesture set (the
-    // audit's O3): a left single is the same footer tap as a right single.
-    // It must not cancel, must not open anything, and — once the surface
-    // consumes it — must not also be relayed as a second, generic input.
-    const { fire, menu, brainstorm, sent } = make(false, undefined, false, true);
+  it('a left single on a live Agent Terminal is the footer action, not menu or cancel', () => {
+    const { fire, menu, terminal, sent } = make(false, undefined, false, true);
     fire({
       sysEvent: {
         eventType: OsEventTypeList.CLICK_EVENT,
@@ -849,48 +839,43 @@ describe('EventRouter — text and list', () => {
     });
     expect(menu.toggle).not.toHaveBeenCalled();
     expect(menu.openNotifications).not.toHaveBeenCalled();
-    expect(brainstorm.handleCancel).not.toHaveBeenCalled();
-    expect(brainstorm.handleClick).toHaveBeenCalledTimes(1);
-    expect(sent).toEqual([]); // consumed by the surface, not double-delivered
+    expect(terminal.handleCancel).not.toHaveBeenCalled();
+    expect(terminal.handleClick).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual([]);
   });
 
-  it('a left single the live Brainstorm declines still reaches the Mac', () => {
-    // The surface owning the page does not own every tap: when its footer
-    // has nothing armed (handleClick() false), the input must keep its
-    // pre-O3 path and be relayed for the Mac to decide.
-    const { fire, menu, brainstorm, sent } = make(false, undefined, false, true);
-    brainstorm.handleClick.mockReturnValue(false);
+  it('a left single the live Agent Terminal declines still reaches the Mac', () => {
+    const { fire, menu, terminal, sent } = make(false, undefined, false, true);
+    terminal.handleClick.mockReturnValue(false);
     fire({
       sysEvent: {
         eventType: OsEventTypeList.CLICK_EVENT,
         eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
       },
     });
-    expect(brainstorm.handleCancel).not.toHaveBeenCalled();
+    expect(terminal.handleCancel).not.toHaveBeenCalled();
     expect(menu.toggle).not.toHaveBeenCalled();
-    expect(sent).toHaveLength(1); // relayed, the Mac decides
+    expect(sent).toHaveLength(1);
   });
 
-  it('keeps cancel on the left double press', () => {
-    const { fire, brainstorm } = make(false, undefined, false, true);
+  it('lets a terminal owner claim left double press when handleCancel returns true', () => {
+    const { fire, terminal, menu } = make(false, undefined, false, true);
+    terminal.handleCancel.mockReturnValueOnce(true);
     fire({
       sysEvent: {
         eventType: OsEventTypeList.DOUBLE_CLICK_EVENT,
         eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
       },
     });
-    expect(brainstorm.handleCancel).toHaveBeenCalledTimes(1);
+    expect(terminal.handleCancel).toHaveBeenCalledTimes(1);
+    expect(menu.toggle).not.toHaveBeenCalled();
   });
 
-  it('lets a swipe back out of topic capture, where there is nothing to scroll', () => {
-    // The one state that keeps the old swipe-cancel: no transcript exists
-    // yet, the screen is a single promise, and the wearer who swipes is
-    // saying never mind. The controller decides (it knows the state); the
-    // router only offers it the swipe before falling back to scrolling.
-    const { fire, brainstorm, transcriptScroll } = make(false, undefined, false, true);
-    brainstorm.handleSwipe.mockReturnValueOnce(true);
-    fire({ textEvent: { containerID: 2, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
-    expect(brainstorm.handleSwipe).toHaveBeenCalledTimes(1);
+  it('lets a swipe deny a pending tool approval before falling back to scrolling', () => {
+    const { fire, terminal, transcriptScroll } = make(false, undefined, false, true);
+    terminal.handleSwipe.mockReturnValueOnce(true);
+    fire({ textEvent: { containerID: 12, eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT } });
+    expect(terminal.handleSwipe).toHaveBeenCalledTimes(1);
     expect(transcriptScroll).not.toHaveBeenCalled();
   });
 
@@ -1023,19 +1008,19 @@ describe('EventRouter — long tap never touches the mic (2026-10-12)', () => {
 
   it('cancels a running terminal job (2026-10-06)', () => {
     const r = make(false, undefined, false, true);
-    r.brainstorm.handleLongPress.mockReturnValue(true);
+    r.terminal.handleLongPress.mockReturnValue(true);
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
     r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
-    expect(r.brainstorm.handleLongPress).toHaveBeenCalledTimes(1);
+    expect(r.terminal.handleLongPress).toHaveBeenCalledTimes(1);
     expect(r.audio.stop).not.toHaveBeenCalled();
     expect(r.audio.start).not.toHaveBeenCalled();
   });
 
-  it('on a Brainstorm page that is not a running job it does nothing', () => {
+  it('on an Agent Terminal page that is not a running job it does nothing', () => {
     const r = make(false, undefined, false, true);
     r.fire({ sysEvent: { eventType: LONG_PRESS, eventSource: 1 } });
     r.fire({ sysEvent: { eventType: RELEASE, eventSource: 1 } });
-    expect(r.brainstorm.handleLongPress).toHaveBeenCalledTimes(1);
+    expect(r.terminal.handleLongPress).toHaveBeenCalledTimes(1);
     expect(r.audio.stop).not.toHaveBeenCalled();
   });
 
@@ -1312,7 +1297,7 @@ describe('EventRouter prompt ownership', () => {
     expect(f.owner.cancel).toHaveBeenCalledOnce();
     expect(f.assistantOverlay.dismissAssistantOverlay).not.toHaveBeenCalled();
     expect(f.navigation.handleCancel).not.toHaveBeenCalled();
-    expect(f.brainstorm.handleCancel).not.toHaveBeenCalled();
+    expect(f.terminal.handleCancel).not.toHaveBeenCalled();
     expect(f.menu.toggle).not.toHaveBeenCalled();
     expect(f.sent).toEqual([]);
   });
@@ -1331,7 +1316,7 @@ describe('EventRouter prompt ownership', () => {
     expect(f.menu.handleList).not.toHaveBeenCalled();
     expect(f.navigation.handleClick).not.toHaveBeenCalled();
     expect(f.navigation.handleScroll).not.toHaveBeenCalled();
-    expect(f.brainstorm.handleClick).not.toHaveBeenCalled();
+    expect(f.terminal.handleClick).not.toHaveBeenCalled();
     expect(f.sent).toEqual([]);
   });
 

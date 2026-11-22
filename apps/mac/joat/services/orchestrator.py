@@ -25,6 +25,7 @@ from typing import Literal
 from uuid import uuid4
 
 from ..audio.vad import RmsVad
+from ..audio.whisper_serve import WhisperServeEngine
 from ..core.interfaces import (
     AudioFrame, AudioFrameSource, GlassesTransport, ReplyEngine, SttEngine, Transcript,
 )
@@ -494,19 +495,6 @@ class VoiceOrchestrator:
             await self._transport.send(
                 HudText(text="Install whisperkit-cli on the Mac to enable transcription.")
             )
-        if active_status is None and self._sessions is not None:
-            # An engine restart mid-Brainstorm used to paint the empty
-            # Ready surface as if no conversation had ever been happening.
-            # The durable record knows better: a row still marked `active`
-            # is crash evidence, and the wearer deserves the way back.
-            probe = getattr(self._sessions, "interrupted_session", None)
-            interrupted = probe() if callable(probe) else None
-            if interrupted is not None:
-                title = getattr(interrupted, "title", "") or "untitled"
-                await self._transport.send(HudText(
-                    text=(f"A Brainstorm was interrupted — “{title[:40]}”. "
-                          f"Say “continue {title[:40]}” to pick it up."),
-                ))
         # Request ears: an earlier session (or doff) may have left the mic off,
         # and a brain that cannot hear is indistinguishable from none.
         await self._transport.send(AudioControl(open=True))
@@ -633,6 +621,13 @@ class VoiceOrchestrator:
         utterance = self._vad.finish_now()
         if utterance is None:
             log.info("prompt commit before any speech owner=%s", ticket.owner_kind)
+            if (self._utterance_worker is None or self._utterance_worker.done()) and not self._pending_utterances:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None:
+                    loop.create_task(self._send_empty_partial(ticket))
             return False
         log.info("prompt commit by tap owner=%s bytes=%d", ticket.owner_kind, len(utterance))
         self._complete_utterance(utterance)
@@ -779,6 +774,19 @@ class VoiceOrchestrator:
         except Exception as exc:
             log.info("partial transcript not sent error=%s", type(exc).__name__)
 
+    async def _send_empty_partial(self, ticket: PromptTicket) -> None:
+        current = self._prompted_input.current_ticket if self._prompted_input is not None else None
+        if current is None or current.prompt_id != ticket.prompt_id:
+            return
+        try:
+            await self._transport.send(PromptPartial(
+                prompt_id=ticket.prompt_id,
+                connection_generation=ticket.connection_generation,
+                text="",
+            ))
+        except Exception as exc:
+            log.info("partial clear not sent error=%s", type(exc).__name__)
+
     async def _clear_partial(self) -> None:
         """Take provisional words off the prompt's card: the utterance they
         came from will not answer it. An empty partial is the Hub's cue."""
@@ -916,7 +924,10 @@ class VoiceOrchestrator:
             if expected:
                 await self._acknowledge(turn)
             await self._stt.feed(utterance)
-            transcript = await self._stt.flush()
+            if turn.prompt_ticket is not None and isinstance(self._stt, WhisperServeEngine):
+                transcript = await self._stt.flush(bias=False)
+            else:
+                transcript = await self._stt.flush()
             self._observe_latency(turn.ordinal, "stt_complete", turn.started_at)
         finally:
             self._stt_busy -= 1
@@ -943,8 +954,6 @@ class VoiceOrchestrator:
         talk until the transcript says "JOAT".
         """
         if self._wake_words is None or turn.prompt_ticket is not None:
-            return True
-        if self._sessions is not None and self._sessions.topic_capture_armed:
             return True
         if self._monotonic() < self._name_only_until:
             return True
@@ -1098,21 +1107,6 @@ class VoiceOrchestrator:
                 return
             # Not the prompt's answer: its provisional words come off the card.
             await self._clear_partial()
-            # A tap has explicitly armed the next glasses phrase as a
-            # Brainstorm topic. This path intentionally runs before the normal
-            # wake-word gate: requiring the wearer to say JOAT again would
-            # contradict the HUD instruction. SessionManager rejects phone,
-            # mixed, and legacy-source utterances while the capture is armed.
-            if (
-                self._prompted_input is None
-                and self._sessions is not None
-                and self._sessions.topic_capture_armed
-                and self._sessions.handle_transcript(
-                    transcript.text,
-                    capture_source=source,
-                )
-            ):
-                return
             heard = transcript.text
             tail = self._unaddressed_tail
             self._unaddressed_tail = None

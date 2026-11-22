@@ -254,6 +254,13 @@ include:
   configured Mac-mini `hermes` agent through separate route-isolated session
   labels, key namespaces, connections, locks, and persistent transcript
   histories.
+- **Names in the Mac app.** Settings and Intelligence show two connection
+  kinds. **Agents** lists A2A task endpoints the wearer picks in Agent
+  Terminal; each has its own name and an agent type (OpenClaw, Hermes, or
+  Other A2A agent). **Agent Gateway (advanced)** is the paired WSS
+  Gateway above (JOAT speaks the OpenClaw Gateway protocol to it); it supplies the built-in `work`, `hermes` and `calendar`
+  lanes, all on Gateway agent ID `hermes`. Each Gateway has a name
+  (OpenClaw unless changed) that the glasses use in its messages.
 
 **`VerifierGate` (verifier/)** — pipeline objects, each a small class: `Fetcher` (httpx, retries, headless/reader fallback), `WaybackClient` (availability + Save-Page-Now), `QuoteMatcher` (normalized fuzzy match), `NliJudge` (MiniCheck or MLX), composed by `VerifierGate.verify()` → `Verdict`. Denials build `RepairRequest`s listing each failed citation and reason.
 

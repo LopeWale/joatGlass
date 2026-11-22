@@ -92,6 +92,28 @@ class MessageHistoryPage:
     has_older: bool
 
 
+@dataclass(frozen=True, slots=True)
+class IncomingText:
+    """One incoming text with the identity a relay to another device needs.
+
+    `handle` and `chat_guid` are Mac-private send identities: a relay may
+    derive an opaque id from them but must never publish them.
+    """
+
+    row_id: int
+    label: str
+    """What to call the conversation: the group's name, else the contact."""
+    person: str
+    """Who in the conversation wrote it (differs from `label` in a group)."""
+    text: str
+    at: float
+    is_group: bool
+    handle: str
+    chat_id: int | None
+    chat_guid: str | None
+    attachment_count: int = 0
+
+
 def _unix_time(raw: int | None) -> float:
     if not raw:
         return 0.0
@@ -217,6 +239,89 @@ class IMessageStore:
             ))
         self._drain_after = last if len(rows) > _READ_PAGE_SIZE else None
         return out, last
+
+    def read_new_texts(
+        self, after: int, limit: int = _READ_PAGE_SIZE,
+    ) -> tuple[list[IncomingText], int, bool]:
+        """Incoming texts after ROWID `after`: (texts, new watermark, more).
+
+        Stateless on purpose. `read_new` gates on a file-mtime edge that it
+        consumes, so a second caller sharing it would starve the notification
+        mux. This reads by ROWID alone (an indexed range), so any number of
+        relays can poll it at their own cadence. The watermark also advances
+        past rows that carry no text, so a blank row never strands later ones.
+        """
+        after = int(after)
+        limit = max(1, min(int(limit), 50))
+        with self._connect() as conn:
+            columns = self._columns(conn, "message")
+            chat_columns = self._columns(conn, "chat")
+            guid_expr = "COALESCE(c.guid, '')" if "guid" in chat_columns else "''"
+            attachment_expr = (
+                "COALESCE(m.cache_has_attachments, 0)"
+                if "cache_has_attachments" in columns else "0"
+            )
+            body_expr, body_size_expr, visible_clause = self._body_sql(columns)
+            if "cache_has_attachments" in columns:
+                visible_clause = (
+                    f"(({visible_clause}) OR COALESCE(m.cache_has_attachments, 0) != 0)"
+                )
+            rows = conn.execute(
+                f"""
+                SELECT m.ROWID,
+                       COALESCE(m.text, ''),
+                       COALESCE(h.id, ''),
+                       m.date,
+                       COALESCE(c.display_name, ''),
+                       COALESCE(c.ROWID, 0),
+                       COALESCE((
+                           SELECT COUNT(*)
+                           FROM chat_handle_join chj
+                           WHERE chj.chat_id = c.ROWID
+                       ), 1),
+                       {guid_expr},
+                       {attachment_expr},
+                       {body_expr},
+                       {body_size_expr}
+                FROM message m
+                LEFT JOIN handle h ON m.handle_id = h.ROWID
+                LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                LEFT JOIN chat c ON c.ROWID = cmj.chat_id
+                WHERE m.ROWID > ?
+                  AND m.is_from_me = 0
+                  AND {visible_clause}
+                ORDER BY m.ROWID
+                LIMIT ?
+                """,
+                (after, limit + 1),
+            ).fetchall()
+
+        out: list[IncomingText] = []
+        last = after
+        for (
+            row_id, plain, handle, date, display, chat_id, participants,
+            guid, attachments, body, body_size,
+        ) in rows[:limit]:
+            last = max(last, int(row_id))
+            text = decode_message_body(plain, body, attributed_size=int(body_size)).text
+            if not text and int(attachments) > 0:
+                text = "Attachment"
+            if not text:
+                continue
+            person = self._contacts.name_for(str(handle)) or "unknown"
+            out.append(IncomingText(
+                row_id=int(row_id),
+                label=str(display) or person,
+                person=person,
+                text=text,
+                at=_unix_time(date),
+                is_group=int(participants) > 1,
+                handle=str(handle),
+                chat_id=int(chat_id) if int(chat_id) > 0 else None,
+                chat_guid=str(guid) if str(guid).strip() else None,
+                attachment_count=1 if int(attachments) > 0 else 0,
+            ))
+        return out, last, len(rows) > limit
 
     # A banner usually appears within seconds of the chat.db row, so the
     # tight window resolves almost everything. But macOS re-shows and stacks
@@ -346,7 +451,8 @@ class IMessageStore:
         Send identities remain Mac-side. The HUD receives only sender and preview,
         so a forged plugin row cannot redirect a reply to a different address.
         """
-        limit = max(1, min(int(limit), 10))
+        limit = max(1, min(int(limit), 250))
+        row_scan_limit = max(60, min(limit * 8, 2_000))
         with self._connect() as conn:
             columns = self._columns(conn, "message")
             chat_columns = self._columns(conn, "chat")
@@ -390,8 +496,9 @@ class IMessageStore:
                 WHERE m.is_from_me = 0
                   AND {visible_clause}
                 ORDER BY m.ROWID DESC
-                LIMIT 60
-                """
+                LIMIT ?
+                """,
+                (row_scan_limit,),
             ).fetchall()
         out: list[MessageThread] = []
         seen: set[tuple[str, str | int]] = set()
@@ -439,7 +546,7 @@ class IMessageStore:
         before_row_id: int | None = None,
     ) -> MessageHistoryPage:
         """Newest-first text/attachment page for one Mac-owned conversation."""
-        limit = max(1, min(int(limit), 16))
+        limit = max(1, min(int(limit), 50))
         if thread.chat_id is None:
             return MessageHistoryPage(entries=(), has_older=False)
         with self._connect() as conn:

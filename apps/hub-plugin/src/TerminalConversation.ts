@@ -1,10 +1,33 @@
 import type { TerminalConversationMessage } from './types';
 
-interface Row { id: string; line: number; text: string }
-interface MessageRows { text: string; role: TerminalConversationMessage['role']; bytes: number; rows: Row[] }
+export type TerminalLayerKind = 'dim' | 'bright' | 'blank';
+
+export interface TerminalLayeredLine {
+  layer: TerminalLayerKind;
+  text: string;
+}
+
+interface Row {
+  id: string;
+  line: number;
+  text: string;
+  layer: TerminalLayerKind;
+}
+
+interface MessageRows {
+  text: string;
+  role: TerminalConversationMessage['role'];
+  bytes: number;
+  rows: Row[];
+}
+
 interface ViewState {
-  rows: Row[]; top: number; visible: number; follow: boolean;
-  layoutKey: string; measured: Map<string, MessageRows>;
+  rows: Row[];
+  top: number;
+  visible: number;
+  follow: boolean;
+  layoutKey: string;
+  measured: Map<string, MessageRows>;
   /** A JSON-restored anchor exists before the first post-handoff measurement. */
   anchor?: Pick<Row, 'id' | 'line'>;
 }
@@ -28,18 +51,27 @@ export class TerminalConversationViewport {
   private readonly conversations = new Map<string, ViewState>();
   private active?: ViewState;
 
-  view(key: string, messages: readonly TerminalConversationMessage[], visible: number,
-    wrap: (text: string) => string[], historyTruncated = false, layoutKey = 'default'): { lines: string[]; newer: number; older: number } {
+  view(
+    key: string,
+    messages: readonly TerminalConversationMessage[],
+    visible: number,
+    wrap: (text: string) => string[],
+    historyTruncated = false,
+    layoutKey = 'default',
+  ): { lines: string[]; newer: number; older: number } {
     let state = this.conversations.get(key);
     const anchor = state?.rows[state.top] ?? state?.anchor;
     const wasFollowing = state?.follow ?? true;
     const encoder = new TextEncoder();
     const previous = state?.layoutKey === layoutKey ? state.measured : undefined;
-    const retained = messages.map(message => {
+    const retained = messages.map((message) => {
       const cached = previous?.get(message.id);
       const same = cached?.text === message.text && cached.role === message.role;
-      return {message, cached: same ? cached : undefined,
-        bytes: same ? cached.bytes : encoder.encode(message.text).length};
+      return {
+        message,
+        cached: same ? cached : undefined,
+        bytes: same ? cached.bytes : encoder.encode(message.text).length,
+      };
     });
     let bytes = retained.reduce((sum, entry) => sum + entry.bytes, 0);
     while (retained.length > 64 || bytes > 262144) {
@@ -50,42 +82,146 @@ export class TerminalConversationViewport {
     }
     const measured = new Map<string, MessageRows>();
     const rows: Row[] = [];
-    if (historyTruncated) rows.push({id: '__history', line: 0, text: 'Earlier conversation history is no longer available.'});
-    for (const {message, cached, bytes: messageBytes} of retained) {
+    if (historyTruncated) {
+      rows.push({
+        id: '__history',
+        line: 0,
+        layer: 'dim',
+        text: 'Earlier conversation history is no longer available.',
+      });
+    }
+    for (const { message, cached, bytes: messageBytes } of retained) {
       let entry = cached;
       if (!entry) {
-        const prefix = message.role === 'user' ? 'YOU > ' : message.role === 'assistant' ? 'AGENT > ' : '';
-        const lines = (prefix + message.text).split(/\r?\n/).flatMap(paragraph => {
+        const prefix = message.role === 'user' ? '> ' : '';
+        const lines = (prefix + message.text).split(/\r?\n/).flatMap((paragraph) => {
           const wrapped = wrap(paragraph);
           return wrapped.length ? wrapped : [''];
         });
-        const messageRows = lines.map((text, line) => ({id: message.id, line, text}));
-        messageRows.push({id: message.id, line: lines.length, text: ''});
-        entry = {text: message.text, role: message.role, bytes: messageBytes, rows: messageRows};
+        const layer: TerminalLayerKind = message.role === 'assistant' ? 'bright' : 'dim';
+        const messageRows: Row[] = lines.map((text, line) => ({ id: message.id, line, text, layer }));
+        messageRows.push({ id: message.id, line: lines.length, text: '', layer: 'blank' });
+        entry = { text: message.text, role: message.role, bytes: messageBytes, rows: messageRows };
       }
       measured.set(message.id, entry);
       for (const row of entry.rows) rows.push(row);
     }
     if (rows[rows.length - 1]?.text === '') rows.pop();
+    return this.commitView(key, state, rows, visible, wasFollowing, anchor, measured, layoutKey);
+  }
+
+  /** Dual-brightness terminal viewport: user/tool/notice rows on Dim, assistant prose on Bright,
+   * with a blank separator line only when transitioning from assistant prose to a new user turn. */
+  viewLayered(
+    key: string,
+    messages: readonly TerminalConversationMessage[],
+    visible: number,
+    formatMessage: (message: TerminalConversationMessage) => TerminalLayeredLine[],
+    historyTruncated = false,
+    layoutKey = 'layered',
+    truncatedNotice = '! Earlier conversation history omitted.',
+  ): { rows: TerminalLayeredLine[]; lines: string[]; newer: number; older: number } {
+    const state = this.conversations.get(key);
+    const anchor = state?.rows[state.top] ?? state?.anchor;
+    const wasFollowing = state?.follow ?? true;
+    const encoder = new TextEncoder();
+    const previous = state?.layoutKey === layoutKey ? state.measured : undefined;
+    const retained = messages.map((message) => {
+      const cached = previous?.get(message.id);
+      const same = cached?.text === message.text && cached.role === message.role;
+      return {
+        message,
+        cached: same ? cached : undefined,
+        bytes: same ? cached.bytes : encoder.encode(message.text).length,
+      };
+    });
+    let bytes = retained.reduce((sum, entry) => sum + entry.bytes, 0);
+    while (retained.length > 64 || bytes > 262144) {
+      const dropped = retained.shift();
+      if (!dropped) break;
+      bytes -= dropped.bytes;
+      historyTruncated = true;
+    }
+    const measured = new Map<string, MessageRows>();
+    const rows: Row[] = [];
+    if (historyTruncated) {
+      rows.push({
+        id: '__history',
+        line: 0,
+        layer: 'dim',
+        text: truncatedNotice,
+      });
+    }
+    for (const { message, cached, bytes: messageBytes } of retained) {
+      let entry = cached;
+      if (!entry) {
+        const formatted = formatMessage(message);
+        const messageRows: Row[] = formatted.map((item, line) => ({
+          id: message.id,
+          line,
+          text: item.text,
+          layer: item.layer,
+        }));
+        entry = { text: message.text, role: message.role, bytes: messageBytes, rows: messageRows };
+      }
+      measured.set(message.id, entry);
+      if (entry.rows.length === 0) continue;
+      if (rows.length > 0 && message.role === 'user' && rows[rows.length - 1]?.layer === 'bright') {
+        rows.push({ id: `${message.id}:sep`, line: 0, text: ' ', layer: 'blank' });
+      }
+      for (const row of entry.rows) rows.push(row);
+    }
+    const committed = this.commitView(key, state, rows, visible, wasFollowing, anchor, measured, layoutKey);
+    const slice = this.active?.rows.slice(this.active.top, this.active.top + visible) ?? [];
+    return {
+      rows: slice.map((row) => ({ layer: row.layer, text: row.text })),
+      lines: committed.lines,
+      newer: committed.newer,
+      older: committed.older,
+    };
+  }
+
+  private commitView(
+    key: string,
+    previousState: ViewState | undefined,
+    rows: Row[],
+    visible: number,
+    wasFollowing: boolean,
+    anchor: Pick<Row, 'id' | 'line'> | undefined,
+    measured: Map<string, MessageRows>,
+    layoutKey: string,
+  ): { lines: string[]; newer: number; older: number } {
     const maximum = Math.max(0, rows.length - visible);
-    let top = wasFollowing ? maximum : Math.min(state?.top ?? 0, maximum);
+    let top = wasFollowing ? maximum : Math.min(previousState?.top ?? 0, maximum);
     if (!wasFollowing && anchor) {
-      const located = rows.findIndex(row => row.id === anchor.id && row.line === anchor.line);
+      const located = rows.findIndex((row) => row.id === anchor.id && row.line === anchor.line);
       // If retained history evicts the reading anchor, expose the explicit
       // history notice rather than silently jumping to a newer answer.
       top = located >= 0 ? Math.min(located, maximum) : 0;
     }
     const measuredAnchor = rows[top];
-    state = {
-      rows, top, visible, follow: wasFollowing, measured, layoutKey,
-      ...(measuredAnchor ? { anchor: { id: measuredAnchor.id, line: measuredAnchor.line } }
-        : anchor ? { anchor: { ...anchor } } : {}),
+    const state: ViewState = {
+      rows,
+      top,
+      visible,
+      follow: wasFollowing,
+      measured,
+      layoutKey,
+      ...(measuredAnchor
+        ? { anchor: { id: measuredAnchor.id, line: measuredAnchor.line } }
+        : anchor
+          ? { anchor: { ...anchor } }
+          : {}),
     };
     this.conversations.delete(key);
     this.conversations.set(key, state);
     while (this.conversations.size > 8) this.conversations.delete(this.conversations.keys().next().value!);
     this.active = state;
-    return {lines: rows.slice(top, top + visible).map(row => row.text), newer: maximum - top, older: top};
+    return {
+      lines: rows.slice(top, top + visible).map((row) => row.text),
+      newer: maximum - top,
+      older: top,
+    };
   }
 
   scroll(direction: 'up' | 'down'): boolean {

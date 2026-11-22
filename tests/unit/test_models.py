@@ -161,3 +161,11 @@ class TestTheNamesItReportsAreNamesItAccepts:
                      "set a reminder for six",
                      "switch the seat to the window"):
             assert await handle_model_command(said, registry) is None, said
+
+
+def test_recommended_stt_model_uses_base_on_low_memory_macs() -> None:
+    from joat.services.models import recommended_stt_model
+
+    assert recommended_stt_model(8 * 1024**3) == "base"
+    assert recommended_stt_model(16 * 1024**3) == "large-v3_turbo"
+    assert recommended_stt_model(32 * 1024**3) == "large-v3_turbo"

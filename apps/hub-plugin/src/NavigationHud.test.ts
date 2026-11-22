@@ -63,7 +63,8 @@ describe('navigation HUD contract', () => {
     expect(repair.hint).not.toMatch(/long-press/i);
 
     const mode = navigationVisualFixture('nav-mode');
-    expect(mode.options).toEqual(['Walk · 18 min', 'Cycle · 7 min']);
+    expect(mode.options).toEqual(['Walk · 18 min', 'Cycle · 7 min', 'Drive · 4 min']);
+    expect(mode.choiceIds).toEqual(['walking', 'cycling', 'driving']);
     expect(mode.selectedIndex).toBe(0);
   });
 
@@ -102,6 +103,8 @@ describe('the guidance pane without a street tile', () => {
     const { navigationMapFallbackCentre, NAVIGATION_MAP_PANEL, projectNavigationMapToPanel } = await import('./HudCanvasRenderer');
     expect(navigationMapFallbackCentre({ ...route, position: { latitude: 0, longitude: 0.001 } }))
       .toEqual({ latitude: 0, longitude: 0.001, zoom: 16 });
+    expect(navigationMapFallbackCentre({ ...route, position: { latitude: 0, longitude: 0.001 } }, 'driving'))
+      .toEqual({ latitude: 0, longitude: 0.001, zoom: 15 });
     const fitted = navigationMapFallbackCentre(route);
     expect(fitted).toMatchObject({ latitude: 0.0045, longitude: 0.0045 });
     expect(fitted!.zoom).toBeLessThan(16);
@@ -148,5 +151,28 @@ describe('the guidance pane without a street tile', () => {
     expect(arcs.length).toBeGreaterThan(0);
     // The instruction kept to its own pane: nothing drawn past the seam.
     expect(texts.filter(({ text }) => text === 'Turn right').every(({ x }) => x < 288)).toBe(true);
+  });
+
+  it('renders DRIVING · ACTIVE heading and Driving footer fact on the guidance canvas', async () => {
+    const { HudCanvasRenderer } = await import('./HudCanvasRenderer');
+    const texts: string[] = [];
+    const state: Record<string, unknown> = {
+      font: '', textAlign: 'left', lineWidth: 0,
+      measureText: (value: string) => ({ width: value.length * 6 }),
+      fillText: (text: string) => texts.push(text),
+    };
+    const context = new Proxy(state, {
+      get: (target, key) => (key in target ? target[String(key)] : () => undefined),
+      set: (target, key, value) => { target[String(key)] = value; return true; },
+    }) as unknown as CanvasRenderingContext2D;
+    const renderer = Object.create(HudCanvasRenderer.prototype) as InstanceType<typeof HudCanvasRenderer>;
+    (renderer as unknown as { drawNavigation(c: unknown, n: unknown): void }).drawNavigation(context, {
+      view: 'guidance', primary: 'Keep left', secondary: 'onto I-90 W', hint: '2x tap: menu',
+      interaction: 'none', options: [], selectedIndex: 0, mode: 'driving',
+      maneuver: 'slight_left', maneuverDistanceM: 350, remainingDistanceM: 4_200, etaMinutes: 6,
+      progress: 0.3,
+    });
+    expect(texts).toContain('DRIVING · ACTIVE');
+    expect(texts.some((t) => t.startsWith('Driving · 4.2 km left · 6 min'))).toBe(true);
   });
 });

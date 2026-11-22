@@ -4,7 +4,7 @@ import { CapabilityMenu } from './CapabilityMenu';
 import type { HudPresenter } from './HudPresenter';
 import type { MacLink } from './MacLink';
 import { Settings } from './Settings';
-import type { InputEventPayload, MessageUIMessage, PromptPresentMessage, UplinkMessage } from './types';
+import { CAPABILITIES, type InputEventPayload, type MessageUIMessage, type PromptPresentMessage, type UplinkMessage } from './types';
 
 function observe(menu: CapabilityMenu, message: unknown, current = () => true): boolean {
   return menu.observeMessageUI(message, current);
@@ -381,4 +381,129 @@ describe('Messages terminal receipts and contextual Back', () => {
     if (exit === 'disconnect') expect(events(r, 'message-cancel')).toEqual([]);
   });
 
+});
+
+describe('Mail capability parity over the shared comms state machine', () => {
+  it('opens Mail at index 1, selects a thread, taps MAIL · CONVERSATION to reply via capmessage, drives message.ui, and emits mail-* lifecycle events', async () => {
+    const r = rig();
+    const mailIndex = CAPABILITIES.indexOf('Mail' as never);
+    expect(mailIndex).toBe(1);
+    await r.menu.openFromContextualMenu(mailIndex);
+    const menuEvents = events(r, 'capmenu');
+    expect(menuEvents[menuEvents.length - 1]).toMatchObject({
+      containerName: 'capmenu',
+      selectedIndex: 1,
+      selectedName: 'Mail',
+    });
+    const requestId = menuEvents[menuEvents.length - 1]!.requestId!;
+    expect(await r.menu.presentList(
+      'MAIL',
+      ['+ New email', '[2m] [Work] Sarah · Q4 Launch'],
+      requestId,
+      true,
+    )).toBe(true);
+
+    const selected = select(r, 1);
+    expect(selected).toMatchObject({
+      containerName: 'capdata',
+      selectedIndex: 1,
+      selectedName: 'MAIL',
+      requestId,
+    });
+
+    expect(await r.menu.presentList(
+      'MAIL · CONVERSATION',
+      ['Q4 Launch', 'Sarah · via Work (work@example.com)', 'Sarah: Can you review the Q4 launch deck?'],
+      requestId,
+      true,
+      'tap: reply · left x2: back',
+      undefined,
+      'Sarah',
+      undefined,
+      undefined,
+      undefined,
+      { id: 'mail-thread-1', index: 0, count: 1 },
+    )).toBe(true);
+    expect(r.visible()).toBe('MAIL · CONVERSATION');
+
+    r.menu.handleClick();
+    const replies = events(r, 'capmessage');
+    expect(replies).toEqual([expect.objectContaining({
+      containerName: 'capmessage',
+      selectedName: 'MAIL',
+      requestId,
+    })]);
+    expect(replies[0]!.traceId).not.toBe(selected.traceId);
+
+    expect(observe(r.menu, ui(selected, { state: 'preparing', text: 'Preparing email.' }))).toBe(true);
+    expect(observe(r.menu, ui(selected, { state: 'awaiting_input', text: 'Listening…' }))).toBe(true);
+    expect(owns(r.menu, prompt())).toBe(true);
+    expect(observe(r.menu, ui(selected, { state: 'awaiting_confirmation', text: 'Reply (Work) to sarah@example.com?' }))).toBe(true);
+    expect(actionCurrent(r.menu, 'messages-ui-one')).toBe(true);
+
+    const sentReceipt = ui(selected, { state: 'sent', text: 'Sent.' });
+    expect(observe(r.menu, sentReceipt)).toBe(true);
+    expect(await show(r.menu, sentReceipt)).toBe(true);
+    expect(r.visible()).toBe('MAIL · CONVERSATION');
+
+    // Back from MAIL · REVIEW -> MAIL · CONVERSATION emits mail-conversation.
+    expect(await r.menu.presentList(
+      'MAIL · REVIEW',
+      ['To sarah@example.com', 'Sounds great, ship it.'],
+      requestId,
+      true,
+      'tap: confirm · left x2: back',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { id: 'mail-review-1', index: 0, count: 1 },
+    )).toBe(true);
+    await r.menu.toggle();
+    expect(r.visible()).toBe('MAIL · CONVERSATION');
+    expect(events(r, 'capability-lifecycle')).toContainEqual(expect.objectContaining({
+      selectedName: 'mail-conversation', requestId, traceId: selected.traceId,
+    }));
+
+    // Back from MAIL · CONVERSATION -> MAIL emits mail-list.
+    await r.menu.toggle();
+    expect(r.visible()).toBe('MAIL');
+    expect(events(r, 'capability-lifecycle')).toContainEqual(expect.objectContaining({
+      selectedName: 'mail-list', requestId, traceId: selected.traceId,
+    }));
+
+    // Back from MAIL -> Overview emits mail-home.
+    await r.menu.toggle();
+    expect(r.visible()).toBe('Overview');
+    expect(events(r, 'capability-lifecycle')).toContainEqual(expect.objectContaining({
+      selectedName: 'mail-home', requestId, traceId: selected.traceId,
+    }));
+  });
+
+  it('replaces a dropped Mail response with truthful retry copy and reopens Mail on tap', async () => {
+    const r = rig();
+    await r.menu.openFromContextualMenu(CAPABILITIES.indexOf('Mail' as never));
+    const firstRequestId = events(r, 'capmenu')[0]!.requestId!;
+    await vi.advanceTimersByTimeAsync(12_000);
+
+    const retryFrame = r.frames[r.frames.length - 1];
+    expect(retryFrame).toMatchObject({
+      title: 'MAIL · RETRY',
+      items: ['JOAT did not answer. Tap to retry Mail.'],
+      hint: 'tap: retry · 2x tap: back',
+      selectable: true,
+    });
+
+    r.menu.handleClick();
+    await vi.advanceTimersByTimeAsync(0);
+    const menuEvents = events(r, 'capmenu');
+    expect(menuEvents).toHaveLength(2);
+    expect(menuEvents[1]).toMatchObject({
+      containerName: 'capmenu',
+      selectedIndex: 1,
+      selectedName: 'Mail',
+    });
+    expect(menuEvents[1]!.requestId).not.toBe(firstRequestId);
+  });
 });

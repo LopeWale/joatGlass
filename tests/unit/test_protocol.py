@@ -12,11 +12,13 @@ from datetime import date, timedelta
 
 from pathlib import Path
 
+import json
 import pytest
 
-from joat.ble.hub_gateway import pack_pcm
+from joat.ble.hub_gateway import HubGatewayTransport, pack_pcm
 from joat.core.protocol import (
-    AgentTerminalHudView,
+    TERMINAL_ACTIONS,
+    TERMINAL_HUD_STATES,
     AgentTerminalHudView,
     Auth,
     AssistantOverlay,
@@ -26,9 +28,8 @@ from joat.core.protocol import (
     AuthAccepted,
     Audio,
     AudioControl,
-    BrainstormAction,
-    BrainstormHudView,
     Confirm,
+    ConfirmCancel,
     ConfirmRequest,
     ContainerId,
     Device,
@@ -67,6 +68,7 @@ from joat.core.protocol import (
     Policy,
     ProtocolError,
     Shutdown,
+    TerminalAction,
     parse_uplink,
 )
 
@@ -113,6 +115,38 @@ class TestParseUplink:
             "revision": 2, "sequence": 7, "state": "wrong_way",
         })
         assert state.state == "wrong_way"  # type: ignore[attr-defined]
+        enriched = parse_uplink({
+            "kind": "navigation.state",
+            "sessionId": "nav-1",
+            "routeId": "route-1",
+            "revision": 2,
+            "sequence": 8,
+            "state": "guidance",
+            "maneuver": "turn_right",
+            "maneuverDistanceM": 120,
+            "instruction": "onto Lincoln Ave",
+            "stepId": "step-2",
+            "remainingDistanceM": 940,
+            "etaMinutes": 6,
+        })
+        assert enriched.state == "guidance"  # type: ignore[attr-defined]
+        assert enriched.maneuver == "turn_right"  # type: ignore[attr-defined]
+        assert enriched.maneuver_distance_m == 120.0  # type: ignore[attr-defined]
+        assert enriched.instruction == "onto Lincoln Ave"  # type: ignore[attr-defined]
+        assert enriched.step_id == "step-2"  # type: ignore[attr-defined]
+        assert enriched.remaining_distance_m == 940.0  # type: ignore[attr-defined]
+        assert enriched.eta_minutes == 6.0  # type: ignore[attr-defined]
+        for forbidden_key in ("latitude", "longitude"):
+            with pytest.raises(ProtocolError, match="unsupported fields"):
+                parse_uplink({
+                    "kind": "navigation.state",
+                    "sessionId": "nav-1",
+                    "routeId": "route-1",
+                    "revision": 2,
+                    "sequence": 9,
+                    "state": "guidance",
+                    forbidden_key: 41.9,
+                })
 
     def test_reroute_request_is_the_only_navigation_uplink_with_a_coordinate(self) -> None:
         message = parse_uplink({
@@ -265,25 +299,45 @@ class TestParseUplink:
             with pytest.raises(ProtocolError, match="conversation"):
                 parse_uplink({"kind": "input", "event": event})
 
-    def test_brainstorm_action_is_bounded_and_typed(self) -> None:
-        message = parse_uplink({"kind": "brainstorm.action", "action": "cancel"})
-        assert message == BrainstormAction(action="cancel")
-        # The long-press on a running work session (2026-10-06).
-        assert parse_uplink({"kind": "brainstorm.action", "action": "cancel_terminal"}) == \
-            BrainstormAction(action="cancel_terminal")
+    def test_terminal_action_round_trips_all_terminal_actions(self) -> None:
+        assert TERMINAL_ACTIONS == (
+            "begin_terminal_input",
+            "retry_terminal",
+            "cancel_terminal",
+            "approve_terminal",
+            "deny_terminal",
+        )
+        for action in TERMINAL_ACTIONS:
+            wire = TerminalAction(action=action).to_wire()
+            assert wire == {"kind": "terminal.action", "action": action}
+            assert parse_uplink(wire) == TerminalAction(action=action)
 
     @pytest.mark.parametrize("payload", [
-        {"kind": "brainstorm.action", "action": "invent"},
-        {"kind": "brainstorm.action", "action": "cancel", "topic": "leak"},
-        # The deleted diagnostic self-test's action (2026-10-06) is gone.
-        {"kind": "brainstorm.action", "action": "begin_acceptance"},
-        {"kind": "brainstorm.action", "action": "begin_acceptance", "surface": "brainstorm", "source": "right", "gesture": "double_press"},
-        {"kind": "brainstorm.action", "action": "cancel", "surface": "brainstorm"},
-        {"kind": "brainstorm.action"},
+        {"kind": "terminal.action", "action": "invent"},
+        {"kind": "terminal.action", "action": "begin_topic_capture"},
+        {"kind": "terminal.action", "action": "show_terminal"},
+        {"kind": "terminal.action", "action": "show_brainstorm"},
+        {"kind": "terminal.action", "action": "cancel"},
+        {"kind": "terminal.action", "action": "begin_terminal_input", "topic": "leak"},
+        {"kind": "terminal.action", "action": "begin_terminal_input", "surface": "agent_terminal"},
+        {"kind": "terminal.action"},
     ])
-    def test_brainstorm_action_rejects_freeform_or_unknown_fields(self, payload: object) -> None:
-        with pytest.raises(ProtocolError, match="brainstorm action"):
+    def test_terminal_action_rejects_removed_brainstorm_verbs_or_unknown_fields(
+        self, payload: object,
+    ) -> None:
+        with pytest.raises(ProtocolError, match="terminal action"):
             parse_uplink(payload)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("payload", [
+        {"kind": "brainstorm.action", "action": "cancel"},
+        {"kind": "brainstorm.action", "action": "begin_terminal_input"},
+        {"kind": "brainstorm.view", "brainstorm": {"state": "ready"}},
+        {"kind": "control.action", "action": "refresh"},
+        {"kind": "control.state", "revision": 1},
+    ])
+    def test_removed_brainstorm_and_control_kinds_are_rejected(self, payload: dict[str, object]) -> None:
+        with pytest.raises(ProtocolError, match="unknown uplink kind"):
+            parse_uplink(payload)
 
     def test_left_temple_click_is_not_a_confirm(self) -> None:
         msg = parse_uplink(
@@ -504,19 +558,29 @@ class TestParseUplink:
             with pytest.raises(ProtocolError):
                 parse_uplink({"kind": "g2.diagnostic", "event": bad})
 
-    def test_g2_diagnostic_accepts_only_redacted_brainstorm_action_receipts(self) -> None:
+    def test_g2_diagnostic_accepts_only_redacted_terminal_action_receipts(self) -> None:
         assert parse_uplink({
             "kind": "g2.diagnostic",
             "event": {
-                "type": "brainstorm_action", "action": "show_terminal", "surface": "brainstorm",
-                "source": "right", "gesture": "tap", "delivery": "sys",
+                "type": "terminal_action", "action": "begin_terminal_input",
+                "surface": "agent_terminal", "source": "right", "gesture": "tap",
+                "delivery": "sys",
             },
         }) == G2Diagnostic(event={
-            "type": "brainstorm_action", "action": "show_terminal", "surface": "brainstorm",
-            "source": "right", "gesture": "tap", "delivery": "sys",
+            "type": "terminal_action", "action": "begin_terminal_input",
+            "surface": "agent_terminal", "source": "right", "gesture": "tap",
+            "delivery": "sys",
         })
-        # The Brainstorm frame receipt hashed the four-tile raster, which no
-        # longer exists, and fed only the self-test deleted 2026-10-06.
+        assert parse_uplink({
+            "kind": "g2.diagnostic",
+            "event": {
+                "type": "terminal_action", "action": "retry_terminal",
+                "source": "right", "gesture": "tap", "delivery": "text",
+            },
+        }) == G2Diagnostic(event={
+            "type": "terminal_action", "action": "retry_terminal",
+            "source": "right", "gesture": "tap", "delivery": "text",
+        })
         with pytest.raises(ProtocolError, match="visual frame kind"):
             parse_uplink({
                 "kind": "g2.diagnostic",
@@ -529,7 +593,14 @@ class TestParseUplink:
     @pytest.mark.parametrize("event", [
         {
             "type": "brainstorm_action", "action": "show_terminal", "surface": "brainstorm",
+            "source": "right", "gesture": "tap", "delivery": "sys",
+        },
+        {
+            "type": "terminal_action", "action": "begin_terminal_input",
             "source": "right", "gesture": "tap", "delivery": "sys", "topic": "private",
+        },
+        {
+            "type": "frame_timing", "frame": 1, "kind": "brainstorm", "changedTiles": 1,
         },
         {
             "type": "visual_frame", "kind": "brainstorm", "surface": "brainstorm",
@@ -540,7 +611,7 @@ class TestParseUplink:
             "state": "running", "sha256": "a" * 63,
         },
     ])
-    def test_g2_brainstorm_diagnostic_rejects_content_and_noncanonical_digest(self, event) -> None:  # type: ignore[no-untyped-def]
+    def test_g2_terminal_diagnostic_rejects_brainstorm_content_and_noncanonical_digest(self, event) -> None:  # type: ignore[no-untyped-def]
         with pytest.raises(ProtocolError):
             parse_uplink({"kind": "g2.diagnostic", "event": event})
 
@@ -876,48 +947,38 @@ class TestDownlinkWire:
         assert len(wire["planningGrid"]) == 42
         assert all("title" not in cell and "identifier" not in cell for cell in wire["planningGrid"])
 
-    def test_brainstorm_view_is_bounded_and_has_no_terminal_payload(self) -> None:
-        """The name of this test is now enforceable.
+    def test_removed_protocol_dataclasses_do_not_exist(self) -> None:
+        import joat.core.protocol as protocol_module
 
-        docs/SESSION_MODEL.md:74-75 requires the Brainstorm model to carry
-        no Agent Terminal, Hermes, OpenClaw, endpoint, approval or
-        tool-policy field. It carried all of them, discriminated by a
-        `screen` key, and this test asserted that payload as correct. The
-        two surfaces are two frames now, so the absence is structural
-        rather than a promise.
-        """
-        wire = BrainstormHudView(
-            state="running",
-            topic="cold-start latency",
-            collaborators=["Codex", "Claude"],
-            active_speaker="Claude · critic",
-            activity="CLAUDE > Key it on the generation too.",
-        ).to_wire()
-        assert wire["kind"] == "brainstorm.view"
-        assert wire["brainstorm"] == {
-            "state": "running",
-            "topic": "cold-start latency",
-            "collaborators": ["Codex", "Claude"],
-            "activeSpeaker": "Claude · critic",
-            "activity": "CLAUDE > Key it on the generation too.",
-        }
-        # Structural, not aspirational: every forbidden field is simply
-        # absent from the dataclass, so no producer can reintroduce one.
-        for forbidden in ("screen", "terminalState", "endpointHost",
-                          "terminalReason", "noToolsChecked"):
-            assert forbidden not in wire["brainstorm"]
+        for removed in (
+            "BrainstormHudView",
+            "BrainstormAction",
+            "ControlState",
+            "ControlAction",
+            "ControlSeat",
+        ):
+            assert not hasattr(protocol_module, removed), f"{removed} should be removed"
 
-    def test_agent_terminal_view_owns_the_connection_facts(self) -> None:
-        """Its own frame, its own kind — and the fields that describe only
-        this surface live here instead of riding every Brainstorm frame."""
+    def test_agent_terminal_view_owns_clean_terminal_facts(self) -> None:
+        """AgentTerminalHudView carries only clean terminal fields and states."""
+        assert TERMINAL_HUD_STATES == frozenset({
+            "unavailable", "approval_required", "ready", "running",
+            "settled", "cancelled", "failed", "blocked",
+        })
+        for state in TERMINAL_HUD_STATES:
+            assert AgentTerminalHudView(
+                state=state,
+                focus="claude · ready",
+                lanes=["claude · ready"],
+                activity="",
+            ).to_wire()["terminal"]["state"] == state
+
         wire = AgentTerminalHudView(
             state="ready",
             focus="work · run",
             lanes=["work·run", "calendar·ask1"],
             activity="> run the http audit",
-            endpoint_host="home-mac.example-tailnet.ts.net",
             reason="",
-            no_tools_checked=True,
         ).to_wire()
         assert wire["kind"] == "agent_terminal.view"
         assert wire["terminal"] == {
@@ -925,20 +986,15 @@ class TestDownlinkWire:
             "focus": "work · run",
             "lanes": ["work·run", "calendar·ask1"],
             "activity": "> run the http audit",
-            "endpointHost": "home-mac.example-tailnet.ts.net",
             "terminalReason": "",
-            "noToolsChecked": True,
-            # Distinct from state="approval_required", which ALSO describes
-            # a connection whose device is unapproved. Opposite remedies,
-            # so a gesture keys on the count, not the state word.
             "approvals": 0,
         }
+        for forbidden in ("endpointHost", "noToolsChecked", "screen", "topic", "collaborators"):
+            assert forbidden not in wire["terminal"]
 
-        with pytest.raises(ProtocolError):
-            BrainstormHudView(state="acceptance_ready", topic="t", collaborators=[], activity="x").to_wire()
-
-        topic_capture = BrainstormHudView(state="topic_capture", topic="Speak your question", collaborators=["Codex", "Claude", "Hermes"], activity="Your next spoken phrase starts this Brainstorm.").to_wire()
-        assert topic_capture["brainstorm"]["state"] == "topic_capture"
+        for bad_state in ("topic_capture", "acceptance_ready", "invented"):
+            with pytest.raises(ProtocolError):
+                AgentTerminalHudView(state=bad_state, focus="claude", lanes=[], activity="x").to_wire()
 
     def test_productivity_view_is_typed_and_bounded(self) -> None:
         wire = ProductivityHudView(
@@ -1262,6 +1318,43 @@ class TestDownlinkWire:
         assert wire["plan"]["mode"] == "walking"  # type: ignore[index]
         assert wire["plan"]["steps"][0]["maneuver"] == "turn_right"  # type: ignore[index]
         assert wire["plan"]["policy"]["offRouteSamples"] == 3  # type: ignore[index]
+        assert "phoneFixes" not in wire
+
+        driving_wire = NavigationRoute(
+            session_id="nav-2", request_id="route-request-2", generation=11,
+            route_id="route-2", revision=1, destination_label="Cajun Corner",
+            eta_minutes=6,
+            phone_fixes=True,
+            plan=NavigationRoutePlan(
+                mode="driving",
+                geometry=[
+                    NavigationCoordinate(latitude=41.9, longitude=-87.65),
+                    NavigationCoordinate(latitude=41.901, longitude=-87.64),
+                ],
+                steps=[NavigationRouteStep(
+                    id="step-1", maneuver="turn_right",
+                    instruction="onto Test Ave", distance_along_route_m=500,
+                )],
+                policy=policy,
+            ),
+        ).to_wire()
+        assert driving_wire["plan"]["mode"] == "driving"  # type: ignore[index]
+        assert driving_wire["phoneFixes"] is True
+
+        from joat.core.protocol import NavigationFix, NavigationResume
+        assert NavigationFix(
+            session_id="nav-2", latitude=41.9, longitude=-87.65, accuracy=5.0,
+        ).to_wire() == {
+            "kind": "navigation.fix",
+            "sessionId": "nav-2",
+            "latitude": 41.9,
+            "longitude": -87.65,
+            "accuracy": 5.0,
+        }
+        assert NavigationResume(session_id="nav-2").to_wire() == {
+            "kind": "navigation.resume",
+            "sessionId": "nav-2",
+        }
 
     def test_navigation_origin_request_is_generation_bound(self) -> None:
         assert NavigationOriginRequest(
@@ -1306,6 +1399,18 @@ class TestDownlinkWire:
         source = (Path(__file__).resolve().parents[2] / "apps/hub-plugin/src/types.ts").read_text()
         assert "export type ConfirmationPurpose = 'terminal_input';" in source
         assert "purpose?: ConfirmationPurpose" in source
+
+    def test_confirm_cancel_wire_shape_and_typescript_mirror(self) -> None:
+        assert ConfirmCancel("act-1").to_wire() == {
+            "kind": "confirm.cancel",
+            "actionId": "act-1",
+        }
+        for invalid in ("", "   ", "x" * 129):
+            with pytest.raises(ProtocolError):
+                ConfirmCancel(invalid).to_wire()
+        source = (Path(__file__).resolve().parents[2] / "apps/hub-plugin/src/types.ts").read_text()
+        assert "| { kind: 'confirm.cancel'; actionId: string }" in source
+        assert "'Messages', 'Mail', 'Reminders', 'Navigation'," in source
 
     def test_shutdown_defaults_to_confirmation_dialog(self) -> None:
         # exitMode 1 = show a dialog. Defaulting to 0 would close the app out
@@ -1685,18 +1790,6 @@ class TestTheTwoLanguagesDescribeTheSameWire:
             return own | (fields(match[1]) if match[1] else set())
         return fields(interface)
 
-    def test_the_brainstorm_frame_matches_its_typescript_payload(self) -> None:
-        view = BrainstormHudView(
-            state="ready", topic="t", collaborators=["a"],
-            active_speaker="s", activity="x",
-        )
-        emitted = set(view.to_wire()["brainstorm"].keys())
-        declared = self._ts_fields("BrainstormViewPayload")
-        assert emitted == declared, (
-            f"engine-only: {sorted(emitted - declared)}, "
-            f"plugin-only: {sorted(declared - emitted)}"
-        )
-
     def test_messages_ui_receipt_matches_its_typescript_payload(self) -> None:
         from joat.core.protocol import MessageUIView
         wire = MessageUIView('request', 'selection', 'messages-ui-action',
@@ -1708,10 +1801,11 @@ class TestTheTwoLanguagesDescribeTheSameWire:
 
     def test_the_terminal_frame_matches_its_typescript_model(self) -> None:
         view = AgentTerminalHudView(
-            state="ready", focus="hermes", lanes=["l"], activity="x",
-            endpoint_host="h", reason="r", no_tools_checked=True, approvals=1,
+            state="ready", focus="claude", lanes=["l"], activity="x",
+            reason="r", approvals=1,
             opening_request_id="visit", opening_selection_id="selection",
             conversation_id="conversation", history_truncated=False, input_required=True,
+            task_recovery=False,
         )
         wire = view.to_wire()
         payload_key = next(k for k in wire if k != "kind")
@@ -1721,19 +1815,74 @@ class TestTheTwoLanguagesDescribeTheSameWire:
             f"engine-only: {sorted(emitted - declared)}, "
             f"plugin-only: {sorted(declared - emitted)}"
         )
+        assert "endpointHost" not in emitted
+        assert "noToolsChecked" not in emitted
 
-    def test_the_brainstorm_frame_carries_no_terminal_field(self) -> None:
-        """docs/SESSION_MODEL.md:84-88, checked against the emitted keys
-        rather than the class definition — a producer could add one."""
-        view = BrainstormHudView(
-            state="ready", topic="t", collaborators=[], activity="x",
+    def test_terminal_action_and_hud_state_match_typescript_types(self) -> None:
+        import re
+
+        source = (Path(__file__).resolve().parents[2]
+                  / "apps/hub-plugin/src/types.ts").read_text()
+        state_match = re.search(r"export type TerminalHudState =\s*(.*?);", source, re.S)
+        assert state_match is not None
+        ts_states = set(re.findall(r"'([^']+)'", state_match.group(1)))
+        assert ts_states == TERMINAL_HUD_STATES
+
+        action_match = re.search(r"export type TerminalAction =\s*(.*?);", source, re.S)
+        assert action_match is not None
+        ts_actions = tuple(re.findall(r"'([^']+)'", action_match.group(1)))
+        assert set(ts_actions) == set(TERMINAL_ACTIONS)
+        assert self._ts_fields("TerminalActionMessage") == {"kind", "action"}
+
+        for removed in (
+            "BrainstormViewPayload",
+            "BrainstormHudScreen",
+            "BrainstormHudState",
+            "BrainstormHudModel",
+            "BrainstormAction",
+            "ControlStateView",
+            "ControlActionMessage",
+            "'brainstorm.view'",
+            "'brainstorm.action'",
+            "'control.state'",
+            "'control.action'",
+        ):
+            assert removed not in source, f"types.ts still contains {removed}"
+
+
+class TestHubGatewayTerminalAction:
+    def test_gateway_exposes_on_terminal_action_and_dispatches_generation_bound_actions(self) -> None:
+        transport = HubGatewayTransport()
+        assert hasattr(transport, "on_terminal_action")
+        assert not hasattr(transport, "on_brainstorm_action")
+        assert not hasattr(transport, "on_control_action")
+
+        received: list[TerminalAction] = []
+        transport.on_terminal_action(received.append)
+        transport._session_id = "session-1"
+        transport._connection_generation = 4
+
+        for action in TERMINAL_ACTIONS:
+            transport._dispatch(
+                json.dumps({"kind": "terminal.action", "action": action}),
+                "session-1",
+            )
+        assert received == [
+            TerminalAction(action=action, connection_generation=4)
+            for action in TERMINAL_ACTIONS
+        ]
+
+        # Removed brainstorm.action and control.action uplinks are dropped cleanly.
+        before = len(received)
+        transport._dispatch(
+            json.dumps({"kind": "brainstorm.action", "action": "begin_terminal_input"}),
+            "session-1",
         )
-        emitted = set(view.to_wire()["brainstorm"].keys())
-        forbidden = {
-            "endpointHost", "terminalState", "terminalReason",
-            "noToolsChecked", "approvals", "focus", "lanes", "screen",
-        }
-        assert not (emitted & forbidden), sorted(emitted & forbidden)
+        transport._dispatch(
+            json.dumps({"kind": "control.action", "action": "refresh"}),
+            "session-1",
+        )
+        assert len(received) == before
 
 
 @pytest.mark.parametrize("request_id,selection_id", [("visit", None), (None, "selection"), ("", "selection"), ("visit", "")])

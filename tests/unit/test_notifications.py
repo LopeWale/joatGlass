@@ -283,18 +283,18 @@ class TestManagerCards:
                 self.gate.set()
 
         sess = Gated()
-        mgr = SessionManager(HudWriter(transport), lambda t: sess)
+        mgr = SessionManager(HudWriter(transport))
         mgr.notify(Card(source="Mail", channel="Mail", summary="first card"))
         await asyncio.sleep(0)
         assert any(isinstance(m, HudText) and "first card" in m.text for m in transport.sent)
 
-        assert mgr.handle_transcript("debate something") is True
+        assert mgr.try_start_session(sess) is True
         await asyncio.sleep(0)
         mgr.notify(Card(source="SMS", channel="Messages",
-                        summary="queued while debating"))
-        assert not any("queued while debating" in getattr(m, "text", "") for m in transport.sent)
-        assert "queued while debating" not in caplog.text
+                        summary="queued while active"))
+        assert not any("queued while active" in getattr(m, "text", "") for m in transport.sent)
+        assert "queued while active" not in caplog.text
         assert "card queued behind active session urgency=" in caplog.text
         sess.gate.set()
         await asyncio.sleep(0); await asyncio.sleep(0); await asyncio.sleep(0)
-        assert any("queued while debating" in getattr(m, "text", "") for m in transport.sent)
+        assert any("queued while active" in getattr(m, "text", "") for m in transport.sent)

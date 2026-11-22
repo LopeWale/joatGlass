@@ -143,6 +143,44 @@ An approval alternative means: deny the original request, then steer the same
 session with the replacement instruction. It is not an approval of modified
 work. Concurrent sessions retain independent lifecycle and output streams.
 
+## Antigravity lane — 2026-11-19
+
+`agents/antigravity_terminal.py` runs Google's Antigravity agent inside the
+JOAT engine through the Python SDK (`google-antigravity`), the same runtime
+as the Antigravity app and `agy`. It is one roster lane, `antigravity`.
+
+| Runtime contract item | How the lane meets it |
+|---|---|
+| Start and stream a turn | `agent.chat()`; text deltas and `⏺ tool: detail` lines reach the tail |
+| Steer | the roster's queued line, landed when the turn settles |
+| Cancel | `ChatResponse.cancel()`; "confirmed" only when the SDK call returned |
+| Approvals | every `run_command` asks through `confirm_run_command(handler=…)`; `terminal approve/deny` answers; cancel or a reset denies whatever waits |
+| History | `terminal history` reads the saved session's own steps, not JOAT's tail |
+| Reconnect | the conversation id is saved; the next turn after a JOAT restart resumes it (`SessionContinuationMode.RESUME`); a lost session starts a new one and says so |
+| List sessions | not supported: the SDK cannot list sessions, so the Antigravity app's sessions are not visible here |
+
+Setup on the Mac:
+
+- Key: `.venv/bin/python -m joat.agents.antigravity_terminal set-key` (input
+  hidden; written 0600 to `~/Library/Application Support/JOAT/gemini-api-key`).
+  `status` says what is missing without printing the key; `check` sends one
+  tiny metered request. `GEMINI_API_KEY` in JOAT's environment also works.
+  The SDK cannot use the Antigravity app's sign-in.
+- Folder: `~/Library/Application Support/JOAT/antigravity-terminal.json`,
+  `{"cwd": "~/Developer/<project>"}`. File tools are confined to it. Without
+  the file the lane works in the home folder: set it.
+- State: `~/Library/Application Support/JOAT/antigravity/<lane>/` holds the
+  saved conversations and the agent's own app data, isolated from
+  `~/.gemini/antigravity`, so the Antigravity app's plugins, hooks and MCP
+  servers do not load into the glasses agent.
+
+Verified: unit tests with a fake SDK (streaming, approvals, cancel, resume,
+lost session, history de-duplication, error wording, key file modes), and the
+real SDK runtime on this Mac with a deliberately invalid key — the harness
+starts, the API's refusal reaches the lenses as one line, the conversation id
+is saved, and a fresh lane resumes it and reads its history. Not verified: a
+turn with a real key, and the lane on the glasses.
+
 ## Hermes, OpenClaw, and A2A boundary
 
 Hermes and OpenClaw remain independent agent runtimes. Agent Terminal is the

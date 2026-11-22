@@ -32,6 +32,15 @@ struct AccessSettingsView: View {
                     }
                 }
                 Divider()
+                AccessPermissionRow(title: "Contacts", symbol: "person.crop.circle", detail: "Look up names, numbers and emails when you ask.",
+                                    value: engine.contactsAccess, granted: engine.contactsAccess == "full access") {
+                    if ["denied", "restricted"].contains(engine.contactsAccess) {
+                        Button("Open Privacy Settings…") { openPrivacy("Privacy_Contacts") }
+                    } else {
+                        Button("Grant Access…") { engine.requestContactsAccess() }
+                    }
+                }
+                Divider()
                 AccessPermissionRow(title: "Messages", symbol: "message", detail: "Read message history through Full Disk Access.",
                                     value: messages.label, granted: messages == .granted) {
                     Button("Open Privacy Settings…") { openPrivacy("Privacy_AllFiles") }

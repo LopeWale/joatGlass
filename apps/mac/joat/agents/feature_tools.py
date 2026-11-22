@@ -15,7 +15,8 @@ from ..services.agent_terminal import MAX_TERMINAL_INSTRUCTION_CHARS
 from ..services.note_commands import NoteCommandController
 from ..services.pomodoro import PomodoroService
 from ..services.session import (
-    BrainstormStartResult, MAX_BRAINSTORM_TOPIC_CHARS, MAX_NAVIGATION_DESTINATION_CHARS,
+    MAX_NAVIGATION_DESTINATION_CHARS,
+    SessionStartResult,
 )
 from .tools import Tool
 
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
 class FeatureName(StrEnum):
     MESSAGES = "messages"
     NOTIFICATIONS = "notifications"
-    BRAINSTORM = "brainstorm"
     AGENT_TERMINAL = "agent_terminal"
     PLANNING = "planning"
     NAVIGATION = "navigation"
@@ -50,7 +50,6 @@ class TimerAction(StrEnum):
 _FEATURE_TARGETS: dict[FeatureName, str] = {
     FeatureName.MESSAGES: "Messages",
     FeatureName.NOTIFICATIONS: "Notifications",
-    FeatureName.BRAINSTORM: "Brainstorm",
     FeatureName.AGENT_TERMINAL: "Agent Terminal",
     FeatureName.PLANNING: "Planning",
     FeatureName.NAVIGATION: "Navigation",
@@ -77,12 +76,8 @@ class PanelActivator(Protocol):
     async def activate(self, tab: str) -> None: ...
 
 
-class BrainstormStarter(Protocol):
-    def start_brainstorm(self, topic: str) -> BrainstormStartResult: ...
-
-
 class NavigationStarter(Protocol):
-    def start_navigation(self, destination: str) -> BrainstormStartResult: ...
+    def start_navigation(self, destination: str) -> SessionStartResult: ...
 
 
 class TerminalRosterReader(Protocol):
@@ -238,24 +233,17 @@ def feature_tools(
     pomodoro: PomodoroService,
     panels: PanelActivator,
     max_note_operations: int = 256,
-    brainstorm: BrainstormStarter | None = None,
-    max_brainstorm_operations: int = 256,
+    max_navigation_operations: int = 256,
     terminal: Callable[[str, str, str], Awaitable[str]] | None = None,
     terminal_lanes: Sequence[str] = (),
     navigation: NavigationStarter | None = None,
 ) -> list[Tool]:
-    """Compose one adapter instance for the lifetime of the assistant's belt.
-
-    Note retry identities survive tool cancellation, not process restarts.
-    The bounded ledger never evicts an identity: once full, new saves fail
-    explicitly while known retries remain safe.
-    """
+    """Compose one adapter instance for the lifetime of the assistant's belt."""
     if type(max_note_operations) is not int or max_note_operations < 1:
         raise ValueError("max_note_operations must be a positive integer")
-    if type(max_brainstorm_operations) is not int or max_brainstorm_operations < 1:
-        raise ValueError("max_brainstorm_operations must be a positive integer")
+    if type(max_navigation_operations) is not int or max_navigation_operations < 1:
+        raise ValueError("max_navigation_operations must be a positive integer")
     saved_notes: dict[str, _SavedNote] = {}
-    started_brainstorms: dict[str, bytes] = {}
     started_routes: dict[str, bytes] = {}
     lane_names = tuple(terminal_lanes)
 
@@ -283,12 +271,12 @@ def feature_tools(
             if previous != digest:
                 return "error: operation_id was already used for a different destination"
             return "Navigation was already started for this request; no second route was requested."
-        if len(started_routes) >= max_brainstorm_operations:
+        if len(started_routes) >= max_navigation_operations:
             return "error: navigation retry capacity reached for this assistant process; no route started"
         if navigation is None:
             return "error: navigation is unavailable on this Mac; no route started"
         result = navigation.start_navigation(destination)
-        if result is BrainstormStartResult.STARTED:
+        if result is SessionStartResult.STARTED:
             started_routes[operation_id] = digest
             return (
                 "Navigation started. The glasses now search for that place, ask the wearer "
@@ -296,13 +284,13 @@ def feature_tools(
                 "current position. Nothing else is needed from you."
             )
         return {
-            BrainstormStartResult.BUSY: (
-                "error: another session (a Brainstorm or a route) is active; it must finish "
+            SessionStartResult.BUSY: (
+                "error: another session is active; it must finish "
                 "or be stopped before a new route"
             ),
-            BrainstormStartResult.UNAVAILABLE: "error: navigation is unavailable on this Mac; no route started",
-            BrainstormStartResult.CLOSED: "error: the session controller is closed; no route started",
-            BrainstormStartResult.INVALID: "error: destination is invalid; no route started",
+            SessionStartResult.UNAVAILABLE: "error: navigation is unavailable on this Mac; no route started",
+            SessionStartResult.CLOSED: "error: the session controller is closed; no route started",
+            SessionStartResult.INVALID: "error: destination is invalid; no route started",
         }[result]
 
     async def send_terminal_instruction(arguments: dict[str, Any]) -> str:
@@ -323,47 +311,6 @@ def feature_tools(
         if terminal is None:
             return "error: Terminal is unavailable; no instruction submitted"
         return await terminal(lane, instruction, operation_id)
-
-    async def start_brainstorm(arguments: dict[str, Any]) -> str:
-        if not isinstance(arguments, dict) or set(arguments) != {"topic", "operation_id"}:
-            return "error: start_brainstorm requires only topic and operation_id"
-        topic, operation_id = arguments["topic"], arguments["operation_id"]
-        if (
-            not isinstance(topic, str) or not topic.strip() or "\x00" in topic
-            or len(topic) > MAX_BRAINSTORM_TOPIC_CHARS
-        ):
-            return f"error: topic must be non-empty text of at most {MAX_BRAINSTORM_TOPIC_CHARS} characters without null characters"
-        try:
-            encoded = topic.encode("utf-8")
-        except UnicodeEncodeError:
-            return "error: topic must be valid UTF-8 text"
-        if not isinstance(operation_id, str) or _OPERATION_ID.fullmatch(operation_id) is None:
-            return "error: operation_id must be 1-128 letters, digits, dots, underscores, colons or hyphens, starting with a letter or digit"
-        digest = sha256(encoded).digest()
-        previous = started_brainstorms.get(operation_id)
-        if previous is not None:
-            if previous != digest:
-                return "error: operation_id was already used for a different topic"
-            return (
-                "Brainstorm was already started for this request; no new session launched. "
-                "This receipt does not report its current status."
-            )
-        if len(started_brainstorms) >= max_brainstorm_operations:
-            return "error: Brainstorm retry capacity reached for this assistant process; no session started"
-        if brainstorm is None:
-            return "error: Brainstorm is unavailable; no session started"
-        result = brainstorm.start_brainstorm(topic)
-        if result is BrainstormStartResult.STARTED:
-            # Admission and ledger insertion are synchronous. Tool timeout or
-            # simultaneous retries cannot launch a second collaborator session.
-            started_brainstorms[operation_id] = digest
-            return "Brainstorm started with the supplied topic. Follow the Brainstorm view for collaborator responses."
-        return {
-            BrainstormStartResult.BUSY: "error: another session is active; no new Brainstorm started",
-            BrainstormStartResult.UNAVAILABLE: "error: Brainstorm collaborators are unavailable; no session started",
-            BrainstormStartResult.CLOSED: "error: the session controller is closed; no Brainstorm started",
-            BrainstormStartResult.INVALID: "error: Brainstorm topic is invalid; no session started",
-        }[result]
 
     async def open_feature(arguments: dict[str, Any]) -> str:
         if not isinstance(arguments, dict) or set(arguments) != {"feature"}:
@@ -442,11 +389,7 @@ def feature_tools(
     tools = [
         Tool(
             name="open_feature",
-            description=(
-                "Open an existing JOAT feature on the glasses. Opening Brainstorm only "
-                "shows its view; use start_brainstorm to submit a supplied topic."
-                if brainstorm is not None else "Open an existing JOAT feature on the glasses."
-            ),
+            description="Open an existing JOAT feature on the glasses.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -456,12 +399,9 @@ def feature_tools(
                 "additionalProperties": False,
             },
             run=open_feature,
-            # These hints only decide whether the local reply engine needs
-            # its extra tool-choice pass. They are deliberately heuristic;
-            # the MCP registry always publishes every tool above.
             decision_hints=(
                 "open", "bring up", "messages", "message", "texts", "notifications",
-                "brainstorm", "debate", "agent terminal", "terminal", "planning",
+                "agent terminal", "terminal", "planning",
                 "navigation", "quicknote", "quicknotes", "quick note", "quick notes",
                 "notes", "activity", "news", "pomodoro", "timer", "search",
             ),
@@ -521,40 +461,6 @@ def feature_tools(
             ),
         ),
     ]
-    if brainstorm is not None:
-        tools.append(Tool(
-            name="start_brainstorm",
-            description=(
-                "Start a collaborative Brainstorm on the user's supplied topic. "
-                "Pass the topic verbatim, in the wearer's own words, not rephrased as a question; "
-                "this starts the existing collaborators and does not "
-                "replace an active session. The receipt confirms admission, not completed answers. "
-                "Reuse operation_id and identical topic on retries. Deduplication lasts for "
-                "this assistant process. If no topic is supplied, ask for it or open the Brainstorm view."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string", "minLength": 1,
-                        "maxLength": MAX_BRAINSTORM_TOPIC_CHARS,
-                        "description": (
-                            "The topic exactly as the wearer said it, e.g. the words after "
-                            "'brainstorm about', unchanged."
-                        ),
-                    },
-                    "operation_id": {
-                        "type": "string", "minLength": 1, "maxLength": 128,
-                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-                        "description": "A unique ID for this start; reuse the ID and exact topic on retries.",
-                    },
-                },
-                "required": ["topic", "operation_id"],
-                "additionalProperties": False,
-            },
-            run=start_brainstorm,
-            decision_hints=("brainstorm", "debate", "collaborators", "think together"),
-        ))
     if terminal is not None and lane_names:
         tools.append(Tool(
             name="send_terminal_instruction",

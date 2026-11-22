@@ -3,7 +3,7 @@ import XCTest
 @testable import JOAT
 
 final class EngineStatusOpenClawTests: XCTestCase {
-    func testDecodesSanitizedOpenClawAndBrainstormProjection() throws {
+    func testDecodesSanitizedOpenClawProjection() throws {
         let data = Data(#"""
         {
           "at": 1777777777,
@@ -16,11 +16,6 @@ final class EngineStatusOpenClawTests: XCTestCase {
           "agent_terminal": {
             "state": "approval_required",
             "reason": "write_scope_required"
-          },
-          "brainstorm": {
-            "state": "ready",
-            "seat_count": 2,
-            "phase": "idle"
           },
           "personal_data": {
             "state": "ready"
@@ -35,8 +30,6 @@ final class EngineStatusOpenClawTests: XCTestCase {
         XCTAssertEqual(status.openClaw.scopes, ["operator.read"])
         XCTAssertEqual(status.openClaw.reason, "write_scope_required")
         XCTAssertEqual(status.agentTerminal.state, "approval_required")
-        XCTAssertEqual(status.brainstorm.state, "ready")
-        XCTAssertEqual(status.brainstorm.seatCount, 2)
         XCTAssertEqual(status.personalData.state, "ready")
     }
 
@@ -44,8 +37,7 @@ final class EngineStatusOpenClawTests: XCTestCase {
         let data = Data(#"""
         {
           "openclaw": {"state": 17, "scopes": "operator.write"},
-          "agent_terminal": {"state": true},
-          "brainstorm": {"seat_count": "many"}
+          "agent_terminal": {"state": true}
         }
         """#.utf8)
 
@@ -54,8 +46,6 @@ final class EngineStatusOpenClawTests: XCTestCase {
         XCTAssertEqual(status.openClaw.state, "not_configured")
         XCTAssertEqual(status.openClaw.scopes, [])
         XCTAssertEqual(status.agentTerminal.state, "unavailable")
-        XCTAssertEqual(status.brainstorm.state, "unavailable")
-        XCTAssertEqual(status.brainstorm.seatCount, 0)
         XCTAssertEqual(status.personalData.state, "checking")
     }
 

@@ -48,6 +48,10 @@ MAX_LENS_CHARS = 600
 REQUEST_TIMEOUT_S = 90.0
 TOKEN_PATH = Path.home() / "Library/Application Support/JOAT/agent-token"
 EMPTY_REPLY = "I didn't get an answer for that — say it again."
+#: JOAT Brain on the wearer's phone asks for some answers whole: a note's
+#: summary, the commitments in a transcript. Those keep their lines and
+#: sections (no lens trimming), still bounded.
+MAX_RAW_CHARS = 12_000
 
 _REASONS = {
     200: "OK", 202: "Accepted", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
@@ -63,6 +67,8 @@ class HttpRequest:
     path: str
     headers: dict[str, str]
     body: bytes
+    query: str = ""
+    """The raw query string (after `?`), for endpoints that take parameters."""
 
 
 class BadRequest(Exception):
@@ -110,7 +116,8 @@ async def read_http_request(
         body = await reader.readexactly(length) if length else b""
     except asyncio.IncompleteReadError as exc:
         raise BadRequest(400, "truncated body") from exc
-    return HttpRequest(method.upper(), target.split("?", 1)[0], headers, body)
+    path, _, query = target.partition("?")
+    return HttpRequest(method.upper(), path, headers, body, query)
 
 
 def lens_text(text: str, max_chars: int = MAX_LENS_CHARS) -> str:
@@ -412,10 +419,14 @@ class AgentEndpoint:
             log.warning("agent request timed out after %.0fs", self._request_timeout_s)
             await self._write_json(writer, 504, _error("the assistant took too long", "timeout"))
             return
-        text = lens_text(answer, self._max_lens_chars) or EMPTY_REPLY
+        raw = body.get("joat_raw") is True
+        if raw:
+            text = answer.strip()[:MAX_RAW_CHARS] or EMPTY_REPLY
+        else:
+            text = lens_text(answer, self._max_lens_chars) or EMPTY_REPLY
         log.info(
-            "agent request chars=%d reply_chars=%d ms=%d stream=False",
-            len(query), len(text), int((time.monotonic() - started) * 1000),
+            "agent request chars=%d reply_chars=%d ms=%d stream=False raw=%s",
+            len(query), len(text), int((time.monotonic() - started) * 1000), raw,
         )
         await self._write_json(writer, 200, self._completion(text))
 

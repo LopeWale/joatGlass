@@ -101,7 +101,7 @@
 								<key>Operator</key>
 								<integer>4</integer>
 								<key>Property</key>
-								<string>conversationName</string>
+								<string>displayName</string>
 								<key>Removable</key>
 								<true/>
 								<key>Values</key>

@@ -47,6 +47,9 @@ while [ $# -gt 0 ]; do
 done
 
 command -v xcodegen >/dev/null || die "xcodegen missing: brew install xcodegen"
+if ! xcodebuild -version >/dev/null 2>&1 && [ -d /Applications/Xcode.app/Contents/Developer ]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
 [ -n "$TEAM_ID" ] || die "set JOAT_TEAM_ID (your Apple Developer team ID) in the environment or the repo's .env"
 export JOAT_TEAM_ID="$TEAM_ID"   # project.yml reads it as \${JOAT_TEAM_ID}
 
@@ -58,7 +61,13 @@ if [ -f "$NEWS_CONFIG" ]; then cp "$NEWS_CONFIG" "$APP_DIR/Generated/news-config
 # The link to this Mac's assistant: its tailnet address (Tailscale Serve
 # carries /agent to the agent endpoint) and the endpoint's bearer token.
 AGENT_TOKEN_FILE="$HOME/Library/Application Support/JOAT/agent-token"
-TS_HOST="$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)"
+# The App Store Tailscale app does not put `tailscale` on PATH; its CLI lives
+# inside the app bundle.
+TAILSCALE_CLI="$(command -v tailscale || true)"
+if [ -z "$TAILSCALE_CLI" ] && [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
+  TAILSCALE_CLI=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+fi
+TS_HOST="$("${TAILSCALE_CLI:-tailscale}" status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)"
 if [ -n "$TS_HOST" ] && [ -f "$AGENT_TOKEN_FILE" ]; then
   TS_HOST="$TS_HOST" TOKEN_FILE="$AGENT_TOKEN_FILE" OUT="$APP_DIR/Generated/mac-link.json" python3 - <<'PY_LINK'
 import json, os
@@ -72,6 +81,40 @@ else
   say "no mac link (tailscale or the agent token missing): answers will say the Mac is unreachable"
 fi
 
+# Texts through this Mac (services/messages_endpoint.py), served by Tailscale
+# Serve at /messages and guarded by its own bearer token.
+MESSAGES_TOKEN_FILE="$HOME/Library/Application Support/JOAT/messages-token"
+if [ -n "$TS_HOST" ] && [ -f "$MESSAGES_TOKEN_FILE" ]; then
+  TS_HOST="$TS_HOST" TOKEN_FILE="$MESSAGES_TOKEN_FILE" OUT="$APP_DIR/Generated/mac-messages.json" python3 - <<'PY_MESSAGES'
+import json, os
+token = open(os.environ["TOKEN_FILE"]).read().strip()
+url = f"https://{os.environ['TS_HOST']}/messages"
+with open(os.environ["OUT"], "w") as f:
+    json.dump({"url": url, "token": token}, f)
+PY_MESSAGES
+  say "messages: through https://$TS_HOST/messages"
+else
+  rm -f "$APP_DIR/Generated/mac-messages.json"
+  say "no messages link (tailscale or the messages token missing): connect Mac over Tailscale for texts"
+fi
+
+# Agent Terminal controls on this Mac (services/terminal_endpoint.py), served
+# by Tailscale Serve at /terminal and guarded by its own bearer token.
+TERMINAL_TOKEN_FILE="$HOME/Library/Application Support/JOAT/terminal-token"
+if [ -n "$TS_HOST" ] && [ -s "$TERMINAL_TOKEN_FILE" ]; then
+  TS_HOST="$TS_HOST" TOKEN_FILE="$TERMINAL_TOKEN_FILE" OUT="$APP_DIR/Generated/mac-terminal.json" python3 - <<'PY_TERMINAL'
+import json, os
+token = open(os.environ["TOKEN_FILE"]).read().strip()
+url = f"https://{os.environ['TS_HOST']}/terminal"
+with open(os.environ["OUT"], "w") as f:
+    json.dump({"url": url, "token": token}, f)
+PY_TERMINAL
+  say "terminal: through https://$TS_HOST/terminal"
+else
+  rm -f "$APP_DIR/Generated/mac-terminal.json"
+  say "no terminal link (tailscale or the terminal token missing): Agents tab will wait for Mac setup"
+fi
+
 # Claude, asked directly by the phone (the wearer's choice, 2026-10-23):
 # only ANTHROPIC_API_KEY is read from .env, never the whole file.
 CLAUDE_KEY="${ANTHROPIC_API_KEY:-$(sed -n 's/^ANTHROPIC_API_KEY=//p' "$REPO_DIR/.env" 2>/dev/null | tail -n 1)}"
@@ -80,7 +123,43 @@ if [ -n "$CLAUDE_KEY" ]; then
   say "claude: answers and note summaries go straight to Claude"
 else
   rm -f "$APP_DIR/Generated/claude.json"
-  say "no ANTHROPIC_API_KEY: answers and summaries go to the Mac"
+  say "no ANTHROPIC_API_KEY: Claude not bundled"
+fi
+
+# Gemini, asked directly by the phone (gemini-3.5-flash-lite):
+# seeded from GEMINI_API_KEY, ~/Library/Application Support/JOAT/gemini-api-key,
+# or GEMINI_API_KEY in .env when non-empty and mode-safe; never echoed.
+GEMINI_KEY_FILE="$HOME/Library/Application Support/JOAT/gemini-api-key"
+GEMINI_RAW_KEY="${GEMINI_API_KEY:-$(sed -n 's/^GEMINI_API_KEY=//p' "$REPO_DIR/.env" 2>/dev/null | tail -n 1)}"
+if [ -n "$GEMINI_RAW_KEY" ] || [ -s "$GEMINI_KEY_FILE" ]; then
+  if GEMINI_RAW_KEY="$GEMINI_RAW_KEY" GEMINI_KEY_FILE="$GEMINI_KEY_FILE" OUT="$APP_DIR/Generated/gemini.json" python3 - <<'PY_GEMINI'
+import json, os, stat, sys
+raw = os.environ.get("GEMINI_RAW_KEY", "").strip().strip("\"'").strip()
+if not raw:
+    key_file = os.environ["GEMINI_KEY_FILE"]
+    try:
+        st = os.lstat(key_file)
+        if stat.S_ISLNK(st.st_mode) or (st.st_mode & 0o077) != 0:
+            sys.exit(2)
+        raw = open(key_file, "r", encoding="utf-8").read().strip().strip("\"'").strip()
+    except OSError:
+        raw = ""
+if not raw:
+    sys.exit(1)
+out = os.environ["OUT"]
+fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump({"key": raw}, f)
+PY_GEMINI
+  then
+    say "gemini: on-phone Gemini 3.5 Flash Lite seeded"
+  else
+    rm -f "$APP_DIR/Generated/gemini.json"
+    say "no usable GEMINI_API_KEY (missing, empty, or unsafe permissions on gemini-api-key)"
+  fi
+else
+  rm -f "$APP_DIR/Generated/gemini.json"
+  say "no GEMINI_API_KEY: on-phone Gemini not bundled (can be added in JOAT Brain › Home)"
 fi
 
 say "regenerating the project from project.yml"
@@ -90,9 +169,20 @@ if [ "$WANT_TESTFLIGHT" = 1 ]; then
   ASC_KEY_ID="${JOAT_ASC_KEY_ID:-$(sed -n 's/^JOAT_ASC_KEY_ID=//p' "$REPO_DIR/.env" 2>/dev/null | tail -n 1)}"
   ASC_ISSUER="${JOAT_ASC_ISSUER_ID:-$(sed -n 's/^JOAT_ASC_ISSUER_ID=//p' "$REPO_DIR/.env" 2>/dev/null | tail -n 1)}"
   ASC_KEY="$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
-  [ -n "$ASC_KEY_ID" ] && [ -n "$ASC_ISSUER" ] || die "set JOAT_ASC_KEY_ID and JOAT_ASC_ISSUER_ID (environment or .env)"
-  [ -f "$ASC_KEY" ] || die "no API key at $ASC_KEY"
-  AUTH=(-authenticationKeyPath "$ASC_KEY" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER")
+  [ -n "$ASC_KEY_ID" ] || die "set JOAT_ASC_KEY_ID (environment or .env); JOAT_ASC_ISSUER_ID too for a team key"
+  [ -n "$ASC_ISSUER" ] && { [ -f "$ASC_KEY" ] || die "no API key at $ASC_KEY"; }
+  AUTH=(-authenticationKeyPath "$ASC_KEY" -authenticationKeyID "$ASC_KEY_ID")
+  # A team key has an issuer ID; an individual key has none (Apple:
+  # "Individual keys don't use the Issuer ID").
+  if [ -n "$ASC_ISSUER" ]; then
+    AUTH+=(-authenticationKeyIssuerID "$ASC_ISSUER")
+  else
+    # xcodebuild insists on -authenticationKeyIssuerID with a key, so an
+    # individual key cannot drive it; the Apple account signed in to Xcode
+    # (Settings > Accounts) signs and uploads instead.
+    say "no JOAT_ASC_ISSUER_ID: using the Apple account signed in to Xcode"
+    AUTH=()
+  fi
   BUILD_NUMBER="$(date +%Y%m%d%H%M)"
   ARCHIVE="$REPO_DIR/dist/ios-archive/JOATBrain-$BUILD_NUMBER.xcarchive"
   EXPORT="$REPO_DIR/dist/ios-export/$BUILD_NUMBER"
@@ -100,7 +190,7 @@ if [ "$WANT_TESTFLIGHT" = 1 ]; then
   say "archiving Release build $BUILD_NUMBER"
   xcodebuild -project "$APP_DIR/JOATBrain.xcodeproj" -scheme JOATBrain \
     -configuration Release -destination "generic/platform=iOS" \
-    -archivePath "$ARCHIVE" -allowProvisioningUpdates "${AUTH[@]}" \
+    -archivePath "$ARCHIVE" -allowProvisioningUpdates ${AUTH[@]+"${AUTH[@]}"} \
     CURRENT_PROJECT_VERSION="$BUILD_NUMBER" archive \
     2>&1 | grep -E 'error:|BUILD|ARCHIVE (SUCCEEDED|FAILED)' || true
   [ -d "$ARCHIVE" ] || die "archive failed — run the xcodebuild line without the grep to see why"
@@ -118,7 +208,7 @@ if [ "$WANT_TESTFLIGHT" = 1 ]; then
 PLIST
   say "uploading to App Store Connect"
   xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportPath "$EXPORT" \
-    -exportOptionsPlist "$EXPORT/ExportOptions.plist" -allowProvisioningUpdates "${AUTH[@]}" \
+    -exportOptionsPlist "$EXPORT/ExportOptions.plist" -allowProvisioningUpdates ${AUTH[@]+"${AUTH[@]}"} \
     > "$EXPORT/export.log" 2>&1 || true
   grep -E '^error|Uploaded|EXPORT (SUCCEEDED|FAILED)' "$EXPORT/export.log" || true
   grep -q 'EXPORT SUCCEEDED' "$EXPORT/export.log" || die "upload failed (see $EXPORT/export.log)"

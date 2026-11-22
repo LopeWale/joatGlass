@@ -98,31 +98,31 @@ describe('MacG2DiagnosticTrace', () => {
     }]);
   });
 
-  it('forwards only the fixed Brainstorm action receipt', () => {
+  it('forwards only the fixed Agent Terminal action and frame timing receipts', () => {
     const sent: UplinkMessage[] = [];
     const trace = new MacG2DiagnosticTrace({ sendDiagnostic: (message) => sent.push(message) });
     trace.setEnabled(true);
 
     trace.record({
-      type: 'brainstorm_action', action: 'show_terminal', surface: 'brainstorm',
+      type: 'terminal_action', action: 'begin_terminal_input', surface: 'agent_terminal',
       source: 'right', gesture: 'tap', delivery: 'sys',
     });
     trace.record({
-      type: 'brainstorm_action', action: 'begin_terminal_input', surface: 'agent_terminal',
-      source: 'right', gesture: 'tap', delivery: 'sys',
+      type: 'frame_timing', frame: 3, kind: 'terminal',
+      changedTiles: 2, queueMs: 0, renderMs: 2, encodeMs: 1, pacingMs: 4, bridgeMs: 9, totalMs: 16,
     });
 
     expect(sent).toEqual([{
       kind: 'g2.diagnostic',
       event: {
-        type: 'brainstorm_action', action: 'show_terminal', surface: 'brainstorm',
+        type: 'terminal_action', action: 'begin_terminal_input', surface: 'agent_terminal',
         source: 'right', gesture: 'tap', delivery: 'sys',
       },
     }, {
       kind: 'g2.diagnostic',
       event: {
-        type: 'brainstorm_action', action: 'begin_terminal_input', surface: 'agent_terminal',
-        source: 'right', gesture: 'tap', delivery: 'sys',
+        type: 'frame_timing', frame: 3, kind: 'terminal',
+        changedTiles: 2, queueMs: 0, renderMs: 2, encodeMs: 1, pacingMs: 4, bridgeMs: 9, totalMs: 16,
       },
     }]);
   });

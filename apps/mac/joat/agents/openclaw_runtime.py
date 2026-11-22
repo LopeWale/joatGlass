@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import stat
+import unicodedata
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ from .openclaw_gateway import (
 from .openclaw_terminal import (
     AgentTerminalConnection,
     OpenClawAgentTerminal,
+    DEFAULT_GATEWAY_NAME,
     OpenClawRunFailed,
     OpenClawToolInventoryUnsettled,
     OpenClawToolsEnabled,
@@ -63,6 +65,16 @@ def _gateway_host_label(gateway_url: str) -> str:
     return host.split(".", 1)[0] if host else ""
 
 
+def _valid_gateway_name(value: object) -> bool:
+    """A wearer-visible Gateway name: 1-32 characters, no control characters."""
+    if not isinstance(value, str):
+        return False
+    name = value.strip()
+    return 1 <= len(name) <= 32 and all(
+        unicodedata.category(ch) not in ("Cc", "Cf") for ch in name
+    )
+
+
 def terminal_ready_activity(*, reverified: bool) -> str:
     """Return the short wearable confirmation for terminal readiness."""
     if reverified:
@@ -86,16 +98,20 @@ class OpenClawRuntimeConfig:
     hostname when several hosts are configured, so the wearer never has to
     invent labels for machines Tailscale has already named.
     """
+    name: str = DEFAULT_GATEWAY_NAME
+    """What the glasses call this Gateway; set in JOAT on the Mac."""
 
     @classmethod
     def _one(cls, entry: dict[str, object], *, host: str = "") -> OpenClawRuntimeConfig:
         """Validate one host binding. Unchanged rules, applied per host."""
         gateway_url = entry.get("gateway_url")
         agent_id = entry.get("agent_id")
+        name = entry.get("name", DEFAULT_GATEWAY_NAME)
         if (
             not isinstance(gateway_url, str)
             or not isinstance(agent_id, str)
             or agent_id != AGENT_TERMINAL_AGENT_ID
+            or not _valid_gateway_name(name)
         ):
             raise ValueError("OpenClaw runtime config is invalid")
         profile = GatewayProfile(gateway_url)
@@ -103,7 +119,7 @@ class OpenClawRuntimeConfig:
             raise ValueError(
                 "OpenClaw runtime config must point to the Gateway, not the Hermes dashboard"
             )
-        return cls(profile=profile, agent_id=agent_id, host=host)
+        return cls(profile=profile, agent_id=agent_id, host=host, name=str(name).strip())
 
     @classmethod
     def load_all(
@@ -136,7 +152,7 @@ class OpenClawRuntimeConfig:
             raise ValueError("OpenClaw runtime config is invalid") from exc
         if not isinstance(raw, dict):
             raise ValueError("OpenClaw runtime config is invalid")
-        if set(raw) == {"gateway_url", "agent_id"}:
+        if set(raw) - {"name"} == {"gateway_url", "agent_id"}:
             return [cls._one(raw)]
         if set(raw) != {"hosts"}:
             raise ValueError("OpenClaw runtime config is invalid")
@@ -145,7 +161,7 @@ class OpenClawRuntimeConfig:
             raise ValueError("OpenClaw runtime config is invalid")
         entries = []
         for entry in hosts:
-            if not isinstance(entry, dict) or set(entry) != {"gateway_url", "agent_id"}:
+            if not isinstance(entry, dict) or set(entry) - {"name"} != {"gateway_url", "agent_id"}:
                 raise ValueError("OpenClaw runtime config is invalid")
             entries.append(entry)
         # A single configured host is still a single-host install, label and
@@ -184,6 +200,7 @@ def make_brainstorm_terminal_agent(
     credentials: OpenClawCredentials,
     agent_id: str,
     state_changed: Callable[[str, str], None] | None = None,
+    display_name: str = DEFAULT_GATEWAY_NAME,
 ) -> OpenClawTerminalAgent:
     """Build the write terminal plus its separately scoped proof client."""
     terminal_client = OpenClawGatewayClient(
@@ -207,6 +224,7 @@ def make_brainstorm_terminal_agent(
         agent_id=agent_id,
         policy=BRAINSTORM_TERMINAL_POLICY,
         state_changed=state_changed,
+        display_name=display_name,
     )
 
 
@@ -217,6 +235,7 @@ def make_work_terminal_agent(
     agent_id: str,
     state_changed: Callable[[str, str], None] | None = None,
     on_approval: Callable[[PendingApproval], None] | None = None,
+    display_name: str = DEFAULT_GATEWAY_NAME,
 ) -> OpenClawTerminalAgent:
     """The Agent Terminal work lane: approvals in, roster reads allowed.
 
@@ -248,6 +267,7 @@ def make_work_terminal_agent(
         policy=WORK_TERMINAL_POLICY,
         state_changed=state_changed,
         on_approval=on_approval,
+        display_name=display_name,
     )
 
 
@@ -365,6 +385,7 @@ class OpenClawTerminalAgent:
     policy: AgentTerminalPolicy = BRAINSTORM_TERMINAL_POLICY
     state_changed: Callable[[str, str], None] | None = None
     on_approval: Callable[[PendingApproval], None] | None = None
+    display_name: str = DEFAULT_GATEWAY_NAME
     _terminal: OpenClawAgentTerminal | None = field(default=None, init=False)
     _resume_key: str | None = field(default=None, init=False)
     """When set, initialize() ATTACHES to this listed session instead of
@@ -541,11 +562,13 @@ class OpenClawTerminalAgent:
                 await self._invalidate_terminal()
                 self._set_state("blocked", "connection_closed")
                 raise
-            except OpenClawRunFailed:
+            except OpenClawRunFailed as exc:
                 # A valid terminal chat event ends this run, not its proven
                 # session. The roster reports the fixed failure message; a
                 # later explicit instruction may reuse this exact context.
                 self._set_state("ready", "")
+                if exc.name != self.display_name:
+                    raise exc.renamed(self.display_name) from exc
                 raise
             except OpenClawGatewayError:
                 await self._invalidate_terminal()

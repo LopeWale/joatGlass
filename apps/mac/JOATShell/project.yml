@@ -50,6 +50,8 @@ targets:
         # Hardened Runtime resource access still requires this entitlement;
         # it does not replace the separate Calendar/Reminders TCC decisions.
         com.apple.security.personal-information.calendars: true
+        # The same rule for Contacts (the assistant's contacts lookup).
+        com.apple.security.personal-information.addressbook: true
         # Hardened Runtime blocks outgoing Apple events without this. It
         # covers the shell's Notes-automation preflight AND the engine's
         # osascript QuickNote export (a child process, attributed to this
@@ -84,6 +86,8 @@ targets:
           "JOAT transcribes your speech on-device to answer on the HUD."
         INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription:
           "JOAT reads and creates calendar events only when you explicitly ask it to."
+        INFOPLIST_KEY_NSContactsUsageDescription:
+          "JOAT looks up a contact's name, number or email only when you ask it to."
         INFOPLIST_KEY_NSRemindersFullAccessUsageDescription:
           "JOAT reads, creates, and completes reminders only when you explicitly ask it to."
         # macOS must always give the app a chance to stop its engine child.

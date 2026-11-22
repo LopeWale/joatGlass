@@ -10,7 +10,15 @@ import Foundation
 /// here: a ported page, a rail tab, or an honest "not on the phone yet".
 final class CapabilityMenu: BrainFeature, VoiceCommand {
     let name = "capabilities"
-    let uplinkKinds: Set<String> = ["input"]
+    let uplinkKinds: Set<String> = ["input", "hello"]
+    /// Pages always served by the wearer's Mac mini (`BrainHandoff.ts`):
+    /// opening them hands the glasses connection to the Mac and returns to
+    /// this iPhone when the wearer goes Home.
+    static let macPages: Set<String> = ["Messages", "Agent Terminal", "Activity"]
+    /// Default `true` on every fresh connection so opening a Mac-pinned page
+    /// before `hello` arrives never races into a local stub; only an explicit
+    /// `handoff: false` from an older plugin disables handoff.
+    private var pluginHandsOff = true
 
     /// capabilities.py BACK_HINT
     static let backHint = "left x2: back"
@@ -30,6 +38,11 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
     /// The Messages page's rows, bound to senders; empty on a thread.
     private var messageSenders: [String] = []
     private var messagesShowingList = false
+    /// The Mail page's unified Gmail threads (Brain sets it).
+    var mail: Mail?
+    /// The Mail page's rows, bound to thread ids (`accountId|threadKey`).
+    private var mailThreadIds: [String] = []
+    private var mailShowingList = false
     /// The Notifications page's rows, bound to card ids (a new arrival
     /// cannot shift what a tap opens).
     private var notificationRows: [Cards.Card] = []
@@ -45,14 +58,19 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
     }
 
     /// A new plugin connection starts with no page open (on_disconnect).
-    func pluginConnected() { retire() }
+    func pluginConnected() {
+        pluginHandsOff = true
+        retire()
+    }
 
     private func retire() {
         if activeCapability == "MESSAGES" { messages?.leaveUI() }
+        if activeCapability == "MAIL" { mail?.leaveUI() }
         activeCapability = nil
         activeRequestId = nil
         reminderIds = []
         messagesShowingList = false
+        mailShowingList = false
         quickNotes.departed()
     }
 
@@ -62,11 +80,31 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
     static func canonical(_ name: String) -> String {
         let n = name.trimmingCharacters(in: .whitespaces).uppercased()
         if n == "REMINDERS" { return "TASKS" }
-        if n == "DEBATE" { return "BRAINSTORM" }
         return n
     }
 
     func handle(kind: String, message: [String: Any]) {
+        if kind == "hello" {
+            if let explicit = message["handoff"] as? Bool {
+                pluginHandsOff = explicit
+            } else if let bridged = message.bool("handoff") {
+                pluginHandsOff = bridged
+            } else {
+                pluginHandsOff = true
+            }
+            Log.add("plugin hello: \(pluginHandsOff ? "hands Mac pages to a Mac" : "no hand-off (older plugin)")")
+            // A new plugin page starts on Home: the phone locked and Even
+            // reloaded the plugin in the background, or the link dropped and
+            // came back. A note still open goes back on the glasses
+            // (2026-11-13: twice in a meeting a note "stopped halfway"; in
+            // the simulator a reconnect left it recording on the phone, off
+            // the glasses).
+            if quickNotes.active, activeCapability != "QUICKNOTES" {
+                Log.add("quicknotes: a new plugin page while a note is open; showing the note again")
+                openByVoice("QuickNotes")
+            }
+            return
+        }
         guard kind == "input", let event = message.object("event"),
               let container = event.string("containerName") else { return }
         let selected = event.string("selectedName")
@@ -99,29 +137,91 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
                 if index == 0 {
                     messages.beginNew(requestId: requestId, traceId: event.string("traceId"))
                 } else if messageSenders.indices.contains(index - 1) {
+                    // The senders stay: back on the list (2x tap, or a
+                    // cancelled draft) the plugin redraws the list it has,
+                    // and its next tap names a row of it.
                     let sender = messageSenders[index - 1]
-                    messageSenders = []
                     messagesShowingList = false
                     sendList(messages.thread(sender, requestId: requestId, traceId: event.string("traceId")),
                              requestId: requestId)
+                } else {
+                    // Never silent: a row this side doesn't know gets the list again.
+                    Log.add("messages: row \(index) is not on the list this side sent (\(messageSenders.count) senders); sending the list again")
+                    showMessages(requestId: requestId)
+                }
+            }
+            else if activeCapability == "MAIL", let mail {
+                // Row 0 is "+ New email"; unified inbox threads follow.
+                if index == 0 {
+                    mail.beginNew(requestId: requestId, traceId: event.string("traceId"))
+                } else if mailThreadIds.indices.contains(index - 1) {
+                    let threadId = mailThreadIds[index - 1]
+                    mailShowingList = false
+                    sendList(mail.thread(threadId, requestId: requestId, traceId: event.string("traceId")),
+                             requestId: requestId)
+                } else {
+                    Log.add("mail: row \(index) is not on the list this side sent (\(mailThreadIds.count) threads); sending the list again")
+                    showMail(requestId: requestId, triggerSync: true)
                 }
             }
         case "capmessage":
             // A tap on the open conversation replies to it.
-            guard activeCapability == "MESSAGES", requestId == activeRequestId else {
-                Log.add("dropping stale Messages reply request=\(requestId ?? "nil")")
+            guard requestId == activeRequestId else {
+                Log.add("dropping stale comms reply request=\(requestId ?? "nil")")
                 return
             }
-            messages?.beginReply()
+            if activeCapability == "MESSAGES" {
+                messages?.beginReply()
+            } else if activeCapability == "MAIL" {
+                mail?.beginReply()
+            } else {
+                Log.add("dropping stale comms reply capability=\(activeCapability ?? "nil") request=\(requestId ?? "nil")")
+            }
         case "message-cancel":
-            if let selected { messages?.cancelUI(actionId: selected) }
+            if let selected {
+                messages?.cancelUI(actionId: selected)
+                mail?.cancelUI(actionId: selected)
+            }
         case "message-retry":
-            if let selected { messages?.retryUI(actionId: selected) }
+            if let selected {
+                messages?.retryUI(actionId: selected)
+                mail?.retryUI(actionId: selected)
+            }
         case "cappage":
             if selected == "QUICKNOTES · LIST", activeCapability == "QUICKNOTES", requestId == activeRequestId {
                 quickNotes.pageList(eventType: event.int("eventType"), selectedIndex: event.int("selectedIndex"))
             }
         case "capability-lifecycle":
+            if selected == "messages-list", activeCapability == "MESSAGES", requestId == activeRequestId {
+                // The plugin is back on the Messages list it drew last.
+                messagesShowingList = true
+                messages?.returnedToList()
+                return
+            }
+            if selected == "messages-conversation", activeCapability == "MESSAGES", requestId == activeRequestId {
+                messagesShowingList = false
+                return
+            }
+            if selected == "messages-home", activeCapability == "MESSAGES",
+               requestId == nil || requestId == activeRequestId {
+                retire()
+                return
+            }
+            if selected == "mail-list", activeCapability == "MAIL", requestId == activeRequestId {
+                // The plugin is back on the Mail list it drew last.
+                mailShowingList = true
+                mail?.returnedToList()
+                return
+            }
+            if selected == "mail-conversation", activeCapability == "MAIL", requestId == activeRequestId {
+                mailShowingList = false
+                return
+            }
+            if selected == "mail-home", activeCapability == "MAIL",
+               requestId == nil || requestId == activeRequestId {
+                retire()
+                return
+            }
             if let selected, selected.hasPrefix("quicknotes-") {
                 // A release always ends a hold, wherever the wearer now is.
                 if selected == "quicknotes-hold-end"
@@ -142,9 +242,21 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
         }
     }
 
+    /// Return the glasses to the default resting overview ("go home", "open home").
+    func openHome() {
+        retire()
+        link.send(["kind": "hud.rebuild", "layout": "default"])
+        Log.add("tx hud.rebuild default (home)")
+    }
+
     /// capabilities.open: one list generation per request.
     func open(_ name: String, requestId: String?, anchorMs: Int?) {
+        if name == "Home" {
+            openHome()
+            return
+        }
         if activeCapability == "MESSAGES" { messages?.leaveUI() }
+        if activeCapability == "MAIL" { mail?.leaveUI() }
         reminderIds = []
         activeCapability = Self.canonical(name)
         activeRequestId = requestId
@@ -167,17 +279,31 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
         case "Navigation" where navigation != nil:
             sendList(["title": "NAVIGATION", "items": navigation?.pageRows() ?? [],
                       "hint": "tap: choose · left x2: back", "selectable": true], requestId: requestId)
-        case "Messages" where messages != nil:
-            showMessages(requestId: requestId)
+        case "Mail" where mail != nil:
+            showMail(requestId: requestId, triggerSync: true)
+        case _ where Self.macPages.contains(name) && pluginHandsOff:
+            handOff(name, requestId: requestId)
         default:
             notOnPhone(name, requestId: requestId)
         }
     }
 
-    // MARK: - Messages (texts from the Shortcuts automation)
+    /// A page only a Mac has: the plugin opens it on one of its Macs.
+    private func handOff(_ name: String, requestId: String?) {
+        retire()
+        var message: [String: Any] = ["kind": "brain.handoff", "capability": name]
+        if let requestId { message["requestId"] = requestId }
+        link.send(message)
+        Log.add("tx brain.handoff \(name): to the Mac")
+    }
+
+    // MARK: - Messages
 
     private func showMessages(requestId: String?) {
         guard let messages else { return }
+        // Opening the page asks the Mac for its conversations; the list
+        // repaints when they arrive (refreshMessages).
+        if requestId != activeRequestId || !messagesShowingList { messages.refreshFromMac() }
         let page = messages.pageList()
         messageSenders = page.senders
         messagesShowingList = true
@@ -196,6 +322,49 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
     func refreshMessages() {
         guard activeCapability == "MESSAGES", messagesShowingList else { return }
         showMessages(requestId: activeRequestId)
+    }
+
+    // MARK: - Mail (standalone Gmail on this iPhone)
+
+    private func showMail(requestId: String?, triggerSync: Bool = false) {
+        guard let mail else { return }
+        if triggerSync {
+            Task { @MainActor in await mail.syncNow() }
+        }
+        let page = mail.pageList()
+        mailThreadIds = page.threadIds
+        mailShowingList = true
+        sendList(page.list, requestId: requestId)
+    }
+
+    /// A reply went out or new email arrived in the open thread: repaint it.
+    func refreshMailThread() {
+        guard activeCapability == "MAIL", !mailShowingList, let mail,
+              let threadId = mail.threadOnGlass else { return }
+        sendList(mail.thread(threadId, requestId: nil, traceId: nil), requestId: activeRequestId)
+    }
+
+    /// An email arrived or accounts synced: repaint the Mail list if open.
+    func refreshMail() {
+        guard activeCapability == "MAIL", mailShowingList else { return }
+        showMail(requestId: activeRequestId)
+    }
+
+    // MARK: - Navigation
+
+    /// Saved places or active route state changed while the Navigation list
+    /// is open on the glasses: repaint it in place.
+    func refreshNavigation() {
+        guard activeCapability == "NAVIGATION", let navigation else { return }
+        sendList(["title": "NAVIGATION", "items": navigation.pageRows(),
+                  "hint": "tap: choose · left x2: back", "selectable": true], requestId: activeRequestId)
+    }
+
+    /// Navigation took over the lens with `navigation.view` or `navigation.resume`:
+    /// retire the menu's list state so place/state updates do not send stale lists.
+    func leaveNavigationIfOpen() {
+        guard activeCapability == "NAVIGATION" else { return }
+        retire()
     }
 
     // MARK: - Notifications (capabilities._show_notifications)
@@ -256,6 +425,10 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
     /// Take the surface for a page the brain shows without an open (a
     /// review the wearer asked for by voice): a fresh "voice-" generation.
     func claim(_ capability: String) {
+        if activeCapability == "MESSAGES", capability != "MESSAGES" { messages?.leaveUI() }
+        if activeCapability == "MAIL", capability != "MAIL" { mail?.leaveUI() }
+        messagesShowingList = false
+        mailShowingList = false
         activeCapability = capability
         activeRequestId = "voice-" + ConfirmGate.hex(6)
     }
@@ -263,30 +436,41 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
     /// Send under whatever request is open now.
     func sendCurrent(_ list: [String: Any]) { sendList(list, requestId: activeRequestId) }
 
-    // MARK: - Voice: "open my notes", "show planning" (CapabilityOpenController)
+    // MARK: - Voice: "open my notes", "show planning", "open mail", "open claude", "go home" (CapabilityOpenController)
 
+    static let homeVoice = try! NSRegularExpression(
+        pattern: #"^(?:go(?:\s+back)?\s+home|(?:open|show|bring\s+up)(?:\s+(?:my|the))?\s+(?:home(?:\s+screen|\s+page)?|overview|dashboard))$"#,
+        options: [.caseInsensitive])
     static let openCapability = try! NSRegularExpression(
-        pattern: #"^(?:open|show|read)(?:\s+(?:my|the))?\s+(?<name>messages|texts|conversations|quick\s?notes|notes|planning|calendar|tasks|reminders|notifications|activity|brainstorm|debate|agent\s?terminal|terminal|navigation|directions|map)$"#,
+        pattern: #"^(?:open|show|read|bring\s+up)(?:\s+(?:my|the))?\s+(?<name>messages|texts|conversations|mail|email|emails|inbox|gmail|quick\s?notes|notes|planning|calendar|tasks|reminders|notifications|activity|agent\s?terminal|terminal|claude(?:\s+code)?|codex|antigravity|navigation|directions|map|news|pomodoro|timer|search)$|^check(?:\s+(?:my|the))?\s+(?<name2>mail|email|emails|inbox|gmail|messages|texts|conversations|agent\s?terminal|terminal|claude(?:\s+code)?|codex|antigravity)$"#,
         options: [.caseInsensitive])
     static let spoken: [String: String] = [
         "messages": "Messages", "texts": "Messages", "conversations": "Messages",
+        "mail": "Mail", "email": "Mail", "emails": "Mail", "inbox": "Mail", "gmail": "Mail",
         "quicknotes": "QuickNotes", "quick notes": "QuickNotes", "notes": "QuickNotes",
         "planning": "Planning", "calendar": "Calendar", "tasks": "Tasks", "reminders": "Reminders",
         "notifications": "Notifications", "activity": "Activity",
-        "brainstorm": "Brainstorm", "debate": "Brainstorm",
         "agent terminal": "Agent Terminal", "agentterminal": "Agent Terminal", "terminal": "Agent Terminal",
+        "claude": "Agent Terminal", "claude code": "Agent Terminal", "codex": "Agent Terminal", "antigravity": "Agent Terminal",
         "navigation": "Navigation", "directions": "Navigation", "map": "Navigation",
+        "news": "News", "pomodoro": "Pomodoro", "timer": "Pomodoro", "search": "Search",
     ]
 
     func handle(_ request: String) -> CommandReply? {
         let normalized = request.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
             .trimmingCharacters(in: CharacterSet(charactersIn: ".,!?")).trimmingCharacters(in: .whitespaces)
-        guard let g = Grammar.match(Self.openCapability, normalized, groups: ["name"]), let said = g["name"] else { return nil }
+        if Grammar.match(Self.homeVoice, normalized) != nil {
+            openHome()
+            return CommandReply(text: "Opening Home.", activated: true)
+        }
+        guard let g = Grammar.match(Self.openCapability, normalized, groups: ["name", "name2"]),
+              let said = g["name"] ?? g["name2"] else { return nil }
         let key = said.lowercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         guard let name = Self.spoken[key] else { return nil }
+        let handedOff = Self.macPages.contains(name) && pluginHandsOff
         openByVoice(name)
         let shown = ["Planning", "Calendar", "Tasks"].contains(name) ? "Reminders" : name
-        return CommandReply(text: "Opening \(shown).", activated: true)
+        return CommandReply(text: "Opening \(shown).", activated: true, suppressesHudReceipt: handedOff)
     }
 
     /// protocol.py HudList.to_wire, under the request it answers. A reply

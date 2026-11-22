@@ -6,7 +6,10 @@ import type { PromptStage } from './G2DiagnosticTrace';
 import type { PromptAckMessage, PromptCancelMessage, PromptOwnerKind, PromptPresentMessage } from './types';
 
 interface PromptedInputOptions {
-  presenter: Partial<Pick<HudPresenter, 'showPromptQuestion' | 'dismissPromptQuestion' | 'showPromptPartial'>>;
+  presenter: Partial<Pick<
+    HudPresenter,
+    'showPromptQuestion' | 'dismissPromptQuestion' | 'showPromptPartial' | 'showPromptTranscribing'
+  >>;
   audio: Pick<AudioStreamer, 'openPromptMicrophone' | 'activatePromptEpoch' | 'clearPromptEpoch'>;
   link: Pick<MacLink, 'sendForGeneration'>;
   monotonicMs?: () => number;
@@ -79,7 +82,7 @@ function parse(value: unknown): PromptPresentMessage | PromptCancelMessage | und
     || (data.source !== 'glasses' && data.source !== 'phone')
     || typeof data.expiresInMs !== 'number' || !Number.isInteger(data.expiresInMs)
     || data.expiresInMs < 1 || data.expiresInMs > 45000
-    || (data.ownerKind !== 'messages' && data.ownerKind !== 'brainstorm'
+    || (data.ownerKind !== 'messages'
       && data.ownerKind !== 'terminal' && data.ownerKind !== 'capability')
     || !ownerIdentifier(data.ownerId, 256) || !ownerIdentifier(data.field, 64)) return;
   return {
@@ -240,6 +243,13 @@ export class PromptedInputController {
     const publication = this.current;
     if (!publication || !publication.acknowledged || !this.isCurrent(publication)) return undefined;
     return publication.message.promptId;
+  }
+
+  notifyCommitted(promptId: string): void {
+    const publication = this.current;
+    if (!publication || !publication.acknowledged
+      || publication.message.promptId !== promptId || !this.isCurrent(publication)) return;
+    void this.options.presenter.showPromptTranscribing?.call(this.options.presenter, promptId);
   }
 
   isActive(): boolean {

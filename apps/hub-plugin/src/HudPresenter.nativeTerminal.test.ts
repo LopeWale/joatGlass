@@ -3,39 +3,32 @@ import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/
 import type { BridgeClient } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter, setNativeOverviewForTest } from './HudPresenter';
-import { ContainerId, type BrainstormHudModel } from './types';
+import { ContainerId, type AgentTerminalHudModel } from './types';
 import type { HudVisualFrame } from './HudVisualSurface';
 
 // These tests pin the IMAGE overview (VITE_NATIVE_OVERVIEW=0). The text
 // overview, which is Home by default, has its own: HudPresenter.textOverview.test.ts.
 setNativeOverviewForTest(false);
 
-// These tests pin the CANVAS overview, which ships as the VITE_NATIVE_OVERVIEW=0
-// fallback. The default text overview has its own tests in
-// HudPresenter.textOverview.test.ts.
-
-
-function terminal(overrides: Partial<BrainstormHudModel> = {}): BrainstormHudModel {
+function terminal(overrides: Partial<AgentTerminalHudModel> = {}): AgentTerminalHudModel {
   return {
-    screen: 'agent_terminal',
     state: 'ready',
-    topic: 'OpenClaw · ready',
-    collaborators: ['OpenClaw', 'Hermes'],
+    focus: 'Claude · ready',
+    lanes: ['Claude · ready', 'Codex · idle', 'Antigravity · idle'],
     activity: 'Ready',
-    conversationId: 'openclaw-conversation',
+    conversationId: 'claude-conversation',
     messages: [],
-    noToolsChecked: true,
     ...overrides,
   };
 }
 
-function longAnswer(): BrainstormHudModel {
+function longAnswer(): AgentTerminalHudModel {
   return terminal({
     state: 'settled',
     messages: [{
       id: 'answer-one',
       role: 'assistant',
-      text: Array.from({ length: 32 }, (_, index) => `OpenClaw result line ${index + 1}`).join('\n'),
+      text: Array.from({ length: 32 }, (_, index) => `Claude result line ${index + 1}`).join('\n'),
     }],
   });
 }
@@ -80,8 +73,8 @@ function rig() {
   };
 }
 
-function body(page: RebuildPageContainer | undefined): string {
-  return page?.textObject?.find((container) => container.containerName === 'terminal-body')?.content ?? '';
+function containerText(page: RebuildPageContainer | undefined, name: string): string {
+  return page?.textObject?.find((container) => container.containerName === name)?.content ?? '';
 }
 
 function last<T>(values: readonly T[]): T | undefined {
@@ -89,30 +82,31 @@ function last<T>(values: readonly T[]): T | undefined {
 }
 
 describe('HudPresenter native Agent Terminal journey', () => {
-  it('uses firmware list selection, one native terminal body, truthful paging, and explicit Back transitions', async () => {
+  it('uses firmware list selection, the 5-container dual-brightness card, inline voice, truthful paging, and explicit Back transitions', async () => {
     const r = rig();
     expect(await r.hud.showText('9:41 JOAT listening bat 87%', ContainerId.StatusBar)).toBe(true);
-    const framesBeforeList = r.frames.length; // the status paint, before any native page
+    const framesBeforeList = r.frames.length;
 
-    expect(await r.hud.showList(['OpenClaw', 'Hermes'], {
+    expect(await r.hud.showList(['Claude · 2 sessions', 'Codex · idle'], {
       title: 'AGENT TERMINAL',
-      hint: '2x tap: back',
+      hint: 'tap: open · 2x: close',
       selectable: true,
       nativeFirmwareList: true,
     })).toBe(true);
     expect(r.rebuilds).toHaveLength(1);
     expect(r.rebuilds[0]?.listObject).toHaveLength(1);
     expect(r.rebuilds[0]?.imageObject ?? []).toHaveLength(0);
-    // The firmware owns this page, so the live top line travels in the
-    // rebuild; a blank status container would hide the clock and battery.
-    // It is also the page's only title line.
     expect(r.rebuilds[0]?.textObject?.find((c) => c.containerName === 'status')?.content)
       .toBe('AGENT TERMINAL · 9:41 JOAT listening bat 87%');
 
-    expect(await r.hud.showBrainstorm(terminal())).toBe(true);
+    expect(await r.hud.showTerminal(terminal())).toBe(true);
     expect(r.rebuilds).toHaveLength(2);
     expect(r.rebuilds[1]?.textObject?.map((item) => item.containerName)).toEqual([
-      'terminal-head', 'terminal-body',
+      'terminal-head',
+      'terminal-card',
+      'terminal-dim',
+      'terminal-bright',
+      'terminal-foot',
     ]);
     expect(r.rebuilds[1]?.imageObject ?? []).toHaveLength(0);
     expect(r.frames).toHaveLength(framesBeforeList);
@@ -120,42 +114,56 @@ describe('HudPresenter native Agent Terminal journey', () => {
     expect(r.hud.scrollTranscript('down')).toBe(false);
 
     expect(await r.hud.showPromptQuestion(
-      'terminal_prompt', 'What should OpenClaw inspect?', () => true, 'terminal',
+      'terminal_prompt', 'What should Claude inspect?', () => true, 'terminal',
     )).toBe(true);
-    expect(last(r.upgrades)?.containerName).toBe('terminal-body');
-    expect(last(r.upgrades)?.content).toContain('QUESTION > What should OpenClaw inspect?');
-    expect(await r.hud.dismissPromptQuestion('terminal_prompt')).toBe(true);
-    expect(last(r.upgrades)?.content).not.toContain('QUESTION >');
+    const brightUpgrades = () => r.upgrades.filter((u) => u.containerName === 'terminal-bright');
+    const footUpgrades = () => r.upgrades.filter((u) => u.containerName === 'terminal-foot');
+    expect(last(brightUpgrades())?.content).toContain('> Listening…');
+    expect(last(brightUpgrades())?.content).not.toContain('QUESTION >');
+    expect(last(footUpgrades())?.content).toBe('● Listening · tap: done · 2x: cancel');
 
-    expect(await r.hud.showBrainstorm(longAnswer())).toBe(true);
+    expect(await r.hud.showPromptPartial('terminal_prompt', 'Check tests and summarize.')).toBe(true);
+    expect(last(brightUpgrades())?.content).toContain('> Check tests and summarize.');
+    expect(last(brightUpgrades())?.content).not.toContain('YOU >');
+
+    expect(await r.hud.showPromptTranscribing('terminal_prompt')).toBe(true);
+    expect(last(footUpgrades())?.content).toBe('◐ Transcribing… · 2x: cancel');
+
+    expect(await r.hud.dismissPromptQuestion('terminal_prompt')).toBe(true);
+    expect(last(brightUpgrades())?.content).not.toContain('> Check tests and summarize.');
+    expect(last(footUpgrades())?.content).toBe('tap: speak · 2x: sessions');
+
+    expect(await r.hud.showTerminal(longAnswer())).toBe(true);
     await r.hud.whenNativeTerminalIdle();
     const writesBeforeScroll = r.upgrades.length;
     expect(r.hud.scrollTranscript('up')).toBe(true);
     await r.hud.whenNativeTerminalIdle();
-    expect(r.upgrades).toHaveLength(writesBeforeScroll + 1);
-    expect(last(r.upgrades)?.containerName).toBe('terminal-body');
-    expect(last(last(r.upgrades)?.content?.split('\n') ?? [])).toContain('down: newer');
+    expect(r.upgrades.length).toBeGreaterThan(writesBeforeScroll);
+    expect(last(footUpgrades())?.content).toContain('newer · tap: speak · swipe: scroll · 2x: sessions');
 
     const rebuildsBeforeBack = r.rebuilds.length;
-    expect(await r.hud.showList(['OpenClaw', 'Hermes'], {
-      title: 'AGENT TERMINAL', hint: '2x tap: back', selectable: true,
+    expect(await r.hud.showList(['+ New session', 'Auth refactor · settled'], {
+      title: 'AGENT TERMINAL · CLAUDE',
+      hint: 'tap: open · 2x: agents',
+      selectable: true,
       nativeFirmwareList: true,
     })).toBe(true);
     expect(r.rebuilds).toHaveLength(rebuildsBeforeBack + 1);
     expect(last(r.rebuilds)?.listObject).toHaveLength(1);
     expect(last(r.rebuilds)?.imageObject ?? []).toHaveLength(0);
 
+    const opsBeforeHome = r.operations.length;
     expect(await r.hud.showDefault()).toBe(true);
     expect(last(r.rebuilds)?.imageObject).toHaveLength(4);
     expect(last(r.frames)?.kind).toBe('overview');
 
-    const activeTerminalOperations = r.operations.slice(1, rebuildsBeforeBack + writesBeforeScroll + 4);
+    const activeTerminalOperations = r.operations.slice(1, opsBeforeHome);
     expect(activeTerminalOperations.some((entry) => entry.endsWith(':4'))).toBe(false);
   });
 
   it('restores the semantic reading anchor into a fresh WebView', async () => {
     const before = rig();
-    expect(await before.hud.showBrainstorm(longAnswer())).toBe(true);
+    expect(await before.hud.showTerminal(longAnswer())).toBe(true);
     expect(before.hud.scrollTranscript('up')).toBe(true);
     await before.hud.whenNativeTerminalIdle();
     const snapshot = JSON.parse(JSON.stringify(before.hud.exportBackgroundState())) as Record<string, unknown>;
@@ -163,16 +171,16 @@ describe('HudPresenter native Agent Terminal journey', () => {
     const after = rig();
     expect(after.hud.importBackgroundState(snapshot)).toBe(true);
     expect(await after.hud.repaintRestoredSurface()).toBe(true);
-    const restored = body(last(after.rebuilds));
-    expect(restored).toContain('down: newer');
-    expect(restored).not.toContain('OpenClaw result line 32');
-    expect(last(after.rebuilds)?.imageObject ?? []).toHaveLength(0);
+    const restoredPage = last(after.rebuilds);
+    expect(containerText(restoredPage, 'terminal-foot')).toContain('newer');
+    expect(containerText(restoredPage, 'terminal-bright')).not.toContain('Claude result line 32');
+    expect(restoredPage?.imageObject ?? []).toHaveLength(0);
     expect(after.frames).toHaveLength(0);
   });
 
-  it('returns from a native assistant answer to the retained native terminal', async () => {
+  it('returns from a native assistant answer to the retained 5-container terminal', async () => {
     const r = rig();
-    expect(await r.hud.showBrainstorm(longAnswer())).toBe(true);
+    expect(await r.hud.showTerminal(longAnswer())).toBe(true);
     expect(await r.hud.showAssistantConversation({
       conversationId: 'joat-answer',
       revision: 1,
@@ -187,61 +195,22 @@ describe('HudPresenter native Agent Terminal journey', () => {
     expect(await r.hud.requestAssistantConversationExit()).toBe('prompted');
     expect(await r.hud.requestAssistantConversationExit()).toBe('exited');
     expect(last(r.rebuilds)?.textObject?.map((item) => item.containerName)).toEqual([
-      'terminal-head', 'terminal-body',
+      'terminal-head',
+      'terminal-card',
+      'terminal-dim',
+      'terminal-bright',
+      'terminal-foot',
     ]);
     expect(last(r.rebuilds)?.imageObject ?? []).toHaveLength(0);
-    expect(body(last(r.rebuilds))).toContain('OPENCLAW > COMPLETE');
+    expect(containerText(last(r.rebuilds), 'terminal-bright')).toContain('Claude result line 32');
   });
-});
 
-
-describe('HudPresenter Brainstorm on the native page', () => {
-  const session: BrainstormHudModel = {
-    screen: 'brainstorm', state: 'running', topic: 'Should the glasses cache the picker?',
-    collaborators: ['Codex', 'Claude'], activeSpeaker: 'Codex · round 1/3 · 2 calls',
-    activity: 'YOU > Should the glasses cache the picker?\nCODEX > A cache saves a round trip.',
-  };
-
-  it('shows a Brainstorm as the two-text page under the transition barrier, with no image tiles', async () => {
+  it('clears any lingering assistantOverlay when showTerminal paints over it', async () => {
     const r = rig();
-    await r.hud.showText('12:34 JOAT listening bat 80%', ContainerId.StatusBar);
-    await r.hud.showText('home card', ContainerId.Main);
-    const framesBefore = r.frames.length;
-
-    expect(await r.hud.showBrainstorm(session)).toBe(true);
-
-    expect(r.operations.filter((op) => op === 'rebuild:0:2:0')).toHaveLength(1);
-    expect(r.frames).toHaveLength(framesBefore);
-    const page = last(r.rebuilds);
-    // The head line is the page's status header: name, then the live line.
-    expect(page?.textObject?.find((c) => c.containerName === 'terminal-head')?.content).toBe('BRAINSTORM · 12:34 JOAT listening bat 80%');
-    expect(body(page)).toContain('CODEX > A cache saves a round trip.');
-    expect(body(page).split('\n')[0]).toContain('WORKING · Codex · round 1/3 · 2 calls');
-
-    // A streamed revision is one body upgrade, never another rebuild.
-    const rebuilds = r.rebuilds.length;
-    expect(await r.hud.showBrainstorm({ ...session, activity: `${session.activity} It also risks stale rows.` })).toBe(true);
-    expect(r.rebuilds).toHaveLength(rebuilds);
-    expect(last(r.upgrades)?.content).toContain('stale rows');
-    expect(r.frames).toHaveLength(framesBefore);
+    expect(await r.hud.showTerminal(longAnswer())).toBe(true);
+    expect(await r.hud.showAssistantOverlay('Recorded: approve.', false, true)).toBe(true);
+    expect(r.hud.hasAssistantOverlay()).toBe(true);
+    expect(await r.hud.showTerminal(longAnswer())).toBe(true);
+    expect(r.hud.hasAssistantOverlay()).toBe(false);
   });
-
-  it('pages the transcript natively on swipe and returns to the page after a question', async () => {
-    const r = rig();
-    const long = { ...session, activity: Array.from({ length: 30 }, (_, i) => `CODEX > point ${i + 1}`).join('\n') };
-    expect(await r.hud.showBrainstorm(long)).toBe(true);
-    const rebuilds = r.rebuilds.length;
-    expect(r.hud.scrollTranscript('up')).toBe(true);
-    await vi.waitFor(() => expect(last(r.upgrades)?.content).toContain('newer · swipe down · 2x tap: cancel'));
-    expect(r.rebuilds).toHaveLength(rebuilds);
-
-    expect(await r.hud.showPromptQuestion('q-1', 'What would you like to brainstorm?', () => true, 'brainstorm')).toBe(true);
-    expect(last(r.rebuilds)?.textObject?.map((c) => c.containerName)).toEqual(['status', 'main', 'hint']);
-    const before = r.operations.length;
-    expect(await r.hud.dismissPromptQuestion('q-1')).toBe(true);
-    const since = r.operations.slice(before);
-    expect(since.filter((op) => op === 'rebuild:0:2:0')).toHaveLength(1);
-    expect(since.filter((op) => op.startsWith('rebuild:0:1:4') || op.startsWith('visual:'))).toHaveLength(0);
-  });
-
 });

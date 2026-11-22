@@ -114,7 +114,7 @@ describe('resolveHudOverview', () => {
     })).toEqual({
       kind: 'empty',
       title: 'Reconnecting',
-      primary: 'Restoring JOAT on your Mac…',
+      primary: 'Reconnecting to JOAT…',
       recovery: 'This screen will refresh automatically.',
       hint: '2x tap: menu',
     });

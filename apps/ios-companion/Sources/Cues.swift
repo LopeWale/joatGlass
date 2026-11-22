@@ -62,12 +62,12 @@ final class Cues {
     /// A cue for the open note, on the main queue.
     var onCue: ((Cue) -> Void)?
 
-    init(claude: ClaudeLink) { self.claude = claude }
+    init(claude: ClaudeLink = ClaudeLink()) { self.claude = claude }
 
     var enabled: Bool {
         UserDefaults.standard.object(forKey: Self.enabledKey) as? Bool ?? true
     }
-    var available: Bool { claude.configured }
+    var available: Bool { OnPhoneAI.shared.anyConfigured || claude.configured }
 
     /// A note opened: a clean slate, with the prep note it uses (none: Skip & start).
     func begin(usePrep: Bool = true) {
@@ -139,7 +139,9 @@ final class Cues {
         inFlight = true
         let g = generation
         let started = Date()
-        claude.cue(system: Self.system(prep: prepNote), text: Self.request(earlier: earlier, said: String(said.suffix(900)), given: given)) { [weak self] result in
+        let systemBlocks = Self.system(prep: prepNote)
+        let promptText = Self.request(earlier: earlier, said: String(said.suffix(900)), given: given)
+        let handleReply: (Result<String, MacLink.Failure>) -> Void = { [weak self] result in
             guard let self, self.generation == g else { return }
             self.inFlight = false
             let ms = Int(Date().timeIntervalSince(started) * 1000)
@@ -158,6 +160,11 @@ final class Cues {
             }
             // Words that arrived while asking are judged next.
             self.consider(paused: false)
+        }
+        if OnPhoneAI.shared.anyConfigured {
+            OnPhoneAI.shared.cue(system: systemBlocks, text: promptText, completion: handleReply)
+        } else {
+            claude.cue(system: systemBlocks, text: promptText, completion: handleReply)
         }
     }
 

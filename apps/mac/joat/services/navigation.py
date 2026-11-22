@@ -15,7 +15,7 @@ from typing import Literal, cast
 
 from ..core.interfaces import GlassesTransport, NavigationProvider
 from ..navigation.map_image import MapImageError, map_move_meters, render_map_tile
-from ..core.navigation import NavigationCandidate, NavigationPoint, ProviderRoute
+from ..core.navigation import NavigationCandidate, NavigationMode, NavigationPoint, ProviderRoute
 from ..core.protocol import (
     SavedPlace,
     NavigationCoordinate,
@@ -59,6 +59,7 @@ _VOICE_FIRST = frozenset({"first", "the first", "option one", "option 1"})
 _VOICE_SECOND = frozenset({"second", "the second", "option two", "option 2"})
 _VOICE_WALK = frozenset({"walk", "walking", "walking mode"})
 _VOICE_CYCLE = frozenset({"cycle", "cycling", "bike", "bicycle", "cycling mode"})
+_VOICE_DRIVE = frozenset({"drive", "driving", "car", "by car", "driving mode"})
 _VOICE_START = frozenset({"start", "start navigation", "go", "begin", "begin navigation"})
 _VOICE_CHANGE_MODE = frozenset({"change mode", "change the mode"})
 _VOICE_FINISH = frozenset({"finish", "done", "end navigation"})
@@ -90,8 +91,46 @@ def _normalise_navigation_voice(text: str) -> str:
     return re.sub(r"\s+", " ", text.casefold().strip().rstrip(".!?"))
 
 
-def navigation_query(text: str) -> str | None:
-    """Return an explicit destination request; ordinary speech is untouched."""
+_MODE_QUERY_PATTERNS: tuple[tuple[re.Pattern[str], NavigationMode | None], ...] = (
+    (re.compile(r"^(?:walk(?:\s+me)?|walking\s+directions)\s+to\s+(.+)$", re.IGNORECASE), "walking"),
+    (
+        re.compile(
+            r"^(?:(?:bike|cycle)(?:\s+me)?|(?:biking|cycling|bicycle)\s+directions)\s+to\s+(.+)$",
+            re.IGNORECASE,
+        ),
+        "cycling",
+    ),
+    (re.compile(r"^(?:drive(?:\s+me)?|driving\s+directions)\s+to\s+(.+)$", re.IGNORECASE), "driving"),
+    (re.compile(r"^walk\s+((?:my\s+)?(?:home|work))$", re.IGNORECASE), "walking"),
+    (re.compile(r"^(?:bike|cycle)\s+((?:my\s+)?(?:home|work))$", re.IGNORECASE), "cycling"),
+    (re.compile(r"^drive\s+((?:my\s+)?(?:home|work))$", re.IGNORECASE), "driving"),
+    (
+        re.compile(
+            r"^(?:navigate(?:\s+me)?|directions|take me|guide me|get me|"
+            r"help me get|show me (?:the )?way)(?:\s+to)\s+(.+)$",
+            re.IGNORECASE,
+        ),
+        None,
+    ),
+    (
+        re.compile(
+            r"^(?:navigate(?:\s+me)?|directions|take me|guide me|get me)\s+((?:my\s+)?(?:home|work))$",
+            re.IGNORECASE,
+        ),
+        None,
+    ),
+    (
+        re.compile(
+            r"^(?:how do i get|what(?:'s| is) the (?:best )?way)(?:\s+to)\s+(.+)$",
+            re.IGNORECASE,
+        ),
+        None,
+    ),
+)
+
+
+def navigation_parsed_query(text: str) -> tuple[str, NavigationMode | None] | None:
+    """Return an explicit destination request and optional travel mode."""
     request = text.strip().rstrip(".!?")
     # The normal assistant address is optional, not part of the destination.
     # Keep the command explicit after stripping it: ordinary conversation must
@@ -104,27 +143,24 @@ def navigation_query(text: str) -> str | None:
         count=1,
         flags=re.IGNORECASE,
     )
-    match = re.match(
-        r"^(?:navigate(?:\s+me)?|directions|take me|guide me|get me|"
-        r"help me get|show me (?:the )?way)(?:\s+to)\s+(.+)$",
-        request,
-        flags=re.IGNORECASE,
-    )
-    if match is None:
-        match = re.match(
-            r"^(?:how do i get|what(?:'s| is) the (?:best )?way)(?:\s+to)\s+(.+)$",
-            request,
-            flags=re.IGNORECASE,
-        )
-    if match is None:
-        return None
-    destination = match.group(1).strip()
-    return destination or None
+    for pattern, mode in _MODE_QUERY_PATTERNS:
+        match = pattern.match(request)
+        if match is not None:
+            destination = match.group(1).strip()
+            return (destination, mode) if destination else None
+    return None
+
+
+def navigation_query(text: str) -> str | None:
+    """Return an explicit destination request; ordinary speech is untouched."""
+    parsed = navigation_parsed_query(text)
+    return parsed[0] if parsed is not None else None
 
 
 @dataclass(frozen=True, slots=True)
 class _Query:
     text: str
+    mode: NavigationMode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +191,7 @@ class _SearchReady:
 #: within ~90 m of a tile centre, under a quarter of the pane from its
 #: middle, with the road ahead always in view.
 _MAP_STRIDE_METERS = 180.0
+_DRIVING_MAP_STRIDE_METERS = 360.0
 #: Two centres this close are the same tile; a reroute re-walks its new
 #: geometry and only the stretch that changed is fetched again.
 _MAP_DEDUPE_METERS = 30.0
@@ -211,8 +248,13 @@ class NavigationSession(Session):
         refresh_proximity: ProximityRefresh | None = None,
         map_token: str = "",
         places: Callable[[], Sequence[SavedPlace]] | None = None,
+        initial_mode: NavigationMode | None = None,
     ) -> None:
+        parsed_initial = navigation_parsed_query(query) if initial_mode is None else None
+        if parsed_initial is not None:
+            query, initial_mode = parsed_initial
         self._initial_query = query
+        self._initial_mode: NavigationMode | None = initial_mode
         self._provider = provider
         # The wearer's saved places (phone page). "Navigate home" resolves
         # to the saved coordinates without a provider search, or searches
@@ -244,7 +286,7 @@ class NavigationSession(Session):
         self._locating_visible_since: float | None = None
         self._candidates: dict[str, NavigationCandidate] = {}
         self._destination: NavigationCandidate | None = None
-        self._mode: Literal["walking", "cycling"] | None = None
+        self._mode: NavigationMode | None = initial_mode
         self._origin: NavigationPoint | None = None
         self._provider_route: ProviderRoute | None = None
         self._route_revision = 0
@@ -271,14 +313,14 @@ class NavigationSession(Session):
         return "arrived" if self._arrived else "cancelled"
 
     async def run(self) -> None:
-        self._start_search(self._initial_query)
+        self._start_search(self._initial_query, initial_mode=self._initial_mode)
         try:
             while not self._finished and not self._cancelled:
                 event = await self._events.get()
                 if isinstance(event, _Cancelled):
                     break
                 if isinstance(event, _Query):
-                    await self._replace_destination(event.text)
+                    await self._replace_destination(event.text, event.mode)
                 elif isinstance(event, _SearchReady):
                     await self._handle_search_ready(event)
                 elif isinstance(event, NavigationAction):
@@ -325,10 +367,10 @@ class NavigationSession(Session):
 
         # An explicit new destination supersedes the current in-flight search
         # or route.  Ordinary place mentions deliberately do not do this.
-        replacement = navigation_query(query)
+        replacement = navigation_parsed_query(query)
         if replacement is not None:
             self._awaiting_destination_speech = False
-            self._events.put_nowait(_Query(replacement))
+            self._events.put_nowait(_Query(replacement[0], replacement[1]))
             return True
 
         spoken = _normalise_navigation_voice(query)
@@ -400,6 +442,8 @@ class NavigationSession(Session):
                 return ("select_mode", "walking")
             if spoken in _VOICE_CYCLE:
                 return ("select_mode", "cycling")
+            if spoken in _VOICE_DRIVE:
+                return ("select_mode", "driving")
             return None
 
         if phase == "preview":
@@ -417,14 +461,16 @@ class NavigationSession(Session):
             return ("finish", None)
         return None
 
-    async def _replace_destination(self, query: str) -> None:
+    async def _replace_destination(
+        self, query: str, mode: NavigationMode | None = None,
+    ) -> None:
         # A future repair entry point may be opened while a route is active.
         # Stop the phone-owned tracker before resetting Mac state or sending a
         # new destination to the cloud; old guidance must never outlive the
         # route generation that authorized it.
         if self._route_installed or self._install_attempt is not None:
             await self._transport.send(NavigationStop(session_id=self._session_id))
-        self._start_search(query)
+        self._start_search(query, initial_mode=mode)
 
     def accept_action(self, action: NavigationAction) -> None:
         self._events.put_nowait(action)
@@ -447,7 +493,9 @@ class NavigationSession(Session):
     def accept_reroute(self, request: NavigationRerouteRequest) -> None:
         self._events.put_nowait(request)
 
-    def _start_search(self, query: str) -> None:
+    def _start_search(
+        self, query: str, *, initial_mode: NavigationMode | None = None,
+    ) -> None:
         search_request = _destination_search(query)
         self._last_query = query
         self._awaiting_destination_speech = False
@@ -455,7 +503,7 @@ class NavigationSession(Session):
         self._cancel_task(self._route_task)
         self._route_token += 1
         self._destination = None
-        self._mode = None
+        self._mode = initial_mode
         self._origin = None
         self._provider_route = None
         self._origin_request = None
@@ -634,10 +682,10 @@ class NavigationSession(Session):
             view="mode",
             primary="Choose travel mode",
             secondary=destination.label,
-            hint="tap choose · swipe select · say walk/cycle",
+            hint="tap choose · swipe select · say walk/cycle/drive",
             interaction="stationary",
-            options=["Walk", "Cycle"],
-            choice_ids=["walking", "cycling"],
+            options=["Walk", "Cycle", "Drive"],
+            choice_ids=["walking", "cycling", "driving"],
             selected_index=0,
         ), "mode")
 
@@ -659,7 +707,10 @@ class NavigationSession(Session):
             self.cancel()
             return
         if phase == "destination" and action.action == "confirm_destination":
-            await self._show_mode()
+            if self._mode is not None:
+                await self._request_origin()
+            else:
+                await self._show_mode()
         elif phase == "destination" and action.action == "retry_destination":
             await self._show_retry_prompt()
         elif phase == "repair" and action.action == "select_destination":
@@ -671,9 +722,9 @@ class NavigationSession(Session):
                 self._destination = candidate
                 await self._show_destination(candidate)
         elif phase == "mode" and action.action == "select_mode":
-            if action.choice_id not in ("walking", "cycling"):
+            if action.choice_id not in ("walking", "cycling", "driving"):
                 return
-            self._mode = cast(Literal["walking", "cycling"], action.choice_id)
+            self._mode = cast(NavigationMode, action.choice_id)
             await self._request_origin()
         elif phase == "preview" and action.action == "start":
             await self._send_route()
@@ -766,8 +817,9 @@ class NavigationSession(Session):
                     return
                 centre = self._map_queue.popleft()
                 try:
+                    zoom = 15 if self._mode == "driving" else 16
                     tile = await render_map_tile(
-                        self._map_token, centre.latitude, centre.longitude,
+                        self._map_token, centre.latitude, centre.longitude, zoom=zoom,
                     )
                 except (MapImageError, OSError) as exc:
                     log.info("navigation map unavailable: %s", type(exc).__name__)
@@ -959,12 +1011,19 @@ class NavigationSession(Session):
         self._generation = max(self._generation, ready.generation)
         # The streets along the whole route, fetched now rather than as the
         # wearer walks: the Mac hears no positions during guidance.
-        self._queue_map_centres(route_map_centres(ready.route.plan.geometry))
+        stride_m = (
+            _DRIVING_MAP_STRIDE_METERS
+            if self._mode == "driving"
+            else _MAP_STRIDE_METERS
+        )
+        self._queue_map_centres(
+            route_map_centres(ready.route.plan.geometry, stride_m=stride_m)
+        )
         if ready.install_immediately:
             await self._send_route()
             return
         mode = self._mode
-        if mode not in ("walking", "cycling"):
+        if mode not in ("walking", "cycling", "driving"):
             return
         remaining = ready.route.plan.steps[-1].distance_along_route_m
         await self._send_view(NavigationHudView(
@@ -983,7 +1042,7 @@ class NavigationSession(Session):
     def _provider_route_is_usable(self, route: ProviderRoute) -> bool:
         mode = self._mode
         destination = self._destination
-        if mode not in ("walking", "cycling") or route.plan.mode != mode or destination is None:
+        if mode not in ("walking", "cycling", "driving") or route.plan.mode != mode or destination is None:
             return False
         try:
             NavigationRoute(

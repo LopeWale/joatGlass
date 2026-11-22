@@ -151,6 +151,26 @@ describe('Home from a firmware text page', () => {
     expect(r.writes()[0]).toBe('rebuild:4:1:0');
     expect(r.frames.map((frame) => frame.kind)).toEqual(['overview']);
   });
+
+  it('presents a capability prompt card with live speech-in-text over a NAVIGATION firmware list and restores the list on cancel', async () => {
+    const r = rig();
+    expect(await r.hud.showList(['➤ Navigate to a place…', '➤ Home'], {
+      title: 'NAVIGATION', hint: 'tap: choose · 2x tap: back', selectable: true, nativeFirmwareList: true,
+    })).toBe(true);
+    expect(r.writes()).toEqual(['rebuild:0:2:1']);
+    r.reset();
+
+    expect(await r.hud.showPromptQuestion('nav-q1', 'Where to?', () => true, 'capability')).toBe(true);
+    const promptPage = r.rebuilds[r.rebuilds.length - 1];
+    expect(promptPage?.textObject?.find((t) => t.containerName === 'generation')?.content?.trim())
+      .toBe('tap: search · 2x tap: cancel');
+    expect(await r.hud.showPromptPartial('nav-q1', 'Cajun Corner')).toBe(true);
+    expect(r.writes()).toContain('upgrade:wearer-turns');
+
+    r.reset();
+    expect(await r.hud.dismissPromptQuestion('nav-q1')).toBe(true);
+    expect(r.writes()).toEqual(['rebuild:0:2:1']);
+  });
 });
 
 describe('navigation frames before the live map', () => {
