@@ -1,6 +1,6 @@
 # apps/hub-plugin
 
-Even Hub G2 plugin — the mobility path. Streams glasses mic PCM, IMU, and input events to the Mac brain over WebSocket; renders HUD replies via `textContainerUpgrade`.
+Even Hub G2 plugin — the glasses runtime. Connects over WebSocket to `JOAT Brain` on the iPhone (`ws://127.0.0.1:8787/glasses`, phone-first default) or directly to `JOAT.app` on the Mac (`wss://<your-mac>.<your-tailnet>.ts.net/glasses`), streaming 16 kHz PCM audio, IMU, location, and touchpad events while rendering native firmware containers and 4-bit canvas surfaces.
 
 See [../../docs/HUB_PLUGIN.md](../../docs/HUB_PLUGIN.md) for the SDK reference and the rules that constrain this code.
 
@@ -8,15 +8,20 @@ See [../../docs/HUB_PLUGIN.md](../../docs/HUB_PLUGIN.md) for the SDK reference a
 
 | File | Role |
 |---|---|
-| `src/types.ts` | Container IDs, canvas constants, uplink/downlink message protocol (mirrored in Python) |
-| `src/BridgeClient.ts` | SDK lifecycle; enforces `waitForEvenAppBridge` → `createStartUpPageContainer` → rest |
-| `src/HudPageBuilder.ts` | Layout declarations; guarantees one `isEventCapture` and unique `zOrderIndex` |
-| `src/HudPresenter.ts` | `showText` / `appendText` (streaming) / `showList` |
+| `src/types.ts` | Container IDs, canvas constants, uplink/downlink message protocol |
+| `src/BridgeClient.ts` | SDK lifecycle; enforces `waitForEvenAppBridge` → `createStartUpPageContainer` → serialized writes |
+| `src/HudPageBuilder.ts` | Layout declarations; guarantees single `isEventCapture` and unique `zOrderIndex` |
+| `src/HudPresenter.ts` | Surface coordinator across Home, readers, lists, image spine, and overlays |
+| `src/AssistantConversationSurface.ts` | Floating multi-turn JOAT conversation card, `JOAT · LISTENING` spine, Turn-2 scroll reset |
+| `src/NativeTerminalSurface.ts` | 5-container framed `Agent Terminal` (`Claude`, `Codex`, `Antigravity`) + inline speech & approvals |
+| `src/NavigationSchematic.ts` | Heading-up vector route schematic (`Walk`, `Cycle`, `Drive`) |
+| `src/NotificationCard.ts` | Popup notification cards, arrival-age labels & persistent 200-ID dismissal tombstones |
+| `src/PhoneControlPanel.ts` | Even Hub WebView connection sheet (`This iPhone · JOAT Brain` vs Mac brain) |
 | `src/AudioStreamer.ts` | `audioControl` + PCM batching (~200 ms chunks) |
-| `src/ImuMonitor.ts` | Nod detection + R1-ring confirm → `Confirmer` for consequential actions |
-| `src/EventRouter.ts` | Single `onEvenHubEvent` subscription, typed fan-out |
-| `src/MacLink.ts` | WebSocket to the Mac: backoff reconnect, bounded queue (drops oldest audio) |
-| `src/main.ts` | Boot sequence and downlink command handling |
+| `src/ImuMonitor.ts` | Nod detection + R1-ring / touchpad `ConfirmGate` |
+| `src/EventRouter.ts` | Single `onEvenHubEvent` subscription, typed gesture fan-out |
+| `src/MacLink.ts` | WebSocket client with backoff reconnect and bounded audio queue |
+| `src/main.ts` | Boot sequence and downlink command routing |
 
 ## Status
 

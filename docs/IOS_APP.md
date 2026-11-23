@@ -68,19 +68,19 @@ Addressing `"JOAT, …"` (or speaking inside the follow-up window) runs polite l
 Home › **Navigation & Places** manages Saved Places (`Home`, `Work`, custom pins, or your current iPhone GPS point), searches Apple Maps with live autocomplete, previews routes on an interactive map (side-by-side split view on unfolded iPhone Duo), and starts **Walk**, **Cycle**, or **Drive** guidance directly on the Even G2 lens.
 
 - **On the glasses:** the `NAVIGATION` menu lists active route controls (`Show active guidance`, `Stop navigation`), `Navigate to a place…` with live speech-in-text (`Where to?`), and 1-tap Saved Places. Spoken triggers such as `"walk to …"`, `"bike to …"`, and `"drive home"` pre-select the travel mode automatically.
-- **Street map tiles:** `NavigationMapTiles` renders `284×220` 4-bit monochrome Web Mercator street tiles along the route—using dark-mode `MKMapSnapshotter` when `JOAT Brain` is foregrounded and a background-safe CPU-only dark slippy-tile stitcher when locked or behind Even Hub.
+- **Heading-up route schematic (`NavigationSchematic.ts`):** active guidance renders a crisp heading-up vector route diagram from live route geometry and GPS fixes (fixed wearer chevron, bright remaining route, dim travelled route, ringed next-maneuver node with street name, cross-street stubs, and dashed off-route connector).
 - **Lock-screen GPS & headphone cues:** `PhoneLocation` uses `WhenInUse` authorization and arms `CLBackgroundActivitySession` + the iOS blue navigation indicator **only** while an active turn-by-turn route is running, streaming single-source `navigation.fix` updates and speaking concise turn prompts into connected headphones when **Spoken turn-by-turn cues** is on.
 
-## Messages
+## Messages & Agent Terminal over Mac Relays
 
-With a home Mac that runs JOAT (Private Tailnet on), texts reach the glasses and replies send through that Mac, with no automation: `scripts/build_ios.sh` reads the Mac's address and `messages-token` into the build, and the phone long-polls the Mac's Messages door (`/messages` on the tailnet). Without one, texts reach the glasses and replies send from your number through two Shortcuts automations. JOAT Brain › Messages has an Add to Shortcuts button for each, which opens it in Shortcuts. Then, in each one's Info › Privacy, turn on Allow Running When Locked. [apps/ios-companion/Shortcuts](../apps/ios-companion/Shortcuts/README.md) has the files, for your own build.
+With a home Mac running `JOAT.app` (Private Tailnet on), `Messages`, `Agent Terminal` (**Claude**, **Codex**, **Antigravity**), and `Activity` keep the Even Hub WebSocket pinned locally to `JOAT Brain` on the iPhone (`ws://127.0.0.1:8787/glasses`) so speech recognition and JOAT Assistant stay on-device, while `JOAT Brain` reaches your Mac in the background over Tailscale HTTPS:
+
+- **`/messages` (`MacMessages.swift`):** reads full macOS `chat.db` thread history, searches threads (`?q=`), and sends iMessages without Shortcuts automations. Without a home Mac, two optional iOS Shortcuts automations ([apps/ios-companion/Shortcuts](../apps/ios-companion/Shortcuts/README.md)) relay incoming and outgoing texts on the phone alone.
+- **`/terminal` (`MacTerminal.swift` + `GlassesTerminal.swift`):** drives the 3-level G2 `Agent Terminal` (`AGENT TERMINAL` → session picker → 5-container framed session card with `[!] Approval needed` touchpad gates and iPhone-transcribed spoken instructions), while the **Agents** tab on the phone manages models, workspaces, accounts, and new sessions.
 
 ## Brainstorm on the Mac
 
-Brainstorm, the Agent Terminal and Activity run on a Mac. Pick one on the glasses while the phone is the brain, and the glasses move to the first Mac in your plugin package that answers, tried in the package's order, with the last one that answered first. When you go Home (2x tap), they come back to the phone.
-
-- The Mac needs JOAT open, and Tailscale on, on both the Mac and the phone. The glasses must have been paired with that Mac once. If no Mac answers, the glasses say so and stay on the phone.
-- The glasses hold one brain at a time. While Brainstorm is open, texts, phone reminders and QuickNotes wait until you're Home.
+Cited multi-agent **Brainstorm** (`Codex` Proposer ⇄ `Claude` Critic ⇄ `VerifierGate`) runs on your Mac. Pick `Brainstorm` when connected directly to a Mac brain (`wss://<your-mac>.<your-tailnet>.ts.net/glasses`), or hand off to the first reachable Mac in your plugin allowlist and return to `This iPhone · JOAT Brain` on `2x tap` Home.
 
 ## Build your own
 
