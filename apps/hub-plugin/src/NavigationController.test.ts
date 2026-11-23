@@ -337,21 +337,15 @@ describe('NavigationController', () => {
   });
 
 
-  it('adopts street surroundings that arrive before their route', async () => {
-    // The Mac fetches the map as soon as it has the wearer's ORIGIN, which
-    // happens before it has a route to send. Dropping the tile because no
-    // route existed yet is exactly why guidance kept falling back to a
-    // bare polyline on black.
+  it('ignores a navigation.map raster tile before or during a route, without throwing', async () => {
+    // Since the route schematic, the glasses never draw a street tile. An
+    // older phone or the Mac may still send one; it must be dropped quietly.
     const { controller, frames, emit } = harness();
-    const image = {} as CanvasImageSource;
-    await controller.installMapPanel(
-      {
-        kind: 'navigation.map', sessionId: 'nav-1',
-        latitude: 41.9, longitude: -87.65,
-        zoom: 16, width: 248, height: 168, png: 'ignored',
-      },
-      async () => image,
-    );
+    await expect(controller.installMapPanel({
+      kind: 'navigation.map', sessionId: 'nav-1',
+      latitude: 41.9, longitude: -87.65,
+      zoom: 16, width: 248, height: 168, png: 'not-even-base64',
+    })).resolves.toBeUndefined();
     await controller.installRoute({
       kind: 'navigation.route', sessionId: 'nav-1', requestId: 'route-1',
       generation: 2, routeId: 'route-1', revision: 1,
@@ -359,46 +353,16 @@ describe('NavigationController', () => {
     });
     emit({ latitude: 0, longitude: 0.0009, accuracy: 5, timestamp: 10_000 });
     await controller.whenIdle();
-
-    const guidance = frames
-      .map((frame) => frame as NavigationHudModel)
-      .find((frame) => frame?.map?.panel !== undefined);
-    expect(guidance?.map?.panel?.image).toBe(image);
-  });
-
-  it('keeps a map that belongs to a different session out of this route', async () => {
-    const { controller, frames, emit } = harness();
-    await controller.installMapPanel(
-      {
-        kind: 'navigation.map', sessionId: 'nav-OTHER',
-        latitude: 41.9, longitude: -87.65,
-        zoom: 16, width: 248, height: 168, png: 'ignored',
-      },
-      async () => ({} as CanvasImageSource),
-    );
-    await controller.installRoute({
-      kind: 'navigation.route', sessionId: 'nav-1', requestId: 'route-1',
-      generation: 2, routeId: 'route-1', revision: 1,
-      destinationLabel: 'Cajun Corner', etaMinutes: 18, plan: routePlan,
+    const before = frames.length;
+    await controller.installMapPanel({
+      kind: 'navigation.map', sessionId: 'nav-1',
+      latitude: 0, longitude: 0.0009, zoom: 16, width: 284, height: 220, png: 'x',
     });
-    emit({ latitude: 0, longitude: 0.0009, accuracy: 5, timestamp: 10_000 });
     await controller.whenIdle();
-    const leaked = frames
+    expect(frames.length).toBe(before);
+    expect(frames
       .map((frame) => frame as NavigationHudModel)
-      .some((frame) => frame?.map?.panel !== undefined);
-    expect(leaked).toBe(false);
-  });
-
-  it('survives a host with no image decoder instead of throwing', async () => {
-    const { controller } = harness();
-    await expect(controller.installMapPanel(
-      {
-        kind: 'navigation.map', sessionId: 'nav-1',
-        latitude: 41.9, longitude: -87.65,
-        zoom: 16, width: 248, height: 168, png: 'ignored',
-      },
-      async () => { throw new Error('no decoder'); },
-    )).resolves.toBeUndefined();
+      .some((frame) => frame?.map?.panel !== undefined)).toBe(false);
   });
 
   it('rejects route installation when high-rate location activation throws', async () => {

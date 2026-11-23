@@ -1079,7 +1079,13 @@ struct NotesView: View {
         .onAppear {
             recoverAndReload()
             syncRegularSelectionIfNeeded()
+            #if DEBUG
+            NotesView.debugSeedInsightsOnce()
+            #endif
         }
+        // Rows show "Reading handwriting…" / "Summarizing…" and the new summary as they land.
+        .onReceive(NotificationCenter.default.publisher(for: QuickNotes.insightsChangedNotification)) { _ in model.reload() }
+        .onReceive(NotificationCenter.default.publisher(for: Notebook.readingChangedNotification)) { _ in model.reload() }
         .onChange(of: filter) { _, _ in
             syncRegularSelectionIfNeeded()
         }
@@ -1535,6 +1541,32 @@ struct NotesView: View {
         }
         model.reload()
     }
+
+    #if DEBUG
+    private static var debugSeeded = false
+    /// JOAT_DEBUG_NOTES_INSIGHTS=1 (with JOAT_DEBUG_NOTEBOOK_SEED=1): the seeded
+    /// pages get insights as a model would give them, for Simulator screenshots.
+    static func debugSeedInsightsOnce() {
+        guard !debugSeeded, ProcessInfo.processInfo.environment["JOAT_DEBUG_NOTES_INSIGHTS"] == "1" else { return }
+        debugSeeded = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let qn = JOATRuntime.shared.brain?.quickNotes else { return }
+            let typedId = "debug-typed-page-1"
+            qn.ensureBlankPage(id: typedId, paperTemplate: PaperTemplate.dotGrid.rawValue)
+            qn.savePage(id: typedId, typed: "Standup: firmware 0.1.152 is signed off. Ask Dana for the TestFlight build notes before Thursday.",
+                        inkChanged: false, paperTemplate: PaperTemplate.dotGrid.rawValue)
+            qn.renameNote(typedId, to: "Standup — Firmware Sign-off")
+            qn.debugSetInsights(typedId,
+                                summary: "Firmware 0.1.152 is signed off; TestFlight build notes are still needed from Dana before Thursday.",
+                                keyPoints: ["Firmware 0.1.152 signed off"], todos: ["Ask Dana for TestFlight build notes by Thursday"])
+            qn.debugSetInsights("debug-duo-page-1",
+                                summary: "Hardware walkthrough: verify G2 lens alignment and battery telemetry, call Mike Friday at 3 pm about the tag map, and order two spare relays.",
+                                keyPoints: ["Verify G2 lens alignment", "Check battery telemetry", "Tag map needs Mike's review"],
+                                todos: ["Call Mike about the tag map — Friday 3 pm", "Order two spare relays"])
+            JOATRuntime.shared.notes.reload()
+        }
+    }
+    #endif
 }
 
 // MARK: - Apple Pencil Page & Voice Note Cards
@@ -1553,14 +1585,11 @@ private struct NotebookPageCardView: View {
     }
 
     private var previewText: String {
-        if let summary = note.summary, !summary.isEmpty {
-            return summary
-        }
-        if let first = note.paragraphs.first, !first.isEmpty {
-            return first
+        if let line = NotesInsights.rowLine(summary: note.summary, keyPoints: note.keyPoints, paragraphs: note.paragraphs) {
+            return line
         }
         if Notebook.reading.contains(note.id) {
-            return "Reading handwriting with Vision…"
+            return "Reading handwriting…"
         }
         return "Tap to sketch or write with Apple Pencil"
     }
@@ -1627,15 +1656,12 @@ private struct NotebookPageCardView: View {
                         .foregroundStyle(.tertiary)
                 }
 
-                Text(previewText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                NoteSummaryLine(note: note, fallback: previewText)
 
                 if !note.todos.isEmpty || cueCount > 0 || Notebook.reading.contains(note.id) {
                     HStack(spacing: 6) {
                         if Notebook.reading.contains(note.id) {
-                            JoatStatusPill(label: "Reading Ink…", color: JoatTheme.amber, icon: "text.viewfinder")
+                            JoatStatusPill(label: "Reading handwriting…", color: JoatTheme.amber, icon: "text.viewfinder")
                         }
                         if !note.todos.isEmpty {
                             JoatStatusPill(
@@ -1707,6 +1733,37 @@ private struct StationeryRulePreview: View {
     }
 }
 
+/// The 1–2 line summary under a note in the list (typed, handwritten or
+/// voice): the AI summary with a sparkle, else its first words, and a
+/// subtle "Summarizing…" while one is on its way.
+private struct NoteSummaryLine: View {
+    let note: QuickNotes.VoiceNote
+    let fallback: String
+
+    var body: some View {
+        let summary = (note.summary ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let summarizing = JOATRuntime.shared.brain?.quickNotes.isSummarizing(note.id) ?? false
+        VStack(alignment: .leading, spacing: 2) {
+            if !summary.isEmpty {
+                (Text(Image(systemName: "sparkles")).foregroundStyle(JoatTheme.accent) + Text(" ") + Text(summary))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            } else {
+                Text(fallback)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            if summarizing {
+                Text("Summarizing…")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+}
+
 private struct VoiceNoteRowView: View {
     let note: QuickNotes.VoiceNote
 
@@ -1730,11 +1787,8 @@ private struct VoiceNoteRowView: View {
                     .foregroundStyle(.tertiary)
             }
 
-            if let text = note.summary ?? note.paragraphs.first, !text.isEmpty {
-                Text(text)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+            if let text = NotesInsights.rowLine(summary: note.summary, keyPoints: note.keyPoints, paragraphs: note.paragraphs) {
+                NoteSummaryLine(note: note, fallback: text)
             }
 
             if !note.todos.isEmpty || cueCount > 0 {

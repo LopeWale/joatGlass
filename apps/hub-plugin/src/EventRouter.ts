@@ -1,5 +1,6 @@
 import { OsEventTypeList, EventSourceType, type EvenHubEvent } from '@evenrealities/even_hub_sdk';
 import { GesturePolicy, type GestureSource } from './GesturePolicy';
+import { PendingNotificationDismissals } from './NotificationCard';
 import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
@@ -74,9 +75,11 @@ export interface AssistantOverlayInputOwner {
   /** The notification card over the page (NotificationCard.ts). */
   hasNotificationCard?(): boolean;
   /** Mark the shown card read and move to the next unread, or close. The
-   * id of the card marked read, for the Mac. */
+   * id of the card marked read, for the brain. */
   tapNotificationCard?(): string | undefined;
-  /** Close the card without marking it read (Even's double tap). */
+  /** Mark the shown/unread card(s) read and close the card (2x tap). */
+  dismissNotificationCard?(): string[];
+  /** Close the card without marking it read (auto-hide timeout). */
   closeNotificationCard?(): Promise<boolean>;
 }
 
@@ -155,6 +158,7 @@ export class EventRouter {
      * keeps 2x tap and swipe as its refusal. The retry is true when the
      * gate took the gesture. */
     private readonly confirmationRetry?: () => (() => boolean) | undefined,
+    private readonly pendingDismissals: PendingNotificationDismissals = new PendingNotificationDismissals(),
   ) {}
 
   attach(): void {
@@ -535,27 +539,39 @@ export class EventRouter {
   }
 
   /**
-   * The notification card owns the page's taps while it is up, as Even's
-   * own card does (the wearer's ruling, 2026-10-07): a tap marks it read and
-   * shows the next unread, or closes the card after the last; a double tap
-   * closes it and leaves it unread. Swipes stay with the card. Long press
-   * is not taken: the microphone keeps it.
+   * The notification card owns the page's taps while it is up: a tap marks
+   * the shown card read and shows the next unread (or closes after the last);
+   * a double tap marks the shown/unread card(s) read, closes the card, and
+   * notifies the brain. Swipes stay with the card; long press stays as-is.
    */
   private handleNotificationCard(eventType: number | undefined): boolean {
     if (!this.assistantOverlay?.hasNotificationCard?.()) return false;
     const type = eventType ?? OsEventTypeList.CLICK_EVENT;
     if (type === OsEventTypeList.CLICK_EVENT) {
       const read = this.assistantOverlay.tapNotificationCard?.();
-      if (read && this.link.linkState === 'connected') {
-        this.link.send({ kind: 'input', event: { containerName: 'notification-dismiss', traceId: read } });
-      }
+      if (read) this.deliverNotificationDismiss(read);
       return true;
     }
     if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-      void this.assistantOverlay.closeNotificationCard?.();
+      if (this.assistantOverlay.dismissNotificationCard) {
+        for (const dismissed of this.assistantOverlay.dismissNotificationCard()) {
+          this.deliverNotificationDismiss(dismissed);
+        }
+      } else {
+        void this.assistantOverlay.closeNotificationCard?.();
+      }
       return true;
     }
     return type === OsEventTypeList.SCROLL_TOP_EVENT || type === OsEventTypeList.SCROLL_BOTTOM_EVENT;
+  }
+
+  private deliverNotificationDismiss(traceId: string): void {
+    if (!/^[a-f0-9]{32}$/i.test(traceId)) return;
+    if (this.link.linkState === 'connected') {
+      this.link.send({ kind: 'input', event: { containerName: 'notification-dismiss', traceId } });
+    } else {
+      this.pendingDismissals.enqueue(traceId);
+    }
   }
 
   /** Questions retain the feature underneath; only Back releases this owner.
@@ -901,8 +917,8 @@ export class EventRouter {
     // Dismiss synchronously retires the identity before any subsequent tap.
     // Never queue this receipt for a replacement Mac session.
     void this.assistantOverlay.dismissVisibleNotification();
-    if (cardId && this.link.linkState === 'connected') {
-      this.link.send({ kind: 'input', event: { containerName: 'notification-dismiss', traceId: cardId } });
+    if (cardId) {
+      this.deliverNotificationDismiss(cardId);
     }
     return true;
   }

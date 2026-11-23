@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AudioInputSource, EventSourceType, OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk';
 import { CONTEXT_MENU_MAX_MS, EventRouter, MENU_LONG_PRESS_WINDOW_MS, type LifecycleHandler } from './EventRouter';
+import { PendingNotificationDismissals } from './NotificationCard';
 import type { BridgeClient } from './BridgeClient';
 import type { MacLink } from './MacLink';
 import type { AudioStreamer } from './AudioStreamer';
@@ -1380,18 +1381,22 @@ it('keeps motion reports out of the diagnostics ring, and records the taps', () 
 });
 
 describe('the notification card owns the taps while it is up', () => {
-  function withCard() {
+  function withCard(linkState: 'connected' | 'reconnecting' = 'connected') {
     const r = make();
     let up = true;
     const overlay = r.assistantOverlay as unknown as Record<string, unknown>;
     overlay.hasNotificationCard = vi.fn(() => up);
     overlay.tapNotificationCard = vi.fn(() => 'c'.repeat(32));
+    overlay.dismissNotificationCard = vi.fn(() => {
+      up = false;
+      return ['c'.repeat(32), 'd'.repeat(32)];
+    });
     overlay.closeNotificationCard = vi.fn(async () => { up = false; return true; });
-    (r.link as unknown as { linkState: string }).linkState = 'connected';
+    (r.link as unknown as { linkState: string }).linkState = linkState;
     return { ...r, overlay };
   }
 
-  it('a tap marks the shown card read on the Mac and nothing else runs', () => {
+  it('a tap marks the shown card read on the brain and nothing else runs', () => {
     const r = withCard();
     r.fire(click(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L));
     expect(r.overlay.tapNotificationCard).toHaveBeenCalledTimes(1);
@@ -1399,12 +1404,91 @@ describe('the notification card owns the taps while it is up', () => {
     expect(r.menu.openActiveTab).not.toHaveBeenCalled();
   });
 
-  it('a double tap closes the card unread instead of opening the menu', () => {
+  it('a double tap dismisses the card stack, marks read, and sends notification-dismiss instead of opening the menu', () => {
     const r = withCard();
     r.fire({ sysEvent: { eventType: OsEventTypeList.DOUBLE_CLICK_EVENT, eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L } });
-    expect(r.overlay.closeNotificationCard).toHaveBeenCalledTimes(1);
+    expect(r.overlay.dismissNotificationCard).toHaveBeenCalledTimes(1);
     expect(r.menu.toggle).not.toHaveBeenCalled();
-    expect(r.sent).toEqual([]);
+    expect(r.sent).toEqual([
+      { kind: 'input', event: { containerName: 'notification-dismiss', traceId: 'c'.repeat(32) } },
+      { kind: 'input', event: { containerName: 'notification-dismiss', traceId: 'd'.repeat(32) } },
+    ]);
+  });
+
+  it('queues notification-dismiss traceIds while disconnected and flushes them on reconnect', () => {
+    const store = new Map<string, string>();
+    const prevStorage = (globalThis as { localStorage?: unknown }).localStorage;
+    (globalThis as { localStorage?: unknown }).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => { store.set(k, v); },
+      removeItem: (k: string) => { store.delete(k); },
+    };
+    try {
+      const pending = new PendingNotificationDismissals();
+      let handler: ((e: EvenHubEvent) => void) | undefined;
+      const client = {
+        track: vi.fn(),
+        require: () => ({ onEvenHubEvent: (cb: (e: EvenHubEvent) => void) => { handler = cb; return () => {}; } }),
+      } as unknown as BridgeClient;
+      const sent: UplinkMessage[] = [];
+      const link = {
+        linkState: 'reconnecting',
+        wasReplaced: false,
+        send: (msg: UplinkMessage) => sent.push(msg),
+      } as unknown as MacLink;
+      const overlay = {
+        hasAssistantOverlay: () => false,
+        scrollAssistantOverlay: () => false,
+        dismissAssistantOverlay: async () => true,
+        hasAssistantConversation: () => false,
+        assistantConversationIdentity: () => undefined,
+        isAssistantConversationContinuePromptVisible: () => false,
+        scrollAssistantConversation: () => false,
+        continueAssistantConversation: async () => false,
+        requestAssistantConversationExit: async () => 'inactive' as const,
+        dismissAssistantConversation: async () => true,
+        hasVisibleNotification: () => false,
+        dismissVisibleNotification: async () => true,
+        hasNotificationCard: () => true,
+        tapNotificationCard: () => '1'.repeat(32),
+        dismissNotificationCard: () => ['2'.repeat(32), '3'.repeat(32)],
+      };
+      new EventRouter(
+        client,
+        link,
+        { isOpen: false, lastSource: 0, start: vi.fn(), stop: vi.fn(), ingest: vi.fn() } as unknown as AudioStreamer,
+        { isPending: () => false, confirmByTap: vi.fn(), declineByTap: vi.fn(), ingest: vi.fn() } as unknown as ImuMonitor,
+        { isOpen: () => false, toggle: vi.fn(async () => {}) } as unknown as CapabilityMenu,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        overlay,
+        undefined,
+        undefined,
+        undefined,
+        pending,
+      ).attach();
+
+      handler!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT, eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_R } } as unknown as EvenHubEvent);
+      handler!({ sysEvent: { eventType: OsEventTypeList.DOUBLE_CLICK_EVENT, eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_R } } as unknown as EvenHubEvent);
+      expect(sent).toEqual([]);
+      expect(pending.list()).toEqual(['1'.repeat(32), '2'.repeat(32), '3'.repeat(32)]);
+
+      // Reload from localStorage and flush on reconnect right after announce!
+      const reloaded = new PendingNotificationDismissals();
+      (link as unknown as { linkState: string }).linkState = 'connected';
+      expect(reloaded.flush((traceId) => link.send({ kind: 'input', event: { containerName: 'notification-dismiss', traceId } }))).toBe(3);
+      expect(sent).toEqual([
+        { kind: 'input', event: { containerName: 'notification-dismiss', traceId: '1'.repeat(32) } },
+        { kind: 'input', event: { containerName: 'notification-dismiss', traceId: '2'.repeat(32) } },
+        { kind: 'input', event: { containerName: 'notification-dismiss', traceId: '3'.repeat(32) } },
+      ]);
+      expect(reloaded.list()).toEqual([]);
+    } finally {
+      if (prevStorage === undefined) delete (globalThis as { localStorage?: unknown }).localStorage;
+      else (globalThis as { localStorage?: unknown }).localStorage = prevStorage;
+    }
   });
 });
 

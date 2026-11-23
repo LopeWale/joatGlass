@@ -385,7 +385,7 @@ class VoiceOrchestrator:
         # find out whether it was the front half of one that was.
         self._unaddressed_tail: tuple[str, float] | None = None
         self._stt = stt
-        self._vad = vad or RmsVad(arm_after_floor=True)
+        self._vad = vad or RmsVad(arm_after_floor=True, prompt_hangover_batches=11)
         # The words so far of the utterance being spoken, for an open
         # prompt's card: one transcription in flight, dropped once the
         # utterance it belongs to has ended.
@@ -581,7 +581,13 @@ class VoiceOrchestrator:
         else:
             self._audio_preroll.append(receipt)
         _was = self._vad.in_speech
-        utterance = self._vad.feed(pcm)
+        prompt_active = self._is_active_prompt_audio(
+            audio_epoch, connection_generation, source=source, speaker=speaker,
+        )
+        if prompt_active and getattr(self._vad, "prompt_hangover_batches", None) is not None:
+            utterance = self._vad.feed(pcm, prompt_active=True)
+        else:
+            utterance = self._vad.feed(pcm)
         if _was != self._vad.in_speech:
             log.info("VADTRACE %s t=%.2f trigger=%.5f",
                      "OPEN" if self._vad.in_speech else "close",
@@ -708,6 +714,41 @@ class VoiceOrchestrator:
             mixed=any(len(values) > 1 for values in (sources, generations, epochs)),
         )
 
+    def _is_active_prompt_audio(
+        self,
+        audio_epoch: str | None,
+        connection_generation: str | None,
+        *,
+        source: AudioSource | None,
+        speaker: str | None,
+    ) -> bool:
+        dispatcher = self._prompted_input
+        if dispatcher is None or not dispatcher.is_armed:
+            return False
+        ticket = dispatcher.current_ticket
+        if (
+            ticket is None
+            or audio_epoch != ticket.prompt_id
+            or connection_generation != ticket.connection_generation
+            or source != ticket.source
+            or speaker == "other"
+        ):
+            return False
+        if self._utterance_frames:
+            provenance = self._completed_provenance(self._utterance_frames)
+            roles = provenance.speaker_roles
+            if (
+                provenance.mixed is not False
+                or (
+                    provenance.source,
+                    provenance.connection_generation,
+                    provenance.audio_epoch,
+                ) != (ticket.source, ticket.connection_generation, ticket.prompt_id)
+                or ("other" in roles and "self" not in roles)
+            ):
+                return False
+        return True
+
     def _end_partials(self) -> None:
         """The utterance ended or broke off: a late partial is not shown."""
         self._utterance_serial += 1
@@ -718,6 +759,8 @@ class VoiceOrchestrator:
         about once a second and show them in its card. Only for audio of
         that prompt (its epoch and connection), and never acted on: the
         final transcript of the whole utterance alone answers it."""
+        if getattr(self._vad, "closing", False):
+            return
         ticket = self._prompted_input.current_ticket if self._prompted_input is not None else None
         if (
             ticket is None or audio_epoch != ticket.prompt_id

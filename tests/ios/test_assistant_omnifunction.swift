@@ -447,15 +447,19 @@ private func testStripPoliteLeadInAndDeterministicRouting(brain: Brain, link: Re
 
     link.clear()
     let openAntigravity = brain.routeCommand("Hey, could you please open Antigravity?")
-    expectEqual(openAntigravity?.text, "Opening Agent Terminal.", "Polite 'open Antigravity' routes to Agent Terminal")
-    expect(link.sent.contains { $0.string("kind") == "brain.handoff" && $0.string("capability") == "Agent Terminal" },
-           "'open Antigravity' emits brain.handoff for Agent Terminal")
+    expectEqual(openAntigravity?.text, "Opening Antigravity.", "Polite 'open Antigravity' routes to Antigravity session picker")
+    expect(link.sent.contains { $0.string("kind") == "hud.list" && ($0.string("title") ?? "").hasPrefix("AGENT TERMINAL") },
+           "'open Antigravity' emits phone-local AGENT TERMINAL hud.list")
+    expect(!link.sent.contains { $0.string("kind") == "brain.handoff" },
+           "'open Antigravity' never emits brain.handoff")
 
     link.clear()
     let openClaude = brain.routeCommand("I'd like you to open Claude, please.")
-    expectEqual(openClaude?.text, "Opening Agent Terminal.", "Polite 'open Claude' routes to Agent Terminal")
-    expect(link.sent.contains { $0.string("kind") == "brain.handoff" && $0.string("capability") == "Agent Terminal" },
-           "'open Claude' emits brain.handoff for Agent Terminal")
+    expectEqual(openClaude?.text, "Opening Claude Code.", "Polite 'open Claude' routes to Claude Code session picker")
+    expect(link.sent.contains { $0.string("kind") == "hud.list" && ($0.string("title") ?? "").hasPrefix("AGENT TERMINAL") },
+           "'open Claude' emits phone-local AGENT TERMINAL hud.list")
+    expect(!link.sent.contains { $0.string("kind") == "brain.handoff" },
+           "'open Claude' never emits brain.handoff")
 
     link.clear()
     let goHome = brain.routeCommand("Okay, go ahead and go home!")
@@ -464,6 +468,7 @@ private func testStripPoliteLeadInAndDeterministicRouting(brain: Brain, link: Re
            "'go home' emits hud.rebuild default")
 
     // 1b. Timers / Pomodoro: polite start, status, reset
+    brain.pomodoro.reset()
     link.clear()
     let timerReply = brain.routeCommand("could you please set a timer for 10 minutes?")
     expect(timerReply != nil && (timerReply?.text.contains("10") == true),
@@ -589,7 +594,7 @@ private func testToolBeltSchemas(brain: Brain) {
         return
     }
     let tools = belt.tools
-    expectEqual(tools.count, 29, "PhoneToolBelt exposes all 29 tools")
+    expectEqual(tools.count, 30, "PhoneToolBelt exposes all 30 tools (incl. glasses_command)")
 
     let expectedNames: Set<String> = [
         "calendar_agenda", "open_reminders", "create_reminder", "complete_reminder",
@@ -852,7 +857,8 @@ private func testDirectToolExecutionAndHandoff(brain: Brain, link: RecordingPlug
     // 3g. `open_surface` for `"agent_terminal"`, `"mail"`, and `"home"`
     for (surfaceArg, expectedReceipt, verifyFrame) in [
         ("agent_terminal", "Opening Agent Terminal.", { (frames: [[String: Any]]) in
-            frames.contains { $0.string("kind") == "brain.handoff" && $0.string("capability") == "Agent Terminal" }
+            frames.contains { $0.string("kind") == "hud.list" && $0.string("title") == "AGENT TERMINAL" }
+                && !frames.contains { $0.string("kind") == "brain.handoff" }
         }),
         ("mail", "Opening Mail.", { (frames: [[String: Any]]) in
             frames.contains { $0.string("kind") == "hud.list" && $0.string("title") == "MAIL" }
@@ -982,8 +988,11 @@ private func testGeminiThoughtSignatureAndToolStreaming(brain: Brain, link: Reco
         expect(!toolsArr.isEmpty, "Request #\(idx + 1) includes functionDeclarations")
         expect(!toolsArr.contains { $0["googleSearch"] != nil }, "Never sends googleSearch tool")
         let genCfg = reqBody["generationConfig"] as? [String: Any] ?? [:]
-        expect(genCfg["thinkingConfig"] == nil && genCfg["thinkingBudget"] == nil,
+        let thinkingCfg = genCfg["thinkingConfig"] as? [String: Any]
+        expect(genCfg["thinkingBudget"] == nil && (thinkingCfg?["thinkingBudget"] as? Int) != 0,
                "Never sends thinkingBudget: 0")
+        expectEqual(thinkingCfg?["thinkingLevel"] as? String, "MINIMAL",
+                    "Uses MINIMAL thinkingLevel on Gemini 3.5 Flash Lite for sub-second streaming")
     }
     let secondContents = recorded[1]["contents"] as? [[String: Any]] ?? []
     expectEqual(secondContents.count, 3, "Round 2 contents has [user, model(functionCall), user(functionResponse)]")
@@ -1062,84 +1071,90 @@ private func testGeminiThoughtSignatureAndToolStreaming(brain: Brain, link: Reco
     expectEqual(claudeMessages.count, 3, "Claude Round 2 messages has [user, assistant(tool_use), user(tool_result)]")
 }
 
-// MARK: - 5. Always-on-Mac Handoff (Messages & Agent Terminal), MacMessages ?q= Search & Agent Terminal Actions
+// MARK: - 5. Phone-First Capability Routing (Zero Handoff!), MacMessages ?q= Search & Agent Terminal Actions
 
 @MainActor
 private func testAlwaysOnMacHandoffMessagesAndTerminal(brain: Brain, link: RecordingPluginLink) async {
     let belt = brain.toolBelt!
 
-    // 5a. CapabilityMenu ALWAYS emits `brain.handoff` for Messages, Agent Terminal, and Activity
-    // even immediately after `pluginConnected()` BEFORE `hello` arrives!
+    // 5a. CapabilityMenu NEVER emits `brain.handoff` — `macPages` is empty and
+    // `Messages`, `Agent Terminal`, and `Activity` are served locally on `JOAT Brain`!
     expectEqual(
         CapabilityMenu.macPages,
-        Set(["Messages", "Agent Terminal", "Activity"]),
-        "CapabilityMenu.macPages pins Messages, Agent Terminal, and Activity to the Mac mini"
+        Set<String>(),
+        "CapabilityMenu.macPages is empty so JOAT Brain never hands off the WebSocket"
     )
 
     brain.capabilities.pluginConnected()
-    for macCap in ["Messages", "Agent Terminal", "Activity"] {
+    for (localCap, expectedTitle) in [
+        ("Messages", "MESSAGES"),
+        ("Agent Terminal", "AGENT TERMINAL"),
+        ("Activity", "ACTIVITY"),
+    ] {
         link.clear()
-        brain.capabilities.open(macCap, requestId: "prehello-\(macCap)", anchorMs: nil)
+        brain.capabilities.open(localCap, requestId: "local-\(localCap)", anchorMs: nil)
         expect(
-            link.sent.contains {
-                $0.string("kind") == "brain.handoff"
-                    && $0.string("capability") == macCap
-                    && $0.string("requestId") == "prehello-\(macCap)"
-            },
-            "Opening '\(macCap)' immediately after pluginConnected() before hello emits brain.handoff"
+            !link.sent.contains { $0.string("kind") == "brain.handoff" },
+            "Opening '\(localCap)' never emits brain.handoff"
         )
         expect(
-            !link.sent.contains { $0.string("kind") == "hud.list" },
-            "Opening '\(macCap)' before hello never emits phone-local hud.list or NOT YET stub"
+            link.sent.contains {
+                $0.string("kind") == "hud.list"
+                    && $0.string("title") == expectedTitle
+                    && $0.string("requestId") == "local-\(localCap)"
+            },
+            "Opening '\(localCap)' immediately emits phone-local hud.list '\(expectedTitle)'"
+        )
+        expect(
+            !link.sent.contains { ($0.string("title") ?? "").contains("NOT YET") },
+            "Opening '\(localCap)' never emits a NOT YET stub"
         )
     }
 
-    // `hello` with omitted `handoff` keeps `pluginHandsOff == true`
-    brain.capabilities.handle(kind: "hello", message: ["kind": "hello"])
-    link.clear()
-    brain.capabilities.open("Messages", requestId: "omitted-hello", anchorMs: nil)
-    expect(
-        link.sent.contains { $0.string("kind") == "brain.handoff" && $0.string("capability") == "Messages" },
-        "hello without explicit handoff key keeps pluginHandsOff == true for Messages"
-    )
+    // `hello` with `handoff: true` or `handoff: false` still keeps all pages phone-local
+    for handoffFlag in [true, false] {
+        brain.capabilities.handle(kind: "hello", message: ["kind": "hello", "handoff": handoffFlag])
+        link.clear()
+        brain.capabilities.open("Messages", requestId: "hello-\(handoffFlag)", anchorMs: nil)
+        expect(
+            link.sent.contains { $0.string("kind") == "hud.list" && $0.string("title") == "MESSAGES" },
+            "hello(handoff:\(handoffFlag)) serves Messages locally via hud.list"
+        )
+        expect(
+            !link.sent.contains { $0.string("kind") == "brain.handoff" },
+            "hello(handoff:\(handoffFlag)) never emits brain.handoff"
+        )
+    }
 
-    // Explicit `handoff: false` disables handoff, and `pluginConnected()` restores `true`
-    brain.capabilities.handle(kind: "hello", message: ["kind": "hello", "handoff": false])
-    link.clear()
-    brain.capabilities.open("Agent Terminal", requestId: "legacy-plugin", anchorMs: nil)
-    expect(
-        link.sent.contains { $0.string("kind") == "hud.list" && ($0.string("title") ?? "").contains("NOT YET") },
-        "Explicit handoff:false falls back to NOT YET stub for legacy plugin"
-    )
-    brain.capabilities.pluginConnected()
-    link.clear()
-    brain.capabilities.open("Messages", requestId: "reconnected", anchorMs: nil)
-    expect(
-        link.sent.contains { $0.string("kind") == "brain.handoff" && $0.string("capability") == "Messages" },
-        "pluginConnected() resets pluginHandsOff back to true"
-    )
-
-    // Voice checks: "open messages", "check my messages", "check Claude Code" hand off to Mac,
-    // while conversational questions stay on PhoneToolBelt (`nil` in routeCommand).
-    for (phrase, expectedCap) in [
-        ("open my messages", "Messages"),
-        ("check my messages", "Messages"),
-        ("open Claude Code", "Agent Terminal"),
-        ("check Claude Code", "Agent Terminal"),
+    // Voice checks: "open messages", "check my messages", "open Claude Code", "check Claude Code"
+    // open phone-local `hud.list` surfaces with zero `brain.handoff` and zero trailing `assistant.overlay`.
+    for (phrase, expectedSpoken, expectedTitlePrefix) in [
+        ("open my messages", "Opening Messages.", "MESSAGES"),
+        ("check my messages", "Opening Messages.", "MESSAGES"),
+        ("open Claude Code", "Opening Claude Code.", "AGENT TERMINAL"),
+        ("check Claude Code", "Opening Claude Code.", "AGENT TERMINAL"),
     ] {
         link.clear()
         let reply = brain.routeCommand(phrase)
-        expectEqual(reply?.text, "Opening \(expectedCap).", "Voice '\(phrase)' routes to \(expectedCap)")
-        expectEqual(reply?.suppressesHudReceipt, true, "Mac handoff voice command suppresses trailing hud.receipt")
+        expectEqual(reply?.text, expectedSpoken, "Voice '\(phrase)' routes locally")
+        expectEqual(reply?.suppressesHudReceipt, true, "Voice '\(phrase)' suppresses trailing hud.receipt")
         expect(
-            link.sent.contains { $0.string("kind") == "brain.handoff" && $0.string("capability") == expectedCap },
-            "Voice '\(phrase)' emits brain.handoff for \(expectedCap)"
+            link.sent.contains { $0.string("kind") == "hud.list" && ($0.string("title") ?? "").hasPrefix(expectedTitlePrefix) },
+            "Voice '\(phrase)' emits phone-local \(expectedTitlePrefix) hud.list"
+        )
+        expect(
+            !link.sent.contains { $0.string("kind") == "brain.handoff" },
+            "Voice '\(phrase)' never emits brain.handoff"
         )
         link.clear()
         brain.handle(.final("Hey JOAT, \(phrase)", latencyMs: 25))
         expect(
-            link.sent.contains { $0.string("kind") == "brain.handoff" && $0.string("capability") == expectedCap },
-            "Full Brain.handle(.final) for '\(phrase)' emits brain.handoff"
+            link.sent.contains { $0.string("kind") == "hud.list" && ($0.string("title") ?? "").hasPrefix(expectedTitlePrefix) },
+            "Full Brain.handle(.final) for '\(phrase)' emits phone-local hud.list"
+        )
+        expect(
+            !link.sent.contains { $0.string("kind") == "brain.handoff" },
+            "Full Brain.handle(.final) for '\(phrase)' never emits brain.handoff"
         )
         expect(
             !link.sent.contains { $0.string("kind") == "assistant.overlay" },
@@ -1151,12 +1166,12 @@ private func testAlwaysOnMacHandoffMessagesAndTerminal(brain: Brain, link: Recor
     expect(brain.routeCommand("did I get any texts?") == nil,
            "'did I get any texts?' falls through to PhoneToolBelt get_recent_messages")
 
-    // 5b. PhoneToolBelt `open_surface("messages")` and `open_surface("claude")` emit `brain.handoff`
-    for (surfaceArg, expectedCap, expectedReceipt) in [
-        ("messages", "Messages", "Opening Messages."),
-        ("claude", "Agent Terminal", "Opening Agent Terminal."),
-        ("codex", "Agent Terminal", "Opening Agent Terminal."),
-        ("activity", "Activity", "Opening Activity."),
+    // 5b. PhoneToolBelt `open_surface` opens phone-local `hud.list` with zero `brain.handoff`
+    for (surfaceArg, expectedTitlePrefix, expectedReceipt) in [
+        ("messages", "MESSAGES", "Opening Messages."),
+        ("claude", "AGENT TERMINAL", "Opening Claude Code."),
+        ("codex", "AGENT TERMINAL", "Opening Codex."),
+        ("activity", "ACTIVITY", "Opening Activity."),
     ] {
         brain.beginStreamingConversationForTesting(user: "Open \(surfaceArg)")
         link.clear()
@@ -1166,17 +1181,21 @@ private func testAlwaysOnMacHandoffMessagesAndTerminal(brain: Brain, link: Recor
         let dismissIdx = link.sent.firstIndex {
             $0.string("kind") == "assistant.conversation" && $0.string("operation") == "dismiss"
         }
-        let handoffIdx = link.sent.firstIndex {
-            $0.string("kind") == "brain.handoff" && $0.string("capability") == expectedCap
+        let listIdx = link.sent.firstIndex {
+            $0.string("kind") == "hud.list" && ($0.string("title") ?? "").hasPrefix(expectedTitlePrefix)
         }
-        expect(dismissIdx != nil && handoffIdx != nil,
-               "open_surface('\(surfaceArg)') emitted dismiss + brain.handoff(\(expectedCap))")
-        if let d = dismissIdx, let h = handoffIdx {
-            expect(d < h, "assistant.conversation dismissed BEFORE brain.handoff(\(expectedCap))")
+        expect(dismissIdx != nil && listIdx != nil,
+               "open_surface('\(surfaceArg)') emitted dismiss + phone-local hud.list(\(expectedTitlePrefix))")
+        if let d = dismissIdx, let l = listIdx {
+            expect(d < l, "assistant.conversation dismissed BEFORE hud.list(\(expectedTitlePrefix))")
         }
         expect(
+            !link.sent.contains { $0.string("kind") == "brain.handoff" },
+            "open_surface('\(surfaceArg)') never emits brain.handoff"
+        )
+        expect(
             !link.sent.contains { $0.string("kind") == "assistant.overlay" },
-            "open_surface('\(surfaceArg)') emits zero trailing assistant.overlay frames after brain.handoff"
+            "open_surface('\(surfaceArg)') emits zero trailing assistant.overlay frames"
         )
     }
 
@@ -1417,7 +1436,7 @@ private func testAlwaysOnMacHandoffMessagesAndTerminal(brain: Brain, link: Recor
         }
     }
 
-    // 1) `send_instruction` (default `open_on_glasses == true` -> dismisses conversation + emits `brain.handoff`!)
+    // 1) `send_instruction` (default `open_on_glasses == true` -> dismisses conversation + opens phone-local `agent_terminal.view`!)
     MockSSEURLProtocol.reset([configAck("Sent instruction to Claude Code.")])
     brain.beginStreamingConversationForTesting(user: "Have Claude Code run the handoff tests", partialAssistant: "Sending…")
     link.clear()
@@ -1434,18 +1453,23 @@ private func testAlwaysOnMacHandoffMessagesAndTerminal(brain: Brain, link: Recor
     let instrDismissIdx = link.sent.firstIndex {
         $0.string("kind") == "assistant.conversation" && $0.string("operation") == "dismiss"
     }
-    let instrHandoffIdx = link.sent.firstIndex {
-        $0.string("kind") == "brain.handoff" && $0.string("capability") == "Agent Terminal"
+    let instrTermIdx = link.sent.firstIndex {
+        $0.string("kind") == "agent_terminal.view"
     }
-    expect(instrDismissIdx != nil && instrHandoffIdx != nil,
-           "send_instruction emitted assistant.conversation dismiss + brain.handoff(Agent Terminal)")
-    if let d = instrDismissIdx, let h = instrHandoffIdx {
-        expect(d < h, "dismissConversation() ran BEFORE openByVoice('Agent Terminal') in send_instruction")
+    expect(instrDismissIdx != nil && instrTermIdx != nil,
+           "send_instruction emitted assistant.conversation dismiss + phone-local agent_terminal.view")
+    if let d = instrDismissIdx, let t = instrTermIdx {
+        expect(d < t, "dismissConversation() ran BEFORE agent_terminal.view in send_instruction")
     }
+    expect(
+        !link.sent.contains { $0.string("kind") == "brain.handoff" },
+        "send_instruction never emits brain.handoff"
+    )
     expect(
         !link.sent.contains { $0.string("kind") == "assistant.overlay" },
         "send_instruction with open_on_glasses emits zero trailing assistant.overlay frames"
     )
+    brain.capabilities.openHome()
     let sendReq = MockSSEURLProtocol.recordedRequests().first
     expect(sendReq?.url.hasSuffix("/terminal/v1/config") == true && sendReq?.method == "POST",
            "send_instruction POSTed to /terminal/v1/config")

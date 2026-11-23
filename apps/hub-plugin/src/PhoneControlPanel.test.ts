@@ -42,6 +42,7 @@ function installFakeDom() {
     'p-mac-pinned-row',
     'p-mac-pinned',
     'p-connect',
+    'brain-help',
     'p-resume',
     'p-location-check',
     'p-location-result',
@@ -116,8 +117,8 @@ describe('index.html markup contract', () => {
   });
 });
 
-describe('PhoneControlPanel split-brain UI', () => {
-  it('shows the pinned Mac row and clear split-brain copy when connected to the iPhone brain', () => {
+describe('PhoneControlPanel phone-first UI', () => {
+  it('reflects local phone brain connection cleanly without claiming pages switch sockets to a Mac, while still supporting explicit handoff state', () => {
     const els = installFakeDom();
     const link = { activeUrl: PHONE, linkState: 'connected' as LinkState, wasReplaced: false };
     const handoff: { active: boolean; capability?: string; homeUrl?: string; lastMacUrl?: string | null } = {
@@ -135,15 +136,18 @@ describe('PhoneControlPanel split-brain UI', () => {
       selectBrain: vi.fn(async () => true),
     });
 
-    expect(els.get('p-mac-pinned-row')!.hidden).toBe(false);
-    expect(els.get('p-mac-pinned')!.textContent).toBe('mac-a · Tailscale (secure) (always)');
+    expect(els.get('p-mac-pinned-row')!.hidden).toBe(true);
+    expect(els.get('p-mac-pinned')!.textContent).toBe('');
+    expect(els.get('brain-help')!.textContent).toBe(
+      'Connected to JOAT Brain on this iPhone. Connect switches only when you choose another brain.',
+    );
     expect(els.get('p-active-brain')!.textContent).toBe('This iPhone · JOAT Brain');
     expect(els.get('p-recovery')!.textContent).toBe(
-      'JOAT Brain is active on this iPhone. Messages & Agent Terminal stay connected to mac-a · Tailscale (secure).',
+      'JOAT Brain is active on this iPhone. All glasses pages stay connected locally on this iPhone.',
     );
     expect(els.get('p-action')!.textContent).toBe('');
 
-    // During an active Mac handoff, keeps #p-brain synced to homeUrl and explains 2x tap return!
+    // During an explicit opt-in Mac handoff, keeps #p-brain synced to homeUrl and explains 2x tap return!
     handoff.active = true;
     handoff.capability = 'Messages';
     handoff.homeUrl = PHONE;
@@ -152,7 +156,8 @@ describe('PhoneControlPanel split-brain UI', () => {
     panel.updateLink('connected');
 
     expect(els.get('p-brain')!.value).toBe(PHONE);
-    expect(els.get('p-mac-pinned')!.textContent).toBe('mac-b · Tailscale (secure) (always)');
+    expect(els.get('p-mac-pinned-row')!.hidden).toBe(false);
+    expect(els.get('p-mac-pinned')!.textContent).toBe('mac-b · Tailscale (secure)');
     expect(els.get('p-active-brain')!.textContent).toBe('mac-b · Tailscale (secure)');
     expect(els.get('p-action')!.textContent).toBe(
       'Messages is active on mac-b · Tailscale (secure). 2× tap back to Home returns to This iPhone · JOAT Brain.',
@@ -167,7 +172,7 @@ describe('PhoneControlPanel split-brain UI', () => {
     expect(els.get('p-action')!.textContent).toContain('Tap Connect to switch to mac-a · Tailscale (secure)');
   });
 
-  it('hides the pinned Mac row when no split phone+Mac pair is configured', () => {
+  it('hides the pinned Mac row and updates help copy when connected directly to a Mac brain', () => {
     const els = installFakeDom();
     new PhoneControlPanel({
       link: { activeUrl: MAC_A, linkState: 'connected' as LinkState, wasReplaced: false },
@@ -180,5 +185,6 @@ describe('PhoneControlPanel split-brain UI', () => {
     });
     expect(els.get('p-mac-pinned-row')!.hidden).toBe(true);
     expect(els.get('p-mac-pinned')!.textContent).toBe('');
+    expect(els.get('brain-help')!.textContent).toBe('Connect retries or switches to the brain you choose.');
   });
 });

@@ -1,6 +1,6 @@
 import { isRouteProgressView } from './ActivityChips';
-import type { NavigationHudModel, NavigationMapPanelModel } from './NavigationHud';
-import { formatNavigationDistance } from './NavigationHud';
+import type { NavigationHudModel } from './NavigationHud';
+import { formatNavigationDistance, navigationStreetLabel } from './NavigationHud';
 import {
   NavigationProgressTracker,
   type NavigationFix,
@@ -19,19 +19,6 @@ type NavigationRouteMessage = Extract<DownlinkMessage, { kind: 'navigation.route
 type NavigationMapMessage = Extract<DownlinkMessage, { kind: 'navigation.map' }>;
 type NavigationFixMessage = Extract<DownlinkMessage, { kind: 'navigation.fix' }>;
 
-/** Decode a Mac-rendered map tile. Isolated so a headless test can supply
- * its own decoder, and so a host without `Image` degrades to no map rather
- * than throwing inside the downlink handler. */
-async function decodePngDataUrl(source: string): Promise<CanvasImageSource> {
-  if (typeof Image === 'undefined') throw new Error('no image decoder');
-  const image = new Image();
-  await new Promise<void>((resolve, reject) => {
-    image.onload = () => resolve();
-    image.onerror = () => reject(new Error('map decode failed'));
-    image.src = source;
-  });
-  return image;
-}
 /**
  * The guidance page follows the wearer, not only the instruction. Until
  * 2026-10-05 it repainted only when the maneuver or the ROUNDED distance
@@ -42,10 +29,9 @@ async function decodePngDataUrl(source: string): Promise<CanvasImageSource> {
  * frame itself paces the BLE link, so this is a ceiling, not a rate.
  */
 const REPAINT_MIN_INTERVAL_MS = 1_000;
-/** About a pixel and a half at zoom 16: smaller moves are not visible. */
+/** About a pixel and a half at the schematic's walking scale: smaller
+ * moves are not visible. */
 const REPAINT_MIN_MOVE_M = 3;
-/** Two tiles centred within a metre of each other are the same tile. */
-const PANEL_DEDUPE_M = 1;
 const EARTH_RADIUS_M = 6_371_000;
 
 function distanceM(
@@ -56,34 +42,6 @@ function distanceM(
   const dx = (b.longitude - a.longitude) * Math.PI / 180 * EARTH_RADIUS_M * Math.cos(lat);
   const dy = (b.latitude - a.latitude) * Math.PI / 180 * EARTH_RADIUS_M;
   return Math.hypot(dx, dy);
-}
-
-/** The tile whose centre is nearest the wearer: with equal-size tiles that
- * is the one with the most ground around them, and the choice flips in the
- * middle of the overlap, where both tiles cover the position. */
-export function nearestMapPanel<T extends { latitude: number; longitude: number }>(
-  panels: readonly T[],
-  position: { latitude: number; longitude: number } | undefined,
-): T | undefined {
-  if (panels.length === 0) return undefined;
-  if (!position) return panels[0];
-  let best = panels[0]!;
-  let bestDistance = distanceM(best, position);
-  for (const panel of panels.slice(1)) {
-    const candidate = distanceM(panel, position);
-    if (candidate < bestDistance) {
-      best = panel;
-      bestDistance = candidate;
-    }
-  }
-  return best;
-}
-
-/** Keep one tile per centre; a refetched centre replaces its predecessor. */
-function adoptPanel(panels: NavigationMapPanelModel[], panel: NavigationMapPanelModel): void {
-  const index = panels.findIndex((existing) => distanceM(existing, panel) <= PANEL_DEDUPE_M);
-  if (index >= 0) panels[index] = panel;
-  else panels.push(panel);
 }
 
 type NavigationUplink = Extract<UplinkMessage, {
@@ -128,15 +86,10 @@ interface ActiveRoute {
    */
   pendingProgress: Array<{ state: NavigationProgressState; fix: NavigationFix }>;
   progressRendering: boolean;
-  /** Mac-rendered street surroundings along this route, once decoded: the
-   * Mac prefetches a tile every ~180 m of the route, and the guidance page
-   * draws the one nearest the wearer, so the map follows them without the
-   * Mac ever receiving a live position. */
-  mapPanels: NavigationMapPanelModel[];
   /** When and where the guidance page was last painted, for the repaint pace. */
   lastPaintAt?: number;
   lastPaintedFix?: NavigationFix;
-  /** The last progress shown, replayed when a tile for it arrives late. */
+  /** The last progress shown, replayed by resumeToGlass. */
   lastProgress?: { state: NavigationProgressState; fix: NavigationFix };
   repaintRequested: boolean;
   reportedFixShape: boolean;
@@ -149,9 +102,6 @@ interface ActiveRoute {
 export class NavigationController {
   private current?: NavigationViewMessage;
   private route?: ActiveRoute;
-  /** Streets that arrived before their route did: the Mac fetches the map
-   * as soon as it has an origin, which is before it has a route to send. */
-  private pendingMapPanels?: { sessionId: string; panels: NavigationMapPanelModel[] };
   private progressQueue: Promise<void> = Promise.resolve();
   private lifecycleEpoch = 0;
   private presentationOperation = 0;
@@ -251,7 +201,6 @@ export class NavigationController {
       this.sendRouteAck(message, 'rejected');
       return false;
     }
-    const pending = this.pendingMapPanels;
     const route: ActiveRoute = {
       message,
       tracker,
@@ -261,12 +210,6 @@ export class NavigationController {
       pausedForReroute: false,
       pendingProgress: [],
       progressRendering: false,
-      // Adopt streets that arrived while this route was still being fetched,
-      // and keep a reroute's predecessor tiles: the streets did not move.
-      mapPanels: [
-        ...(prior?.message.sessionId === message.sessionId ? prior.mapPanels : []),
-        ...(pending?.sessionId === message.sessionId ? pending.panels : []),
-      ],
       repaintRequested: false,
       reportedFixShape: false,
     };
@@ -725,52 +668,13 @@ export class NavigationController {
   }
 
   /**
-   * Adopt the Mac-rendered surroundings for this session.
-   *
-   * Decoding happens once, here, rather than on every painted frame: the
-   * renderer runs inside the BLE frame budget and must never wait on an
-   * image decode. A failed decode is silent — guidance keeps working with
-   * the route's bare shape, which is strictly better than a black pane.
+   * A stray `navigation.map` raster tile. Ignored: since 2026-11-23 the
+   * guidance pane is a route schematic drawn from the route and the live
+   * fix alone, so a phone or Mac that still sends street tiles costs one
+   * dropped message — no decode, no repaint, no state.
    */
-  async installMapPanel(
-    message: NavigationMapMessage,
-    decode: (source: string) => Promise<CanvasImageSource> = decodePngDataUrl,
-  ): Promise<void> {
-    // The Mac fetches the streets as soon as it has the wearer's origin —
-    // which is BEFORE it has a route to send. Requiring an installed route
-    // here silently dropped almost every tile, so guidance kept falling
-    // back to the bare polyline. Hold it for the route that is coming.
-    let image: CanvasImageSource;
-    try {
-      image = await decode(`data:image/png;base64,${message.png}`);
-    } catch {
-      console.warn('[joat] navigation map panel failed to decode');
-      return;
-    }
-    const panel: NavigationMapPanelModel = {
-      latitude: message.latitude,
-      longitude: message.longitude,
-      zoom: message.zoom,
-      width: message.width,
-      height: message.height,
-      image,
-    };
-    const route = this.route;
-    if (route && route.message.sessionId === message.sessionId) {
-      adoptPanel(route.mapPanels, panel);
-      // A tile that arrives while its stretch of road is on the glass used
-      // to wait for the next instruction change to appear. Show it now.
-      const progress = route.lastProgress;
-      if (progress && progress.state.kind === 'guidance' && !route.pausedForReroute) {
-        route.repaintRequested = true;
-        this.enqueueProgress(route, progress.state, progress.fix);
-      }
-      return;
-    }
-    if (this.pendingMapPanels?.sessionId !== message.sessionId) {
-      this.pendingMapPanels = { sessionId: message.sessionId, panels: [] };
-    }
-    adoptPanel(this.pendingMapPanels.panels, panel);
+  async installMapPanel(_message: NavigationMapMessage): Promise<void> {
+    return undefined;
   }
 
   private progressModel(
@@ -779,6 +683,11 @@ export class NavigationController {
     fix?: NavigationFix,
   ): NavigationHudModel {
     const mode = route.message.plan.mode;
+    // The schematic marks the maneuver the wearer is heading for, and
+    // labels it with the street the instruction names.
+    const nextStep = state.kind === 'guidance'
+      ? route.message.plan.steps.find((step) => step.id === state.stepId)
+      : undefined;
     const base = {
       interaction: 'none' as const,
       options: [] as readonly string[],
@@ -790,7 +699,13 @@ export class NavigationController {
       map: {
         geometry: route.message.plan.geometry,
         ...(fix ? { position: { latitude: fix.latitude, longitude: fix.longitude } } : {}),
-        ...((panel) => (panel ? { panel } : {}))(nearestMapPanel(route.mapPanels, fix)),
+        ...(fix && Number.isFinite(fix.heading) ? { heading: fix.heading } : {}),
+        ...(fix && Number.isFinite(fix.speed) ? { speed: fix.speed } : {}),
+        ...('progressM' in state ? { progressM: state.progressM } : {}),
+        ...(nextStep ? {
+          maneuverAlongM: nextStep.distanceAlongRouteM,
+          ...((label) => (label ? { maneuverLabel: label } : {}))(navigationStreetLabel(nextStep.instruction)),
+        } : {}),
       },
     };
     if (state.kind === 'guidance') {

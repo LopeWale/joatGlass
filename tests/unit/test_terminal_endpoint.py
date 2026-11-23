@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import json
 import stat
+from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from joat.agents.antigravity_terminal import AntigravityTerminalAgent, gemini_api_key, store_gemini_api_key
-from joat.agents.claude_code_terminal import ClaudeCodeTerminalAgent, ClaudeTerminalLaneConfig
+from joat.agents.claude_code_terminal import (
+    ClaudeCodeTerminalAgent,
+    ClaudeTerminalLaneConfig,
+    _RosterPolicy,
+)
 from joat.agents.cli_accounts import AccountProfile, AccountRegistry
 from joat.agents.cli_signin import AccountStatus, LoginSnapshot
 from joat.agents.codex_terminal import CodexTerminalAgent, CodexTerminalLaneConfig
@@ -102,8 +109,68 @@ async def _call(
     return int(head.split()[1]), json.loads(rest or b"{}")
 
 
+class _FakeClaudeSdk:
+    def __init__(self) -> None:
+        self.sessions: list[Any] = []
+        self.messages: dict[str, list[Any]] = {}
+
+    def list_sessions(self, _directory: str | None = None, limit: int = 20) -> list[Any]:
+        return self.sessions[:limit]
+
+    def get_session_messages(self, session_id: str, _cwd: str | None = None) -> list[Any]:
+        return list(self.messages.get(session_id, []))
+
+
+class _FakeAntigravityMode(str, enum.Enum):
+    RESUME = "resume"
+
+
+class _FakeAntigravitySdk:
+    def __init__(self) -> None:
+        sdk = self
+        self.history: list[Any] = []
+        self.conversation_id = "ag-default-conv"
+
+        class _Agent:
+            def __init__(self, config: dict[str, Any]) -> None:
+                conv_id = config.get("conversation_id")
+                if isinstance(conv_id, str) and conv_id:
+                    sdk.conversation_id = conv_id
+                self.conversation = SimpleNamespace(history=sdk.history)
+
+            async def __aenter__(self) -> "_Agent":
+                return self
+
+            async def __aexit__(self, *_exc: Any) -> None:
+                return None
+
+            @property
+            def conversation_id(self) -> str:
+                return sdk.conversation_id
+
+        def _plain(**kwargs: Any) -> dict[str, Any]:
+            return kwargs
+
+        self.ag = SimpleNamespace(
+            LocalAgentConfig=_plain,
+            Agent=_Agent,
+            types=SimpleNamespace(
+                Text=type("Text", (), {}),
+                ToolCall=type("ToolCall", (), {}),
+                SessionContinuationMode=_FakeAntigravityMode,
+                RetryConfig=_plain,
+                ModelAPIRetryConfig=_plain,
+            ),
+        )
+        self.policy = SimpleNamespace(confirm_run_command=lambda handler: ["confirm"])
+
+
+async def _offline_codex_spawn(*_args: Any, **_kwargs: Any) -> Any:
+    raise FileNotFoundError("codex binary not used in unit tests")
+
+
 @pytest.fixture
-async def terminal_service(tmp_path: Path):
+async def terminal_service(tmp_path: Path) -> AsyncIterator[tuple[TerminalEndpoint, Path, Path, Path, FakeSignIn]]:
     work_a = tmp_path / "work_a"
     work_b = tmp_path / "work_b"
     work_a.mkdir()
@@ -113,18 +180,23 @@ async def terminal_service(tmp_path: Path):
     key_path = joat_dir / "gemini-api-key"
     store_gemini_api_key(RAW_SECRET_KEY, key_path)
 
+    claude_sdk = _FakeClaudeSdk()
     claude = ClaudeCodeTerminalAgent(
         ClaudeTerminalLaneConfig("claude", str(work_a)),
         cli_path=lambda: "/usr/local/bin/claude",
+        sdk=claude_sdk,
     )
     codex = CodexTerminalAgent(
         CodexTerminalLaneConfig("codex", str(work_a)),
         binary=lambda: "/usr/local/bin/codex",
+        spawn=_offline_codex_spawn,
     )
+    ag_sdk = _FakeAntigravitySdk()
     antigravity = AntigravityTerminalAgent(
         "antigravity",
         str(work_a),
         api_key=lambda: gemini_api_key(key_path, env={}),
+        sdk=ag_sdk,
         state_dir=joat_dir / "antigravity" / "antigravity",
     )
     roster = AgentTerminalRoster(
@@ -151,6 +223,7 @@ async def terminal_service(tmp_path: Path):
     try:
         yield endpoint, joat_dir, work_a, work_b, signin
     finally:
+        await antigravity.close()
         await endpoint.stop()
 
 
@@ -167,7 +240,7 @@ def test_terminal_token_mints_private_file_and_respects_env(
     assert terminal_token(path) == "override-token"
 
 
-async def test_health_is_public_and_state_requires_bearer_auth(terminal_service) -> None:
+async def test_health_is_public_and_state_requires_bearer_auth(terminal_service: Any) -> None:
     endpoint, *_ = terminal_service
     status, body = await _call(endpoint, "GET", "/health", token=None)
     assert status == 200 and body["ok"] is True
@@ -181,7 +254,7 @@ async def test_health_is_public_and_state_requires_bearer_auth(terminal_service)
     assert (await _call(endpoint, "POST", "/v1/config", {"action": "refresh"}, token=None))[0] == 401
 
 
-async def test_state_never_exposes_raw_gemini_api_key(terminal_service) -> None:
+async def test_state_never_exposes_raw_gemini_api_key(terminal_service: Any) -> None:
     endpoint, *_ = terminal_service
     status, body = await _call(endpoint, "GET", "/terminal/v1/state")
     assert status == 200
@@ -196,7 +269,7 @@ async def test_state_never_exposes_raw_gemini_api_key(terminal_service) -> None:
     assert "claude" in body["assistantOptions"]
 
 
-async def test_config_updates_model_cwd_gemini_key_session_and_accounts(terminal_service) -> None:
+async def test_config_updates_model_cwd_gemini_key_session_and_accounts(terminal_service: Any) -> None:
     endpoint, joat_dir, _work_a, work_b, signin = terminal_service
 
     # 1. set_model persists and updates state
@@ -289,7 +362,9 @@ async def test_config_updates_model_cwd_gemini_key_session_and_accounts(terminal
 
 
 class _ScriptedTerminalAgent:
-    """Controllable terminal agent double for live instruction, cancel, and approval tests."""
+    """Controllable terminal agent double for live instruction, cancel, approval, and session tests."""
+
+    policy = _RosterPolicy()
 
     def __init__(self, provider: str, cwd: str) -> None:
         self.provider = provider
@@ -304,12 +379,40 @@ class _ScriptedTerminalAgent:
         self._approval_cb: Any = None
         self._pending: dict[str, asyncio.Future[str]] = {}
         self.trigger_approval: tuple[str, str, str] | None = None
+        self.sessions: list[dict[str, Any]] = []
+        self.session_histories: dict[str, list[tuple[str, str]]] = {}
+        self.session_cwds: dict[str, str] = {}
+        self.resumed_sessions: list[str] = []
+        self.list_sessions_error: Exception | None = None
 
     def set_approval_callback(self, callback: Any) -> None:
         self._approval_cb = callback
 
     async def reset_conversation(self) -> None:
         self.resets += 1
+
+    async def list_sessions(self, limit: int = 20) -> list[dict[str, str]]:
+        if self.list_sessions_error is not None:
+            raise self.list_sessions_error
+        return list(self.sessions[:limit])
+
+    async def resume_session(self, session_key: str) -> None:
+        valid_keys = {
+            str(item.get("key") or "").strip()
+            for item in self.sessions
+            if isinstance(item, dict) and str(item.get("key") or "").strip()
+        }
+        if session_key not in valid_keys:
+            raise RuntimeError("session not found")
+        self.resumed_sessions.append(session_key)
+        if session_key in self.session_cwds:
+            self.cwd = self.session_cwds[session_key]
+
+    async def history(self, limit: int = 10) -> list[tuple[str, str]]:
+        if not self.resumed_sessions:
+            return []
+        latest = self.resumed_sessions[-1]
+        return list(self.session_histories.get(latest, []))[-limit:]
 
     async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> str | None:
         self.resolved_approvals.append((approval_id, kind, decision))
@@ -318,7 +421,7 @@ class _ScriptedTerminalAgent:
             fut.set_result(decision)
         return decision
 
-    async def stream(self, prompt: str):
+    async def stream(self, prompt: str) -> AsyncIterator[str]:
         self.prompts.append(prompt)
         self.cancellation_status = "none"
         try:
@@ -341,7 +444,9 @@ class _ScriptedTerminalAgent:
 
 
 @pytest.fixture
-async def controllable_terminal(tmp_path: Path):
+async def controllable_terminal(
+    tmp_path: Path,
+) -> AsyncIterator[tuple[TerminalEndpoint, AgentTerminalRoster, dict[str, _ScriptedTerminalAgent], Path]]:
     work = tmp_path / "work"
     work.mkdir()
     joat_dir = tmp_path / "JOAT"
@@ -387,7 +492,9 @@ async def controllable_terminal(tmp_path: Path):
         await endpoint.stop()
 
 
-async def test_state_exposes_recent_messages_and_pending_approval_items(controllable_terminal) -> None:
+async def test_state_exposes_recent_messages_and_pending_approval_items(
+    controllable_terminal: Any,
+) -> None:
     endpoint, roster, _agents, _key_path = controllable_terminal
     claude_lane = roster.lane("claude")
     assert claude_lane is not None
@@ -429,7 +536,7 @@ async def test_state_exposes_recent_messages_and_pending_approval_items(controll
 
 
 async def test_send_instruction_returns_promptly_supports_new_session_and_rejects_invalid_or_busy(
-    controllable_terminal,
+    controllable_terminal: Any,
 ) -> None:
     endpoint, roster, agents, key_path = controllable_terminal
 
@@ -519,7 +626,7 @@ async def test_send_instruction_returns_promptly_supports_new_session_and_reject
     assert unavail_status == 409
 
 
-async def test_cancel_run_and_decide_approval_approve_and_deny(controllable_terminal) -> None:
+async def test_cancel_run_and_decide_approval_approve_and_deny(controllable_terminal: Any) -> None:
     endpoint, roster, agents, _key_path = controllable_terminal
 
     # 1. Start a long-running Codex job, while focusing Claude, then cancel_run without provider
@@ -596,3 +703,289 @@ async def test_cancel_run_and_decide_approval_approve_and_deny(controllable_term
             await ag_task
         await asyncio.sleep(0)
         assert agents["antigravity"].resolved_approvals[-1] == (f"ag-{decision}", "run_command", decision)
+
+
+async def test_state_exposes_lane_sessions_capped_at_twelve_and_falls_back_on_error(
+    controllable_terminal: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint, roster, agents, _key_path = controllable_terminal
+
+    # Populate Claude with invalid/blank entries, missing-label entry, and >12 valid sessions
+    agents["claude"].sessions = [
+        {"key": "   ", "label": "Blank key ignored"},
+        {"key": "sess-fallback-label", "label": ""},
+        *[
+            {"key": f"sess-{idx:02d}", "label": f"Session {idx:02d}"}
+            for idx in range(1, 16)
+        ],
+    ]
+    # Codex listing raises an error -> gracefully falls back to []
+    agents["codex"].list_sessions_error = RuntimeError("codex daemon unavailable")
+
+    status, body = await _call(endpoint, "GET", "/terminal/v1/state")
+    assert status == 200
+    by_prov = {a["provider"]: a for a in body["agents"]}
+
+    # Note: AgentTerminalRoster.list_lane_sessions slices rows[:12] before filtering blank keys,
+    # and TerminalEndpoint._lane_sessions also caps valid non-empty items at 12 and falls back label->key.
+    claude_sessions = by_prov["claude"]["sessions"]
+    assert 1 <= len(claude_sessions) <= 12
+    assert claude_sessions[0] == {"key": "sess-fallback-label", "label": "sess-fallback-label"}
+    assert claude_sessions[1] == {"key": "sess-01", "label": "Session 01"}
+    assert all(item["key"].strip() and item["label"].strip() for item in claude_sessions)
+    assert by_prov["codex"]["sessions"] == []
+    assert by_prov["antigravity"]["sessions"] == []
+
+    # Direct roster.list_lane_sessions returning >12 mixed items + raising on one lane is capped at 12 valid items
+    async def fake_list_lane_sessions(lane_name: str, limit: int = 16) -> list[dict[str, str]]:
+        assert limit == 12
+        if lane_name == "codex":
+            raise OSError("unexpected I/O error")
+        if lane_name == "antigravity":
+            return []
+        return [
+            {"key": "", "label": "skip-empty"},
+            {"key": "bad\x00null", "label": "skip-null"},
+            {"key": "no-label-key", "label": ""},
+            *[{"key": f"k-{i}", "label": f"Label {i}"} for i in range(1, 16)],
+        ]
+
+    monkeypatch.setattr(roster, "list_lane_sessions", fake_list_lane_sessions)
+    status2, body2 = await _call(endpoint, "GET", "/v1/state")
+    assert status2 == 200
+    by_prov2 = {a["provider"]: a for a in body2["agents"]}
+    assert len(by_prov2["claude"]["sessions"]) == 12
+    assert by_prov2["claude"]["sessions"][0] == {"key": "no-label-key", "label": "no-label-key"}
+    assert by_prov2["claude"]["sessions"][-1] == {"key": "k-11", "label": "Label 11"}
+    assert by_prov2["codex"]["sessions"] == []
+    assert by_prov2["antigravity"]["sessions"] == []
+
+
+async def test_resume_session_success_hydrates_messages_and_supports_camel_and_snake_case(
+    controllable_terminal: Any, tmp_path: Path,
+) -> None:
+    endpoint, roster, agents, _key_path = controllable_terminal
+    alt_cwd = tmp_path / "alt_project"
+    alt_cwd.mkdir()
+
+    agents["claude"].sessions = [
+        {"key": "sess-alpha", "label": "Fix cursor pagination"},
+        {"key": "sess-beta", "label": "Add telemetry counters"},
+    ]
+    agents["claude"].session_cwds["sess-alpha"] = str(alt_cwd)
+    agents["claude"].session_histories["sess-alpha"] = [
+        ("user", "Fix cursor pagination"),
+        ("assistant", "Updated page token handling."),
+    ]
+    agents["claude"].session_histories["sess-beta"] = [
+        ("user", "Add telemetry counters"),
+        ("assistant", "Counters wired to metrics sink."),
+    ]
+
+    # 1. GET /v1/state primes labels and exposes both sessions
+    state_status, state_body = await _call(endpoint, "GET", "/v1/state")
+    assert state_status == 200
+    claude_before = next(a for a in state_body["agents"] if a["provider"] == "claude")
+    assert claude_before["sessions"] == [
+        {"key": "sess-alpha", "label": "Fix cursor pagination"},
+        {"key": "sess-beta", "label": "Add telemetry counters"},
+    ]
+
+    # 2. Resume with provider + sessionKey (camelCase, trimmed)
+    roster.focus("codex")
+    status, resumed_body = await _call(
+        endpoint,
+        "POST",
+        "/terminal/v1/config",
+        {"action": "resume_session", "provider": "claude-code", "sessionKey": "  sess-alpha  "},
+    )
+    assert status == 200
+    assert resumed_body["ok"] is True
+    assert resumed_body["notice"] == "Resumed claude session."
+    assert roster.focused == "claude"
+    assert agents["claude"].resumed_sessions == ["sess-alpha"]
+
+    claude_after = next(a for a in resumed_body["agents"] if a["provider"] == "claude")
+    assert claude_after["cwd"] == str(alt_cwd)
+    assert claude_after["activeSessionTitle"] == "Fix cursor pagination"
+    assert claude_after["recentMessages"] == [
+        {"role": "status", "text": "Resumed Fix cursor pagination"},
+        {"role": "user", "text": "Fix cursor pagination"},
+        {"role": "assistant", "text": "Updated page token handling."},
+    ]
+
+    # 3. Resume with lane + session_key (snake_case)
+    status2, resumed_body2 = await _call(
+        endpoint,
+        "POST",
+        "/v1/config",
+        {"action": "resume_session", "lane": "claude", "session_key": "sess-beta"},
+    )
+    assert status2 == 200
+    assert resumed_body2["notice"] == "Resumed claude session."
+    claude_after2 = next(a for a in resumed_body2["agents"] if a["provider"] == "claude")
+    assert claude_after2["recentMessages"] == [
+        {"role": "status", "text": "Resumed Add telemetry counters"},
+        {"role": "user", "text": "Add telemetry counters"},
+        {"role": "assistant", "text": "Counters wired to metrics sink."},
+    ]
+
+    # 4. Follow-up instruction on the resumed session succeeds seamlessly
+    send_status, _ = await _call(
+        endpoint,
+        "POST",
+        "/v1/config",
+        {"action": "send_instruction", "provider": "claude", "instruction": "run unit suite"},
+    )
+    assert send_status == 200
+    task = roster.lane("claude").task  # type: ignore[union-attr]
+    if task is not None:
+        await task
+
+
+async def test_resume_session_returns_400_404_and_409_appropriately(
+    controllable_terminal: Any,
+) -> None:
+    endpoint, roster, agents, _key_path = controllable_terminal
+    agents["claude"].sessions = [{"key": "sess-valid", "label": "Valid session"}]
+
+    # 1. Invalid payloads -> 400 Bad Request
+    for bad_payload in (
+        {"action": "resume_session", "sessionKey": "sess-valid"},
+        {"action": "resume_session", "provider": "", "sessionKey": "sess-valid"},
+        {"action": "resume_session", "provider": "unknown-lane", "sessionKey": "sess-valid"},
+        {"action": "resume_session", "provider": 42, "sessionKey": "sess-valid"},
+        {"action": "resume_session", "provider": "claude"},
+        {"action": "resume_session", "provider": "claude", "sessionKey": "   "},
+        {"action": "resume_session", "provider": "claude", "sessionKey": "x" * 257},
+        {"action": "resume_session", "provider": "claude", "sessionKey": "sess\x00bad"},
+        {"action": "resume_session", "provider": "claude", "sessionKey": True},
+    ):
+        bad_status, bad_body = await _call(endpoint, "POST", "/v1/config", bad_payload)
+        assert bad_status == 400, f"expected 400 for {bad_payload}, got {bad_status}"
+        assert bad_body["ok"] is False
+
+    # 2. Exactly 256-char key passes validation and reaches lookup -> 404 Not Found
+    not_found_256, nf_body_256 = await _call(
+        endpoint,
+        "POST",
+        "/v1/config",
+        {"action": "resume_session", "provider": "claude", "sessionKey": "k" * 256},
+    )
+    assert not_found_256 == 404
+    assert nf_body_256 == {"ok": False, "error": "session not found or could not be resumed"}
+
+    # Missing session key -> 404 Not Found
+    missing_status, missing_body = await _call(
+        endpoint,
+        "POST",
+        "/v1/config",
+        {"action": "resume_session", "provider": "claude", "sessionKey": "sess-missing"},
+    )
+    assert missing_status == 404
+    assert missing_body == {"ok": False, "error": "session not found or could not be resumed"}
+
+    # 3. Busy lane -> 409 Conflict ("finish or cancel the running turn first")
+    gate = asyncio.Event()
+    agents["claude"].gate = gate
+    send_status, _ = await _call(
+        endpoint,
+        "POST",
+        "/v1/config",
+        {"action": "send_instruction", "provider": "claude", "instruction": "hold turn open"},
+    )
+    assert send_status == 200
+
+    busy_status, busy_body = await _call(
+        endpoint,
+        "POST",
+        "/v1/config",
+        {"action": "resume_session", "provider": "claude", "sessionKey": "sess-valid"},
+    )
+    assert busy_status == 409
+    assert busy_body == {"ok": False, "error": "finish or cancel the running turn first"}
+
+    # Let running turn complete, then resume succeeds with 200
+    gate.set()
+    task = roster.lane("claude").task  # type: ignore[union-attr]
+    if task is not None:
+        await task
+    await asyncio.sleep(0)
+
+    ok_status, ok_body = await _call(
+        endpoint,
+        "POST",
+        "/v1/config",
+        {"action": "resume_session", "provider": "claude", "sessionKey": "sess-valid"},
+    )
+    assert ok_status == 200
+    assert ok_body["notice"] == "Resumed claude session."
+
+
+async def test_real_claude_and_antigravity_adapters_list_and_resume_over_http(
+    terminal_service: Any,
+) -> None:
+    endpoint, _joat_dir, work_a, work_b, _signin = terminal_service
+    claude_lane = endpoint._roster.lane("claude")
+    ag_lane = endpoint._roster.lane("antigravity")
+    assert claude_lane is not None and ag_lane is not None
+    claude_agent: Any = claude_lane.agent
+    ag_agent: Any = ag_lane.agent
+
+    # Seed real ClaudeCodeTerminalAgent's fake SDK and real AntigravityTerminalAgent's sessions.json
+    claude_agent._sdk.sessions = [
+        SimpleNamespace(
+            session_id="cc-session-1",
+            custom_title="Audit loopback HTTP routes",
+            summary=None,
+            first_prompt=None,
+            cwd=str(work_b),
+        ),
+        SimpleNamespace(
+            session_id="cc-session-2",
+            custom_title=None,
+            summary="Clean up Swift models",
+            first_prompt=None,
+            cwd=str(work_a),
+        ),
+    ]
+    claude_agent._sdk.messages["cc-session-1"] = [
+        SimpleNamespace(type="user", message={"content": "Audit loopback HTTP routes"}),
+        SimpleNamespace(type="assistant", message={"content": "All endpoints require bearer auth."}),
+    ]
+    ag_agent._record_session("ag-conv-1", "Implement session picker")
+    ag_agent._record_session("ag-conv-2", "Verify simulator flow")
+
+    # Cold resume on Claude BEFORE any GET /v1/state call primes _listed automatically
+    cold_status, cold_body = await _call(
+        endpoint,
+        "POST",
+        "/v1/config",
+        {"action": "resume_session", "provider": "claude", "sessionKey": "cc-session-1"},
+    )
+    assert cold_status == 200
+    assert cold_body["notice"] == "Resumed claude session."
+    claude_item = next(a for a in cold_body["agents"] if a["provider"] == "claude")
+    assert claude_item["cwd"] == str(work_b)
+    assert [s["key"] for s in claude_item["sessions"]] == ["cc-session-1", "cc-session-2"]
+    assert any(
+        m["role"] == "assistant" and "bearer auth" in m["text"]
+        for m in claude_item["recentMessages"]
+    )
+
+    ag_item = next(a for a in cold_body["agents"] if a["provider"] == "antigravity")
+    assert ag_item["sessions"] == [
+        {"key": "ag-conv-2", "label": "Verify simulator flow"},
+        {"key": "ag-conv-1", "label": "Implement session picker"},
+    ]
+
+    # Resume saved Antigravity conversation
+    ag_status, ag_body = await _call(
+        endpoint,
+        "POST",
+        "/v1/config",
+        {"action": "resume_session", "provider": "antigravity", "sessionKey": "ag-conv-1"},
+    )
+    assert ag_status == 200
+    assert ag_body["notice"] == "Resumed antigravity session."
+    assert ag_agent.conversation_id == "ag-conv-1"

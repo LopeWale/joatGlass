@@ -409,7 +409,8 @@ final class PastingTextView: UITextView, UITextPasteDelegate {
 enum Notebook {
     static let readingChangedNotification = Notification.Name("joat.notebook.readingChanged")
     static let autoSaveDebounceSeconds: TimeInterval = 1.2
-    static let ocrIdleSeconds: TimeInterval = 25.0
+    /// A short writing pause (≈4 s, was 25 s): handwriting is read and the page summarized.
+    static let ocrIdleSeconds: TimeInterval = NotesInsights.idleSeconds
 
     /// Pages whose handwriting/images are currently being read by `OnPhoneAI`.
     static private(set) var reading: Set<String> = []
@@ -443,6 +444,8 @@ enum Notebook {
         if triggerOCR {
             if (inkChanged || imagesChanged) && (ink || pasted) {
                 read(id, drawing, quickNotes: quickNotes)
+            } else if inkChanged || imagesChanged {
+                quickNotes.pageRead(id, handwriting: "NONE")
             } else {
                 quickNotes.pageReady(id)
             }
@@ -473,46 +476,95 @@ enum Notebook {
         if PageView.open == nil { recoverDraft(quickNotes: quickNotes) }
     }
 
+    /// Newer ink that arrived while the page was being read: read once more after.
+    static private var rereadPending: [String: (drawing: PKDrawing, offerReminders: Bool)] = [:]
+    /// Why the last reading of a page failed (shown on the page's insight card).
+    static private(set) var readProblems: [String: String] = [:]
+
     /// Routes handwriting + pasted-image OCR through `OnPhoneAI.shared.readHandwriting`
-    /// so Gemini 3.5 Flash Lite vision and Claude vision both work out of the box.
+    /// (Claude first when its key is on the phone, Gemini as backup), then the summary.
+    /// One reading per page at a time; newer ink meanwhile is read right after.
+    /// Runs under a background task, so leaving the app mid-read still lands it.
     static func read(
         _ id: String,
         _ drawing: PKDrawing,
         quickNotes: QuickNotes,
+        offerReminders: Bool = true,
         completion: ((Result<String, MacLink.Failure>) -> Void)? = nil
     ) {
         let tiles = PageStore.pngTiles(drawing)
         let pasted = PageStore.images(id).prefix(10).compactMap(PageStore.jpegForClaude)
         guard !(tiles.isEmpty && pasted.isEmpty) else {
-            quickNotes.pageReady(id)
+            quickNotes.pageRead(id, handwriting: "NONE", offerReminders: offerReminders)
             completion?(.failure(.empty))
             return
         }
-        guard !reading.contains(id) else { return }
+        guard !reading.contains(id) else {
+            let earlier = rereadPending[id]?.offerReminders ?? false
+            rereadPending[id] = (drawing, offerReminders || earlier)
+            Log.add("notebook: page \(id.prefix(6)) changed while being read; reading again after")
+            completion?(.failure(.empty))
+            return
+        }
         guard OnPhoneAI.shared.visionConfigured else {
             Log.add("notebook: handwriting not read: no Gemini or Claude key on this phone")
-            quickNotes.pageReady(id)
+            readProblems[id] = "Handwriting is not read: no Claude or Gemini key on this phone."
+            quickNotes.pageReady(id, offerReminders: offerReminders)
+            NotificationCenter.default.post(name: readingChangedNotification, object: id)
             completion?(.failure(.notConfigured))
             return
         }
         reading.insert(id)
+        readProblems[id] = nil
         NotificationCenter.default.post(name: readingChangedNotification, object: id)
+        let hold = BackgroundHold("JOAT read page")
         Log.add("notebook: reading page \(id.prefix(6)), \(tiles.count) ink image\(tiles.count == 1 ? "" : "s"), "
             + "\(pasted.count) pasted")
         OnPhoneAI.shared.readHandwriting(tiles, pasted: Array(pasted)) { result in
             Task { @MainActor in
                 reading.remove(id)
-                NotificationCenter.default.post(name: readingChangedNotification, object: id)
+                let again = rereadPending.removeValue(forKey: id)
                 switch result {
                 case .success(let text):
-                    quickNotes.pageRead(id, handwriting: text)
+                    // Newer ink is read next: summarize once, after that.
+                    quickNotes.pageRead(id, handwriting: text, summarize: again == nil, offerReminders: offerReminders)
                 case .failure(let f):
                     Log.add("notebook: handwriting not read: \(MacLink.explain(f))")
-                    quickNotes.pageReady(id)
+                    readProblems[id] = "Handwriting not read: \(MacLink.explain(f))"
+                    if again == nil { quickNotes.pageReady(id, offerReminders: offerReminders) }
                 }
+                NotificationCenter.default.post(name: readingChangedNotification, object: id)
                 completion?(result)
+                if let again {
+                    read(id, again.drawing, quickNotes: quickNotes, offerReminders: again.offerReminders || offerReminders)
+                }
+                // Let the summary that follows the reading land too.
+                hold.end(after: quickNotes.isSummarizing(id) ? 20 : 0)
             }
         }
+    }
+}
+
+/// Keeps JOAT Brain running briefly in the background so a page read (and its
+/// summary) started as the wearer leaves the app is not dropped.
+@MainActor
+final class BackgroundHold {
+    private var task: UIBackgroundTaskIdentifier = .invalid
+
+    init(_ name: String) {
+        task = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+            MainActor.assumeIsolated { self?.end(after: 0) }
+        }
+    }
+
+    func end(after seconds: TimeInterval) {
+        guard task != .invalid else { return }
+        if seconds > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [self] in end(after: 0) }
+            return
+        }
+        UIApplication.shared.endBackgroundTask(task)
+        task = .invalid
     }
 }
 
@@ -583,6 +635,7 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
     private var pageSize = CGSize.zero
     private var following = false
     private var lastInk: PKToolPickerItem?
+    private var lastAttachments: [ObjectIdentifier]?
 
     init(
         noteId: String?,
@@ -620,6 +673,7 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         textView.typingAttributes = PageStore.textAttributes
         textView.onPasteImages = { [weak self] in self?.insert(images: $0) }
         textView.acceptImages()
+        lastAttachments = PageStore.attachments(textView.attributedText ?? NSAttributedString()).map(ObjectIdentifier.init)
         textView.isScrollEnabled = false
         textView.backgroundColor = .clear
         textView.textContainerInset = UIEdgeInsets(top: 20, left: 16, bottom: 20, right: 16)
@@ -728,7 +782,7 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         }
     }
 
-    // MARK: - Continuous Per-Page Auto-Save & 25s Idle OCR
+    // MARK: - Continuous Per-Page Auto-Save & ≈4 s Writing-Pause OCR
 
     var typedText: String { textView.text.replacingOccurrences(of: "\u{FFFC}", with: "") }
 
@@ -765,18 +819,23 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         }
     }
 
+    /// Leaving the app mid-page: save, and read/summarize what changed now
+    /// (under a background task) instead of dropping it.
     @objc private func handleAppBackgrounding() {
-        flushAutoSave(triggerOCR: false)
+        flushAutoSave(triggerOCR: ocrDirty || typedSummaryDirty, offerReminders: false)
     }
 
+    /// A short pause in writing: read the new ink / summarize the new words.
+    /// Reminders are offered once, on leaving the page.
     private func handleIdleOCRTimeout() {
         ocrIdleTimer?.invalidate()
         ocrIdleTimer = nil
-        flushAutoSave(triggerOCR: true)
+        flushAutoSave(triggerOCR: true, offerReminders: false)
     }
 
     @discardableResult
-    func flushAutoSave(quickNotes explicitQuickNotes: QuickNotes? = nil, triggerOCR: Bool = false) -> String? {
+    func flushAutoSave(quickNotes explicitQuickNotes: QuickNotes? = nil, triggerOCR: Bool = false,
+                       offerReminders: Bool = true) -> String? {
         saveTimer?.invalidate()
         saveTimer = nil
         if triggerOCR {
@@ -817,15 +876,14 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
                 ocrDirty = false
                 typedSummaryDirty = false
                 if !drawingNow.strokes.isEmpty || !attachments.isEmpty {
-                    Notebook.read(pageId, drawingNow, quickNotes: qn)
-                } else if !cleanTyped.isEmpty {
-                    qn.pageReady(pageId)
+                    Notebook.read(pageId, drawingNow, quickNotes: qn, offerReminders: offerReminders)
+                } else {
+                    // The ink was erased: drop its old reading, summarize what is left.
+                    qn.pageRead(pageId, handwriting: "NONE", offerReminders: offerReminders)
                 }
             } else if typedSummaryDirty {
                 typedSummaryDirty = false
-                if !cleanTyped.isEmpty {
-                    qn.pageReady(pageId)
-                }
+                qn.pageReady(pageId, offerReminders: offerReminders)
             }
         }
 
@@ -906,7 +964,7 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         let size = CGSize(width: pageWidth, height: CGFloat(sheets) * Self.sheet.height)
         let fit = bounds.width / pageWidth
         let refit = abs(fit - fitScale) > 0.0001
-        guard size != pageSize || refit else { return }
+        guard size != pageSize || refit else { centrePage(); return }
         pageSize = size
         following = true
         let offset = refit ? zoomToFit(fit) : nil
@@ -918,6 +976,7 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         sheetLines.sheets = sheets
         textScroll.contentSize = zoomed
         canvas.contentSize = zoomed
+        centrePage()
         if let offset {
             let inset = canvas.adjustedContentInset
             let most = CGPoint(x: max(-inset.left, zoomed.width - bounds.width + inset.right),
@@ -937,16 +996,19 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         if refit { sharpenText() }
     }
 
+    /// Width-fit on first show; pinch goes out to half of that (the page
+    /// centred) and in to at least 4× (NotesInsights.zoomLimits).
     private func zoomToFit(_ fit: CGFloat) -> CGPoint {
         let relative = fitScale > 0 ? canvas.zoomScale / fitScale : 1
         let before = canvas.zoomScale
         let offset = canvas.contentOffset
         fitScale = fit
-        let most = max(4, fit * 4)
-        let zoom = min(max(fit * relative, fit), most)
+        let limits = NotesInsights.zoomLimits(fit: Double(fit))
+        let zoom = CGFloat(NotesInsights.clampZoom(Double(fit * relative), fit: Double(fit)))
         for scroller in [textScroll, canvas] as [UIScrollView] {
-            scroller.minimumZoomScale = fit
-            scroller.maximumZoomScale = most
+            scroller.minimumZoomScale = CGFloat(limits.min)
+            scroller.maximumZoomScale = CGFloat(limits.max)
+            scroller.bouncesZoom = true
             scroller.zoomScale = zoom
         }
         let ratio = before > 0 ? zoom / before : 1
@@ -983,13 +1045,51 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
             if other === canvas {
                 canvas.contentSize = CGSize(width: pageSize.width * moved.zoomScale, height: pageSize.height * moved.zoomScale)
             }
+            centrePage()
         }
         other.contentOffset = moved.contentOffset
         following = false
     }
 
+    /// Room under the tool picker, kept apart from the centring insets.
+    private var toolInsetBottom: CGFloat = 0
+
+    /// A page zoomed out smaller than the screen sits in its middle; both
+    /// scroll views get the same insets so ink and text stay aligned.
+    private func centrePage() {
+        guard pageSize.width > 0, bounds.width > 0 else { return }
+        let zoom = canvas.zoomScale
+        let c = NotesInsights.centringInset(content: (Double(pageSize.width * zoom), Double(pageSize.height * zoom)),
+                                            bounds: (Double(bounds.width), Double(bounds.height - toolInsetBottom)))
+        let inset = UIEdgeInsets(top: CGFloat(c.top), left: CGFloat(c.left),
+                                 bottom: CGFloat(c.top) + toolInsetBottom, right: CGFloat(c.left))
+        for scroller in [textScroll, canvas] as [UIScrollView] where scroller.contentInset != inset {
+            scroller.contentInset = inset
+            scroller.verticalScrollIndicatorInsets.bottom = toolInsetBottom
+        }
+    }
+
+    #if DEBUG
+    /// Simulator screenshots (no pinch): zoom to `factor` × width-fit.
+    func debugZoom(_ factor: CGFloat) {
+        guard fitScale > 0 else { return }
+        let zoom = CGFloat(NotesInsights.clampZoom(Double(fitScale * factor), fit: Double(fitScale)))
+        following = true
+        canvas.zoomScale = zoom
+        textScroll.zoomScale = zoom
+        canvas.contentSize = CGSize(width: pageSize.width * zoom, height: pageSize.height * zoom)
+        following = false
+        centrePage()
+        let start = CGPoint(x: -canvas.contentInset.left, y: -canvas.contentInset.top)
+        canvas.contentOffset = start
+        textScroll.contentOffset = start
+        sharpenText()
+        Log.add("debug: page zoom \(String(format: "%.2f", zoom)) (fit \(String(format: "%.2f", fitScale)))")
+    }
+    #endif
+
     fileprivate func sharpenText() {
-        let scale = traitCollection.displayScale * min(textScroll.zoomScale, 2.5)
+        let scale = traitCollection.displayScale * min(max(textScroll.zoomScale, 0.5), 2.5)
         func apply(_ view: UIView) {
             if view is SheetLines { return }
             view.contentScaleFactor = scale
@@ -1041,10 +1141,10 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
             if wasOcrDirty, let d = capturedDrawing {
                 if !d.strokes.isEmpty || !PageStore.imageNames(pid).isEmpty {
                     Notebook.read(pid, d, quickNotes: qn)
-                } else if !capturedTyped.isEmpty {
-                    qn.pageReady(pid)
+                } else {
+                    qn.pageRead(pid, handwriting: "NONE")
                 }
-            } else if wasTypedDirty && !capturedTyped.isEmpty {
+            } else if wasTypedDirty {
                 qn.pageReady(pid)
             }
         }
@@ -1059,7 +1159,10 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
     #endif
 
     func textViewDidChange(_ textView: UITextView) {
-        let hasAttachmentChange = textView.attributedText.map { !PageStore.attachments($0).isEmpty } ?? false
+        // Only a pasted/removed image re-reads the page; typing next to one just re-summarizes.
+        let shown = textView.attributedText.map { PageStore.attachments($0).map(ObjectIdentifier.init) } ?? []
+        let hasAttachmentChange = lastAttachments.map { $0 != shown } ?? !shown.isEmpty
+        lastAttachments = shown
         markChanged(ink: false, imageChanged: hasAttachmentChange)
         setNeedsLayout()
         notifyUndoState()
@@ -1082,6 +1185,7 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
         page.replaceCharacters(in: range, with: piece)
         textView.attributedText = page
         fitImages()
+        lastAttachments = PageStore.attachments(textView.attributedText ?? page).map(ObjectIdentifier.init)
         textView.typingAttributes = attributes
         textView.selectedRange = NSRange(location: range.location + piece.length, length: 0)
         markChanged(ink: false, imageChanged: !images.isEmpty)
@@ -1168,11 +1272,8 @@ final class PageView: UIView, UITextViewDelegate, PKCanvasViewDelegate, PKToolPi
 
     func toolPickerFramesObscuredDidChange(_ toolPicker: PKToolPicker) {
         let obscured = toolPicker.frameObscured(in: self)
-        let bottom = obscured.isNull ? 0 : max(0, bounds.maxY - obscured.minY)
-        for scroller in [textScroll, canvas] as [UIScrollView] {
-            scroller.contentInset.bottom = bottom
-            scroller.verticalScrollIndicatorInsets.bottom = bottom
-        }
+        toolInsetBottom = obscured.isNull ? 0 : max(0, bounds.maxY - obscured.minY)
+        centrePage()
     }
 }
 
@@ -1541,6 +1642,10 @@ struct PageEditorView: View {
         VStack(spacing: 0) {
             stationeryControlStrip
             Divider()
+            PageInsightCard(noteId: activeNoteId, handle: handle) {
+                _ = handle.view?.flushAutoSave(triggerOCR: false)
+                showingInspector = true
+            }
             PageCanvas(
                 pageId: activeNoteId,
                 typed: initialTyped,
@@ -1765,6 +1870,156 @@ struct PageEditorView: View {
     }
 }
 
+// MARK: - Inline Page Insights Card (summary, key points, todos)
+
+/// The page's AI summary, key points and next steps, right above the paper
+/// (collapsible), with what is happening while handwriting is read or the
+/// page summarized, and a clear line when no AI key is set up.
+struct PageInsightCard: View {
+    let noteId: String
+    let handle: PageHandle
+    let openInspector: () -> Void
+
+    @ObservedObject private var notesModel = JOATRuntime.shared.notes
+    @ObservedObject private var ai = OnPhoneAI.shared
+    @AppStorage("joat.notes.insightCardExpanded") private var expanded = true
+    @State private var reading = false
+    @State private var summarizing = false
+    @State private var problem: String?
+
+    private var quickNotes: QuickNotes? { JOATRuntime.shared.brain?.quickNotes }
+    private var note: QuickNotes.VoiceNote? { notesModel.voice.first(where: { $0.id == noteId }) }
+
+    private var status: NotesInsights.Status {
+        let n = note
+        let summary = (n?.summary ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasContent = !(n?.paragraphs ?? []).isEmpty || (handle.view?.hasAnyContent ?? false)
+        return NotesInsights.status(reading: reading, summarizing: summarizing,
+                                    configured: quickNotes?.insightsConfigured ?? ai.anyConfigured,
+                                    hasSummary: !summary.isEmpty, stale: n?.summaryStale == true,
+                                    hasContent: hasContent)
+    }
+
+    var body: some View {
+        let s = status
+        let n = note
+        let summary = (n?.summary ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let points = n?.keyPoints ?? []
+        let todos = n?.todos ?? []
+        let hasInsights = !summary.isEmpty || !points.isEmpty || !todos.isEmpty
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                if s.inFlight {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: s == .noKey ? "key.slash" : "sparkles")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(s == .noKey ? Color.orange : JoatTheme.accent)
+                }
+                Text(headerText(s, hasInsights: hasInsights))
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(s == .noKey ? Color.orange : .primary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Button(action: openInspector) {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.body)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("AI Insights & Prep")
+                if hasInsights || s == .noKey {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() }
+                    } label: {
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.footnote.weight(.semibold))
+                            .padding(4)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(expanded ? "Collapse summary" : "Expand summary")
+                }
+            }
+
+            if expanded, hasInsights {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !summary.isEmpty {
+                            Text(summary)
+                                .font(.callout)
+                                .foregroundStyle(n?.summaryStale == true ? .secondary : .primary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if !points.isEmpty {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("KEY POINTS").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+                                ForEach(points, id: \.self) { p in
+                                    Text("•  \(p)").font(.footnote).fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                        if !todos.isEmpty {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("NEXT STEPS").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+                                ForEach(todos, id: \.self) { t in
+                                    Text("☐  \(t)").font(.footnote).fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 190)
+                .fixedSize(horizontal: false, vertical: true)
+            } else if !expanded, !summary.isEmpty {
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            if expanded, s == .noKey {
+                Text(s.label)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let problem, !s.inFlight, expanded {
+                Text(problem)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(JoatTheme.card)
+        .overlay(alignment: .bottom) { Divider() }
+        .onAppear(perform: refresh)
+        .onReceive(NotificationCenter.default.publisher(for: Notebook.readingChangedNotification)) { _ in refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: QuickNotes.insightsChangedNotification)) { _ in refresh() }
+    }
+
+    private func headerText(_ s: NotesInsights.Status, hasInsights: Bool) -> String {
+        switch s {
+        case .readingHandwriting, .summarizing: return s.label
+        case .noKey: return "No AI key — summaries are off"
+        case .ready: return "AI summary"
+        case .stale: return "AI summary · updates after a pause"
+        case .pending, .empty: return hasInsights ? "AI summary" : s.label
+        }
+    }
+
+    private func refresh() {
+        reading = Notebook.reading.contains(noteId)
+        summarizing = quickNotes?.isSummarizing(noteId) ?? false
+        problem = Notebook.readProblems[noteId] ?? quickNotes?.insightProblems[noteId]
+        notesModel.reload()
+    }
+}
+
 // MARK: - Sparkles AI Insights & Prep Inspector (`PageInspectorSheet`)
 
 private struct InspectorOfferItem: Identifiable {
@@ -1879,7 +2134,7 @@ struct PageInspectorSheet: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else if hasInk || hasImages {
-                Text("Handwriting or pasted images are ready to read. Auto-OCR runs after 25s of idle or when closing the page.")
+                Text("Handwriting or pasted images are ready to read. They are read a few seconds after you stop writing, or when you leave the page.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
@@ -2155,6 +2410,15 @@ extension Notebook {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), nil, { _, _, _, _, _ in
             Task { @MainActor in NotificationCenter.default.post(name: Notebook.debugDrop, object: nil) }
         }, "com.joat.debug.drop" as CFString, nil, .deliverImmediately)
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), nil, { _, _, _, _, _ in
+            Task { @MainActor in PageView.open?.debugZoom(0.5) }
+        }, "com.joat.debug.zoomout" as CFString, nil, .deliverImmediately)
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), nil, { _, _, _, _, _ in
+            Task { @MainActor in PageView.open?.debugZoom(1) }
+        }, "com.joat.debug.zoomfit" as CFString, nil, .deliverImmediately)
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), nil, { _, _, _, _, _ in
+            Task { @MainActor in PageView.open?.debugZoom(8) }
+        }, "com.joat.debug.zoomin" as CFString, nil, .deliverImmediately)
         Log.add("debug: UI test pictures on")
     }
     private static var snapCount = 0

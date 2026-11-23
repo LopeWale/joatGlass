@@ -11,8 +11,8 @@ Routes (with or without `/terminal` prefix):
   the voice assistant seat, saved CLI accounts, and in-progress CLI sign-in.
   NEVER exposes raw Gemini API keys, OAuth codes, or bearer tokens.
 - `POST /v1/config` — bearer-authenticated mutations (`set_model`, `set_cwd`,
-  write-only `set_gemini_key`, `new_session`, `send_instruction`,
-  `cancel_run`, `decide_approval`, `set_assistant_seat`,
+  write-only `set_gemini_key`, `new_session`, `resume_session`,
+  `send_instruction`, `cancel_run`, `decide_approval`, `set_assistant_seat`,
   `account.select`/`account.activate`, `account.add`, `account.remove`,
   `login.start`, `login.code`, `login.cancel`, `login.dismiss`, `refresh`).
 """
@@ -59,6 +59,8 @@ log = logging.getLogger(__name__)
 DEFAULT_PORT = 8790
 TOKEN_PATH = JOAT_DIR / "terminal-token"
 MAX_CONFIG_BODY_BYTES = 32 * 1024
+MAX_LANE_SESSIONS = 12
+MAX_SESSION_KEY_CHARS = 256
 MAX_RECENT_MESSAGES = 6
 MAX_RECENT_MESSAGE_CHARS = 600
 MAX_APPROVAL_SUMMARY_CHARS = 240
@@ -295,7 +297,7 @@ class TerminalEndpoint:
         if path == "/v1/state":
             if request.method != "GET":
                 return 405, {"ok": False, "error": "method not allowed"}
-            return 200, self._state_snapshot()
+            return 200, await self._state_snapshot()
 
         if path == "/v1/config":
             if request.method != "POST":
@@ -312,14 +314,14 @@ class TerminalEndpoint:
                 return exc.status, {"ok": False, "error": exc.message}
             except AccountError as exc:
                 return 400, {"ok": False, "error": str(exc)}
-            snapshot = self._state_snapshot(notice=notice)
+            snapshot = await self._state_snapshot(notice=notice)
             return 200, snapshot
 
         return 404, {"ok": False, "error": "not found"}
 
     # ── State projection (secret-free) ───────────────────────────────────
 
-    def _state_snapshot(self, *, notice: str | None = None) -> dict[str, Any]:
+    async def _state_snapshot(self, *, notice: str | None = None) -> dict[str, Any]:
         assistant_slot = self._models.slot("assistant")
         assistant_seat = (
             (assistant_slot.current.id or assistant_slot.current.label)
@@ -332,7 +334,7 @@ class TerminalEndpoint:
             else ["claude", "codex", "local"]
         )
 
-        agents: list[dict[str, Any]] = []
+        lane_entries: list[tuple[str, Any, str]] = []
         for name in self._roster.names():
             lane = self._roster.lane(name)
             if lane is None:
@@ -341,7 +343,17 @@ class TerminalEndpoint:
             provider = _normalize_provider(raw_provider)
             if provider not in ("claude", "codex", "antigravity"):
                 continue
-            agents.append(self._agent_item(lane.key, lane, provider))
+            lane_entries.append((lane.key, lane, provider))
+
+        sessions_per_lane = await asyncio.gather(
+            *(self._lane_sessions(lane_key) for lane_key, _, _ in lane_entries),
+        )
+        agents: list[dict[str, Any]] = [
+            self._agent_item(lane_key, lane, provider, sessions=sessions)
+            for (lane_key, lane, provider), sessions in zip(
+                lane_entries, sessions_per_lane, strict=False,
+            )
+        ]
 
         accounts: list[dict[str, Any]] = []
         for cli_prov in PROVIDERS:
@@ -391,7 +403,47 @@ class TerminalEndpoint:
             "notice": effective_notice,
         }
 
-    def _agent_item(self, lane_key: str, lane: Any, provider: str) -> dict[str, Any]:
+    async def _lane_sessions(self, lane_key: str) -> list[dict[str, str]]:
+        raw_sessions: Any = []
+        with contextlib.suppress(Exception):
+            raw_sessions = await asyncio.wait_for(
+                self._roster.list_lane_sessions(lane_key, limit=MAX_LANE_SESSIONS),
+                timeout=3.0,
+            )
+        if not isinstance(raw_sessions, list):
+            return []
+        sessions: list[dict[str, str]] = []
+        for item in raw_sessions:
+            if not isinstance(item, Mapping):
+                continue
+            raw_key = item.get("key")
+            if raw_key is None or isinstance(raw_key, bool):
+                continue
+            key = str(raw_key).strip()
+            if not key or "\x00" in key or len(key) > MAX_SESSION_KEY_CHARS:
+                continue
+            raw_label = item.get("label")
+            label = (
+                str(raw_label).strip()
+                if raw_label is not None and not isinstance(raw_label, bool)
+                else ""
+            )
+            sessions.append({
+                "key": key,
+                "label": label or key,
+            })
+            if len(sessions) >= MAX_LANE_SESSIONS:
+                break
+        return sessions
+
+    def _agent_item(
+        self,
+        lane_key: str,
+        lane: Any,
+        provider: str,
+        *,
+        sessions: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
         cwd = str(getattr(lane.agent, "cwd", None) or Path.home())
         model_val = getattr(lane.agent, "model", None)
         if provider == "antigravity":
@@ -461,6 +513,7 @@ class TerminalEndpoint:
             "activeSessionTitle": self._roster.lane_active_summary(lane_key),
             "pendingApprovals": len(lane.approvals),
             "approvals": len(lane.approvals),
+            "sessions": list(sessions) if sessions is not None else [],
             "recentMessages": self._recent_messages(lane),
             "pendingApprovalItems": self._pending_approval_items(lane),
         }
@@ -622,6 +675,47 @@ class TerminalEndpoint:
             if not started:
                 raise BadRequest(400, "finish or cancel the running turn first")
             return f"Started a new {lane_key} session."
+
+        if action == "resume_session":
+            raw_target = body.get("provider") or body.get("lane")
+            if not isinstance(raw_target, str):
+                raise BadRequest(400, "unknown provider or lane")
+            lane_key = self._resolve_lane_key(raw_target)
+            if lane_key is None:
+                raise BadRequest(400, "unknown provider or lane")
+            lane = self._roster.lane(lane_key)
+            if lane is None:
+                raise BadRequest(400, "unknown provider or lane")
+            raw_session_key = body.get("sessionKey") or body.get("session_key")
+            if raw_session_key is not None and not isinstance(raw_session_key, str):
+                raise BadRequest(400, "sessionKey must be a string")
+            session_key = str(raw_session_key or "").strip()
+            if (
+                not session_key
+                or len(session_key) > MAX_SESSION_KEY_CHARS
+                or "\x00" in session_key
+            ):
+                raise BadRequest(
+                    400, f"sessionKey must be 1-{MAX_SESSION_KEY_CHARS} characters",
+                )
+            try:
+                session_key.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise BadRequest(400, "sessionKey must be valid UTF-8") from exc
+            if lane.busy or lane.queued:
+                raise BadRequest(409, "finish or cancel the running turn first")
+            listed_cache = getattr(lane.agent, "_listed", None)
+            if isinstance(listed_cache, dict) and not listed_cache:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        self._roster.list_lane_sessions(lane_key, limit=MAX_LANE_SESSIONS),
+                        timeout=3.0,
+                    )
+            resumed = await self._roster.resume_lane_session(lane_key, session_key)
+            if not resumed:
+                raise BadRequest(404, "session not found or could not be resumed")
+            await self._roster.repaint()
+            return f"Resumed {lane_key} session."
 
         if action == "send_instruction":
             raw_target = body.get("provider") if body.get("provider") is not None else body.get("lane")

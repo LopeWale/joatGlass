@@ -90,7 +90,7 @@ describe('navigation HUD contract', () => {
   });
 });
 
-describe('the guidance pane without a street tile', () => {
+describe('the guidance pane route schematic', () => {
   const route = {
     geometry: [
       { latitude: 0, longitude: 0 },
@@ -99,35 +99,15 @@ describe('the guidance pane without a street tile', () => {
     ],
   };
 
-  it('centres on the wearer at the tiles\' own zoom, or fits the whole route before the first fix', async () => {
-    const { navigationMapFallbackCentre, NAVIGATION_MAP_PANEL, projectNavigationMapToPanel } = await import('./HudCanvasRenderer');
-    expect(navigationMapFallbackCentre({ ...route, position: { latitude: 0, longitude: 0.001 } }))
-      .toEqual({ latitude: 0, longitude: 0.001, zoom: 16 });
-    expect(navigationMapFallbackCentre({ ...route, position: { latitude: 0, longitude: 0.001 } }, 'driving'))
-      .toEqual({ latitude: 0, longitude: 0.001, zoom: 15 });
-    const fitted = navigationMapFallbackCentre(route);
-    expect(fitted).toMatchObject({ latitude: 0.0045, longitude: 0.0045 });
-    expect(fitted!.zoom).toBeLessThan(16);
-    const projection = projectNavigationMapToPanel(route, fitted!)!;
-    for (const [x, y] of projection.points) {
-      expect(x).toBeGreaterThanOrEqual(NAVIGATION_MAP_PANEL.x);
-      expect(x).toBeLessThanOrEqual(NAVIGATION_MAP_PANEL.x + NAVIGATION_MAP_PANEL.width);
-      expect(y).toBeGreaterThanOrEqual(NAVIGATION_MAP_PANEL.y);
-      expect(y).toBeLessThanOrEqual(NAVIGATION_MAP_PANEL.y + NAVIGATION_MAP_PANEL.height);
-    }
-    expect(navigationMapFallbackCentre({ geometry: [{ latitude: 0, longitude: 0 }] })).toBeUndefined();
-  });
-
-  it('draws the route\'s shape and the wearer in the pane when no tile has arrived', async () => {
-    const { HudCanvasRenderer } = await import('./HudCanvasRenderer');
+  function recordingContext() {
     const strokes: number[] = [];
     const arcs: Array<[number, number]> = [];
+    const texts: Array<{ text: string; x: number; y: number }> = [];
     let images = 0;
-    const texts: Array<{ text: string; x: number }> = [];
     const state: Record<string, unknown> = {
       font: '', textAlign: 'left', lineWidth: 0,
       measureText: (value: string) => ({ width: value.length * 6 }),
-      fillText: (text: string, x: number) => texts.push({ text, x }),
+      fillText: (text: string, x: number, y: number) => texts.push({ text, x, y }),
       stroke: () => strokes.push(state.lineWidth as number),
       arc: (x: number, y: number) => arcs.push([x, y]),
       drawImage: () => { images += 1; },
@@ -136,21 +116,37 @@ describe('the guidance pane without a street tile', () => {
       get: (target, key) => (key in target ? target[String(key)] : () => undefined),
       set: (target, key, value) => { target[String(key)] = value; return true; },
     }) as unknown as CanvasRenderingContext2D;
+    return { context, strokes, arcs, texts, images: () => images };
+  }
+
+  it('draws the route schematic — never a raster tile, even when a stray one is attached', async () => {
+    const { HudCanvasRenderer } = await import('./HudCanvasRenderer');
+    const rec = recordingContext();
     const renderer = Object.create(HudCanvasRenderer.prototype) as InstanceType<typeof HudCanvasRenderer>;
-    (renderer as unknown as { drawNavigation(c: unknown, n: unknown): void }).drawNavigation(context, {
+    (renderer as unknown as { drawNavigation(c: unknown, n: unknown): void }).drawNavigation(rec.context, {
       view: 'guidance', primary: 'Turn right', secondary: 'onto Test Ave', hint: 'Then continue',
       interaction: 'none', options: [], selectedIndex: 0, mode: 'walking',
       maneuver: 'turn_right', maneuverDistanceM: 80, remainingDistanceM: 900, etaMinutes: 13,
       progress: 0.1,
-      map: { ...route, position: { latitude: 0, longitude: 0.001 } },
+      map: {
+        ...route,
+        position: { latitude: 0, longitude: 0.0083 },
+        maneuverAlongM: 1000,
+        maneuverLabel: 'Test Ave',
+        panel: { latitude: 0, longitude: 0, zoom: 16, width: 284, height: 220, image: {} as CanvasImageSource },
+      },
     });
-    // No tile was blitted, the route was traced once in the thin "shape"
-    // weight, and the wearer's marker was drawn — nothing disappeared.
-    expect(images).toBe(0);
-    expect(strokes).toContain(2);
-    expect(arcs.length).toBeGreaterThan(0);
+    expect(rec.images()).toBe(0);
+    // The road ahead is the one wide bright stroke; the travelled part is thin.
+    expect(rec.strokes).toContain(8);
+    expect(rec.strokes).toContain(2);
+    // The maneuver node and its street label sit inside the right pane.
+    const label = rec.texts.find(({ text }) => text === 'Test Ave');
+    expect(label).toBeDefined();
+    expect(label!.x).toBeGreaterThanOrEqual(292);
+    expect(rec.arcs.some(([x]) => x > 292)).toBe(true);
     // The instruction kept to its own pane: nothing drawn past the seam.
-    expect(texts.filter(({ text }) => text === 'Turn right').every(({ x }) => x < 288)).toBe(true);
+    expect(rec.texts.filter(({ text }) => text === 'Turn right').every(({ x }) => x < 288)).toBe(true);
   });
 
   it('renders DRIVING · ACTIVE heading and Driving footer fact on the guidance canvas', async () => {

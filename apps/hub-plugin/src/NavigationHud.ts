@@ -85,9 +85,37 @@ export interface NavigationMapPoint {
 export interface NavigationMapModel {
   geometry: readonly NavigationMapPoint[];
   position?: NavigationMapPoint;
-  /** Street surroundings rendered by the Mac. Without it the pane still
-   * draws the route's shape; with it the wearer sees the actual blocks. */
+  /** The fix's course, degrees clockwise from true north. The schematic is
+   * heading-up: this faces the top of the pane when it is a real course;
+   * otherwise the route's own bearing at the wearer does. */
+  heading?: number;
+  /** Ground speed of the fix, m/s; a near-stationary course is ignored. */
+  speed?: number;
+  /** The tracker's along-route match, metres from the route's start. */
+  progressM?: number;
+  /** Where the next maneuver is, metres along the route from its start. */
+  maneuverAlongM?: number;
+  /** The street the next maneuver turns onto, as the schematic labels it. */
+  maneuverLabel?: string;
+  /**
+   * @deprecated Raster street tiles are no longer drawn on the glasses
+   * (2026-11-23 route schematic). Kept only so an old producer's field
+   * type-checks; the renderer ignores it.
+   */
   panel?: NavigationMapPanelModel;
+}
+
+/**
+ * The street a maneuver instruction names, for the schematic's label:
+ * "Turn right onto N Michigan Ave" → "N Michigan Ave". An instruction with
+ * no recognisable street keeps its own words.
+ */
+export function navigationStreetLabel(instruction: string | undefined): string | undefined {
+  const text = instruction?.replace(/\s+/gu, ' ').trim();
+  if (!text) return undefined;
+  const match = /\b(?:onto|on to|into|on|toward|towards|at|to)\s+(.+?)[.\s]*$/iu.exec(text);
+  const street = (match?.[1] ?? text).trim();
+  return street.length > 28 ? `${street.slice(0, 27).trimEnd()}…` : street;
 }
 
 export interface NavigationMapPanelModel {
@@ -118,10 +146,9 @@ export function formatNavigationDistance(distanceM: number): string {
  * Deterministic review data used by the browser preview and official G2
  * simulator. It never starts location, search, routing, or native actions.
  */
-/** A real walking route near 1007 N Shartel Ave, Oklahoma City — the same
- * place the checked-in map sample covers, so the development frame shows
- * the true composite: streets underneath, route and position on top. A
- * fixture whose route sits in a different city verifies nothing. */
+/** A real walking route near 1007 N Shartel Ave, Oklahoma City: north up
+ * Shartel, right at the corner ~57 m ahead, then a short dog-leg. The
+ * schematic draws it heading-up, so the turn reads as a right turn. */
 const VISUAL_ROUTE_MAP: NavigationMapModel = {
   geometry: [
     { latitude: 35.47590, longitude: -97.52564 },
@@ -133,6 +160,8 @@ const VISUAL_ROUTE_MAP: NavigationMapModel = {
     { latitude: 35.47850, longitude: -97.52300 },
   ],
   position: { latitude: 35.47730, longitude: -97.52564 },
+  maneuverAlongM: 212,
+  maneuverLabel: 'W Fullerton Ave',
 };
 
 export function navigationVisualFixture(state: NavigationVisualState): NavigationHudModel {

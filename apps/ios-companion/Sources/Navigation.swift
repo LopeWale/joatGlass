@@ -1407,7 +1407,6 @@ final class NavigationSession {
                     self.locatingSince = nil
                     self.origin = phonePoint
                     Log.add("navigation origin received from PhoneLocation")
-                    self.queueMapCentres([phonePoint], mode: mode)
                     self.showRouting()
                     self.startRoute(
                         from: phonePoint,
@@ -1445,7 +1444,6 @@ final class NavigationSession {
         usingPhoneFixes = false
         Log.add("navigation origin received from plugin")
         origin = point
-        queueMapCentres([point], mode: mode)
         showRouting()
         startRoute(from: point, generation: self.generation, revision: routeRevision + 1, installNow: autoInstall)
     }
@@ -1583,8 +1581,9 @@ final class NavigationSession {
         Log.add("navigation route ready: \(Int(r.totalM)) m, \(r.steps.count) steps, \(r.geometry.count) points, "
                 + String(format: "%.1f min", r.etaMinutes))
 
-        let centres = NavigationMapTiles.routeMapCentres(geometry: r.geometry, mode: travel)
-        queueMapCentres(centres, mode: travel)
+        // No street-tile prefetch: since 2026-11-23 the glasses draw a route
+        // schematic from the route and the live fix alone, and ignore any
+        // `navigation.map` raster that still arrives.
 
         if installNow {
             sendRoute()
@@ -1742,49 +1741,10 @@ final class NavigationSession {
         }
     }
 
-    // MARK: - Sequential Street Tile Prefetch (`navigation.map`)
+    // MARK: - Street Tile Prefetch (retired)
 
-    private func queueMapCentres(_ centres: [NavPoint], mode: String) {
-        guard !ended, !centres.isEmpty else { return }
-        for c in centres {
-            if mapCentres.contains(where: { $0.mode == mode && NavigationMapTiles.moveMeters($0.point, c) < NavigationMapTiles.dedupeMeters }) {
-                continue
-            }
-            mapCentres.append((c, mode))
-            mapQueue.append((c, mode))
-        }
-        guard mapTask == nil, !mapQueue.isEmpty else { return }
-        let sid = sessionId
-        mapTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.mapTask = nil }
-            while !self.ended, !Task.isCancelled, self.sessionId == sid, !self.mapQueue.isEmpty {
-                let next = self.mapQueue.removeFirst()
-                guard let tile = await NavigationMapTiles.shared.renderTile(
-                    latitude: next.point.latitude,
-                    longitude: next.point.longitude,
-                    mode: next.mode
-                ) else {
-                    continue
-                }
-                guard !self.ended, !Task.isCancelled, self.sessionId == sid else { return }
-                let b64 = tile.png.base64EncodedString()
-                guard !b64.isEmpty, b64.count <= 400_000 else { continue }
-                self.link.send([
-                    "kind": "navigation.map",
-                    "sessionId": sid,
-                    "latitude": tile.latitude,
-                    "longitude": tile.longitude,
-                    "zoom": tile.zoom,
-                    "width": tile.width,
-                    "height": tile.height,
-                    "png": b64,
-                ])
-                Log.add("tx navigation.map \(sid) z=\(tile.zoom) bytes=\(tile.png.count)")
-            }
-        }
-    }
-
+    /// Retired with the raster map pane (2026-11-23): nothing queues tiles
+    /// any more; this only clears state a pre-schematic build left behind.
     private func cancelMapPrefetch() {
         mapTask?.cancel()
         mapTask = nil

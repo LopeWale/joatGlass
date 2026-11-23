@@ -71,6 +71,8 @@ interface AssistantConversationSurfaceOptions {
   replacePage?: (page: RebuildPageContainer) => Promise<boolean>;
   /** The page's live header line (HudPresenter.nativeHeader) at rebuild. */
   statusText?: () => string;
+  /** True when the image spine (HeaderImage.ts) owns the top bar instead of text container 1. */
+  imageHeader?: () => boolean;
 }
 
 export type ConversationExitResult = 'inactive' | 'prompted' | 'exited' | 'failed';
@@ -352,6 +354,7 @@ export function validAssistantConversationSnapshot(value: AssistantConversationS
     if ((turn.role !== 'user' && turn.role !== 'assistant') || !turn.text || turn.text.length > 4_000) return false;
     units += turn.text.length;
   }
+  if (value.listening !== undefined && typeof value.listening !== 'boolean') return false;
   return units <= 16_000 && typeof value.earlierTurnsOmitted === 'boolean';
 }
 
@@ -389,6 +392,7 @@ export class AssistantConversationSurface {
   private readonly continuationPromptEnabled: boolean;
   private readonly replacePage?: AssistantConversationSurfaceOptions['replacePage'];
   private readonly statusText?: AssistantConversationSurfaceOptions['statusText'];
+  private readonly imageHeader?: AssistantConversationSurfaceOptions['imageHeader'];
   /** The header as the glass shows it, and the one it should show. */
   private shownStatus = '';
   private desiredStatus = '';
@@ -405,6 +409,7 @@ export class AssistantConversationSurface {
     this.continuationPromptEnabled = options.continuationPromptEnabled ?? true;
     this.replacePage = options.replacePage;
     this.statusText = options.statusText;
+    this.imageHeader = options.imageHeader;
     this.viewportOptions = {};
   }
 
@@ -431,13 +436,23 @@ export class AssistantConversationSurface {
       this.pageLineCapacity = 0;
       this.lastView = undefined;
     }
-    if (entering || this.committedScroll === 0) {
+    const newTurnStarted = !current
+      || value.turns.length > current.turns.length
+      || (current.state === 'ready' && value.state !== 'ready');
+    if (entering || this.committedScroll === 0 || newTurnStarted) {
       this.desiredScroll = 0;
       this.committedScroll = 0;
     } else if (current) {
       const oldLines = conversationLines(current, this.viewportOptions).length;
       const newLines = conversationLines(value, this.viewportOptions).length;
       this.desiredScroll = Math.max(0, this.committedScroll + newLines - oldLines);
+    }
+    if (this.statusText && !this.imageHeader?.() && current?.listening !== value.listening) {
+      const nextStatus = this.statusText();
+      if (nextStatus !== this.shownStatus) {
+        this.desiredStatus = nextStatus;
+        this.statusDirty = true;
+      }
     }
     this.snapshotDirty = true;
     const work = this.ensureDrain();
@@ -447,6 +462,7 @@ export class AssistantConversationSurface {
   }
 
   isActive(): boolean { return this.active; }
+  isListening(): boolean { return this.canInteract() && this.snapshot?.listening === true; }
   isContinuePromptVisible(): boolean { return this.canInteract() && this.continuePrompt; }
   currentRevision(): number { return this.renderedRevision; }
   scrollFromTail(): number { return this.committedScroll; }
@@ -582,6 +598,22 @@ export class AssistantConversationSurface {
     this.snapshotDirty = true;
     await this.ensureDrain();
     return this.lastPaintSucceeded;
+  }
+
+  /** Clear an initial `present()` whose bridge rebuild transiently failed,
+   * without retiring `conversationId` so the next streamed revision can paint. */
+  abortFailedEnter(): boolean {
+    if (!this.isActive()) return false;
+    this.clearTimers();
+    this.active = false;
+    this.paused = false;
+    this.snapshot = undefined;
+    this.snapshotDirty = false;
+    this.footerDirty = false;
+    this.statusDirty = false;
+    this.lastView = undefined;
+    this.pageLineCapacity = 0;
+    return true;
   }
 
   /** A higher-priority surface owns the page now. Retire the conversation
@@ -766,6 +798,10 @@ export class AssistantConversationSurface {
   }
 
   private async paintStatus(): Promise<boolean> {
+    if (this.imageHeader?.()) {
+      this.shownStatus = this.desiredStatus;
+      return true;
+    }
     const text = this.desiredStatus;
     if (text === this.shownStatus) return true;
     const previous = this.shownStatus;

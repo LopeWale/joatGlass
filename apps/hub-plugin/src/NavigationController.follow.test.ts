@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { NavigationController, nearestMapPanel } from './NavigationController';
+import { NavigationController } from './NavigationController';
 import { navigationVisualFixture } from './NavigationHud';
-import type { NavigationHudModel, NavigationMapPanelModel } from './NavigationHud';
+import type { NavigationHudModel } from './NavigationHud';
 import type { NavigationRoutePlan } from './NavigationProgress';
 import type { UplinkMessage } from './types';
 
@@ -115,39 +115,33 @@ describe('the guidance page follows the wearer', () => {
     expect(JSON.stringify(h.sent)).not.toContain('"latitude"');
   });
 
-  it('shows a street tile the moment it arrives, and the one nearest the wearer', async () => {
+  it('ignores a stray raster tile: no repaint, no panel on any frame', async () => {
     const h = harness();
     await h.install();
     await h.walk(100, 0);
-    expect(h.frames[0]?.map?.panel).toBeUndefined();
-
-    const tile = (longitude: number): NavigationMapPanelModel => ({
-      latitude: 0, longitude, zoom: 16, width: 284, height: 220, image: { longitude } as never,
+    expect(h.frames).toHaveLength(1);
+    await h.controller.installMapPanel({
+      kind: 'navigation.map', sessionId: 'nav-1', latitude: 0, longitude: 0,
+      zoom: 16, width: 284, height: 220, png: 'x',
     });
-    const decode = async (source: string) => ({ source } as never);
-    for (const longitude of [0, 0.0045, 0.009]) {
-      await h.controller.installMapPanel({
-        kind: 'navigation.map', sessionId: 'nav-1', latitude: 0, longitude,
-        zoom: 16, width: 284, height: 220, png: 'x',
-      }, decode);
-    }
     await h.controller.whenIdle();
-    // The arrival of a tile repainted the page it was for.
-    expect(h.frames).toHaveLength(4);
-    expect(h.frames[3]?.map?.panel?.longitude).toBe(0);
-
-    // Walking on (within the tracker's 400 m search window per fix), the
-    // pane switches to the tile nearest the wearer.
+    expect(h.frames).toHaveLength(1);
     await h.walk(350, 2);
-    await h.walk(600, 4);
-    expect(h.frames[h.frames.length - 1]).toMatchObject({ view: 'guidance' });
-    expect(h.frames[h.frames.length - 1]?.map?.panel?.longitude).toBe(0.0045);
-    await h.walk(850, 6);
-    expect(h.frames[h.frames.length - 1]?.map?.panel?.longitude).toBe(0.009);
+    expect(h.frames.every((frame) => frame?.map?.panel === undefined)).toBe(true);
+  });
 
-    expect(nearestMapPanel([tile(0), tile(0.009)], { latitude: 0, longitude: 0.004 })?.longitude).toBe(0);
-    expect(nearestMapPanel([tile(0), tile(0.009)], { latitude: 0, longitude: 0.005 })?.longitude).toBe(0.009);
-    expect(nearestMapPanel([], { latitude: 0, longitude: 0 })).toBeUndefined();
+  it('carries the schematic inputs: heading, speed, progress and the next maneuver', async () => {
+    const h = harness();
+    await h.install();
+    await h.walk(100, 0, { heading: 90, speed: 1.4 });
+    const map = h.frames[0]?.map;
+    expect(map?.heading).toBe(90);
+    expect(map?.speed).toBe(1.4);
+    expect(map?.progressM).toBeGreaterThan(90);
+    expect(map?.progressM).toBeLessThan(110);
+    const turn = plan.steps.find((step) => step.distanceAlongRouteM > 100)!;
+    expect(map?.maneuverAlongM).toBe(turn.distanceAlongRouteM);
+    expect(map?.maneuverLabel).toBe('Test Ave');
   });
 
   it('accepts a fix without an accuracy figure and a timestamp in seconds', async () => {

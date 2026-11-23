@@ -6,7 +6,9 @@ import { withImageHeader } from './HeaderImage';
 import { withHomeImages } from './HomeImages';
 import { HudPageBuilder } from './HudPageBuilder';
 import {
-  NOTIFICATION_CARD, NotificationCardId, cardFromRenderedText, notificationAge, notificationCardBottom,
+  MAX_PENDING_NOTIFICATION_DISMISSALS,
+  NOTIFICATION_CARD, NotificationCardId, PENDING_NOTIFICATION_DISMISS_STORAGE_KEY,
+  PendingNotificationDismissals, cardFromRenderedText, notificationAge, notificationCardBottom,
   notificationCardLayout, overlayNotificationCard,
 } from './NotificationCard';
 import type { OverviewTextView } from './OverviewText';
@@ -108,6 +110,41 @@ describe('notification card', () => {
     const cardZ = Math.min(...(page.textObject ?? []).filter((t) => cardIds.has(t.containerID!)).map((t) => t.zOrderIndex ?? 0));
     for (const item of [...fromHome, ...(page.imageObject ?? []).filter((i) => i.containerID! >= 18)]) {
       expect(item.zOrderIndex ?? 0).toBeLessThan(cardZ);
+    }
+  });
+
+  it('persists bounded FIFO pending dismissals in localStorage and flushes cleanly', () => {
+    const store = new Map<string, string>();
+    const prevStorage = (globalThis as { localStorage?: unknown }).localStorage;
+    (globalThis as { localStorage?: unknown }).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => { store.set(k, v); },
+    };
+    try {
+      const hex = (n: number) => n.toString(16).padStart(32, '0');
+      const pending = new PendingNotificationDismissals();
+      pending.enqueue('not-a-valid-hex-id');
+      for (let i = 1; i <= 105; i += 1) {
+        pending.enqueue(hex(i));
+      }
+      // Re-enqueuing an existing ID moves it to the newest FIFO slot without duplicating
+      pending.enqueue(hex(10));
+      expect(pending.list()).toHaveLength(MAX_PENDING_NOTIFICATION_DISMISSALS);
+      expect(pending.list()[0]).toBe(hex(6));
+      expect(pending.list()[pending.list().length - 1]).toBe(hex(10));
+      expect(store.get(PENDING_NOTIFICATION_DISMISS_STORAGE_KEY)).toBeDefined();
+
+      const reloaded = new PendingNotificationDismissals();
+      expect(reloaded.list()).toHaveLength(MAX_PENDING_NOTIFICATION_DISMISSALS);
+      const flushed: string[] = [];
+      expect(reloaded.flush((id) => flushed.push(id))).toBe(MAX_PENDING_NOTIFICATION_DISMISSALS);
+      expect(flushed[0]).toBe(hex(6));
+      expect(flushed[flushed.length - 1]).toBe(hex(10));
+      expect(reloaded.list()).toEqual([]);
+      expect(JSON.parse(store.get(PENDING_NOTIFICATION_DISMISS_STORAGE_KEY)!)).toEqual([]);
+    } finally {
+      if (prevStorage === undefined) delete (globalThis as { localStorage?: unknown }).localStorage;
+      else (globalThis as { localStorage?: unknown }).localStorage = prevStorage;
     }
   });
 });

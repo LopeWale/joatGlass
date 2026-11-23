@@ -81,6 +81,11 @@ import {
 // let one through.
 const MAX_UPGRADE_BYTES = TEXT_CONTAINER_MAX_BYTES;
 
+export const NOTIFICATIONS_READ_STORAGE_KEY = 'joat.notifications.read.v1';
+export const MAX_READ_NOTIFICATION_IDS = 200;
+export const MAX_NOTIFICATION_STACK = 25;
+const NOTIFICATION_CARD_ID_RE = /^[a-f0-9]{32}$/i;
+
 /**
  * Repaint throttle for streamed text. Tokens arrive far faster than BLE can
  * move frames to the glasses; painting per token floods the link and, on
@@ -576,7 +581,9 @@ export class HudPresenter {
   private readerUnderBox?: number;
   /** Every unread JOAT notification, newest first (hud.notifications). */
   private notificationStack: HudNotificationCard[] = [];
-  /** Cards the wearer marked read here, until the Mac's next list. */
+  /** True once the active brain has sent at least one `hud.notifications` frame. */
+  private notificationsSynced = false;
+  /** Bounded FIFO tombstones of cards marked read here, persisted in localStorage. */
   private readonly notificationsReadHere = new Set<string>();
   /** The notification card over the page, while it is up. */
   private notificationCard?: {
@@ -589,6 +596,8 @@ export class HudPresenter {
     revision: number;
   };
   private notificationCardRevision = 0;
+  private notificationCardPaint?: Promise<boolean>;
+  private notificationCardPaintDirty = false;
   private displayActive = true;
   private displayRevision = 0;
   private readonly assistantConversation: AssistantConversationSurface;
@@ -619,6 +628,7 @@ export class HudPresenter {
           overlayConversation(page, this.conversationUnderlay()), 'assistant-native',
         ),
         statusText: () => this.nativeHeader(this.nativePageTitle()),
+        imageHeader: () => this.imageHeaderShown && this.pageOwner === 'assistant-native',
       },
     );
     this.nativeTerminal = new NativeTerminalSurface(
@@ -634,6 +644,7 @@ export class HudPresenter {
     // Header and column images just switched off (one hung on the glasses):
     // redraw the page on the glass with both as firmware text.
     if (visual) visual.onPagePartsDisabled = () => { void this.repaintRestoredSurface(); };
+    this.loadReadNotifications();
   }
 
   /** Switch from the image HUD to an SDK-native text page under the same
@@ -770,6 +781,8 @@ export class HudPresenter {
   private async restoreRetainedPage(): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
+    await this.settlePageReplacement();
+    if (!displayCurrent()) return false;
     if (this.surface.kind === 'terminal') {
       return this.nativeTerminal.present(this.surface.terminal,
         this.nativeHeader(this.nativePageTitle()), displayCurrent);
@@ -819,6 +832,7 @@ export class HudPresenter {
     this.healing = false;
     this.notificationReturn = undefined;
     this.clearNotificationCard();
+    this.notificationCardPaint = undefined;
     this.focusReturn = undefined;
     this.resetAll();
     this.surface = { kind: 'default' };
@@ -893,11 +907,14 @@ export class HudPresenter {
     frame: Extract<HudVisualFrame, { kind: 'overview' }>,
     view: ReturnType<typeof composeOverviewText>,
   ): HomeColumnView | undefined {
+    const unread = this.notificationsSynced
+      ? this.unreadNotifications().length
+      : (frame.ambient?.unread ?? 0);
     return homeImagesEnabled && this.visual?.paintHomeColumn && this.visual.canPaintHomeColumn?.()
       ? homeColumnView(
         view,
         frame.ambient ? `${frame.ambient.temperature} ${frame.ambient.condition}`.trim() : '',
-        frame.ambient?.unread ?? 0,
+        unread,
       )
       : undefined;
   }
@@ -1112,8 +1129,9 @@ export class HudPresenter {
     // wearer's ruling, 2026-10-07: over every page, as Even's own does).
     // Home's own record of it below is unchanged.
     if (containerId === ContainerId.Main && contentKind === 'notification'
-      && /^[a-f0-9]{32}$/i.test(notificationId ?? '') && text.trim()) {
-      void this.popNotification(notificationId!, text);
+      && NOTIFICATION_CARD_ID_RE.test(notificationId ?? '')) {
+      if (this.isNotificationReadHere(notificationId!)) return true;
+      if (text.trim()) void this.popNotification(notificationId!, text);
     }
     if (this.confirmation && containerId !== ContainerId.StatusBar) {
       this.deferText(text, containerId, textColor, contentKind, notificationId);
@@ -1548,10 +1566,15 @@ export class HudPresenter {
       this.clearPanelTicker();
       if (!displayCurrent()) return false;
     }
+    const wasListening = this.assistantConversation.isListening();
     const presented = await this.assistantConversation.present(snapshot);
     if (!presented && entering) {
-      this.assistantConversation.retireForHandoff();
-      await this.restoreAfterAssistantConversation();
+      if (this.assistantConversation.abortFailedEnter()) {
+        await this.restoreAfterAssistantConversation();
+      }
+    } else if (presented && !entering && this.imageHeaderShown
+      && wasListening !== this.assistantConversation.isListening()) {
+      void this.paintImageHeader();
     }
     return presented;
   }
@@ -1873,48 +1896,142 @@ export class HudPresenter {
     return true;
   }
 
-  /** The Mac's list of unread notifications, newest first. */
-  acceptNotifications(cards: readonly HudNotificationCard[]): void {
-    this.notificationStack = cards
-      .filter((card) => /^[a-f0-9]{32}$/i.test(card.id) && typeof card.body === 'string')
-      .slice(0, 10)
+  /** The brain's list of unread notifications, newest first. Returns any
+   * incoming card IDs that were already marked read here so the caller can
+   * reconcile the brain with `notification-dismiss`. */
+  acceptNotifications(cards: readonly HudNotificationCard[]): string[] {
+    const valid = cards.filter(
+      (card) => NOTIFICATION_CARD_ID_RE.test(card.id) && typeof card.body === 'string',
+    );
+    this.notificationStack = valid
+      .slice(0, MAX_NOTIFICATION_STACK)
       .map((card) => ({ ...card }));
-    const ids = new Set(this.notificationStack.map((card) => card.id));
-    for (const id of [...this.notificationsReadHere]) if (!ids.has(id)) this.notificationsReadHere.delete(id);
-    // A card drawn from the Mac's short line before the list arrived is
-    // redrawn whole now.
+    this.notificationsSynced = true;
+    const alreadyReadIds = valid
+      .filter((card) => this.isNotificationReadHere(card.id))
+      .map((card) => card.id);
+    // Keep bounded 200-ID FIFO tombstones in `notificationsReadHere` across
+    // transient omissions / reconnects so dismissed cards never resurrect.
     const shown = this.notificationCard;
-    const full = shown && this.notificationStack.find((card) => card.id === shown.card.id);
-    if (shown && full && this.hasNotificationCard()
-      && (shown.provisional || full.body !== shown.card.body || full.sender !== shown.card.sender)) {
-      shown.card = full;
-      shown.provisional = false;
+    if (shown && this.hasNotificationCard()) {
+      if (this.isNotificationReadHere(shown.card.id)) {
+        const next = this.unreadNotifications()[0];
+        if (next) {
+          shown.card = next;
+          shown.provisional = false;
+          shown.revision = ++this.notificationCardRevision;
+          this.armNotificationCardTimer();
+          void this.paintNotificationCard();
+        } else {
+          void this.closeNotificationCard();
+        }
+        return alreadyReadIds;
+      }
+      const full = this.notificationStack.find(
+        (card) => card.id.toLowerCase() === shown.card.id.toLowerCase(),
+      );
+      if (full) {
+        shown.card = full;
+        shown.provisional = false;
+      }
       void this.paintNotificationCard();
-      return;
+      return alreadyReadIds;
     }
-    // Home's Notifications tab lists the unread cards: keep it current. A
-    // repaint that changes nothing sends nothing (paintOverviewAsText).
-    if (!shown && nativeOverviewEnabled && this.rail.active() === 'notifications') {
+    // Home's Notifications tab and info unread count stay current. A repaint
+    // that changes nothing sends nothing (paintOverviewAsText).
+    if (!shown && this.surface.kind === 'default') {
       void this.repaintRestingPane();
+    }
+    return alreadyReadIds;
+  }
+
+  /** Clear per-brain notification stack/sync state when switching brain URLs,
+   * while preserving read tombstones so dismissed cards never reappear. */
+  resetNotificationsForBrainSwitch(): void {
+    this.clearNotificationCard();
+    this.notificationStack = [];
+    this.notificationsSynced = false;
+    if (this.ambient) {
+      this.ambient = { ...this.ambient, unread: 0 };
+    }
+    this.notificationReturn = undefined;
+    if (this.kinds.get(ContainerId.Main) === 'notification') {
+      this.cancelPending(ContainerId.Main);
+      this.streams.delete(ContainerId.Main);
+      this.brightness.delete(ContainerId.Main);
+      this.kinds.delete(ContainerId.Main);
+      this.notificationId = undefined;
+      this.paintedNotificationId = undefined;
     }
   }
 
   /** Unread cards, newest first, that the wearer has not marked read here. */
   unreadNotifications(): HudNotificationCard[] {
-    return this.notificationStack.filter((card) => !this.notificationsReadHere.has(card.id));
+    return this.notificationStack.filter((card) => !this.isNotificationReadHere(card.id));
   }
 
   hasNotificationCard(): boolean {
     return this.notificationCard !== undefined && this.pageOwner === 'notification-native';
   }
 
+  private loadReadNotifications(): void {
+    try {
+      if (typeof localStorage === 'undefined' || typeof localStorage.getItem !== 'function') return;
+      const raw = localStorage.getItem(NOTIFICATIONS_READ_STORAGE_KEY);
+      if (!raw || raw.length > 16_384) return;
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      const valid = parsed
+        .filter((id): id is string => typeof id === 'string' && NOTIFICATION_CARD_ID_RE.test(id))
+        .map((id) => id.toLowerCase())
+        .slice(-MAX_READ_NOTIFICATION_IDS);
+      for (const id of valid) {
+        this.notificationsReadHere.add(id);
+      }
+    } catch {
+      // Unreadable storage: in-memory set remains active.
+    }
+  }
+
+  private persistReadNotifications(): void {
+    try {
+      if (typeof localStorage === 'undefined' || typeof localStorage.setItem !== 'function') return;
+      localStorage.setItem(
+        NOTIFICATIONS_READ_STORAGE_KEY,
+        JSON.stringify([...this.notificationsReadHere]),
+      );
+    } catch {
+      // Unwritable storage: in-memory set remains active.
+    }
+  }
+
+  private markNotificationReadHere(id: string): void {
+    if (!NOTIFICATION_CARD_ID_RE.test(id)) return;
+    const key = id.toLowerCase();
+    if (this.notificationsReadHere.has(key)) {
+      this.notificationsReadHere.delete(key);
+    }
+    this.notificationsReadHere.add(key);
+    while (this.notificationsReadHere.size > MAX_READ_NOTIFICATION_IDS) {
+      const oldest = this.notificationsReadHere.values().next().value;
+      if (oldest === undefined) break;
+      this.notificationsReadHere.delete(oldest);
+    }
+    this.persistReadNotifications();
+  }
+
+  private isNotificationReadHere(id: string): boolean {
+    return NOTIFICATION_CARD_ID_RE.test(id) && this.notificationsReadHere.has(id.toLowerCase());
+  }
+
   /** A new notification: its card pops up over the page. Not over a
    * decision, a question or JOAT's conversation, which own the glass until
    * they end; it then waits as unread (Home's bell, the Notifications tab). */
   private async popNotification(id: string, renderedText: string): Promise<boolean> {
+    if (this.isNotificationReadHere(id)) return false;
     if (!this.visual || !this.displayActive || this.confirmation || this.promptQuestion
       || this.assistantConversation.isActive() || this.assistantOverlay) return false;
-    const full = this.notificationStack.find((card) => card.id === id);
+    const full = this.notificationStack.find((card) => card.id.toLowerCase() === id.toLowerCase());
     const card = full ?? cardFromRenderedText(id, renderedText, Date.now());
     this.showNotificationCard(card, false, !full);
     return this.paintNotificationCard();
@@ -1953,52 +2070,82 @@ export class HudPresenter {
   }
 
   /** The card over the page as it is now; the page's column, if any, is
-   * repainted with nothing under the card. */
-  private async paintNotificationCard(): Promise<boolean> {
-    const state = this.notificationCard;
-    if (!state) return false;
-    const unread = this.unreadNotifications();
-    const list = unread.some((card) => card.id === state.card.id) ? unread : [state.card, ...unread];
-    const index = Math.max(0, list.findIndex((card) => card.id === state.card.id));
-    const layout = notificationCardLayout(
-      state.card, { index, count: list.length }, Date.now(), this.nativeHeader(this.nativePageTitle()),
-    );
-    const page = overlayNotificationCard(layout, this.conversationUnderlay());
-    const shown = await this.replaceNativePage(page, 'notification-native');
-    if (!shown || this.notificationCard !== state) return false;
-    const bottom = notificationCardBottom(page);
-    const reminders = this.reminderCardNow();
-    if (bottom !== undefined && hasReminderCard(page) && reminders) {
-      void this.paintReminderCard(
-        { ...reminders, clipTop: bottom + NOTIFICATION_CARD.gap, dim: true }, this.captureDisplayGuard(),
-      );
+   * repainted with nothing under the card. Coalesces bursts across active
+   * page transitions so rapid notifications never drop the newest frame. */
+  private paintNotificationCard(): Promise<boolean> {
+    if (!this.notificationCard) return Promise.resolve(false);
+    if (this.notificationCardPaint) {
+      this.notificationCardPaintDirty = true;
+      return this.notificationCardPaint;
     }
-    if (bottom !== undefined && hasHomeImages(page) && this.surface.kind === 'default') {
-      const frame = this.visualFrame();
-      if (frame.kind === 'overview') {
-        const column = this.homeColumnFor(frame, this.overviewView(frame));
-        if (column) {
-          void this.paintHomeColumn(
-            { ...column, clipTop: bottom + NOTIFICATION_CARD.gap, dim: true }, this.captureDisplayGuard(),
+    const run = async (): Promise<boolean> => {
+      let ok = false;
+      try {
+        do {
+          this.notificationCardPaintDirty = false;
+          await this.settlePageReplacement();
+          const state = this.notificationCard;
+          if (!state || !this.displayActive) return false;
+          const unread = this.unreadNotifications();
+          const list = unread.some((card) => card.id.toLowerCase() === state.card.id.toLowerCase())
+            ? unread
+            : [state.card, ...unread];
+          const index = Math.max(
+            0,
+            list.findIndex((card) => card.id.toLowerCase() === state.card.id.toLowerCase()),
           );
-        }
+          const layout = notificationCardLayout(
+            state.card, { index, count: list.length }, Date.now(), this.nativeHeader(this.nativePageTitle()),
+          );
+          const page = overlayNotificationCard(layout, this.conversationUnderlay());
+          const shown = await this.replaceNativePage(page, 'notification-native');
+          if (!shown || this.notificationCard !== state) {
+            ok = false;
+            continue;
+          }
+          const bottom = notificationCardBottom(page);
+          const reminders = this.reminderCardNow();
+          if (bottom !== undefined && hasReminderCard(page) && reminders) {
+            void this.paintReminderCard(
+              { ...reminders, clipTop: bottom + NOTIFICATION_CARD.gap, dim: true }, this.captureDisplayGuard(),
+            );
+          }
+          if (bottom !== undefined && hasHomeImages(page) && this.surface.kind === 'default') {
+            const frame = this.visualFrame();
+            if (frame.kind === 'overview') {
+              const column = this.homeColumnFor(frame, this.overviewView(frame));
+              if (column) {
+                void this.paintHomeColumn(
+                  { ...column, clipTop: bottom + NOTIFICATION_CARD.gap, dim: true }, this.captureDisplayGuard(),
+                );
+              }
+            }
+          }
+          ok = true;
+        } while (this.notificationCardPaintDirty && this.notificationCard !== undefined);
+        return ok;
+      } finally {
+        this.notificationCardPaint = undefined;
       }
-    }
-    return true;
+    };
+    this.notificationCardPaint = run();
+    return this.notificationCardPaint;
   }
 
   /** A tap on the card: it is read; the next unread takes its place, or the
-   * card closes after the last. Returns the id read, for the Mac. */
+   * card closes after the last. Returns the id read, for the brain. */
   tapNotificationCard(): string | undefined {
     const state = this.notificationCard;
     if (!state || !this.hasNotificationCard()) return undefined;
     const read = state.card.id;
-    this.notificationsReadHere.add(read);
+    this.markNotificationReadHere(read);
     // Home's own copy of it goes too, in state only (the card is on the
-    // glass): Home comes back without it before the Mac's retire arrives.
+    // glass): Home comes back without it before the brain's retire arrives.
     this.retiredNotificationIds.add(read);
     this.removeRetiredNotifications();
-    const next = this.unreadNotifications().find((card) => card.id !== read);
+    const next = this.unreadNotifications().find(
+      (card) => card.id.toLowerCase() !== read.toLowerCase(),
+    );
     if (next) {
       state.card = next;
       state.provisional = false;
@@ -2011,15 +2158,44 @@ export class HudPresenter {
     return read;
   }
 
-  /** Close the card, the page beneath as it is now. */
+  /** Double tap on the card: marks the shown and remaining unread card(s) read,
+   * closes the popup, repaints the underlying surface (including resting Home
+   * unread count), and returns the dismissed card IDs for the brain. */
+  dismissNotificationCard(): string[] {
+    const state = this.notificationCard;
+    if (!state || !this.hasNotificationCard()) return [];
+    const dismissed: string[] = [];
+    const seen = new Set<string>();
+    for (const candidate of [state.card, ...this.unreadNotifications()]) {
+      if (!NOTIFICATION_CARD_ID_RE.test(candidate.id)) continue;
+      const lower = candidate.id.toLowerCase();
+      if (seen.has(lower)) continue;
+      seen.add(lower);
+      dismissed.push(candidate.id);
+      this.markNotificationReadHere(candidate.id);
+      this.retiredNotificationIds.add(candidate.id);
+    }
+    this.removeRetiredNotifications();
+    void this.closeNotificationCard();
+    return dismissed;
+  }
+
+  /** Close the card without marking unread cards read (e.g. auto-hide timeout),
+   * restoring the page beneath as it is now. */
   async closeNotificationCard(): Promise<boolean> {
-    if (!this.notificationCard) return false;
-    const onGlass = this.pageOwner === 'notification-native';
+    const hadCard = this.notificationCard !== undefined;
+    const painting = this.notificationCardPaint;
+    if (!hadCard && this.pageOwner !== 'notification-native') return false;
     this.clearNotificationCard();
-    return onGlass ? this.restoreRetainedPage() : true;
+    if (painting) await painting.catch(() => false);
+    if (this.notificationCard) return true;
+    return this.pageOwner === 'notification-native'
+      ? this.restoreRetainedPage()
+      : this.repaintRestingPane();
   }
 
   private clearNotificationCard(): void {
+    this.notificationCardPaintDirty = false;
     if (this.notificationCard?.timer !== undefined) clearTimeout(this.notificationCard.timer);
     this.notificationCard = undefined;
   }
@@ -2148,6 +2324,11 @@ export class HudPresenter {
   async setStatusModel(model: HudStatusModel): Promise<boolean> {
     this.statusModel = { ...model };
     this.micOn = model.mic;
+    if (this.hasNotificationCard()) {
+      this.streams.set(ContainerId.StatusBar, nativeStatusLine(model));
+      void this.paintNotificationCard();
+      return true;
+    }
     if (this.imageHeaderShown) {
       // One header on every firmware page: redraw the spine and send only
       // the half that changed.
@@ -2156,6 +2337,9 @@ export class HudPresenter {
       // sends it only when a word changed.
       const card = this.reminderCardShown ? this.reminderCardNow() : undefined;
       if (card) void this.paintReminderCard(card, this.captureDisplayGuard());
+      if (this.surface.kind === 'default' && this.rail.active() === 'notifications') {
+        void this.repaintRestingPane();
+      }
       return this.paintImageHeader();
     }
     if (this.readerUnderBox !== undefined && this.visual && this.evenFontReaderRetained()) {
@@ -2204,7 +2388,9 @@ export class HudPresenter {
   /** The name the header carries for the page the presenter holds. */
   private nativePageTitle(): string | undefined {
     // A conversation is JOAT's own page, whatever feature it covers.
-    if (this.conversationInFront()) return undefined;
+    if (this.conversationInFront()) {
+      return this.assistantConversation.isListening() ? 'JOAT · LISTENING' : undefined;
+    }
     switch (this.surface.kind) {
       case 'list': return this.surface.options.title;
       case 'navigation': return 'NAVIGATION';
@@ -3970,11 +4156,17 @@ export class HudPresenter {
     // With Home in firmware text a notification is the card's to show, never
     // the pane's, so an image page composited over Home leaves it out too.
     const homeCard = nativeOverviewEnabled && this.kinds.get(ContainerId.Main) === 'notification';
+    const effectiveUnread = this.notificationsSynced
+      ? this.unreadNotifications().length
+      : (this.ambient?.unread ?? 0);
+    const effectiveAmbient = this.ambient
+      ? { ...this.ambient, unread: effectiveUnread }
+      : (this.notificationsSynced ? { temperature: '', condition: '', unread: effectiveUnread } : undefined);
     return this.withOverlays({
       kind: 'overview',
       status,
       micOn: this.micOn,
-      ...(this.ambient ? { ambient: this.ambient } : {}),
+      ...(effectiveAmbient ? { ambient: effectiveAmbient } : {}),
       mainBrightness: this.brightness.get(ContainerId.Main)
         ?? DEFAULT_BRIGHTNESS[ContainerId.Main]!,
       main: homeCard ? '' : this.streams.get(ContainerId.Main) ?? '',

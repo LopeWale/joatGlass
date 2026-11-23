@@ -268,7 +268,7 @@ final class LoopbackServer: ObservableObject, PluginLink {
             for container in [2, 5, 6] {   // Main, Context, Tray (types.ts ContainerId)
                 send(conn, text: #"{"kind":"hud.text","containerId":\#(container),"text":""}"#)
             }
-            send(conn, text: #"{"kind":"hud.text","containerId":1,"text":"JOAT · online — say 'JOAT ...'"}"#)
+            send(conn, text: #"{"kind":"hud.text","containerId":1,"text":"JOAT · online"}"#)
             Log.add("tx connect greeting (cleared Main/Context/Tray, status online)")
             // The Mac answers a connected plugin with AudioControl(open=True):
             // ask for the glasses mic the same way.

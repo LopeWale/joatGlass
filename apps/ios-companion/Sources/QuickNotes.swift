@@ -37,6 +37,9 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         var typed: String? = nil
         var handwriting: String? = nil
         var paperTemplate: String? = nil
+        /// The page changed after its summary was made: the summary stays on
+        /// show (marked as such) until the new one arrives.
+        var summaryStale: Bool? = nil
     }
 
     struct TextNote: Codable {
@@ -113,6 +116,14 @@ final class QuickNotes: VoiceCommand, PanelProvider {
     }
     weak var prep: Prep?
     private var insightsAvailable: Bool { macLink?.configured == true }
+    /// A model (Gemini, Claude or the Mac) can summarize notes on this phone.
+    var insightsConfigured: Bool { insightsAvailable }
+    /// A note's summary started or finished (the page card and list repaint).
+    static let insightsChangedNotification = Notification.Name("joat.quicknotes.insightsChanged")
+    func isSummarizing(_ id: String) -> Bool { summaryRuns.isRunning(id) }
+    private func insightsChanged(_ id: String) {
+        DispatchQueue.main.async { NotificationCenter.default.post(name: Self.insightsChangedNotification, object: id) }
+    }
 
     init(link: PluginLink, hud: Hud, directory: URL? = nil) {
         self.link = link
@@ -536,8 +547,10 @@ final class QuickNotes: VoiceCommand, PanelProvider {
     private var readerOpen = false
     /// What a tap does while a reader is open (note_reader.on_tap).
     private var readerTap: (() -> Void)?
-    /// Notes being summarized on the Mac right now.
-    private var summarizing = Set<String>()
+    /// Notes being summarized right now; a request meanwhile reruns once after.
+    private var summaryRuns = NotesInsights.RunQueue()
+    /// Why the last summary of a note did not arrive (shown on the page).
+    private(set) var insightProblems: [String: String] = [:]
     /// The reminders review page's answer, and its 90 s clock.
     private var reviewDecide: ((Bool?) -> Void)?
     /// Reminders found after a save while QuickNotes was not on the glasses.
@@ -1115,9 +1128,28 @@ final class QuickNotes: VoiceCommand, PanelProvider {
             createReminders(latest.id) { [weak self] r in self?.hud.receipt(r); self?.say?(r) }
             return CommandReply(text: "", activated: false)
         }
-        // Text notes (note_commands.py): "take a note …", "note …", "find notes …".
+        // Text notes (note_commands.py): "remember for me that …", "take a note …", "note …", "find notes …".
         let stripped = request.trimmingCharacters(in: .whitespacesAndNewlines)
-        for prefix in ["take a note", "note", "find notes"] {
+        let isRelationshipFact = stripped.range(
+            of: #"\bis\s+my\s+(?:wife|husband|mom|mother|dad|father|brother|sister|boss|partner|boyfriend|girlfriend|friend)\b"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+        let notePrefixes = [
+            "remember for me that",
+            "remember for me",
+            "remember that",
+            "take a note that",
+            "take a note",
+            "note to self that",
+            "note to self",
+            "note that",
+            "jot down that",
+            "jot down",
+            "note",
+            "find notes",
+        ]
+        for prefix in notePrefixes {
+            if prefix.hasPrefix("remember") && isRelationshipFact { continue }
             guard let body = Self.after(prefix, in: stripped) else { continue }
             if body.isEmpty { break }
             return reflect(prefix == "find notes" ? search(body) : saveText(body))
@@ -1279,6 +1311,7 @@ extension QuickNotes.VoiceNote {
         typed = try c.decodeIfPresent(String.self, forKey: .typed)
         handwriting = try c.decodeIfPresent(String.self, forKey: .handwriting)
         paperTemplate = try c.decodeIfPresent(String.self, forKey: .paperTemplate)
+        summaryStale = try c.decodeIfPresent(Bool.self, forKey: .summaryStale)
     }
 }
 
@@ -1352,7 +1385,8 @@ extension QuickNotes {
     func retryPendingInsights() {
         guard insightsAvailable else { return }
         let pending = retained.filter {
-            $0.summary == nil && !transcript($0).isEmpty && !summarizing.contains($0.id) && !insightsGaveUp.contains($0.id)
+            ($0.summary == nil || ($0.page == true && $0.summaryStale == true)) && !transcript($0).isEmpty
+                && !summaryRuns.isRunning($0.id) && !insightsGaveUp.contains($0.id)
         }.prefix(3)
         for n in pending {
             summarize(n.id) { receipt in Log.add("pending summary: \(receipt)") }
@@ -1371,25 +1405,37 @@ extension QuickNotes {
         let title = n.title.isEmpty ? "Untitled" : n.title
         let text = transcript(n)
         guard !text.isEmpty else { completion("“\(title)” has no transcript to summarize."); return }
-        guard !summarizing.contains(id) else { completion("“\(title)” is already being summarized. One moment."); return }
-        summarizing.insert(id)
+        // One run per note; a request meanwhile (newer words) reruns once after it.
+        guard summaryRuns.begin(id) else { completion("“\(title)” is already being summarized. One moment."); return }
+        insightProblems[id] = nil
+        insightsChanged(id)
         let material = n.page == true ? "NOTEBOOK PAGE (written by hand and typed, not a recording):\n\(text)" : "TRANSCRIPT:\n\(text)"
         link.complete(instructions: Self.insightsSystem, text: material) { [weak self] result in
             guard let self else { return }
-            self.summarizing.remove(id)
+            let rerun = self.summaryRuns.finish(id)
+            defer {
+                self.insightsChanged(id)
+                if rerun { self.summarize(id) { receipt in Log.add("summary rerun: \(receipt)") } }
+            }
             let raw: String
             switch result {
             case .success(let r): raw = r
-            case .failure(let f): completion(MacLink.explain(f)); return
+            case .failure(let f):
+                self.insightProblems[id] = MacLink.explain(f)
+                completion(MacLink.explain(f))
+                return
             }
             guard let parsed = Self.parseInsights(raw), let i = self.stored.voice.firstIndex(where: { $0.id == id }) else {
                 self.insightsGaveUp.insert(id)
+                self.insightProblems[id] = "The summarizer returned an unusable answer. Tap Re-summarize to retry."
                 completion("The summarizer returned an unusable answer. Say: summarize the last note, to retry.")
                 return
             }
             self.stored.voice[i].summary = parsed.summary
             self.stored.voice[i].keyPoints = parsed.keyPoints
             self.stored.voice[i].todos = parsed.todos
+            // Newer words are on their way: still stale until that run lands.
+            self.stored.voice[i].summaryStale = rerun ? true : nil
             self.stored.voice[i].updated = Date()
             var shown = self.stored.voice[i].title
             if !parsed.title.isEmpty, Grammar.match(Self.clockTitleRe, shown) != nil {
@@ -1911,15 +1957,13 @@ extension QuickNotes {
             if let paperTemplate {
                 stored.voice[i].paperTemplate = paperTemplate
             }
-            if inkChanged {
-                stored.voice[i].handwriting = nil
-            }
+            // Changed ink keeps the last reading (and the summary stays on
+            // show, marked stale) until the page is read again a few seconds
+            // after writing stops: insights no longer vanish while writing.
             stored.voice[i].paragraphs = Self.pageParagraphs(typed: typed, handwriting: stored.voice[i].handwriting)
             if typedChanged || inkChanged {
                 insightsGaveUp.remove(id)
-                stored.voice[i].summary = nil
-                stored.voice[i].keyPoints = []
-                stored.voice[i].todos = []
+                if stored.voice[i].summary != nil { stored.voice[i].summaryStale = true }
             }
             stored.voice[i].updated = now
             persist()
@@ -1940,7 +1984,7 @@ extension QuickNotes {
     }
 
     /// The handwriting as read by vision OCR ("NONE": no words on the page).
-    func pageRead(_ id: String, handwriting raw: String) {
+    func pageRead(_ id: String, handwriting raw: String, summarize: Bool = true, offerReminders: Bool = true) {
         guard let i = stored.voice.firstIndex(where: { $0.id == id }) else { return }
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         stored.voice[i].handwriting = text.uppercased() == "NONE" ? "" : text
@@ -1951,15 +1995,44 @@ extension QuickNotes {
         persist()
         publishPanel?()
         Log.add("notebook: page \(id.prefix(6)) read, \(text.count) chars")
-        pageReady(id)
+        if summarize { pageReady(id, offerReminders: offerReminders) }
     }
 
     /// The summary, a title and the reminders offer, as after a voice note.
-    func pageReady(_ id: String) {
-        guard insightsAvailable, let n = stored.voice.first(where: { $0.id == id }), !transcript(n).isEmpty else { return }
-        summarize(id) { receipt in Log.add("page summary: \(receipt)") }
-        offerReminders(id)
+    /// `offerReminders` false: a writing pause, not leaving the page (the
+    /// reminders pass runs once, on leave).
+    func pageReady(_ id: String, offerReminders offer: Bool = true) {
+        guard insightsAvailable, let n = stored.voice.first(where: { $0.id == id }) else { return }
+        guard !transcript(n).isEmpty else {
+            // Everything erased: no summary of words that are gone.
+            if n.summary != nil, let i = stored.voice.firstIndex(where: { $0.id == id }) {
+                stored.voice[i].summary = nil
+                stored.voice[i].keyPoints = []
+                stored.voice[i].todos = []
+                stored.voice[i].summaryStale = nil
+                persist()
+                insightsChanged(id)
+            }
+            return
+        }
+        if n.summary == nil || n.summaryStale == true || summaryRuns.isRunning(id) {
+            summarize(id) { receipt in Log.add("page summary: \(receipt)") }
+        }
+        if offer { offerReminders(id) }
     }
+
+    #if DEBUG
+    /// Simulator screenshots: a page's insights as a model would give them.
+    func debugSetInsights(_ id: String, summary: String, keyPoints: [String], todos: [String]) {
+        guard let i = stored.voice.firstIndex(where: { $0.id == id }) else { return }
+        stored.voice[i].summary = summary
+        stored.voice[i].keyPoints = keyPoints
+        stored.voice[i].todos = todos
+        stored.voice[i].summaryStale = nil
+        persist()
+        insightsChanged(id)
+    }
+    #endif
 
     /// One paragraph per line, typed first, then handwritten.
     static func pageParagraphs(typed: String, handwriting: String?) -> [String] {

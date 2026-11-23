@@ -39,7 +39,8 @@ import { ImuMonitor, imuReportPaceFromMs } from './ImuMonitor';
 import { EventRouter, type LifecycleHandler } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
-import { PhoneControlPanel, isPhoneBrain } from './PhoneControlPanel';
+import { PhoneControlPanel } from './PhoneControlPanel';
+import { PendingNotificationDismissals } from './NotificationCard';
 import { Places, placesToWire } from './Places';
 import { CapabilityMenu, usesFirmwareList } from './CapabilityMenu';
 import {
@@ -344,10 +345,19 @@ async function boot(): Promise<void> {
   let displayYielded = false;
   let exiting = false;
   let phonePanel: PhoneControlPanel | undefined;
-  // Mac-pinned pages (Messages, Agent Terminal, Activity), opened from the phone
-  // brain (BrainHandoff). Created once the HUD and menu exist.
+  // Opt-in BrainHandoff helper if a brain explicitly emits `brain.handoff`.
   let handoffRef: BrainHandoff | undefined;
   let handoffDepartingGeneration = -1;
+  const pendingNotificationDismissals = new PendingNotificationDismissals();
+  const reconciledReadNotifications = new Set<string>();
+  const deliverNotificationDismiss = (traceId: string): void => {
+    if (!/^[a-f0-9]{32}$/i.test(traceId)) return;
+    if (link.linkState === 'connected') {
+      link.send({ kind: 'input', event: { containerName: 'notification-dismiss', traceId } });
+    } else {
+      pendingNotificationDismissals.enqueue(traceId);
+    }
+  };
   link.onState((state) => {
     if (import.meta.env.DEV) console.info('[blank-trace]', Date.now(), 'link', state);
     setPanel('p-link', link.wasReplaced ? 'Another JOAT display connected. Use Reconnect to take over.' : state);
@@ -379,8 +389,14 @@ async function boot(): Promise<void> {
         void client.storage.set(PREFERRED_BRAIN_KEY, active);
       }
       announce?.();
+      if (announce) {
+        pendingNotificationDismissals.flush((traceId) => {
+          link.send({ kind: 'input', event: { containerName: 'notification-dismiss', traceId } });
+        });
+      }
     }
     else {
+      reconciledReadNotifications.clear();
       activeCapabilityPromptId = undefined;
       promptedInputRef?.cancel('connection', false);
       confirmationRetry = undefined;
@@ -535,8 +551,12 @@ async function boot(): Promise<void> {
     options?: { skipDefaultPaint?: boolean },
   ): Promise<boolean> => {
     if (exiting || !MAC_WS_URLS.includes(url)) return false;
+    const changingBrain = url !== link.activeUrl;
     const skipDefaultPaint = options?.skipDefaultPaint === true;
     link.close();
+    if (changingBrain) {
+      hud.resetNotificationsForBrainSwitch();
+    }
     if (!skipDefaultPaint) {
       menuRef?.releaseToLiveSession();
     }
@@ -581,11 +601,6 @@ async function boot(): Promise<void> {
     log: (line) => console.info(`[joat] ${line}`),
   });
   handoffRef = handoff;
-  menu.handoffCapability = (capability) => {
-    if (handoff.active || !isPhoneBrain(link.activeUrl)) return false;
-    void handoff.start(capability);
-    return true;
-  };
   menu.onHome = () => handoff.home();
   terminalRef = terminal;
   navigationRef = navigation;
@@ -689,6 +704,7 @@ async function boot(): Promise<void> {
     (direction) => hud.scrollTranscript(direction),
     promptedInput,
     () => confirmationRetry?.run,
+    pendingNotificationDismissals,
   ).attach();
 
   // Official-simulator visual gate. This is DEV-only and drives the same
@@ -889,10 +905,21 @@ async function boot(): Promise<void> {
           unread: msg.unread,
         }));
         break;
-      case 'hud.notifications':
+      case 'hud.notifications': {
         // The unread list the notification card moves through.
-        hud.acceptNotifications(Array.isArray(msg.cards) ? msg.cards : []);
+        const staleReadIds = hud.acceptNotifications(Array.isArray(msg.cards) ? msg.cards : []);
+        for (const traceId of staleReadIds) {
+          const lower = traceId.toLowerCase();
+          if (reconciledReadNotifications.has(lower)) continue;
+          reconciledReadNotifications.add(lower);
+          if (reconciledReadNotifications.size > 200) {
+            const oldest = reconciledReadNotifications.values().next().value;
+            if (oldest !== undefined) reconciledReadNotifications.delete(oldest);
+          }
+          deliverNotificationDismiss(traceId);
+        }
         break;
+      }
       case 'hud.panel':
         // Cache first, so a swipe onto this tab paints from memory. Then:
         // a voice-initiated open expands the tab; a push for a tab whose

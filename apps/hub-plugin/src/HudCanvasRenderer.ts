@@ -60,11 +60,9 @@ import {
 import {
   formatNavigationDistance,
   type NavigationHudModel,
-  type NavigationMapModel,
-  type NavigationMapPanelModel,
   type NavigationManeuver,
-  type NavigationMode,
 } from './NavigationHud';
+import { buildRouteSchematic, type RouteSchematic, type ScreenPoint } from './NavigationSchematic';
 
 import {
   TYPE,
@@ -837,17 +835,11 @@ export function hudSpinePageTitle(frame: HudVisualFrame): string {
   }
 }
 
-/** Where the guidance map panel sits: the right half of the canvas, under
- * the status spine. Left of it belongs to the maneuver the wearer must act
- * on; a turn instruction and the shape of the road are different jobs. */
 /**
- * The map pane, full-bleed.
- *
- * It touches the right edge of the canvas and runs from just under the
- * status spine down to the progress bar — no border, no inner padding. The
- * reference HUD does the same, and for the same reason: the map IS the
- * content of its pane, so a frame around it only steals pixels from the
- * thing the wearer came to look at.
+ * The guidance pane: the right half of the canvas, from just under the
+ * status spine down to the bottom band, full-bleed. Left of it belongs to
+ * the maneuver the wearer must act on. Since 2026-11-23 it holds the route
+ * schematic (NavigationSchematic.ts) — never a raster street tile.
  */
 export const NAVIGATION_MAP_PANEL = {
   x: 292,
@@ -856,99 +848,6 @@ export const NAVIGATION_MAP_PANEL = {
   height: 220,
   padding: 0,
 } as const;
-
-export interface NavigationMapProjection {
-  points: ReadonlyArray<readonly [number, number]>;
-  position?: readonly [number, number];
-}
-
-/** Project the route onto the Mac-rendered panel, so line meets road. */
-/** What a projection needs from a tile: where it is centred and how far in. */
-export type NavigationMapCentre = Pick<NavigationMapPanelModel, 'latitude' | 'longitude' | 'zoom'>;
-
-/** The map's own zoom: the Mac's tiles are rendered at it (map_image.py). */
-const NAVIGATION_MAP_ZOOM = 16;
-const NAVIGATION_DRIVING_MAP_ZOOM = 15;
-
-/**
- * Where to centre the pane when no street tile has arrived: on the wearer
- * at the tiles' own zoom, so the frame does not jump when a tile does
- * arrive; before the first fix, on the whole route, zoomed to fit it.
- * Until 2026-10-05 the pane simply disappeared without a tile — the
- * "bare route shape" the comments promised was never reachable — so any
- * Mapbox failure took the map away entirely.
- */
-export function navigationMapFallbackCentre(
-  map: NavigationMapModel,
-  mode?: NavigationMode,
-): NavigationMapCentre | undefined {
-  if (map.geometry.length < 2) return undefined;
-  const targetZoom = mode === 'driving' ? NAVIGATION_DRIVING_MAP_ZOOM : NAVIGATION_MAP_ZOOM;
-  if (map.position) {
-    return { latitude: map.position.latitude, longitude: map.position.longitude, zoom: targetZoom };
-  }
-  const latitudes = map.geometry.map((point) => point.latitude);
-  const longitudes = map.geometry.map((point) => point.longitude);
-  const centre = {
-    latitude: (Math.min(...latitudes) + Math.max(...latitudes)) / 2,
-    longitude: (Math.min(...longitudes) + Math.max(...longitudes)) / 2,
-  };
-  // Zoom out until the route's bounding box fits the pane, at most to a
-  // district-scale 12; the fit is checked by projecting, not estimated.
-  for (let zoom = targetZoom; zoom > 12; zoom -= 1) {
-    const probe = { ...centre, zoom };
-    const fits = map.geometry.every((point) => {
-      const [x, y] = projectMercatorPanel(point, probe, NAVIGATION_MAP_PANEL);
-      return x >= NAVIGATION_MAP_PANEL.x + 8 && x <= NAVIGATION_MAP_PANEL.x + NAVIGATION_MAP_PANEL.width - 8
-        && y >= NAVIGATION_MAP_PANEL.y + 8 && y <= NAVIGATION_MAP_PANEL.y + NAVIGATION_MAP_PANEL.height - 8;
-    });
-    if (fits) return probe;
-  }
-  return { ...centre, zoom: 12 };
-}
-
-export function projectNavigationMapToPanel(
-  map: NavigationMapModel,
-  panel: NavigationMapCentre,
-): NavigationMapProjection | undefined {
-  if (map.geometry.length < 2) return undefined;
-  const bounds = NAVIGATION_MAP_PANEL;
-  return {
-    points: map.geometry.map((point) => projectMercatorPanel(point, panel, bounds)),
-    ...(map.position
-      ? { position: projectMercatorPanel(map.position, panel, bounds) }
-      : {}),
-  };
-}
-
-/**
- * Web Mercator, in the same 512-pixel tile scheme Mapbox Static Images
- * uses. The route JOAT draws must land ON the roads the Mac fetched, so
- * both halves have to agree on this transform exactly — a different tile
- * size would slide the line a block sideways at street zoom.
- */
-export function projectMercatorPanel(
-  point: { latitude: number; longitude: number },
-  panel: NavigationMapCentre,
-  bounds: { x: number; y: number; width: number; height: number },
-): readonly [number, number] {
-  const worldPixels = 512 * Math.pow(2, panel.zoom);
-  const toWorld = (latitude: number, longitude: number): readonly [number, number] => {
-    const clamped = Math.max(-85.05112878, Math.min(85.05112878, latitude));
-    const sin = Math.sin((clamped * Math.PI) / 180);
-    return [
-      ((longitude + 180) / 360) * worldPixels,
-      (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * worldPixels,
-    ];
-  };
-  const [centreX, centreY] = toWorld(panel.latitude, panel.longitude);
-  const [x, y] = toWorld(point.latitude, point.longitude);
-  return [
-    bounds.x + bounds.width / 2 + (x - centreX),
-    bounds.y + bounds.height / 2 + (y - centreY),
-  ];
-}
-
 
 export class HudCanvasRenderer implements HudFrameRenderer {
   readonly drawsReaders = true;
@@ -1699,18 +1598,13 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context: CanvasRenderingContext2D,
     navigation: NavigationHudModel,
   ): void {
-    const panel = navigation.map?.panel;
-    const centre = navigation.map
-      ? (panel ?? navigationMapFallbackCentre(navigation.map, navigation.mode))
-      : undefined;
-    const projection = navigation.map && centre
-      ? projectNavigationMapToPanel(navigation.map, centre)
-      : undefined;
     // Four bands, as the reference HUD lays them out: the status spine, two
-    // panes side by side, and one fact line along the bottom. The pane holds
-    // the streets when a tile has arrived and the route's own shape around
-    // the wearer when none has; only a route with no geometry at all gives
-    // the instruction the whole width.
+    // panes side by side, and one fact line along the bottom. The right pane
+    // is the route schematic; only a route with no geometry at all gives the
+    // instruction the whole width. A stray raster `map.panel` is ignored.
+    const projection = navigation.map
+      ? buildRouteSchematic(navigation.map, NAVIGATION_MAP_PANEL, navigation.mode ?? 'walking')
+      : undefined;
     const actWidth = projection ? 236 : 504;
 
     context.textBaseline = 'middle';
@@ -1740,7 +1634,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     context.font = TYPE.meta;
     this.fitText(context, navigation.hint, 36, 198, actWidth);
 
-    if (projection) this.drawNavigationMap(context, projection, panel);
+    if (projection) this.drawNavigationMap(context, projection);
 
     // Keep live facts with the maneuver when a map owns the right pane. A
     // full-width changing footer dirties the bottom-right image tile on every
@@ -1763,120 +1657,135 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     );
   }
 
-  /** The route as a picture: a dim full polyline, a bright travelled-to
-   * position, and no chrome around it. The panel has no border — the map IS
-   * the content, and a box around it would only steal pixels. */
+  /**
+   * The route schematic, heading-up: one thick bright line for the road
+   * still ahead, the travelled part as a dim thread, the next maneuver as a
+   * ringed node with faint cross-street stubs and its street name, and a
+   * chevron for "you" at the fixed lower-centre anchor, always pointing up
+   * the way the wearer is going. Nothing else: no tiles, no buildings, no
+   * frame — on a transparent lens black is the real street showing through.
+   */
   private drawNavigationMap(
     context: CanvasRenderingContext2D,
-    projection: NavigationMapProjection,
-    panel?: NavigationMapPanelModel,
+    schematic: RouteSchematic,
   ): void {
-    const [first, ...rest] = projection.points;
-    if (!first) return;
-    // Surroundings first, under everything JOAT draws: the streets are the
-    // answer to "where am I", and the route is the answer to "where next".
-    if (panel) {
-      context.save();
-      context.beginPath();
-      context.rect(
-        NAVIGATION_MAP_PANEL.x, NAVIGATION_MAP_PANEL.y,
-        NAVIGATION_MAP_PANEL.width, NAVIGATION_MAP_PANEL.height,
-      );
-      context.clip();
-      // Drawn at full strength. An earlier version dimmed this to 45% on
-      // the theory that streets are "context" — which crushed the land tone
-      // back toward black and undid the whole point of tone-mapping the
-      // tile. Brightness is decided ONCE, by the Mac's tone curve
-      // (MAP_LAND_FLOOR); the renderer does not second-guess it.
-      context.drawImage(
-        panel.image,
-        NAVIGATION_MAP_PANEL.x + (NAVIGATION_MAP_PANEL.width - panel.width) / 2,
-        NAVIGATION_MAP_PANEL.y + (NAVIGATION_MAP_PANEL.height - panel.height) / 2,
-        panel.width,
-        panel.height,
-      );
-      context.restore();
-    }
-
+    const pane = NAVIGATION_MAP_PANEL;
     context.save();
     context.beginPath();
-    context.rect(
-      NAVIGATION_MAP_PANEL.x, NAVIGATION_MAP_PANEL.y,
-      NAVIGATION_MAP_PANEL.width, NAVIGATION_MAP_PANEL.height,
-    );
+    context.rect(pane.x, pane.y, pane.width, pane.height);
     context.clip();
     context.lineJoin = 'round';
     context.lineCap = 'round';
 
-    const traceRoute = (): void => {
+    const trace = (points: readonly ScreenPoint[]): void => {
+      const [first, ...rest] = points;
+      if (!first) return;
       context.beginPath();
       context.moveTo(first[0], first[1]);
       for (const [x, y] of rest) context.lineTo(x, y);
       context.stroke();
     };
 
-    if (panel) {
-      // Over a map of lit streets a bright line is just one more street. Two
-      // things separate the route from them, and only one of them is tone:
-      //
-      // * The dark CASING. Black is transparent glass, so the gap costs
-      //   nothing and is what makes the line read as ABOVE the grid.
-      // * WIDTH. This is the load-bearing one. The map is capped at level 11
-      //   and the route draws at 14, but three levels of headroom is a
-      //   difference the wearer should not have to hunt for — and it is not
-      //   even resolvable in the simulator, whose screenshot curve returns
-      //   the same value for both. Width survives quantization, survives the
-      //   capture path, and is what makes the route obvious at a glance: no
-      //   Mapbox road at this zoom is drawn anywhere near five pixels wide.
-      // Bright RAILS around a dark CHANNEL. Every road on this map is lit,
-      // so one more lit line is camouflage — the route has to differ in
-      // kind, not degree. Cutting it out of the ground makes it the only
-      // unlit path on the panel, and on a transparent lens unlit is the
-      // real street showing through, so the wearer follows a clear line
-      // instead of hunting for a brighter one. The rails keep it from
-      // reading as a gap where the map failed to render.
-      context.strokeStyle = gray(BRIGHT);
-      context.lineWidth = 11;
-      traceRoute();
-      context.strokeStyle = '#000000';
-      context.lineWidth = 7;
-      traceRoute();
-    } else {
-      // No streets underneath: nothing to separate from, and the route is
-      // context rather than the instruction.
+    // Behind the wearer: present, but quiet.
+    context.strokeStyle = gray(QUIET);
+    context.lineWidth = 2;
+    trace(schematic.travelled);
+
+    const maneuver = schematic.maneuver;
+    if (maneuver) {
+      context.strokeStyle = gray(CHROME);
+      context.lineWidth = 3;
+      for (const stub of maneuver.stubs) trace(stub);
+    }
+
+    if (schematic.offRoute && schematic.nearestOnRoute) {
+      // Off the line: a faint dashed thread back to it.
+      context.save();
+      context.setLineDash?.([4, 5]);
       context.strokeStyle = gray(CHROME);
       context.lineWidth = 2;
-      traceRoute();
+      trace([schematic.you, schematic.nearestOnRoute]);
+      context.restore();
     }
 
-    // Destination end of the line, so the wearer can see which way it runs.
-    const last = projection.points[projection.points.length - 1];
-    if (last) {
-      context.fillStyle = gray(SUPPORT);
-      context.beginPath();
-      context.arc(last[0], last[1], 4, 0, Math.PI * 2);
-      context.fill();
+    // The road ahead: the one bright, wide thing in the pane.
+    context.strokeStyle = gray(BRIGHT);
+    context.lineWidth = 8;
+    trace(schematic.remaining);
+
+    if (schematic.destination) {
+      const [x, y] = schematic.destination;
+      context.fillStyle = gray(BRIGHT);
+      context.fillRect(x - 6, y - 6, 12, 12);
+      context.fillStyle = '#000000';
+      context.fillRect(x - 2, y - 2, 4, 4);
     }
 
-    if (projection.position) {
-      const [x, y] = projection.position;
-      // A filled dot inside a ring: unmistakably "you", and it survives the
-      // Gray4 quantization that would swallow a subtler marker.
+    if (maneuver) {
+      const [x, y] = maneuver.point;
+      // A ringed node: a black gap around a bright core, so the corner is a
+      // point the eye lands on rather than a bend in the line.
       context.fillStyle = '#000000';
       context.beginPath();
-      context.arc(x, y, 7, 0, Math.PI * 2);
+      context.arc(x, y, 8, 0, Math.PI * 2);
       context.fill();
       context.strokeStyle = gray(BRIGHT);
-      context.lineWidth = 2;
+      context.lineWidth = 2.5;
       context.beginPath();
-      context.arc(x, y, 6, 0, Math.PI * 2);
+      context.arc(x, y, 7, 0, Math.PI * 2);
       context.stroke();
       context.fillStyle = gray(BRIGHT);
       context.beginPath();
-      context.arc(x, y, 2.5, 0, Math.PI * 2);
+      context.arc(x, y, 3, 0, Math.PI * 2);
       context.fill();
+      if (maneuver.label) this.drawSchematicLabel(context, maneuver.label, maneuver.point, maneuver.exitSide);
     }
+
+    this.drawYouChevron(context, schematic.you);
     context.restore();
+  }
+
+  /** The maneuver's street name, beside the node on the side the route does
+   * NOT leave by, on a black plate so the line never runs through letters. */
+  private drawSchematicLabel(
+    context: CanvasRenderingContext2D,
+    label: string,
+    point: ScreenPoint,
+    exitSide: 'left' | 'right' | 'ahead',
+  ): void {
+    const pane = NAVIGATION_MAP_PANEL;
+    context.font = TYPE.meta;
+    context.textBaseline = 'middle';
+    context.textAlign = 'left';
+    const maxWidth = pane.width - 16;
+    const width = Math.min(maxWidth, context.measureText(label).width);
+    let x = exitSide === 'right' ? point[0] - 14 - width : point[0] + 14;
+    if (exitSide === 'ahead') x = point[0] - width / 2;
+    x = Math.max(pane.x + 6, Math.min(pane.x + pane.width - 6 - width, x));
+    let y = point[1] - 16;
+    y = Math.max(pane.y + 10, Math.min(pane.y + pane.height - 10, y));
+    context.fillStyle = '#000000';
+    context.fillRect(x - 3, y - 9, width + 6, 18);
+    context.fillStyle = gray(BRIGHT);
+    this.fitText(context, label, x, y, maxWidth);
+  }
+
+  /** "You": a solid chevron pointing up the pane, outlined in black so it
+   * stays a distinct shape where it sits on the bright route line. */
+  private drawYouChevron(context: CanvasRenderingContext2D, at: ScreenPoint): void {
+    const [x, y] = at;
+    context.beginPath();
+    context.moveTo(x, y - 14);
+    context.lineTo(x + 10, y + 9);
+    context.lineTo(x, y + 4);
+    context.lineTo(x - 10, y + 9);
+    context.closePath();
+    context.strokeStyle = '#000000';
+    context.lineWidth = 5;
+    context.lineJoin = 'round';
+    context.stroke();
+    context.fillStyle = gray(BRIGHT);
+    context.fill();
   }
 
   /** "arrive 9:54" from a minutes-remaining figure, or '' when there isn't one.

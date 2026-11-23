@@ -123,6 +123,8 @@ export interface AssistantConversationSnapshot {
   turns: AssistantConversationTurn[];
   continueAfterMs: number;
   earlierTurnsOmitted: boolean;
+  /** True while the follow-up window is open (wearer can speak without saying "JOAT"). */
+  listening?: boolean;
 }
 export type G2DiagnosticEvent = import('./G2DiagnosticTrace').G2TraceEvent;
 export type NavigationHudModel = import('./NavigationHud').NavigationHudModel;
@@ -451,8 +453,8 @@ export interface HudNotificationCard {
 }
 
 /**
- * Every unread JOAT notification, newest first (at most ten), republished
- * whenever the Mac's card log changes. The notification card reads its next
+ * Every unread JOAT notification, newest first (at most 25), republished
+ * whenever the brain's card log changes. The notification card reads its next
  * unread from here, so a tap moves on without a round trip.
  * Mac counterpart: HudNotifications in apps/mac/joat/core/protocol.py.
  */

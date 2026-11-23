@@ -1,27 +1,36 @@
 import Foundation
 
 /// One question the glasses ask for a feature, answered by the wearer's
-/// next sentence: the Mac's prompt wire (prompted_input.py, the plugin's
-/// PromptedInputController). The plugin draws the question card, opens the
-/// glasses mic for it and acknowledges; the words so far show under the
-/// question (`prompt.partial`); a tap on the card takes them as they are
-/// (`prompt-commit`). Either side can cancel. Used by Messages: "What should
-/// I say to Mom?" after a tap on a conversation (2026-10-30: the glasses had
-/// no way to reply at all).
+/// next sentence (or multi-clause dictation for `body` / `instruction`):
+/// the Mac's prompt wire (prompted_input.py, the plugin's PromptedInputController).
+/// The plugin draws the question card, opens the glasses mic for it and
+/// acknowledges; the words so far show under the question (`prompt.partial`);
+/// a tap on the card takes them immediately (`prompt-commit`). Either side can
+/// cancel.
 final class Prompts: BrainFeature {
     let name = "prompts"
     let uplinkKinds: Set<String> = ["prompt.ack", "prompt.cancel", "input", "device"]
 
+    static let multiClauseFields: Set<String> = ["body", "instruction"]
+
     private struct Open {
         let id: String
+        let field: String
+        let askedAt: Date
+        var listeningSince: Date?
         let answer: (String?) -> Void
+        var segments: [String] = []
         var partial = ""
         let timeout: DispatchWorkItem
+        var settleWorkItem: DispatchWorkItem?
         /// Answered, the card stays until the next question replaces it.
         let hold: Bool
     }
 
     private let link: PluginLink
+    /// Quiet window after a finalized clause on `body` / `instruction` before
+    /// auto-committing, pushed forward whenever volatile speech arrives.
+    var multiClauseSettleSeconds: TimeInterval = 1.5
     /// The plugin echoes it: one value per plugin connection.
     private var generation = "phone-" + ConfirmGate.hex(8)
     private var open: Open?
@@ -47,21 +56,33 @@ final class Prompts: BrainFeature {
 
     /// Show `question` and hand the next sentence (or nil: cancelled, timed
     /// out, the mic refused) to `answer`, once, on the main queue. `hold`:
-    /// the answered card stays up until the owner asks again or cancels
-    /// (Messages' "Who should I text?" while the contact is looked up: the
-    /// card closing first left the glasses on the list, and a tap there
-    /// cancelled the draft before the next question came, 2026-11-11).
+    /// the answered card stays up until the owner asks again or cancels.
     func ask(_ question: String, ownerKind: String, ownerId: String, field: String,
              seconds: Int = 30, hold: Bool = false, answer: @escaping (String?) -> Void) {
         finish(nil, notify: true, why: "replaced")
         // The glasses replace a held card with this question themselves.
         held = nil
         let id = ConfirmGate.hex(16)
+        let now = Date()
         let timeout = DispatchWorkItem { [weak self] in
-            guard self?.open?.id == id else { return }
-            self?.finish(nil, notify: true, why: "no answer in \(seconds) s")
+            guard let self, let current = self.open, current.id == id else { return }
+            let accumulated = Self.combine(segments: current.segments, partial: current.partial)
+            if !accumulated.isEmpty {
+                self.finish(accumulated, notify: true, why: "timeout with accumulated speech")
+            } else {
+                self.finish(nil, notify: true, why: "no answer in \(seconds) s")
+            }
         }
-        open = Open(id: id, answer: answer, timeout: timeout, hold: hold)
+        open = Open(
+            id: id,
+            field: field,
+            askedAt: now,
+            listeningSince: nil,
+            answer: answer,
+            timeout: timeout,
+            settleWorkItem: nil,
+            hold: hold
+        )
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds), execute: timeout)
         link.send([
             "kind": "prompt.present", "promptId": id, "question": String(question.prefix(1000)),
@@ -92,22 +113,60 @@ final class Prompts: BrainFeature {
                    "text": String(text.suffix(600))])
     }
 
-    /// A finished sentence: the answer, when a question is open.
-    func heard(_ text: String) -> Bool {
-        guard open != nil else { return false }
-        let words = WakeGate.strip(text).flatMap { $0.isEmpty ? nil : $0 } ?? text
-        Log.add("prompt answered (\(words.count) chars)")
-        finish(words, notify: true, why: "answered")
+    /// A finished sentence (or clause from `DictationTranscriber`):
+    /// - If `spokeUntil` ended before `listeningSince ?? askedAt`, ignores the
+    ///   stale pre-prompt utterance so the tail of `"JOAT, text Mom"` never
+    ///   bleeds into the answer.
+    /// - For `body` and `instruction` with live STT (`spokeUntil != nil`),
+    ///   accumulates clauses across natural pauses and settles after `1.5s` of
+    ///   quiet (or `0 ms` on tap `prompt-commit`).
+    @discardableResult
+    func heard(_ text: String, spokeUntil: Date? = nil) -> Bool {
+        guard var o = open else { return false }
+        let fence = o.listeningSince ?? o.askedAt
+        if let spokeUntil, spokeUntil < fence {
+            if o.segments.isEmpty {
+                o.partial = ""
+                open = o
+            }
+            Log.add("prompt ignored stale pre-prompt speech: \(text.prefix(80))")
+            return true
+        }
+
+        let rawWords = WakeGate.strip(text).flatMap { $0.isEmpty ? nil : $0 } ?? text
+        let words = rawWords.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty else { return true }
+
+        if spokeUntil != nil, Self.multiClauseFields.contains(o.field) {
+            o.segments.append(words)
+            o.partial = ""
+            let combined = Self.combine(segments: o.segments, partial: "")
+            armSettleTimer(&o)
+            open = o
+            sendPartial(promptId: o.id, text: combined)
+            Log.add("prompt clause \(o.segments.count) (\(combined.count) chars)")
+            return true
+        }
+
+        let full = Self.combine(segments: o.segments + [words], partial: "")
+        Log.add("prompt answered (\(full.count) chars)")
+        finish(full, notify: true, why: "answered")
         return true
     }
 
-    /// Words so far, under the question.
+    /// Words so far, under the question. When clauses have already finalized,
+    /// publishes the full accumulated text + volatile clause and slides the
+    /// `1.5s` settle timer forward so active speech is never cut off.
     func hearing(_ text: String) {
         guard var o = open else { return }
-        o.partial = text
+        o.partial = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let combined = Self.combine(segments: o.segments, partial: o.partial)
+        if !o.segments.isEmpty {
+            armSettleTimer(&o)
+        }
         open = o
-        link.send(["kind": "prompt.partial", "promptId": o.id, "connectionGeneration": generation,
-                   "text": String(text.suffix(600))])
+        guard !combined.isEmpty else { return }
+        sendPartial(promptId: o.id, text: combined)
     }
 
     func handle(kind: String, message: [String: Any]) {
@@ -120,7 +179,7 @@ final class Prompts: BrainFeature {
             Log.add("prompt \(id.prefix(6)) closed on the glasses while held")
             return
         }
-        guard let o = open else { return }
+        guard var o = open else { return }
         switch kind {
         case "prompt.ack":
             guard message.string("promptId") == o.id else { return }
@@ -133,6 +192,8 @@ final class Prompts: BrainFeature {
             if message.bool("success") == false {
                 finish(nil, notify: false, why: "the glasses could not open the mic")
             } else {
+                o.listeningSince = Date()
+                open = o
                 Log.add("prompt \(o.id.prefix(6)) on the glasses, listening")
             }
         case "prompt.cancel":
@@ -142,10 +203,10 @@ final class Prompts: BrainFeature {
             #endif
             finish(nil, notify: false, why: "cancelled on the glasses")
         case "input":
-            // A tap on the listening card: take what was heard now.
+            // A tap on the listening card: cancel any settle timer and commit immediately (0 ms).
             guard let event = message.object("event"), event.string("containerName") == "prompt-commit",
                   event.string("selectedName") == o.id else { return }
-            let said = o.partial.trimmingCharacters(in: .whitespacesAndNewlines)
+            let said = Self.combine(segments: o.segments, partial: o.partial)
             if said.isEmpty { Log.add("prompt commit with nothing heard yet"); return }
             finish(said, notify: true, why: "tapped")
         default:
@@ -153,10 +214,43 @@ final class Prompts: BrainFeature {
         }
     }
 
+    private func armSettleTimer(_ o: inout Open) {
+        o.settleWorkItem?.cancel()
+        let promptId = o.id
+        let delay = max(0.05, multiClauseSettleSeconds)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let current = self.open, current.id == promptId else { return }
+            let full = Self.combine(segments: current.segments, partial: current.partial)
+            guard !full.isEmpty else { return }
+            Log.add("prompt multi-clause settled (\(full.count) chars, \(current.segments.count) segment(s))")
+            self.finish(full, notify: true, why: "settled")
+        }
+        o.settleWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func sendPartial(promptId: String, text: String) {
+        link.send([
+            "kind": "prompt.partial",
+            "promptId": promptId,
+            "connectionGeneration": generation,
+            "text": String(text.suffix(600)),
+        ])
+    }
+
+    private static func combine(segments: [String], partial: String) -> String {
+        let cleanPartial = partial.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (segments + [cleanPartial])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
     private func finish(_ said: String?, notify: Bool, why: String) {
         guard let o = open else { return }
         open = nil
         o.timeout.cancel()
+        o.settleWorkItem?.cancel()
         let hold = o.hold && said != nil
         if hold { held = o.id }
         if notify && !hold {

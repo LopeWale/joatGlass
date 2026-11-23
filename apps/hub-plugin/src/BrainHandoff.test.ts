@@ -7,7 +7,6 @@ import { Chrome } from './Chrome';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
 import type { LinkState, MacLink } from './MacLink';
-import { isPhoneBrain } from './PhoneControlPanel';
 import { Settings } from './Settings';
 import { ContainerId, HANDOFF_CAPABILITIES } from './types';
 
@@ -291,16 +290,23 @@ describe('BrainHandoff', () => {
       lostMs: 30,
       pollMs: 5,
     });
-    menu.handoffCapability = (capability) => {
-      if (handoff.active || !isPhoneBrain(linkState.activeUrl)) return false;
-      void handoff.start(capability);
-      return true;
-    };
     menu.onHome = () => handoff.home();
 
-    // Pick Messages while connected to PHONE: intercepts locally without round-tripping to PHONE!
+    // Menu pick on PHONE stays on PHONE without triggering BrainHandoff!
     await menu.openFromContextualMenu(0);
-    await vi.waitFor(() => expect(handoff.active).toBe(true));
+    expect(handoff.active).toBe(false);
+    expect(linkState.activeUrl).toBe(PHONE);
+    expect(
+      sentByOrigin.filter((entry) => entry.url === PHONE && (entry.msg.event as { containerName?: string } | undefined)?.containerName === 'capmenu'),
+    ).toHaveLength(1);
+    menu.releaseToLiveSession();
+    await hud.showDefault();
+    rebuilds.length = 0;
+    sentByOrigin.length = 0;
+
+    // Explicit opt-in brain.handoff frame triggers BrainHandoff with a single upfront rebuild!
+    await handoff.start('Messages');
+    expect(handoff.active).toBe(true);
     await vi.waitFor(() => expect(
       sentByOrigin.some((entry) => entry.url === MAC_A && (entry.msg.event as { containerName?: string } | undefined)?.containerName === 'capmenu'),
     ).toBe(true));

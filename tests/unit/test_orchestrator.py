@@ -1967,3 +1967,191 @@ class TestPromptPartials:
         wire = PromptPartial("p1", "g1", "x " * 400 + "the end").to_wire()
         assert len(wire["text"]) <= 500
         assert wire["text"].startswith("…") and wire["text"].endswith("the end")
+
+    async def test_armed_prompt_dictation_survives_mid_sentence_clause_pause(self) -> None:
+        received: list[str] = []
+        flushed_bytes: list[int] = []
+        dispatcher = PromptedInputDispatcher()
+
+        async def consume(text: str) -> None:
+            received.append(text)
+
+        class CountingEngine(FakeEngine):
+            async def flush(self) -> Transcript | None:
+                if not self.fed:
+                    return None
+                size = len(self.fed)
+                flushed_bytes.append(size)
+                self.fed.clear()
+                text = (
+                    "Hey I just got home, let me know if you want dinner."
+                    if size >= 14 * len(LOUD)
+                    else "Hey I just got home"
+                )
+                return Transcript(text=text, is_final=True)
+
+        transport = FakeTransport()
+        engine = CountingEngine()
+        orchestrator = VoiceOrchestrator(
+            transport, engine, prompted_input=dispatcher, wake_words=("joat",),
+        )
+        seq = 0
+        room = batch(350)
+        for _ in range(10):
+            orchestrator._ingest_audio(
+                room, seq, source="glasses", speaker="self",
+                connection_generation="g1", audio_epoch=None,
+            )
+            seq += 1
+
+        ticket = dispatcher.begin_publication(
+            owner_kind="messages", owner_id="m1", field="body",
+            source="glasses", connection_generation="g1",
+            presentation_binding="body-prompt", ttl_s=30,
+            is_valid=lambda: True,
+            consume=consume,
+        )
+        fence = orchestrator.fence_prompt_audio()
+        assert dispatcher.acknowledge(
+            ticket.prompt_id, success=True, presentation_binding="body-prompt",
+            connection_generation="g1", audio_epoch=ticket.prompt_id, ingress_fence=fence,
+        )
+
+        # Clause 1 (0.8 s), then a 1.6 s (8-batch) thinking pause that used to chop at 1.0 s:
+        for pcm in ([LOUD] * 4 + [QUIET] * 8 + [LOUD] * 4):
+            orchestrator._ingest_audio(
+                pcm, seq, source="glasses", speaker="self",
+                connection_generation="g1", audio_epoch=ticket.prompt_id,
+            )
+            seq += 1
+            await drain()
+        assert received == []
+        assert flushed_bytes == []
+        assert orchestrator._vad.in_speech is True
+
+        # Tap-to-review still commits immediately without waiting for the 2.2 s hangover:
+        assert orchestrator.commit_prompt_answer(ticket.prompt_id) is True
+        await drain()
+        assert len(flushed_bytes) == 1
+        assert received == ["Hey I just got home, let me know if you want dinner."]
+
+    async def test_closing_quiet_frames_do_not_fire_trailing_silence_partials(self) -> None:
+        dispatcher, prompt_id = self._prompt()
+        transport = FakeTransport()
+        engine = PartialEngine("final answer")
+        vad = RmsVad(
+            adaptive=False, speech_rms=0.015, start_batches=2,
+            hangover_batches=5, prompt_hangover_batches=11,
+        )
+        orchestrator = VoiceOrchestrator(
+            transport, engine, vad=vad, prompted_input=dispatcher, wake_words=("joat",),
+        )
+        seq = 0
+        # 6 loud batches (1.2 s = 38,400 bytes) fire one partial at batch 5 (32,000 bytes):
+        for _ in range(6):
+            orchestrator._ingest_audio(
+                LOUD, seq, source="glasses", speaker="self",
+                connection_generation="g1", audio_epoch=prompt_id,
+            )
+            seq += 1
+            await drain()
+        assert engine.partials == [5 * len(LOUD)]
+
+        # 10 closing quiet batches (2.0 s = 64,000 bytes of silence) grow the buffer
+        # past two PARTIAL_STEP_BYTES increments without firing wasted partials:
+        for _ in range(10):
+            orchestrator._ingest_audio(
+                QUIET, seq, source="glasses", speaker="self",
+                connection_generation="g1", audio_epoch=prompt_id,
+            )
+            seq += 1
+            await drain()
+        assert vad.in_speech is True
+        assert vad.closing is True
+        assert engine.partials == [5 * len(LOUD)]
+        partials = [m for m in transport.sent if isinstance(m, PromptPartial)]
+        assert [p.text for p in partials] == ["words 1"]
+
+        # 11th quiet batch closes the utterance cleanly with no extra partial:
+        orchestrator._ingest_audio(
+            QUIET, seq, source="glasses", speaker="self",
+            connection_generation="g1", audio_epoch=prompt_id,
+        )
+        await drain()
+        assert vad.in_speech is False
+        assert engine.partials == [5 * len(LOUD)]
+
+    async def test_bystander_speech_closes_at_ordinary_hangover_instead_of_prompt_hangover(self) -> None:
+        received: list[str] = []
+        dispatcher = PromptedInputDispatcher()
+
+        async def consume(text: str) -> None:
+            received.append(text)
+
+        transport = FakeTransport()
+        engine = FakeEngine("wearer reply")
+        orchestrator = VoiceOrchestrator(
+            transport, engine, prompted_input=dispatcher, wake_words=("joat",),
+        )
+        seq = 0
+        room = batch(350)
+        for _ in range(10):
+            orchestrator._ingest_audio(
+                room, seq, source="glasses", speaker="self",
+                connection_generation="g1", audio_epoch=None,
+            )
+            seq += 1
+
+        ticket = dispatcher.begin_publication(
+            owner_kind="messages", owner_id="m1", field="body",
+            source="glasses", connection_generation="g1",
+            presentation_binding="body-prompt", ttl_s=30,
+            is_valid=lambda: True,
+            consume=consume,
+        )
+        fence = orchestrator.fence_prompt_audio()
+        assert dispatcher.acknowledge(
+            ticket.prompt_id, success=True, presentation_binding="body-prompt",
+            connection_generation="g1", audio_epoch=ticket.prompt_id, ingress_fence=fence,
+        )
+
+        # Bystander speech (both when quiet frames carry speaker="other" and when
+        # trailing quiet frames arrive unlabelled) and wrong-source speech must close
+        # at ordinary hangover (5 batches = 1.0 s), never holding open for 2.2 s:
+        for loud_source, loud_speaker, quiet_speaker in (
+            ("glasses", "other", "other"),
+            ("glasses", "other", None),
+            ("phone", "self", "self"),
+        ):
+            for _ in range(2):
+                orchestrator._ingest_audio(
+                    LOUD, seq, source=loud_source, speaker=loud_speaker,  # type: ignore[arg-type]
+                    connection_generation="g1", audio_epoch=ticket.prompt_id,
+                )
+                seq += 1
+                await drain()
+            assert orchestrator._vad.in_speech is True
+            for _ in range(5):
+                orchestrator._ingest_audio(
+                    QUIET, seq, source=loud_source, speaker=quiet_speaker,  # type: ignore[arg-type]
+                    connection_generation="g1", audio_epoch=ticket.prompt_id,
+                )
+                seq += 1
+                await drain()
+            assert orchestrator._vad.in_speech is False
+            assert dispatcher.is_armed is True
+            assert received == []
+
+        # Wearer's own reply still stays armed and consumes the prompt cleanly:
+        for pcm in ([LOUD] * 2 + [QUIET] * 8 + [LOUD] * 2):
+            orchestrator._ingest_audio(
+                pcm, seq, source="glasses", speaker="self",
+                connection_generation="g1", audio_epoch=ticket.prompt_id,
+            )
+            seq += 1
+            await drain()
+        assert orchestrator._vad.in_speech is True
+        assert orchestrator.commit_prompt_answer(ticket.prompt_id) is True
+        await drain()
+        assert received == ["wearer reply"]
+

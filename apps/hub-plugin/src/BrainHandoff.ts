@@ -2,17 +2,17 @@ import type { LinkState } from './MacLink';
 import type { HandoffCapability } from './types';
 
 /**
- * A Mac-pinned page (Messages, Agent Terminal, Activity), opened
- * while the phone brain (JOAT Brain) holds the glasses.
+ * Opt-in helper for an explicit `brain.handoff` frame sent by a connected brain.
  *
- * Either the plugin intercepts the menu pick directly on the phone brain or
- * the phone brain answers with `brain.handoff`. This paints a single focus
- * list frame upfront, dials the package's other brains in order (the Mac that
- * last answered first; no Mac is named in code) without extra default-layout
- * BLE rebuilds, opens the page on the first that authenticates, and goes back
- * to the phone brain once the wearer is Home again, or when that Mac goes
- * away. A hand-off is never remembered as the preferred brain: a relaunch in
- * the middle of a session starts on the phone.
+ * Normal menu picks (`Messages`, `Agent Terminal`, `Activity`) stay on the
+ * currently connected brain (including `JOAT Brain` on this iPhone, which
+ * serves them directly over loopback using background Mac HTTP relays). If a
+ * brain ever explicitly emits `brain.handoff`, this paints a single focus list
+ * frame upfront, dials the package's other brains in order (the Mac that last
+ * answered first; no Mac is named in code) without extra default-layout BLE
+ * rebuilds, opens the page on the first that authenticates, and goes back to
+ * the home brain once the wearer is Home again, or when that Mac goes away. A
+ * hand-off is never remembered as the preferred brain.
  */
 export interface BrainHandoffDeps {
   /** The package's brains (MAC_WS_URLS). */

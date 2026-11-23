@@ -54,9 +54,32 @@ final class MacTerminal: ObservableObject {
         }
     }
 
+    struct SessionItem: Identifiable, Equatable, Decodable {
+        let key: String
+        let label: String
+        var id: String { key }
+
+        init(key: String, label: String) {
+            self.key = key
+            self.label = label
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: FlexKey.self)
+            guard let k = c.nonEmptyString(["key", "id", "sessionKey", "session_key"]) else {
+                throw DecodingError.dataCorrupted(
+                    .init(codingPath: decoder.codingPath, debugDescription: "Missing session key")
+                )
+            }
+            self.key = k
+            self.label = c.nonEmptyString(["label", "title", "name"]) ?? k
+        }
+    }
+
     struct AgentItem: Identifiable, Equatable, Decodable {
         typealias RecentMessage = MacTerminal.RecentMessage
         typealias PendingApprovalItem = MacTerminal.PendingApprovalItem
+        typealias SessionItem = MacTerminal.SessionItem
 
         let name: String
         let provider: String
@@ -72,13 +95,21 @@ final class MacTerminal: ObservableObject {
         let pendingApprovals: Int
         let recentMessages: [RecentMessage]
         let pendingApprovalItems: [PendingApprovalItem]
+        let sessions: [SessionItem]
 
         var id: String { name.isEmpty ? provider : name }
 
         var displayTitle: String {
+            let lowerProvider = provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let lowerName = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let lowerTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if ["claude", "claude-code", "claude code"].contains(lowerProvider)
+                || ["claude", "claude-code", "claude code"].contains(lowerName)
+                || lowerTitle == "claude" {
+                return "Claude Code"
+            }
             if let title, !title.isEmpty { return title }
-            switch provider.lowercased() {
-            case "claude": return "Claude Code"
+            switch lowerProvider {
             case "codex": return "Codex"
             case "antigravity": return "Antigravity"
             default:
@@ -101,7 +132,8 @@ final class MacTerminal: ObservableObject {
             activeSessionTitle: String? = nil,
             pendingApprovals: Int = 0,
             recentMessages: [RecentMessage] = [],
-            pendingApprovalItems: [PendingApprovalItem] = []
+            pendingApprovalItems: [PendingApprovalItem] = [],
+            sessions: [SessionItem] = []
         ) {
             self.name = name
             self.provider = provider
@@ -117,6 +149,7 @@ final class MacTerminal: ObservableObject {
             self.pendingApprovals = pendingApprovals
             self.recentMessages = recentMessages
             self.pendingApprovalItems = pendingApprovalItems
+            self.sessions = sessions
         }
 
         init(from decoder: Decoder) throws {
@@ -142,6 +175,10 @@ final class MacTerminal: ObservableObject {
             self.pendingApprovalItems = c.LossyArray(
                 PendingApprovalItem.self,
                 forKeys: ["pendingApprovalItems", "pending_approval_items", "approvalItems"]
+            )
+            self.sessions = c.LossyArray(
+                SessionItem.self,
+                forKeys: ["sessions", "pastSessions", "past_sessions"]
             )
         }
     }
@@ -476,6 +513,24 @@ final class MacTerminal: ObservableObject {
     func newSession(lane: String) async -> Bool {
         await sendConfig(["action": "new_session", "lane": lane],
                          logLabel: "new_session(\(lane))")
+    }
+
+    @discardableResult
+    func resumeSession(provider: String, sessionKey: String) async -> Bool {
+        let cleanProvider = provider.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanKey = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanProvider.isEmpty, !cleanKey.isEmpty else {
+            actionError = "Choose a session to resume."
+            return false
+        }
+        return await sendConfig(
+            [
+                "action": "resume_session",
+                "provider": cleanProvider,
+                "sessionKey": cleanKey,
+            ],
+            logLabel: "resume_session(\(cleanProvider))"
+        )
     }
 
     @discardableResult

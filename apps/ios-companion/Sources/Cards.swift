@@ -2,26 +2,28 @@ import Foundation
 
 /// JOAT's own notifications on the phone, and the resting dashboard's margin
 /// facts. Ports, by file:
-///   channels/cards.py     Card, CardLog (ten kept, read/unread by card id)
+///   channels/cards.py     Card, CardLog (25 kept, read/unread by card id,
+///                         persistent origin tombstones across reconnects)
 ///   services/session.py   the Main card, the Tray's two previous rows,
 ///                         notification_stack → hud.notifications
 ///   services/ambient.py   hud.ambient: temperature, sky word, unread count
 ///   capabilities.py       the Notifications page (list, detail, clear)
 ///
 /// What the phone cannot do: read other apps' notifications. These cards are
-/// the ones JOAT itself raises (Pomodoro, reminders) and texts a Shortcuts
-/// automation hands over (Messages.swift).
+/// the ones JOAT itself raises (Pomodoro, reminders), Gmail arrivals, and
+/// texts relayed from the Mac or Shortcuts automations (Messages.swift).
 final class Cards: BrainFeature {
     let name = "cards"
     let uplinkKinds: Set<String> = ["input", "location"]
 
-    struct Card {
+    struct Card: Codable, Equatable {
         let id: String
         let source: String
         let channel: String
         let summary: String
         let body: String
         let at: Date
+        var originId: String? = nil
 
         /// cards.py Card.render: who, then what.
         var render: String {
@@ -37,46 +39,146 @@ final class Cards: BrainFeature {
         }
     }
 
-    /// Enough that a backlog of texts shown on reconnect keeps every one in
-    /// the notifications list (the tray still shows the newest few).
-    static let keep = 50
+    private struct PersistedStore: Codable {
+        var entries: [Card]
+        var acknowledged: [String]
+        var dismissedOriginIds: [String]
+    }
+
+    static let storeKey = "joat.cards.store.v2"
+    /// Matched 1:1 across `hud.notifications`, `hud.ambient`, and `NOTIFICATIONS` list.
+    static let keep = 25
+    static let dismissedOriginKeep = 200
+
     private let link: PluginLink
-    private var entries: [Card] = []
+    private let defaults: UserDefaults
+    private(set) var entries: [Card] = []
     private var acknowledged: Set<String> = []
+    /// Bounded FIFO tombstones of dismissed `originId`s so reconnecting the
+    /// plugin or restarting JOAT Brain never resurrects dismissed notifications.
+    private(set) var dismissedOriginIds: [String] = []
     /// The card Main is showing; the tray lists the ones before it.
     private var mainCardId: String?
 
-    init(link: PluginLink) { self.link = link }
+    init(link: PluginLink, defaults: UserDefaults = .standard) {
+        self.link = link
+        self.defaults = defaults
+        loadPersisted()
+    }
+
+    private func loadPersisted() {
+        guard let data = defaults.data(forKey: Self.storeKey) else { return }
+        do {
+            let decoded = try JSONDecoder().decode(PersistedStore.self, from: data)
+            entries = Array(decoded.entries.suffix(Self.keep))
+            acknowledged = Set(decoded.acknowledged).intersection(entries.map(\.id))
+            var seen = Set<String>()
+            var dedupedOrigins: [String] = []
+            for raw in decoded.dismissedOriginIds.reversed() {
+                let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !clean.isEmpty, seen.insert(clean).inserted {
+                    dedupedOrigins.append(clean)
+                }
+            }
+            dismissedOriginIds = Array(dedupedOrigins.reversed().suffix(Self.dismissedOriginKeep))
+        } catch {
+            if defaults === UserDefaults.standard {
+                SafeStore.quarantine(defaultsKey: Self.storeKey, data, error)
+            } else {
+                defaults.removeObject(forKey: Self.storeKey)
+            }
+        }
+    }
+
+    private func recordDismissedOrigin(_ originId: String?) {
+        guard let clean = originId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !clean.isEmpty else { return }
+        if let idx = dismissedOriginIds.firstIndex(of: clean) {
+            dismissedOriginIds.remove(at: idx)
+        }
+        dismissedOriginIds.append(clean)
+        if dismissedOriginIds.count > Self.dismissedOriginKeep {
+            dismissedOriginIds.removeFirst(dismissedOriginIds.count - Self.dismissedOriginKeep)
+        }
+    }
+
+    private func persist() {
+        let payload = PersistedStore(
+            entries: entries,
+            acknowledged: Array(acknowledged).sorted(),
+            dismissedOriginIds: dismissedOriginIds
+        )
+        if let data = try? JSONEncoder().encode(payload) {
+            defaults.set(data, forKey: Self.storeKey)
+        }
+    }
 
     // MARK: - Raising a card
 
-    func post(source: String, channel: String, summary: String, body: String = "") {
-        let card = Card(id: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
-                        source: source, channel: channel, summary: summary, body: body, at: Date())
+    func post(
+        source: String,
+        channel: String,
+        summary: String,
+        body: String = "",
+        at: Date = Date(),
+        originId: String? = nil
+    ) {
+        let cleanOrigin: String? = {
+            guard let raw = originId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty else { return nil }
+            return raw
+        }()
+        if let cleanOrigin {
+            if dismissedOriginIds.contains(cleanOrigin) || entries.contains(where: { $0.originId == cleanOrigin }) {
+                Log.add("cards: skipped duplicate/dismissed origin \(cleanOrigin)")
+                return
+            }
+        }
+        let card = Card(
+            id: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+            source: source,
+            channel: channel,
+            summary: summary,
+            body: body,
+            at: at,
+            originId: cleanOrigin
+        )
         entries.append(card)
         if entries.count > Self.keep { entries.removeFirst(entries.count - Self.keep) }
         acknowledged.formIntersection(entries.map(\.id))
-        // session._paint: the card in Main at notification brightness.
+        persist()
+        mainCardId = card.id
+        // Publish `hud.notifications` + `hud.ambient` BEFORE `hud.text` so the
+        // plugin's `notificationStack` already holds the card's true `at`
+        // timestamp, full `body`, and 1:1 unread count when `popNotification` renders!
+        publish()
         link.send(["kind": "hud.text", "containerId": 2, "text": card.render,
                    "textColor": 3, "contentKind": "notification", "traceId": card.id])
-        mainCardId = card.id
         Log.add("tx card \(card.source) · \(card.channel): \(card.summary)")
-        publish()
     }
 
     var active: [Card] { entries.filter { !acknowledged.contains($0.id) } }
 
     @discardableResult
     func acknowledge(_ id: String) -> Bool {
-        guard !acknowledged.contains(id), entries.contains(where: { $0.id == id }) else { return false }
-        acknowledged.insert(id)
-        return true
+        guard let card = entries.first(where: { $0.id == id }) else { return false }
+        let inserted = acknowledged.insert(id).inserted
+        recordDismissedOrigin(card.originId)
+        if inserted || card.originId != nil {
+            persist()
+        }
+        return inserted
     }
 
     /// Clear what the page showed, never a card that arrived after it.
     func dismiss(_ ids: [String]) {
+        let idSet = Set(ids)
         let wasActive = Set(active.map(\.id))
-        acknowledged.formUnion(Set(entries.map(\.id)).intersection(ids))
+        for card in entries where idSet.contains(card.id) {
+            acknowledged.insert(card.id)
+            recordDismissedOrigin(card.originId)
+        }
+        persist()
         ids.filter(wasActive.contains).forEach(retire)
         publish()
     }
@@ -91,7 +193,7 @@ final class Cards: BrainFeature {
     func publish() {
         let unread = active
         link.send(["kind": "hud.notifications",
-                   "cards": unread.reversed().prefix(10).map { c -> [String: Any] in
+                   "cards": unread.reversed().prefix(Self.keep).map { c -> [String: Any] in
                        var body = (c.body.isEmpty ? c.summary : c.body).split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
                        if body.count > 600 { body = String(body.prefix(599)).trimmingCharacters(in: .whitespaces) + "…" }
                        return ["id": c.id, "app": String(c.channel.prefix(48)), "sender": String(c.source.prefix(48)),

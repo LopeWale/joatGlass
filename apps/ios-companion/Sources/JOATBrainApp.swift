@@ -57,7 +57,7 @@ final class JOATRuntime: NSObject, UNUserNotificationCenterDelegate {
         UNUserNotificationCenter.current().delegate = self
         server.start()
         keepAlive.start()
-        let b = Brain(server: server, stt: stt, shadow: nil, voice: voice)
+        let b = Brain(server: server, stt: stt, shadow: nil, voice: voice, macTerminal: macTerminal)
         brain = b
         let cues = Cues(claude: ClaudeLink())
         cues.prep = prep

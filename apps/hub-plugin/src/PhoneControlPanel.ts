@@ -1,4 +1,3 @@
-import { HANDOFF_LAST_MAC_KEY } from './BrainHandoff';
 import type { LinkState, MacLink } from './MacLink';
 import type { Settings } from './Settings';
 import type { ResumePolicy } from './types';
@@ -71,11 +70,13 @@ export class PhoneControlPanel {
     const handoff = this.options.handoff;
     const handoffActive = handoff?.active === true;
     const primaryUrl = this.primaryUrl();
-    const pinnedMacUrl = this.resolvePinnedMacUrl();
 
     const pinnedRow = document.getElementById('p-mac-pinned-row');
-    if (pinnedRow) pinnedRow.hidden = pinnedMacUrl === undefined;
-    this.write('p-mac-pinned', pinnedMacUrl ? `${brainLabel(pinnedMacUrl)} (always)` : '');
+    if (pinnedRow) pinnedRow.hidden = !handoffActive;
+    this.write('p-mac-pinned', handoffActive ? brainLabel(link.activeUrl) : '');
+    this.write('brain-help', isPhoneBrain(primaryUrl)
+      ? 'Connected to JOAT Brain on this iPhone. Connect switches only when you choose another brain.'
+      : 'Connect retries or switches to the brain you choose.');
 
     if (this.brain && !this.userEditedBrain && this.brain.value !== primaryUrl) {
       this.brain.value = primaryUrl;
@@ -96,9 +97,7 @@ export class PhoneControlPanel {
         ? handoffSummary
         : state === 'connected'
           ? isPhoneBrain(link.activeUrl)
-            ? pinnedMacUrl
-              ? `JOAT Brain is active on this iPhone. Messages & Agent Terminal stay connected to ${brainLabel(pinnedMacUrl)}.`
-              : 'JOAT Brain is active on this iPhone. Add your Mac connection when packaging to use Messages & Agent Terminal.'
+            ? 'JOAT Brain is active on this iPhone. All glasses pages stay connected locally on this iPhone.'
             : 'The Mac connection is authenticated. AI and feature availability still depend on the services configured in that Mac’s JOAT app.'
           : isPhoneBrain(link.activeUrl)
             ? 'Open JOAT Brain on this iPhone, then reconnect.'
@@ -126,23 +125,6 @@ export class PhoneControlPanel {
     const handoff = this.options.handoff;
     if (handoff?.active && handoff.homeUrl) return handoff.homeUrl;
     return this.options.link.activeUrl;
-  }
-
-  private resolvePinnedMacUrl(): string | undefined {
-    const hasPhone = this.options.urls.some((url) => isPhoneBrain(url));
-    const macUrls = this.options.urls.filter((url) => !isPhoneBrain(url));
-    if (!hasPhone || macUrls.length === 0) return undefined;
-    const remembered = this.options.handoff?.lastMacUrl ?? this.readStoredLastMac();
-    if (remembered && macUrls.includes(remembered)) return remembered;
-    return macUrls[0];
-  }
-
-  private readStoredLastMac(): string | null {
-    try {
-      return typeof localStorage !== 'undefined' ? localStorage.getItem(HANDOFF_LAST_MAC_KEY) : null;
-    } catch {
-      return null;
-    }
   }
 
   private describeHandoff(

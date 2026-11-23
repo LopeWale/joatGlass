@@ -24,6 +24,8 @@ final class Reminders: BrainFeature, VoiceCommand, PanelProvider {
     var publishPanel: (() -> Void)?
     /// Ask a question; the next sentence (no wake word needed) is the answer.
     var askFollowUp: ((_ question: String, _ answer: @escaping (String) -> Void) -> Void)?
+    /// Publishes an answered spoken list query onto JOAT's conversation card.
+    var onListAnswered: ((_ userRequest: String, _ answer: String) -> Void)?
 
     init(link: PluginLink, hud: Hud, confirm: ConfirmGate) {
         self.link = link
@@ -126,7 +128,7 @@ final class Reminders: BrainFeature, VoiceCommand, PanelProvider {
     static let complete = Grammar.regex(
         #"^(?:complete|finish|check off|tick off) (?:the )?reminder (?<title>.+)$|^mark (?:the )?reminder (?<titletwo>.+?) (?:as )?(?:done|complete|completed)$"#)
     static let list = Grammar.regex(
-        #"^(?:what are|what's|what is|read|tell me|show|list)(?: me)? (?:my |the )?(?:open )?reminders(?: today| this week)?$"#)
+        #"^(?:what are|what's|what is|do i have(?: any)?|check|read|tell me|show|list)(?: me)? (?:my |the |any )?(?:open )?reminders(?: right now| today| this week| for today)?$"#)
 
     func handle(_ request: String) -> CommandReply? {
         let t = Grammar.normalize(request)
@@ -149,6 +151,7 @@ final class Reminders: BrainFeature, VoiceCommand, PanelProvider {
             return CommandReply(text: "", activated: false)
         }
         if Grammar.match(Self.list, t) != nil {
+            let spokenRequest = request.trimmingCharacters(in: .whitespacesAndNewlines)
             Task { @MainActor in
                 let open = await store.incomplete()
                 let text: String
@@ -158,8 +161,12 @@ final class Reminders: BrainFeature, VoiceCommand, PanelProvider {
                     let names = open.prefix(3).map { $0.title ?? "Reminder" }.joined(separator: "; ")
                     text = "You have \(open.count) open reminder\(open.count == 1 ? "" : "s"): \(names)\(open.count > 3 ? "; and more." : ".")"
                 }
-                self.hud.receipt(text)
-                self.say?(text)
+                if let onListAnswered = self.onListAnswered {
+                    onListAnswered(spokenRequest, text)
+                } else {
+                    self.hud.receipt(text)
+                    self.say?(text)
+                }
             }
             return CommandReply(text: "", activated: false)
         }

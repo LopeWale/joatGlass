@@ -245,6 +245,7 @@ class WhisperServeEngine(SttEngine):
         ready_timeout_s: float = DEFAULT_READY_TIMEOUT_S,
         temperature_fallback_count: int = 0,
         without_timestamps: bool = True,
+        language: str | None = "en",
         model_dir: Path | None = None,
         batch_deadline_s: float = DEFAULT_BATCH_DEADLINE_S,
     ) -> None:
@@ -274,6 +275,7 @@ class WhisperServeEngine(SttEngine):
         self._ready_timeout_s = ready_timeout_s
         self._temperature_fallback_count = temperature_fallback_count
         self._without_timestamps = without_timestamps
+        self._language = language
         self._buffer = bytearray()
         self._proc: asyncio.subprocess.Process | None = None
         self._ready = False
@@ -437,8 +439,12 @@ class WhisperServeEngine(SttEngine):
                 self._binary, "serve", "--model", self._model,
                 "--download-model-path", str(self._model_dir),
                 "--host", "127.0.0.1", "--port", str(self._port),
-                "--temperature-fallback-count", str(self._temperature_fallback_count),
             ]
+            if self._language:
+                cmd.extend(["--language", self._language])
+            cmd.extend([
+                "--temperature-fallback-count", str(self._temperature_fallback_count),
+            ])
             if self._without_timestamps:
                 cmd.append("--without-timestamps")
         spawning = asyncio.create_task(asyncio.create_subprocess_exec(
@@ -687,6 +693,8 @@ class WhisperServeEngine(SttEngine):
 
     def _post(self, wav_payload: bytes, *, bias: bool = True) -> str:
         fields = {"model": self._model, "response_format": "json"}
+        if self._language:
+            fields["language"] = self._language
         if bias and self._prompt:
             fields["prompt"] = self._prompt
         body, content_type = multipart(

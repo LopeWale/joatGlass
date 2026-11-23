@@ -988,7 +988,7 @@ final class PhoneToolBelt {
                         ],
                         "open_on_glasses": [
                             "type": "boolean",
-                            "description": "Whether to hand the glasses screen to the Mac mini's live Agent Terminal after running (defaults to true for 'send_instruction').",
+                            "description": "Whether to open Agent Terminal on the glasses (shown by the phone, relayed from the Mac) after running (defaults to true for 'send_instruction').",
                         ],
                     ],
                     "required": ["action"],
@@ -999,7 +999,65 @@ final class PhoneToolBelt {
                     return await belt.runAgentTerminalAction(args)
                 }
             ),
+
+            // 30. glasses_command — every deterministic VoiceCommand, reachable
+            // from conversation through the same chain the wake word uses.
+            PhoneTool(
+                name: "glasses_command",
+                description: "Run a short spoken-style glasses command through JOAT's deterministic voice-command chain, exactly as if the wearer had said it after \"Hey JOAT\". "
+                    + "Use it for any glasses or app capability no other tool covers, or when the wearer's request is itself a command: "
+                    + "Pomodoro/timer control (\"start a pomodoro\", \"set focus to 30 minutes\", \"skip the break\", \"pomodoro status\"), "
+                    + "opening or switching capability pages (\"open planning\", \"show my notes\", \"go home\"), news or search result numbers (\"read story 2\", \"open result 3\"), "
+                    + "QuickNotes and voice-note commands (\"start a voice note\", \"make reminders from that note\"), \"reply …\" to the thread on the lens, "
+                    + "spoken replies on/off, and navigation phrases. Pass one imperative utterance without the wake word. "
+                    + "If it reports no glasses command matched, answer or use a more specific tool instead.",
+                parameters: [
+                    "type": "object",
+                    "properties": [
+                        "utterance": [
+                            "type": "string",
+                            "description": "The command as the wearer would say it, without \"JOAT\" (e.g. \"start a 25 minute pomodoro\").",
+                        ],
+                    ],
+                    "required": ["utterance"],
+                ],
+                // Dismiss only when the matched command actually claims the lens;
+                // plain-text status replies and non-matches leave the conversation live.
+                dismissesConversationBeforeRun: false,
+                run: { [weak belt] args in
+                    guard let belt else { return PhoneToolOutcome("error: assistant unavailable") }
+                    return belt.runGlassesCommand(args)
+                }
+            ),
         ]
+    }
+
+    // MARK: - 30: glasses_command
+
+    /// Runs `utterance` through `Brain.routeCommand` (the deterministic
+    /// VoiceCommand chain). Activated commands take the lens with their
+    /// receipt; a command that drives the lens itself (a question, a
+    /// confirmation) claims it silently; a plain text answer returns to the
+    /// model to relay.
+    private func runGlassesCommand(_ args: [String: Any]) -> PhoneToolOutcome {
+        guard let brain else { return PhoneToolOutcome("error: assistant unavailable") }
+        guard var utterance = Self.stringArg(args, "utterance") else {
+            return PhoneToolOutcome("error: utterance is required.")
+        }
+        if let stripped = WakeGate.strip(utterance), !stripped.isEmpty { utterance = stripped }
+        guard let reply = brain.routeCommand(utterance) else {
+            return PhoneToolOutcome("No glasses command matched \"\(utterance.prefix(120))\". Answer directly or use a more specific tool.")
+        }
+        if reply.text.isEmpty {
+            dismissConversation()
+            return PhoneToolOutcome("Done: the command is now on the glasses.", claimsLens: true)
+        }
+        if reply.activated {
+            dismissConversation()
+            if !reply.suppressesHudReceipt { brain.hud.receipt(reply.text) }
+            return PhoneToolOutcome(reply.text, claimsLens: true, spokenReceipt: reply.text)
+        }
+        return PhoneToolOutcome(reply.text)
     }
 
     // MARK: - 1 & 2: Calendar & Reminders
@@ -2353,7 +2411,22 @@ final class PhoneToolBelt {
             let receipt = "Opening Activity."
             return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: receipt)
 
-        case "agent terminal", "agentterminal", "terminal", "claude", "claude code", "codex", "antigravity":
+        case "claude", "claude code":
+            brain.glassesTerminal.openByVoice(agentHint: "claude")
+            let receipt = "Opening Claude Code."
+            return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: receipt)
+
+        case "codex":
+            brain.glassesTerminal.openByVoice(agentHint: "codex")
+            let receipt = "Opening Codex."
+            return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: receipt)
+
+        case "antigravity":
+            brain.glassesTerminal.openByVoice(agentHint: "antigravity")
+            let receipt = "Opening Antigravity."
+            return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: receipt)
+
+        case "agent terminal", "agentterminal", "terminal":
             brain.capabilities.openByVoice("Agent Terminal")
             let receipt = "Opening Agent Terminal."
             return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: receipt)
@@ -2405,7 +2478,7 @@ final class PhoneToolBelt {
     }
 
     private func runTerminalStatus() async -> PhoneToolOutcome {
-        let terminal = AssistantRuntimeHooks.sharedMacTerminal?() ?? fallbackMacTerminal
+        let terminal = AssistantRuntimeHooks.sharedMacTerminal?() ?? brain?.macTerminal ?? fallbackMacTerminal
         terminal.reloadConfig()
         guard terminal.configured else {
             return PhoneToolOutcome(
@@ -2489,7 +2562,7 @@ final class PhoneToolBelt {
             return PhoneToolOutcome("error: action is required.")
         }
 
-        let terminal = AssistantRuntimeHooks.sharedMacTerminal?() ?? fallbackMacTerminal
+        let terminal = AssistantRuntimeHooks.sharedMacTerminal?() ?? brain.macTerminal
         terminal.reloadConfig()
         guard terminal.configured else {
             return PhoneToolOutcome(
@@ -2539,7 +2612,7 @@ final class PhoneToolBelt {
             if openOnGlasses {
                 let spoken = "Sent to \(target.label) on your Mac."
                 dismissConversation()
-                brain.capabilities.openByVoice("Agent Terminal")
+                brain.glassesTerminal.openSessionByVoice(provider: target.provider)
                 return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: spoken)
             }
             return PhoneToolOutcome(receipt, claimsLens: false)
@@ -2556,8 +2629,11 @@ final class PhoneToolBelt {
                 : "Denied pending tool request\(agentSuffix) on your Mac."
             let receipt = terminal.notice ?? fallbackNotice
             if Self.boolArg(args, "open_on_glasses") == true {
+                let targetProvider = explicitTarget?.provider
+                    ?? Self.normalizeAgentTarget(terminal.state.assistantSeat)?.provider
+                    ?? "claude"
                 dismissConversation()
-                brain.capabilities.openByVoice("Agent Terminal")
+                brain.glassesTerminal.openSessionByVoice(provider: targetProvider)
                 return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: receipt)
             }
             return PhoneToolOutcome(receipt, claimsLens: false)
@@ -2571,8 +2647,11 @@ final class PhoneToolBelt {
             let agentSuffix = explicitTarget.map { " on \($0.label)" } ?? ""
             let receipt = terminal.notice ?? "Cancelled active run\(agentSuffix) on your Mac."
             if Self.boolArg(args, "open_on_glasses") == true {
+                let targetProvider = explicitTarget?.provider
+                    ?? Self.normalizeAgentTarget(terminal.state.assistantSeat)?.provider
+                    ?? "claude"
                 dismissConversation()
-                brain.capabilities.openByVoice("Agent Terminal")
+                brain.glassesTerminal.openSessionByVoice(provider: targetProvider)
                 return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: receipt)
             }
             return PhoneToolOutcome(receipt, claimsLens: false)
@@ -2592,7 +2671,7 @@ final class PhoneToolBelt {
             let receipt = terminal.notice ?? "Started a new \(target.label) session on your Mac."
             if Self.boolArg(args, "open_on_glasses") == true {
                 dismissConversation()
-                brain.capabilities.openByVoice("Agent Terminal")
+                brain.glassesTerminal.openSessionByVoice(provider: target.provider)
                 return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: receipt)
             }
             return PhoneToolOutcome(receipt, claimsLens: false)
@@ -2616,7 +2695,7 @@ final class PhoneToolBelt {
             let receipt = terminal.notice ?? "Switched \(target.label) to \(model) on your Mac."
             if Self.boolArg(args, "open_on_glasses") == true {
                 dismissConversation()
-                brain.capabilities.openByVoice("Agent Terminal")
+                brain.glassesTerminal.openSessionByVoice(provider: target.provider)
                 return PhoneToolOutcome(receipt, claimsLens: true, spokenReceipt: receipt)
             }
             return PhoneToolOutcome(receipt, claimsLens: false)

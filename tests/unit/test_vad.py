@@ -352,3 +352,163 @@ class TestRoomBeforeSpeech:
         for _ in range(3):
             vad.feed(self.SPEECH)
         assert vad.in_speech
+
+
+class TestMessageDictationRegressions:
+    """2026-11-22 live hardware regressions during spoken Messages replies:
+    1) Sustained dictation poisoned _recent and pushed trigger to 0.459 (-6.7 dBFS),
+       making normal speech unable to open VAD ('prompt commit before any speech').
+    2) A single temple-tap spike followed by 200 ms quiet left _speech_since_quiet
+       set, causing fence_prompt() to enter _prompt_discarding and eat the entire
+       dictated message when the wearer began speaking within 1.0 s.
+    3) Ordinary 1.0 s hangover cut multi-clause dictated messages in half because
+       the first completed utterance immediately consumes the single-use PromptTicket.
+    """
+
+    def test_sustained_speech_never_poisons_room_floor_or_exceeds_max_trigger(self) -> None:
+        vad = RmsVad(arm_after_floor=True)
+        room = batch(400)        # ~0.0122 RMS normal G2 room tone
+        loud_speech = batch(11_000)  # ~0.336 RMS close-mic speech
+        normal_reply = batch(2_000)  # ~0.061 RMS conversational reply
+
+        for _ in range(20):
+            vad.feed(room)
+        baseline_trigger = vad.trigger
+        assert 0.018 <= baseline_trigger <= 0.030
+
+        # 30 seconds (150 batches) of sustained dictation with brief retry pauses:
+        for i in range(150):
+            vad.feed(room if i in (50, 51, 105, 106) else loud_speech)
+        assert vad.floor <= vad.max_floor_rms
+        assert vad.trigger == vad.max_trigger
+        assert vad.trigger < rms(normal_reply)
+
+        vad.reset()
+        assert vad.feed(normal_reply) is None
+        assert vad.feed(normal_reply) is None
+        assert vad.in_speech is True
+
+    def test_quiet_to_loud_ambient_transition_adapts_without_floor_lockup(self) -> None:
+        vad = RmsVad(arm_after_floor=True)
+        quiet_room = batch(400)       # ~0.0122 RMS quiet room
+        loud_ambient = batch(1_500)   # ~0.0458 RMS loud ambient room
+        normal_reply = batch(2_000)   # ~0.0610 RMS conversational speech
+
+        for _ in range(40):
+            vad.feed(quiet_room)
+        quiet_floor = vad.floor
+        assert 0.012 <= quiet_floor <= 0.013
+
+        for _ in range(120):
+            vad.feed(loud_ambient)
+
+        # _recent adapts past the old ~0.012 floor instead of freezing while _in_speech,
+        # clamping floor at max_floor_rms (0.028) and capping trigger at 0.050:
+        assert vad.floor > quiet_floor * 2
+        assert vad.floor == vad.max_floor_rms
+        assert vad.trigger == 0.050
+        assert rms(loud_ambient) < vad.trigger
+        assert vad.in_speech is False
+
+        assert vad.feed(normal_reply) is None
+        assert vad.feed(normal_reply) is None
+        assert vad.in_speech is True
+
+    def test_loud_ambient_room_still_adapts_up_to_ceiling_without_runaway(self) -> None:
+        vad = RmsVad(arm_after_floor=True)
+        extreme = batch(15_000)  # ~0.458 RMS
+        for _ in range(120):
+            vad.feed(extreme)
+        assert vad.trigger == vad.max_trigger
+
+    def test_temple_tap_spike_before_fence_does_not_discard_following_speech(self) -> None:
+        vad = RmsVad(adaptive=False, start_batches=2, hangover_batches=5)
+        # Single 200 ms tap spike on the temple arm, then 200 ms UI turn-around quiet:
+        assert vad.feed(LOUD) is None
+        assert vad.feed(QUIET) is None
+        assert vad.in_speech is False
+
+        vad.fence_prompt()
+
+        assert vad.prompt_discarding is False
+        assert vad.feed(LOUD) is None
+        assert vad.feed(LOUD) is None
+        assert vad.in_speech is True
+
+    def test_prompt_fence_clears_after_short_breath_despite_long_dictation_hangover(self) -> None:
+        vad = RmsVad(
+            adaptive=False, start_batches=2, hangover_batches=5,
+            prompt_hangover_batches=11, fence_quiet_batches=2,
+        )
+        vad.feed(LOUD)
+        vad.feed(LOUD)
+        assert vad.in_speech is True
+
+        vad.fence_prompt()
+        assert vad.prompt_discarding is True
+
+        # 400 ms (2 batches) of quiet clears pre-prompt speech, not 1.0 s or 2.2 s:
+        assert vad.feed(QUIET, prompt_active=True) is None
+        assert vad.prompt_discarding is True
+        assert vad.feed(QUIET, prompt_active=True) is None
+        assert vad.prompt_discarding is False
+
+    def test_continuous_pre_prompt_speech_never_opens_mid_stream_without_quiet_boundary(self) -> None:
+        vad = RmsVad(
+            adaptive=False, start_batches=2, hangover_batches=5,
+            prompt_hangover_batches=11, fence_quiet_batches=2,
+        )
+        vad.feed(LOUD)
+        vad.feed(LOUD)
+        assert vad.in_speech is True
+
+        vad.fence_prompt()
+        assert vad.prompt_discarding is True
+        assert vad.in_speech is False
+
+        # Continuous pre-prompt speech (10 s) and sub-400ms (1-batch) breaths never
+        # break prompt isolation or open mid-stream without a real 400 ms quiet boundary:
+        for i in range(50):
+            sample = QUIET if i in (15, 35) else LOUD
+            assert vad.feed(sample, prompt_active=True) is None
+            assert vad.prompt_discarding is True
+            assert vad.in_speech is False
+
+        # An actual 400 ms (2-batch) quiet boundary clears the fence:
+        assert vad.feed(QUIET, prompt_active=True) is None
+        assert vad.prompt_discarding is True
+        assert vad.feed(QUIET, prompt_active=True) is None
+        assert vad.prompt_discarding is False
+
+        # Fresh post-boundary speech opens cleanly:
+        assert vad.feed(LOUD, prompt_active=True) is None
+        assert vad.feed(LOUD, prompt_active=True) is None
+        assert vad.in_speech is True
+
+    def test_prompt_active_uses_extended_hangover_for_clause_pauses(self) -> None:
+        vad = RmsVad(
+            adaptive=False, start_batches=2, hangover_batches=5,
+            prompt_hangover_batches=11,
+        )
+        vad.feed(LOUD, prompt_active=True)
+        vad.feed(LOUD, prompt_active=True)
+        assert vad.in_speech is True
+        assert vad.closing is False
+
+        # A 1.6 s (8-batch) mid-sentence pause while thinking of words stays open:
+        for _ in range(8):
+            assert vad.feed(QUIET, prompt_active=True) is None
+        assert vad.in_speech is True
+        assert vad.closing is True
+
+        # Resuming speech (2 consecutive loud batches) continues the same message:
+        assert vad.feed(LOUD, prompt_active=True) is None
+        assert vad.feed(LOUD, prompt_active=True) is None
+        assert vad.closing is False
+        for _ in range(10):
+            assert vad.feed(QUIET, prompt_active=True) is None
+        completed = vad.feed(QUIET, prompt_active=True)
+        assert completed is not None
+        assert not vad.in_speech
+        assert vad.closing is False
+

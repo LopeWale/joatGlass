@@ -2437,46 +2437,23 @@ describe('queued conversational Terminal prelude ownership', () => {
   });
 });
 
-describe('Mac handoff interception, single-paint prepareMacHandoffPage, and hardened openOnMac', () => {
-  it('intercepts Messages, Agent Terminal, and Activity directly on the phone brain without round-tripping to the iPhone, while forwarding when already on the Mac', async () => {
+describe('Phone-first capmenu routing & opt-in prepareMacHandoffPage / openOnMac', () => {
+  it('routes Messages, Agent Terminal, and Activity directly as capmenu on the connected brain without intercepting or switching sockets', async () => {
     const { menu, lists, sent, surfaceEvents } = rig();
-    const intercepted: string[] = [];
-    let onPhoneBrain = true;
-    menu.handoffCapability = (capability) => {
-      if (!onPhoneBrain) return false;
-      intercepted.push(capability);
-      return true;
-    };
 
-    for (const name of ['Messages', 'Agent Terminal', 'Activity'] as const) {
+    for (const name of ['Messages', 'Agent Terminal', 'Activity', 'Mail'] as const) {
       await menu.openFromContextualMenu(CAPABILITIES.indexOf(name));
+      expect(lists[lists.length - 1]).toEqual([`Loading recent ${name.toLowerCase()}…`]);
+      expect(sent[sent.length - 1]?.event).toMatchObject({
+        containerName: 'capmenu',
+        eventType: 0,
+        selectedIndex: CAPABILITIES.indexOf(name),
+        selectedName: name,
+      });
     }
-    expect(intercepted).toEqual(['Messages', 'Agent Terminal', 'Activity']);
-    expect(lists).toHaveLength(0);
-    expect(sent).toHaveLength(0);
-    expect(surfaceEvents).toHaveLength(0);
-
-    // Non-handoff capabilities still open on the phone brain immediately.
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Mail'));
-    expect(lists).toEqual([['Loading recent mail…']]);
-    expect(sent).toHaveLength(1);
-    expect(sent[0]?.event).toMatchObject({ containerName: 'capmenu', selectedName: 'Mail' });
-
-    // Once connected to the Mac brain, picking Messages and Agent Terminal sends capmenu normally.
-    onPhoneBrain = false;
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Messages'));
-    expect(sent[sent.length - 1]?.event).toMatchObject({
-      containerName: 'capmenu',
-      selectedIndex: CAPABILITIES.indexOf('Messages'),
-      selectedName: 'Messages',
-    });
-
-    await menu.openFromContextualMenu(CAPABILITIES.indexOf('Agent Terminal'));
-    expect(sent[sent.length - 1]?.event).toMatchObject({
-      containerName: 'capmenu',
-      selectedIndex: CAPABILITIES.indexOf('Agent Terminal'),
-      selectedName: 'Agent Terminal',
-    });
+    expect(
+      surfaceEvents.filter((ev) => (ev.event as { selectedName?: string } | undefined)?.selectedName === 'surface-feature'),
+    ).toHaveLength(4);
   });
 
   it('prepareMacHandoffPage + openOnMac paints once and avoids a duplicate Loading rebuild', async () => {

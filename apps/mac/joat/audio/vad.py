@@ -53,6 +53,16 @@ class RmsVad:
     never closed them, because a noisy room produces a spike more often than
     once per 1.6s. 1.0s is the measured middle."""
 
+    prompt_hangover_batches: int | None = None
+    """Optional longer hangover (e.g. 11 x 200ms = 2.2s) while dictating an
+    armed prompt answer, where the first completed segment consumes the single-
+    use prompt ticket immediately and cannot be rejoined later."""
+
+    fence_quiet_batches: int = 2
+    """Quiet duration (2 x 200ms = 400ms, capped at hangover_batches) needed to
+    clear pre-prompt speech across fence_prompt(), so a brief breath releases
+    the fence instead of demanding a full 1.0s-2.2s silence."""
+
     start_batches: int = 2
     """Consecutive loud batches required to ARM. A single spike (keystroke,
     door, chair) is not speech, and without this debounce one stray packet
@@ -79,6 +89,16 @@ class RmsVad:
     At 1.6x the trigger sat at 0.0177 and passed 30% of ALL packets, so the
     hangover never elapsed; 1.8x puts it at ~0.020, just above the median
     room level and below the speech band."""
+
+    max_floor_rms: float = 0.028
+    """Upper bound on room-tone floor samples so close-mic speech (0.10-0.48)
+    during sustained dictation cannot poison the 20th-percentile floor while
+    noisy ambient rooms (<= 0.028) still adapt without locking."""
+
+    max_trigger: float = 0.050
+    """Ceiling on adaptive trigger (-26.0 dBFS) so prolonged speech or loud
+    ambient rooms never drive the threshold above normal conversational voice
+    levels."""
 
     arm_after_floor: bool = False
     """Do not start an utterance until the room's floor is known (10 batches,
@@ -112,6 +132,10 @@ class RmsVad:
     @property
     def in_speech(self) -> bool:
         return self._in_speech
+
+    @property
+    def closing(self) -> bool:
+        return self._in_speech and self._closing_quiet_samples > 0
 
     def speech_so_far(self) -> bytes | None:
         """The utterance still being spoken, for a partial transcript; None
@@ -161,27 +185,35 @@ class RmsVad:
         floor = self.floor
         if not self.adaptive or floor <= 0.0:
             return self.speech_rms
-        return max(self.speech_rms, floor * self.noise_margin)
+        return max(self.speech_rms, min(self.max_trigger, floor * self.noise_margin))
 
-    def feed(self, pcm: bytes) -> bytes | None:
+    def feed(self, pcm: bytes, *, prompt_active: bool = False) -> bytes | None:
         """Returns the finished utterance's PCM when this batch closes one."""
         sample_count = len(pcm) // SAMPLE_WIDTH
         level = rms(pcm)
-        # History is fed unconditionally — a percentile floor needs to see
-        # speech to know what is NOT speech.
-        self._recent.append(level)
+        # History is fed unconditionally (clamped at max_floor_rms) so quiet-to-
+        # loud room transitions never lock _recent while _in_speech, and close-
+        # mic speech cannot poison the 20th-percentile floor past max_trigger.
+        self._recent.append(min(level, self.max_floor_rms))
         loud = level >= self.trigger
         if loud and self.arm_after_floor and self.adaptive and len(self._recent) < 10:
             loud = False  # the room is not known yet: nothing is "loud"
 
         # Prompt ownership needs an actual quiet boundary, independent of
         # ordinary segmentation's hard cap and isolated-noise tolerance.
+        # Single pre-speech tap spikes (< start_batches) that already subsided
+        # before fence_prompt() are not ongoing speech.
+        fence_quiet_samples = (
+            min(self.hangover_batches, max(1, self.fence_quiet_batches))
+            * NOMINAL_BATCH_SAMPLES
+        )
         if loud:
-            self._speech_since_quiet = True
-            self._prompt_quiet_samples = 0
+            if self._in_speech or self._prompt_discarding or self._speech_since_quiet:
+                self._speech_since_quiet = True
+                self._prompt_quiet_samples = 0
         elif self._speech_since_quiet:
             self._prompt_quiet_samples += sample_count
-            if self._prompt_quiet_samples >= self.hangover_batches * NOMINAL_BATCH_SAMPLES:
+            if self._prompt_quiet_samples >= fence_quiet_samples:
                 self._speech_since_quiet = False
                 self._prompt_quiet_samples = 0
         if self._prompt_discarding:
@@ -198,6 +230,8 @@ class RmsVad:
             if self._loud_run < self.start_batches:
                 return None  # debounce: not enough consecutive speech yet
             self._in_speech = True
+            self._speech_since_quiet = True
+            self._prompt_quiet_samples = 0
             self._closing_quiet_samples = 0
             self._closing_noise_chunks = 0
             # Seed with the pre-roll (which already includes this batch and
@@ -221,7 +255,12 @@ class RmsVad:
             return None
 
         self._closing_quiet_samples += sample_count
-        hangover_samples = self.hangover_batches * NOMINAL_BATCH_SAMPLES
+        effective_hangover = (
+            self.prompt_hangover_batches
+            if prompt_active and self.prompt_hangover_batches is not None
+            else self.hangover_batches
+        )
+        hangover_samples = effective_hangover * NOMINAL_BATCH_SAMPLES
         if self._closing_quiet_samples >= hangover_samples:
             return self._finish()
         return None

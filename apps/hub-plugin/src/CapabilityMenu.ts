@@ -98,7 +98,6 @@ function isQuickNotesReaderTitle(title: string): boolean {
 import { reminderDueCompleteFor } from './ReminderDueReceipt';
 import {
   CAPABILITIES,
-  HANDOFF_CAPABILITIES,
   QUICKNOTES_NOTE_TITLE,
   VOICE_REQUEST_PREFIX,
   type InputEventPayload,
@@ -306,8 +305,6 @@ export class CapabilityMenu {
   onHome: () => void = () => {};
   /** Live mic state, injected so the restored status line tells the truth. */
   micIsOpen: () => boolean = () => false;
-  /** Intercept Mac-pinned capabilities when connected to the phone brain. */
-  handoffCapability: (capability: HandoffCapability) => boolean = () => false;
 
   constructor(
     private readonly hud: HudPresenter,
@@ -1872,12 +1869,6 @@ export class CapabilityMenu {
     },
     initialSelectedIndex = 0,
   ): Promise<void> {
-    if (
-      (HANDOFF_CAPABILITIES as readonly string[]).includes(picked)
-      && this.handoffCapability(picked as HandoffCapability)
-    ) {
-      return;
-    }
     this.departSurface('feature');
     // Retrying an unopened Messages or Mail picker replaces its request on the brain.
     // There is no selected conversation or draft requiring a second Home.

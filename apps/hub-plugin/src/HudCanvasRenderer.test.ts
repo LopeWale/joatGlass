@@ -246,36 +246,8 @@ describe('home dashboard content', () => {
   });
 });
 
-describe('navigation map projection', () => {
-  const panel = {
-    latitude: 41.9147, longitude: -87.6379, zoom: 16,
-    width: 248, height: 168, image: {} as CanvasImageSource,
-  };
-
-  it('puts the panel centre exactly at the pane centre', () => {
-    const bounds = HudCanvas.NAVIGATION_MAP_PANEL;
-    const [x, y] = HudCanvas.projectMercatorPanel(
-      { latitude: panel.latitude, longitude: panel.longitude }, panel, bounds,
-    );
-    expect(x).toBeCloseTo(bounds.x + bounds.width / 2, 6);
-    expect(y).toBeCloseTo(bounds.y + bounds.height / 2, 6);
-  });
-
-  it('places north up and east right, at the Mapbox 512px tile scale', () => {
-    const bounds = HudCanvas.NAVIGATION_MAP_PANEL;
-    const north = HudCanvas.projectMercatorPanel(
-      { latitude: panel.latitude + 0.001, longitude: panel.longitude }, panel, bounds,
-    );
-    const east = HudCanvas.projectMercatorPanel(
-      { latitude: panel.latitude, longitude: panel.longitude + 0.001 }, panel, bounds,
-    );
-    expect(north[1]).toBeLessThan(bounds.y + bounds.height / 2);
-    expect(east[0]).toBeGreaterThan(bounds.x + bounds.width / 2);
-    // 512·2^16 px span 360°, so 0.001° of longitude is 93.2px — which is
-    // also what makes the 248px pane ≈220m wide. If this drifts, JOAT's
-    // route stops sitting on the roads the Mac drew.
-    expect(east[0] - (bounds.x + bounds.width / 2)).toBeCloseTo(93.2, 0);
-  });
+describe('navigation guidance layout', () => {
+  const panel = { latitude: 41.9147, longitude: -87.6379 };
   it('keeps changing mapped-guidance facts inside the left tile column', () => {
     const widths: Array<number | undefined> = [];
     const renderer = Object.create(HudCanvasRenderer.prototype) as HudCanvasRenderer;
@@ -312,7 +284,6 @@ describe('navigation map projection', () => {
           { latitude: panel.latitude + 0.001, longitude: panel.longitude + 0.001 },
         ],
         position: { latitude: panel.latitude, longitude: panel.longitude },
-        panel,
       },
     });
 

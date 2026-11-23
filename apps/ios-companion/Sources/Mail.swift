@@ -359,13 +359,24 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
         let source = multiAccount ? "[\(item.accountLabel)] \(item.fromName)" : item.fromName
         let summary = item.snippet.isEmpty ? item.subject : "\(item.subject) — \(item.snippet)"
         let fullBody = item.body.isEmpty ? summary : "\(item.subject)\n\(item.body)"
-        cards.post(source: source, channel: "Mail", summary: summary, body: fullBody)
+        cards.post(source: source, channel: "Mail", summary: summary, body: fullBody,
+                   at: item.at, originId: "mail:\(item.id)")
 
         let fresh = speak && Date().timeIntervalSince(item.at) <= Self.staleArrivalSeconds
         if fresh {
             say?("Email from \(item.fromName): \(item.subject)")
         }
         onChange?()
+    }
+
+    var activitySummaryRow: String {
+        if accountStore.enabledAccounts.isEmpty {
+            return "Mail · not connected"
+        }
+        let unread = threads.filter(\.unread).count
+        return unread > 0
+            ? "Mail · \(threads.count) threads (\(unread) unread)"
+            : "Mail · \(threads.count) recent threads"
     }
 
     private func findMessage(byId id: String) -> MessageItem? {
@@ -799,9 +810,10 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
         options: [.caseInsensitive]
     )
 
+    /// "reply …" with no name, only while an email thread is on the lens
+    /// (design 2026-11-23, Goal 4): an arrival alone is not enough.
     func takesUnaddressed(_ text: String, now: Date = Date()) -> Bool {
-        let withinWindow = now.timeIntervalSince(lastArrival) < Self.unaddressedSeconds || threadIdOnGlass != nil
-        guard withinWindow else { return false }
+        guard threadIdOnGlass != nil else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return Grammar.match(Messages.replyRe, trimmed) != nil
             || Grammar.match(Messages.bareReplyRe, Grammar.normalize(trimmed)) != nil

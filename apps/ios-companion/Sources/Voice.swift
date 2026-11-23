@@ -19,6 +19,9 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     ]
 
     @Published private(set) var speaking = false
+    /// Invoked on the main queue when an utterance finishes so `Brain` can give
+    /// the wearer their full follow-up window after spoken replies conclude.
+    var onFinishSpeaking: (() -> Void)?
     private var startedAt = Date.distantPast
     private var finishedAt = Date.distantPast
     private var synth = AVSpeechSynthesizer()
@@ -77,13 +80,23 @@ final class Voice: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         DispatchQueue.main.async { self.speaking = true; self.startedAt = Date() }
     }
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
-        DispatchQueue.main.async { self.speaking = s.isSpeaking; self.finishedAt = Date() }
+        DispatchQueue.main.async {
+            let nowSpeaking = s.isSpeaking
+            self.speaking = nowSpeaking
+            self.finishedAt = Date()
+            if !nowSpeaking { self.onFinishSpeaking?() }
+        }
     }
     /// A reply cut off (a call, another app's audio) ends too: otherwise
     /// `speaking` stayed true and every note sentence and follow-up after it
     /// was dropped as JOAT's own voice (review, 2026-10-30).
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) {
-        DispatchQueue.main.async { self.speaking = s.isSpeaking; self.finishedAt = Date() }
+        DispatchQueue.main.async {
+            let nowSpeaking = s.isSpeaking
+            self.speaking = nowSpeaking
+            self.finishedAt = Date()
+            if !nowSpeaking { self.onFinishSpeaking?() }
+        }
     }
 
     /// Was the phone talking when a sentence that ended at `moment` was

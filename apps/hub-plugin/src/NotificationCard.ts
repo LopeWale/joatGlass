@@ -268,3 +268,80 @@ export function overlayNotificationCard(
     ...(tiles.length > 0 ? { imageObject: tiles } : {}),
   });
 }
+
+export const PENDING_NOTIFICATION_DISMISS_STORAGE_KEY = 'joat.notifications.pending-dismiss.v1';
+export const MAX_PENDING_NOTIFICATION_DISMISSALS = 100;
+const NOTIFICATION_TRACE_ID_RE = /^[a-f0-9]{32}$/i;
+
+/**
+ * Bounded FIFO queue of `notification-dismiss` traceIds triggered while the
+ * brain link is disconnected or reconnecting, persisted in `localStorage` and
+ * flushed immediately after `announce()` on `state === 'connected'`.
+ */
+export class PendingNotificationDismissals {
+  private readonly queue: string[] = [];
+
+  constructor() {
+    this.load();
+  }
+
+  list(): string[] {
+    return [...this.queue];
+  }
+
+  enqueue(traceId: string): void {
+    if (!NOTIFICATION_TRACE_ID_RE.test(traceId)) return;
+    const lower = traceId.toLowerCase();
+    const existingIndex = this.queue.findIndex((item) => item.toLowerCase() === lower);
+    if (existingIndex >= 0) {
+      this.queue.splice(existingIndex, 1);
+    }
+    this.queue.push(traceId);
+    while (this.queue.length > MAX_PENDING_NOTIFICATION_DISMISSALS) {
+      this.queue.shift();
+    }
+    this.persist();
+  }
+
+  flush(deliver: (traceId: string) => void): number {
+    if (this.queue.length === 0) return 0;
+    const items = this.queue.splice(0, this.queue.length);
+    this.persist();
+    for (const traceId of items) {
+      deliver(traceId);
+    }
+    return items.length;
+  }
+
+  private load(): void {
+    try {
+      if (typeof localStorage === 'undefined' || typeof localStorage.getItem !== 'function') return;
+      const raw = localStorage.getItem(PENDING_NOTIFICATION_DISMISS_STORAGE_KEY);
+      if (!raw || raw.length > 16_384) return;
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      const seen = new Set<string>();
+      for (const item of parsed) {
+        if (typeof item !== 'string' || !NOTIFICATION_TRACE_ID_RE.test(item)) continue;
+        const lower = item.toLowerCase();
+        if (seen.has(lower)) continue;
+        seen.add(lower);
+        this.queue.push(item);
+      }
+      if (this.queue.length > MAX_PENDING_NOTIFICATION_DISMISSALS) {
+        this.queue.splice(0, this.queue.length - MAX_PENDING_NOTIFICATION_DISMISSALS);
+      }
+    } catch {
+      // Unreadable storage: keep in-memory queue only.
+    }
+  }
+
+  private persist(): void {
+    try {
+      if (typeof localStorage === 'undefined' || typeof localStorage.setItem !== 'function') return;
+      localStorage.setItem(PENDING_NOTIFICATION_DISMISS_STORAGE_KEY, JSON.stringify(this.queue));
+    } catch {
+      // Unwritable storage: session queue remains accurate.
+    }
+  }
+}

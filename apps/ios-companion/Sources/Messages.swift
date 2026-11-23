@@ -140,6 +140,24 @@ final class Messages: VoiceCommand, HoldableChannel {
         s.contains("@") ? fit(s, units: 24) : "…" + String(s.filter(\.isNumber).suffix(4))
     }
 
+    /// Suffix for confirmation headers: includes `" (…1234)"` or `" (addr@…)"`
+    /// only when `recipient` has a real email (distinct from `label`) or at
+    /// least 4 digits — omitting `" (…)"` on opaque Mac `/messages` thread labels.
+    static func confirmHandleSuffix(label: String, recipient: String, isGroup: Bool) -> String {
+        guard !isGroup else { return "" }
+        let trimmed = recipient.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains("@") {
+            guard trimmed.caseInsensitiveCompare(label.trimmingCharacters(in: .whitespacesAndNewlines)) != .orderedSame else {
+                return ""
+            }
+            return " (\(shortHandle(trimmed)))"
+        }
+        if trimmed.filter(\.isNumber).count >= 4 {
+            return " (\(shortHandle(trimmed)))"
+        }
+        return ""
+    }
+
     /// A text from the Message automation: its sender's saved name, its
     /// group, then the spam check (SpamCheck: it can never stop a text the
     /// way a refused Shortcuts step does). Spam stays off the glasses.
@@ -152,7 +170,17 @@ final class Messages: VoiceCommand, HoldableChannel {
     /// shortcut's "Add Group to Text" step. `quiet`: a text that arrived while
     /// the phone was away is saved to its thread, not shown or spoken.
     func arrived(from rawFrom: String, body rawBody: String, group namedGroup: String? = nil,
-                 fromMac: Bool = false, quiet: Bool = false, sentAt: Date? = nil, done: (() -> Void)? = nil) {
+                 fromMac: Bool = false, quiet: Bool = false, sentAt: Date? = nil,
+                 originKey: String? = nil, done: (() -> Void)? = nil) {
+        let cleanOriginKey: String? = {
+            guard let raw = originKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty else { return nil }
+            return raw
+        }()
+        if let cleanOriginKey, texts.contains(where: { $0.id == cleanOriginKey }) {
+            done?()
+            return
+        }
         var from = rawFrom.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         // "<Group Name> (<Sender>)" with no group name: one person.
         if from.hasPrefix("("), from.hasSuffix(")"), from.count > 2 {
@@ -188,10 +216,20 @@ final class Messages: VoiceCommand, HoldableChannel {
         let thread = group ?? name
         // An automation that fires twice for one text shows it once (the
         // first may already carry its group: `speaker` is then the sender).
-        if let last = texts.last, !last.outgoing, last.body == body,
+        if cleanOriginKey == nil, let last = texts.last, !last.outgoing, last.body == body,
            last.from == thread || last.speaker == name,
            Date().timeIntervalSince(last.at) < 10 { done?(); return }
-        let text = Text(id: ConfirmGate.hex(8), from: thread, handle: group == nil ? handle : nil, body: body,
+        let textId: String
+        if let cleanOriginKey {
+            textId = cleanOriginKey
+        } else if let sentAt {
+            let ms = Int((sentAt.timeIntervalSince1970 * 1000).rounded())
+            textId = String(ConfirmGate.sha256("msg|\(thread)|\(name)|\(body)|\(ms)").prefix(16))
+        } else {
+            textId = ConfirmGate.hex(8)
+        }
+        if texts.contains(where: { $0.id == textId }) { done?(); return }
+        let text = Text(id: textId, from: thread, handle: group == nil ? handle : nil, body: body,
                         at: sentAt ?? Date(), outgoing: false, speaker: group == nil ? nil : name)
         // No group yet: the shortcut's next steps (Find Conversation, then
         // "Add Group to Text") may name one. The text is saved now and shown
@@ -229,10 +267,11 @@ final class Messages: VoiceCommand, HoldableChannel {
         // Keep the page's Mac-side list and the open thread current.
         if !macRows.isEmpty { refreshFromMac() }
         if macHistory[t.label] != nil { refreshHistory(t.label) }
+        let stableKey = "mac-\(t.id)"
         if t.group {
-            arrived(from: t.person, body: t.text, group: t.label, fromMac: true, quiet: quiet, sentAt: t.at, done: done)
+            arrived(from: t.person, body: t.text, group: t.label, fromMac: true, quiet: quiet, sentAt: t.at, originKey: stableKey, done: done)
         } else {
-            arrived(from: t.label, body: t.text, fromMac: true, quiet: quiet, sentAt: t.at, done: done)
+            arrived(from: t.label, body: t.text, fromMac: true, quiet: quiet, sentAt: t.at, originKey: stableKey, done: done)
         }
     }
 
@@ -310,10 +349,12 @@ final class Messages: VoiceCommand, HoldableChannel {
         // A text that waited a long time (the phone slept) is shown, not read.
         let fresh = speak && Date().timeIntervalSince(t.at) <= MacMessages.staleSeconds
         if let who = t.speaker {
-            cards.post(source: t.from, channel: "Messages", summary: "\(who): \(t.body)", body: "\(who): \(t.body)")
+            cards.post(source: t.from, channel: "Messages", summary: "\(who): \(t.body)", body: "\(who): \(t.body)",
+                       at: t.at, originId: "msg:\(t.id)")
             if fresh { say?("\(who) in \(t.from) says: \(t.body)") }
         } else {
-            cards.post(source: t.from, channel: "Messages", summary: t.body, body: t.body)
+            cards.post(source: t.from, channel: "Messages", summary: t.body, body: t.body,
+                       at: t.at, originId: "msg:\(t.id)")
             if fresh { say?("\(t.from) says: \(t.body)") }
         }
         onChange?()
@@ -356,9 +397,10 @@ final class Messages: VoiceCommand, HoldableChannel {
         pattern: #"^(?:message|text|send\s+(?:a\s+)?(?:message|text)\s+to)\s+(?<recipient>.+)$"#,
         options: [.caseInsensitive])
 
-    /// "reply …" with no name, shortly after a text arrived.
+    /// "reply …" with no name, only while a conversation is on the lens
+    /// (design 2026-11-23, Goal 4): an arrival alone is not enough.
     func takesUnaddressed(_ text: String, now: Date = Date()) -> Bool {
-        guard now.timeIntervalSince(lastArrival) < Self.unaddressedSeconds else { return false }
+        guard threadOnGlass != nil else { return false }
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return Grammar.match(Self.replyRe, t) != nil || Grammar.match(Self.bareReplyRe, Grammar.normalize(t)) != nil
     }
@@ -468,7 +510,7 @@ final class Messages: VoiceCommand, HoldableChannel {
             finish(refusal)
             return
         }
-        let to = isGroup(label) ? "" : " (\(Self.shortHandle(recipient)))"
+        let to = Self.confirmHandleSuffix(label: label, recipient: recipient, isGroup: isGroup(label))
         let prompt = ConfirmGate.fitMessagePrompt(header: "Send to \(Self.fit(label, units: 24))\(to)", body: body)
         confirm.ask(prompt: prompt, payload: "messages.send|\(recipient)|\(body)", diagnosticKind: "messages") { [weak self] outcome in
             guard let self else { return }
@@ -603,20 +645,45 @@ final class Messages: VoiceCommand, HoldableChannel {
 
     /// The Mac's conversation list and histories, last fetched (Mac road).
     private var macRows: [MacMessages.ThreadRow] = []
+    private var macRowsLoaded = false
+    private var macRowsFailed = false
     private var macHistory: [String: [MacMessages.HistoryEntry]] = [:]
+
+    var activitySummaryRow: String {
+        if !macRows.isEmpty {
+            let unread = macRows.filter(\.unread).count
+            return unread > 0
+                ? "Messages · \(macRows.count) threads (\(unread) unread)"
+                : "Messages · \(macRows.count) recent threads"
+        }
+        if !texts.isEmpty {
+            let threads = Set(texts.map(\.from)).count
+            return "Messages · \(threads) recent conversation\(threads == 1 ? "" : "s")"
+        }
+        if mac?.configured == true {
+            return "Messages · connected to Mac"
+        }
+        return "Messages · 0 recent"
+    }
 
     /// Fetch the Mac's conversation list, then repaint the picker.
     func refreshFromMac() {
         guard let mac, mac.configured else { return }
+        macRowsFailed = false
         Task { @MainActor [weak self] in
             do {
                 let rows = try await mac.threads()
                 guard let self else { return }
                 self.macRows = rows
+                self.macRowsLoaded = true
+                self.macRowsFailed = false
                 rows.forEach { self.rememberMacThread(label: $0.label, group: $0.group, id: $0.id) }
                 self.onChange?()
             } catch {
+                guard let self else { return }
+                self.macRowsFailed = true
                 Log.add("messages page: the Mac's conversations did not load (\((error as NSError).code))")
+                self.onChange?()
             }
         }
     }
@@ -649,6 +716,31 @@ final class Messages: VoiceCommand, HoldableChannel {
             }
             return (["title": "MESSAGES", "items": rows, "hint": "tap: select · left x2: back", "selectable": true],
                     shown.map(\.label))
+        }
+        if mac?.configured == true, texts.isEmpty {
+            if !macRowsLoaded && !macRowsFailed {
+                return (
+                    [
+                        "title": "MESSAGES",
+                        "items": ["Loading Messages from your Mac…"],
+                        "hint": "left x2: back",
+                        "selectable": false,
+                    ],
+                    []
+                )
+            }
+            let statusRow = macRowsFailed
+                ? "Can't reach your Mac · check Tailscale"
+                : "No conversations on your Mac yet"
+            return (
+                [
+                    "title": "MESSAGES",
+                    "items": [Self.newMessageRow, statusRow],
+                    "hint": "tap: select · left x2: back",
+                    "selectable": true,
+                ],
+                []
+            )
         }
         var senders: [String] = []
         for t in texts.reversed() where !senders.contains(t.from) { senders.append(t.from) }
@@ -809,7 +901,7 @@ final class Messages: VoiceCommand, HoldableChannel {
             return
         }
         ui(d, "awaiting_confirmation", "Awaiting your confirmation on the glasses.")
-        let to = isGroup(d.label) ? "" : " (\(Self.shortHandle(d.recipient)))"
+        let to = Self.confirmHandleSuffix(label: d.label, recipient: d.recipient, isGroup: isGroup(d.label))
         let prompt = ConfirmGate.fitMessagePrompt(header: "Send to \(Self.fit(d.label, units: 24))\(to)", body: body)
         confirm.ask(prompt: prompt, payload: "messages.send|\(d.recipient)|\(body)|\(d.id)",
                     diagnosticKind: "messages", messageUIActionId: d.id) { [weak self] outcome in

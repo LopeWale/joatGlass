@@ -3,22 +3,17 @@ import Foundation
 /// The glasses' capability menu, answered on the phone: a port of
 /// services/capabilities.py CapabilityRouter.
 ///
-/// The plugin's menu is navigation only. A row pick sends `input` with
-/// containerName "capmenu" and waits 12 s for a `hud.list` carrying the
-/// same requestId; with no answer it says "No response from the Mac yet."
-/// (CapabilityMenu.ts showResponseTimeout). So every row gets an answer
-/// here: a ported page, a rail tab, or an honest "not on the phone yet".
+/// Every capability — including `Messages`, `Agent Terminal`, and `Activity` —
+/// stays 100% on `JOAT Brain` (`ws://127.0.0.1:8787/glasses`), relaying Mac
+/// Messages (`/messages`) and Mac Agent Terminal (`/terminal`) over Tailscale
+/// in the background so speech recognition and JOAT Assistant never leave the
+/// iPhone.
 final class CapabilityMenu: BrainFeature, VoiceCommand {
     let name = "capabilities"
     let uplinkKinds: Set<String> = ["input", "hello"]
-    /// Pages always served by the wearer's Mac mini (`BrainHandoff.ts`):
-    /// opening them hands the glasses connection to the Mac and returns to
-    /// this iPhone when the wearer goes Home.
-    static let macPages: Set<String> = ["Messages", "Agent Terminal", "Activity"]
-    /// Default `true` on every fresh connection so opening a Mac-pinned page
-    /// before `hello` arrives never races into a local stub; only an explicit
-    /// `handoff: false` from an older plugin disables handoff.
-    private var pluginHandsOff = true
+    /// Zero capabilities hand off the WebSocket away from the iPhone brain.
+    static let macPages: Set<String> = []
+    private var pluginHandsOff = false
 
     /// capabilities.py BACK_HINT
     static let backHint = "left x2: back"
@@ -29,6 +24,7 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
     let reminders: Reminders
     /// The Reminders page's rows, bound to reminder ids.
     private var reminderIds: [String?] = []
+    private var cachedOpenRemindersCount: Int?
     private let cards: Cards
     let quickNotes: QuickNotes
     /// The Navigation page's question and saved places (Brain sets it).
@@ -43,6 +39,11 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
     /// The Mail page's rows, bound to thread ids (`accountId|threadKey`).
     private var mailThreadIds: [String] = []
     private var mailShowingList = false
+    /// Mac Agent Terminal state & glasses 3-level terminal controller (Brain sets them).
+    var macTerminal: MacTerminal?
+    var glassesTerminal: GlassesTerminal?
+    /// Pomodoro / Timer state for `ACTIVITY` summary (Brain sets it).
+    var pomodoro: Pomodoro?
     /// The Notifications page's rows, bound to card ids (a new arrival
     /// cannot shift what a tap opens).
     private var notificationRows: [Cards.Card] = []
@@ -59,13 +60,14 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
 
     /// A new plugin connection starts with no page open (on_disconnect).
     func pluginConnected() {
-        pluginHandsOff = true
+        pluginHandsOff = false
         retire()
     }
 
     private func retire() {
         if activeCapability == "MESSAGES" { messages?.leaveUI() }
         if activeCapability == "MAIL" { mail?.leaveUI() }
+        if activeCapability == "AGENT TERMINAL" { glassesTerminal?.retireFromMenu() }
         activeCapability = nil
         activeRequestId = nil
         reminderIds = []
@@ -90,15 +92,12 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
             } else if let bridged = message.bool("handoff") {
                 pluginHandsOff = bridged
             } else {
-                pluginHandsOff = true
+                pluginHandsOff = false
             }
-            Log.add("plugin hello: \(pluginHandsOff ? "hands Mac pages to a Mac" : "no hand-off (older plugin)")")
+            Log.add("plugin hello: phone-local capabilities active")
             // A new plugin page starts on Home: the phone locked and Even
             // reloaded the plugin in the background, or the link dropped and
-            // came back. A note still open goes back on the glasses
-            // (2026-11-13: twice in a meeting a note "stopped halfway"; in
-            // the simulator a reconnect left it recording on the phone, off
-            // the glasses).
+            // came back. A note still open goes back on the glasses.
             if quickNotes.active, activeCapability != "QUICKNOTES" {
                 Log.add("quicknotes: a new plugin page while a note is open; showing the note again")
                 openByVoice("QuickNotes")
@@ -117,10 +116,15 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
             guard let selected, let index = event.int("selectedIndex") else { return }
             // Rail tabs (NEWS, POMODORO, SEARCH) are the panel publisher's.
             if PanelPublisher.tab(forTitle: selected) != nil { return }
+            // Agent Terminal Level 1 & Level 2 taps are handled by `GlassesTerminal`.
+            let canonicalSelected = Self.canonical(selected)
+            if canonicalSelected == "AGENT TERMINAL" || canonicalSelected.hasPrefix("AGENT TERMINAL · ") {
+                return
+            }
             // Planning, Calendar and Tasks are one page (Reminders): opened by
             // voice as "planning", its taps come back as REMINDERS (TASKS).
-            let family = Self.planningNames.contains(Self.canonical(selected)) && planningActive
-            guard requestId == activeRequestId, Self.canonical(selected) == activeCapability || family else {
+            let family = Self.planningNames.contains(canonicalSelected) && planningActive
+            guard requestId == activeRequestId, canonicalSelected == activeCapability || family else {
                 Log.add("dropping stale capability tap \(selected) request=\(requestId ?? "nil")")
                 return
             }
@@ -137,15 +141,11 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
                 if index == 0 {
                     messages.beginNew(requestId: requestId, traceId: event.string("traceId"))
                 } else if messageSenders.indices.contains(index - 1) {
-                    // The senders stay: back on the list (2x tap, or a
-                    // cancelled draft) the plugin redraws the list it has,
-                    // and its next tap names a row of it.
                     let sender = messageSenders[index - 1]
                     messagesShowingList = false
                     sendList(messages.thread(sender, requestId: requestId, traceId: event.string("traceId")),
                              requestId: requestId)
                 } else {
-                    // Never silent: a row this side doesn't know gets the list again.
                     Log.add("messages: row \(index) is not on the list this side sent (\(messageSenders.count) senders); sending the list again")
                     showMessages(requestId: requestId)
                 }
@@ -193,7 +193,6 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
             }
         case "capability-lifecycle":
             if selected == "messages-list", activeCapability == "MESSAGES", requestId == activeRequestId {
-                // The plugin is back on the Messages list it drew last.
                 messagesShowingList = true
                 messages?.returnedToList()
                 return
@@ -208,7 +207,6 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
                 return
             }
             if selected == "mail-list", activeCapability == "MAIL", requestId == activeRequestId {
-                // The plugin is back on the Mail list it drew last.
                 mailShowingList = true
                 mail?.returnedToList()
                 return
@@ -220,6 +218,10 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
             if selected == "mail-home", activeCapability == "MAIL",
                requestId == nil || requestId == activeRequestId {
                 retire()
+                return
+            }
+            if let selected, selected.hasPrefix("terminal-") {
+                // `GlassesTerminal` handles `terminal-home`, `terminal-agents`, and `terminal-sessions`.
                 return
             }
             if let selected, selected.hasPrefix("quicknotes-") {
@@ -257,6 +259,9 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
         }
         if activeCapability == "MESSAGES" { messages?.leaveUI() }
         if activeCapability == "MAIL" { mail?.leaveUI() }
+        if activeCapability == "AGENT TERMINAL", Self.canonical(name) != "AGENT TERMINAL" {
+            glassesTerminal?.retireFromMenu()
+        }
         reminderIds = []
         activeCapability = Self.canonical(name)
         activeRequestId = requestId
@@ -279,22 +284,153 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
         case "Navigation" where navigation != nil:
             sendList(["title": "NAVIGATION", "items": navigation?.pageRows() ?? [],
                       "hint": "tap: choose · left x2: back", "selectable": true], requestId: requestId)
+        case "Messages" where messages != nil:
+            showMessages(requestId: requestId)
         case "Mail" where mail != nil:
             showMail(requestId: requestId, triggerSync: true)
-        case _ where Self.macPages.contains(name) && pluginHandsOff:
-            handOff(name, requestId: requestId)
+        case "Agent Terminal":
+            if let glassesTerminal {
+                glassesTerminal.openPicker(requestId: requestId)
+            } else {
+                notOnPhone(name, requestId: requestId)
+            }
+        case "Activity":
+            showActivity(requestId: requestId)
         default:
             notOnPhone(name, requestId: requestId)
         }
     }
 
-    /// A page only a Mac has: the plugin opens it on one of its Macs.
-    private func handOff(_ name: String, requestId: String?) {
-        retire()
-        var message: [String: Any] = ["kind": "brain.handoff", "capability": name]
-        if let requestId { message["requestId"] = requestId }
-        link.send(message)
-        Log.add("tx brain.handoff \(name): to the Mac")
+    // MARK: - Agent Terminal Coordination
+
+    /// Keeps `CapabilityMenu` synchronized when `GlassesTerminal` opens a
+    /// voice generation or returns from Level 3 back to Level 2 / Level 1.
+    func syncTerminalVisit(requestId: String?) {
+        if activeCapability == "MESSAGES" { messages?.leaveUI() }
+        if activeCapability == "MAIL" { mail?.leaveUI() }
+        reminderIds = []
+        messagesShowingList = false
+        mailShowingList = false
+        quickNotes.departed()
+        activeCapability = "AGENT TERMINAL"
+        activeRequestId = requestId
+    }
+
+    func leaveTerminalIfOpen() {
+        guard activeCapability == "AGENT TERMINAL" else { return }
+        activeCapability = nil
+        activeRequestId = nil
+    }
+
+    // MARK: - Activity (`ACTIVITY` phone-local summary)
+
+    private func showActivity(requestId: String?, triggerSync: Bool = true) {
+        let rows = buildActivityRows()
+        sendList(
+            [
+                "title": "ACTIVITY",
+                "items": rows,
+                "hint": Self.backHint,
+                "selectable": false,
+            ],
+            requestId: requestId
+        )
+
+        guard triggerSync else { return }
+        Task { @MainActor [weak self] in
+            guard let self,
+                  self.activeCapability == "ACTIVITY",
+                  self.activeRequestId == requestId else { return }
+            let terminal = self.glassesTerminal?.activeTerminal ?? self.macTerminal
+            if let terminal {
+                terminal.reloadConfig()
+                if terminal.configured, terminal.state.agents.isEmpty {
+                    await terminal.fetchState(quiet: true)
+                }
+            }
+            if self.reminders.store.authorized {
+                let openItems = await self.reminders.store.incomplete()
+                self.cachedOpenRemindersCount = openItems.count
+            }
+            guard self.activeCapability == "ACTIVITY",
+                  self.activeRequestId == requestId else { return }
+            let updatedRows = self.buildActivityRows()
+            if updatedRows != rows {
+                self.sendList(
+                    [
+                        "title": "ACTIVITY",
+                        "items": updatedRows,
+                        "hint": Self.backHint,
+                        "selectable": false,
+                    ],
+                    requestId: requestId
+                )
+            }
+        }
+    }
+
+    private func buildActivityRows() -> [String] {
+        var rows: [String] = []
+
+        // 1. Live Mac Agent Terminal lanes
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                let terminal = glassesTerminal?.activeTerminal ?? macTerminal
+                if let terminal, !terminal.state.agents.isEmpty {
+                    for agent in terminal.state.agents.prefix(6) {
+                        rows.append(GlassesTerminal.formatAgentPickerRow(agent))
+                    }
+                } else if terminal?.configured == true {
+                    rows.append("Agent Terminal · syncing with Mac…")
+                } else {
+                    rows.append("Agent Terminal · Mac not linked")
+                }
+            }
+        } else {
+            rows.append("Agent Terminal · syncing with Mac…")
+        }
+
+        // 2. Pomodoro / Timer status
+        if let pomodoro {
+            let ws = pomodoro.wireState()
+            let isRunning = (ws["running"] as? Bool) ?? false
+            let phase = pomodoro.phase
+            if phase == "idle" && !isRunning {
+                rows.append("Pomodoro · idle")
+            } else {
+                let mins = max(1, (pomodoro.remainingMs() + 59_999) / 60_000)
+                let phaseLabel: String
+                switch phase {
+                case "focus": phaseLabel = "Focus"
+                case "break": phaseLabel = "Break"
+                case "long_break": phaseLabel = "Long break"
+                case "timer": phaseLabel = "Timer"
+                default: phaseLabel = phase.capitalized
+                }
+                rows.append("Pomodoro · \(phaseLabel) \(isRunning ? "running" : "paused") (\(mins)m left)")
+            }
+        }
+
+        // 3. Open Reminders count
+        if reminders.store.authorized {
+            if let count = cachedOpenRemindersCount {
+                rows.append("Reminders · \(count) open")
+            } else {
+                rows.append("Reminders · checking…")
+            }
+        } else {
+            rows.append("Reminders · allow access in Settings")
+        }
+
+        // 4. Recent Messages & Mail counts
+        if let messages {
+            rows.append(messages.activitySummaryRow)
+        }
+        if let mail {
+            rows.append(mail.activitySummaryRow)
+        }
+
+        return rows
     }
 
     // MARK: - Messages
@@ -427,6 +563,9 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
     func claim(_ capability: String) {
         if activeCapability == "MESSAGES", capability != "MESSAGES" { messages?.leaveUI() }
         if activeCapability == "MAIL", capability != "MAIL" { mail?.leaveUI() }
+        if activeCapability == "AGENT TERMINAL", capability != "AGENT TERMINAL" {
+            glassesTerminal?.retireFromMenu()
+        }
         messagesShowingList = false
         mailShowingList = false
         activeCapability = capability
@@ -436,7 +575,7 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
     /// Send under whatever request is open now.
     func sendCurrent(_ list: [String: Any]) { sendList(list, requestId: activeRequestId) }
 
-    // MARK: - Voice: "open my notes", "show planning", "open mail", "open claude", "go home" (CapabilityOpenController)
+    // MARK: - Voice: "open my notes", "show planning", "open mail", "open claude", "go home"
 
     static let homeVoice = try! NSRegularExpression(
         pattern: #"^(?:go(?:\s+back)?\s+home|(?:open|show|bring\s+up)(?:\s+(?:my|the))?\s+(?:home(?:\s+screen|\s+page)?|overview|dashboard))$"#,
@@ -467,10 +606,23 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
               let said = g["name"] ?? g["name2"] else { return nil }
         let key = said.lowercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         guard let name = Self.spoken[key] else { return nil }
-        let handedOff = Self.macPages.contains(name) && pluginHandsOff
+
+        if name == "Agent Terminal", let glassesTerminal {
+            glassesTerminal.openByVoice(agentHint: key)
+            let agentShown: String
+            switch key {
+            case "claude", "claude code": agentShown = "Claude Code"
+            case "codex": agentShown = "Codex"
+            case "antigravity": agentShown = "Antigravity"
+            default: agentShown = "Agent Terminal"
+            }
+            return CommandReply(text: "Opening \(agentShown).", activated: true, suppressesHudReceipt: true)
+        }
+
         openByVoice(name)
         let shown = ["Planning", "Calendar", "Tasks"].contains(name) ? "Reminders" : name
-        return CommandReply(text: "Opening \(shown).", activated: true, suppressesHudReceipt: handedOff)
+        let suppressOverlay = ["Messages", "Agent Terminal", "Activity"].contains(name)
+        return CommandReply(text: "Opening \(shown).", activated: true, suppressesHudReceipt: suppressOverlay)
     }
 
     /// protocol.py HudList.to_wire, under the request it answers. A reply

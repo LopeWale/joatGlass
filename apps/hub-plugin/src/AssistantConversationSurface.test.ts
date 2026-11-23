@@ -420,4 +420,121 @@ describe('AssistantConversationSurface delivery', () => {
     expect(rebuildPageContainer).toHaveBeenCalledTimes(2);
     expect(surface.currentIdentity()).toEqual({ conversationId: 'conversation-1', revision: 3 });
   });
+
+  it('snaps scroll back to the live tail when a second turn starts after scrolling up on the first reply', async () => {
+    const { client, rebuildPageContainer, textContainerUpgrade } = fakeClient();
+    const surface = new AssistantConversationSurface(
+      client as never,
+      new HudPageBuilder(),
+      async () => true,
+      { indicatorIntervalMs: 0, continuationPromptEnabled: false },
+    );
+    const firstLongReply = Array.from({ length: 60 }, (_, i) => `alpha${i}`).join(' ');
+    await surface.present(snapshot(1, [
+      { role: 'user', text: 'First question?' },
+      { role: 'assistant', text: firstLongReply },
+    ], 'ready'));
+    expect(surface.scroll('up')).toBe(true);
+    await surface.whenIdle();
+    expect(surface.scroll('up')).toBe(true);
+    await surface.whenIdle();
+    expect(surface.scrollFromTail()).toBe(2);
+
+    // Wearer asks a second question: viewport must snap to the bottom so the
+    // new turn and streamed second answer are visible instead of stuck on Turn 1.
+    await surface.present(snapshot(2, [
+      { role: 'user', text: 'First question?' },
+      { role: 'assistant', text: firstLongReply },
+      { role: 'user', text: 'Second follow-up question?' },
+    ], 'answering'));
+    await surface.whenIdle();
+    expect(surface.scrollFromTail()).toBe(0);
+
+    await surface.present(snapshot(3, [
+      { role: 'user', text: 'First question?' },
+      { role: 'assistant', text: firstLongReply },
+      { role: 'user', text: 'Second follow-up question?' },
+      { role: 'assistant', text: 'Here is the visible second response.' },
+    ], 'ready'));
+    await surface.whenIdle();
+    expect(surface.scrollFromTail()).toBe(0);
+
+    const lastBrightUpgrade = [...textContainerUpgrade.mock.calls]
+      .reverse()
+      .map(([u]) => u)
+      .find((u) => u.containerName === 'joat-turns')?.content
+      ?? rebuildPageContainer.mock.calls[rebuildPageContainer.mock.calls.length - 1]?.[0].textObject?.find(
+        (t: { containerName?: string }) => t.containerName === 'joat-turns',
+      )?.content
+      ?? '';
+    expect(lastBrightUpgrade).toContain('Here is the visible second response.');
+  });
+
+  it('shows listening state via statusText without adding fake transcript rows or extra page rebuilds', async () => {
+    const { client, rebuildPageContainer, textContainerUpgrade } = fakeClient();
+    let surfaceRef!: AssistantConversationSurface;
+    const surface = new AssistantConversationSurface(
+      client as never,
+      new HudPageBuilder(),
+      async () => true,
+      {
+        indicatorIntervalMs: 0,
+        continuationPromptEnabled: false,
+        statusText: () => (surfaceRef?.isListening() ? '12:00  JOAT · LISTENING' : '12:00  JOAT'),
+      },
+    );
+    surfaceRef = surface;
+
+    await surface.present({
+      ...snapshot(1, [
+        { role: 'user', text: 'What time is it?' },
+        { role: 'assistant', text: 'Noon.' },
+      ], 'ready'),
+      listening: true,
+    });
+    expect(surface.isListening()).toBe(true);
+    expect(rebuildPageContainer).toHaveBeenCalledTimes(1);
+    const initialStatus = rebuildPageContainer.mock.calls[0]?.[0].textObject?.find(
+      (t: { containerName?: string }) => t.containerName === 'status',
+    )?.content;
+    expect(initialStatus).toContain('JOAT · LISTENING');
+
+    await surface.present({
+      ...snapshot(2, [
+        { role: 'user', text: 'What time is it?' },
+        { role: 'assistant', text: 'Noon.' },
+      ], 'ready'),
+      listening: false,
+    });
+    await surface.whenIdle();
+    expect(surface.isListening()).toBe(false);
+    expect(rebuildPageContainer).toHaveBeenCalledTimes(1);
+    const statusUpgrade = textContainerUpgrade.mock.calls
+      .map(([u]) => u)
+      .find((u) => u.containerName === 'status');
+    expect(statusUpgrade?.content).toBe('12:00  JOAT');
+  });
+
+  it('abortFailedEnter clears a failed initial paint without retiring conversationId for the next delta', async () => {
+    const { client, rebuildPageContainer } = fakeClient();
+    rebuildPageContainer.mockResolvedValueOnce(false).mockResolvedValue(true);
+    const surface = new AssistantConversationSurface(
+      client as never,
+      new HudPageBuilder(),
+      async () => true,
+      { indicatorIntervalMs: 0, continuationPromptEnabled: false },
+    );
+
+    await expect(surface.present(snapshot(1, [
+      { role: 'user', text: 'Hello?' },
+    ], 'answering'))).resolves.toBe(false);
+    expect(surface.abortFailedEnter()).toBe(true);
+    expect(surface.isActive()).toBe(false);
+
+    await expect(surface.present(snapshot(2, [
+      { role: 'user', text: 'Hello?' },
+      { role: 'assistant', text: 'Hi there!' },
+    ], 'ready'))).resolves.toBe(true);
+    expect(surface.isActive()).toBe(true);
+  });
 });

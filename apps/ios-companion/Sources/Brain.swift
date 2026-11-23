@@ -1,4 +1,5 @@
 import Foundation
+import EventKit
 
 /// The brain loop on the phone: glasses mic → on-device STT → wake gate →
 /// deterministic commands or streaming on-phone/Mac assistant → the glasses'
@@ -11,28 +12,40 @@ final class Brain {
     private let shadow: Transcriber?
     let voice: Voice
     private var conversationId = "phone-\(UUID().uuidString.prefix(8).lowercased())"
-    private var pendingConversationId: String?
     private var revision = 0
+    /// Turns shown on the current glasses conversation card (`conversationId`).
     private var turns: [[String: String]] = []
+    /// Recent conversational turns (kept up to 30 s) so follow-up questions keep
+    /// context even after the wearer taps to close the previous card.
+    private var modelHistory: [[String: String]] = []
+    /// Whether `conversationId` is currently mounted on the glasses lens.
+    /// Any exit, dismiss, or lens-claiming feature resets this so the next
+    /// question mints a fresh `conversationId` (never hitting `retired` in Hub).
+    private var conversationVisible = false
     private var lastAddressedAt = Date.distantPast
-    private var lastVolatileBroadcastAt = Date.distantPast
-    private var lastVolatilePreview = ""
-    private var activeStreamId = UUID()
-    private var dismissedStreamId: UUID?
+    private var streamEpoch = 0
+    private var preDismissedEpoch: Int?
     private var streamingTurnIndex: Int?
     private(set) var toolBelt: PhoneToolBelt!
     /// After the name alone ("JOAT" -> "Yes?"), the next utterance is the request.
     private var nameOnlyUntil = Date.distantPast
-    /// orchestrator.py ConversationWindow: after JOAT answers, the next
-    /// question needs no name for a while; every answer re-opens it, the
-    /// conversation page's Exit closes it.
-    /// How long, in seconds: the wearer sets it in JOAT Brain ("Follow-up
-    /// without the name"); 0 is off, 8 unless changed.
+    private var nameOnlyLatchedUntil = Date.distantPast
+    /// orchestrator.py ConversationWindow: after JOAT answers an addressed
+    /// request, the next question needs no name for `joat.followUpSeconds`
+    /// (0 = off, 8 unless changed). Never hard-coded.
     static let followUpKey = "joat.followUpSeconds"
     static var conversationWindow: TimeInterval {
-        UserDefaults.standard.object(forKey: followUpKey) as? Double ?? 8
+        max(0, UserDefaults.standard.object(forKey: followUpKey) as? Double ?? 8)
     }
     private var conversationUntil = Date.distantPast
+    /// Latched when the wearer begins speaking inside an open follow-up window
+    /// so sentences that finish after the countdown still go through.
+    private var speechLatchedUntil = Date.distantPast
+    private var extendWindowAfterSpeech = false
+    /// True while a follow-up needs no "JOAT".
+    var followUpWindowOpen: Bool { Date() < conversationUntil }
+    static let listeningCue = "Listening… (no name needed)"
+    private var cueExpiry: DispatchWorkItem?
 
     let router = FeatureRouter()
     let hud: Hud
@@ -54,6 +67,10 @@ final class Brain {
     let macLink = MacLink()
     /// This phone's texts through the home Mac (services/messages_endpoint.py).
     let macMessages = MacMessages()
+    /// The Mac's Agent Terminal over the tailnet (services/terminal_endpoint.py).
+    let macTerminal: MacTerminal
+    /// 3-level Agent Terminal capability on the glasses via `macTerminal`.
+    let glassesTerminal: GlassesTerminal
     /// Routes to a place with Apple Maps (services/navigation.py).
     let navigation: Navigation
     /// Texts in and out through the home Mac over Tailscale (Messages.swift).
@@ -72,16 +89,26 @@ final class Brain {
     private var commands: [VoiceCommand] = []
 
     @MainActor
-    init(server: LoopbackServer, stt: Transcriber, shadow: Transcriber?, voice: Voice, linkOverride: PluginLink? = nil) {
+    init(
+        server: LoopbackServer,
+        stt: Transcriber,
+        shadow: Transcriber?,
+        voice: Voice,
+        macTerminal: MacTerminal? = nil,
+        cardDefaults: UserDefaults = .standard,
+        linkOverride: PluginLink? = nil
+    ) {
         let activeLink: PluginLink = linkOverride ?? server
         let hasTestLink = linkOverride != nil
         self.server = server
         self.link = activeLink
+        let resolvedTerminal = macTerminal ?? MacTerminal()
+        self.macTerminal = resolvedTerminal
         hud = Hud(link: activeLink)
         panels = PanelPublisher(link: activeLink)
         confirm = ConfirmGate(link: activeLink)
         reminders = Reminders(link: activeLink, hud: hud, confirm: confirm)
-        cards = Cards(link: activeLink)
+        cards = Cards(link: activeLink, defaults: cardDefaults)
         quickNotes = QuickNotes(link: activeLink, hud: hud)
         navigation = Navigation(link: activeLink)
         messages = Messages(hud: hud, confirm: confirm, cards: cards)
@@ -90,16 +117,24 @@ final class Brain {
         capabilities = CapabilityMenu(link: activeLink, panels: panels,
                                       reminders: reminders,
                                       cards: cards, quickNotes: quickNotes)
+        glassesTerminal = GlassesTerminal(
+            link: activeLink,
+            macTerminal: resolvedTerminal,
+            prompts: prompts,
+            menu: capabilities
+        )
+        glassesTerminal.overrideMacTerminal = { AssistantRuntimeHooks.sharedMacTerminal?() }
         quickNotes.menu = capabilities
         capabilities.navigation = navigation
         capabilities.messages = messages
         capabilities.mail = mail
+        capabilities.macTerminal = resolvedTerminal
+        capabilities.glassesTerminal = glassesTerminal
+        capabilities.pomodoro = pomodoro
         messages.onChange = { [capabilities] in capabilities.refreshMessages() }
         messages.onThreadChange = { [capabilities] in capabilities.refreshThread() }
         messages.link = activeLink
         messages.prompts = prompts
-        // Texts through the home Mac, when this build carries its address
-        // (MacMessages.swift): the glasses stay on this phone alone.
         messages.mac = macMessages
         mail.link = activeLink
         mail.prompts = prompts
@@ -108,23 +143,15 @@ final class Brain {
         mail.onThreadChange = { [capabilities] in capabilities.refreshMailThread() }
         router.register(prompts)
         server.onUplink = { [router] kind, obj, raw in router.route(kind: kind, message: obj, raw: raw) }
-        server.onPluginConnected = { [router, pomodoro] in
-            router.pluginConnected()
-            DispatchQueue.main.async { pomodoro.flushRecoveryCard() }
-        }
-        // Pomodoro + countdown timer (services/pomodoro.py, panel_commands.py).
         panels.register(pomodoro)
         pomodoro.onChange = { [panels] in panels.publish("pomodoro") }
         pomodoro.onCard = { [cards] source, summary in cards.post(source: source, channel: "Pomodoro", summary: summary) }
         router.register(panels)
-        // "Open my notes", "show planning", "open mail": surface opens come first (commands.py).
         commands.append(capabilities)
-        // "Email Sarah saying …", "Reply …", "Message Mom saying …".
         commands.append(mail)
         commands.append(messages)
         messages.say = { [voice] text in voice.say(text) }
         commands.append(SpokenRepliesCommand(voice: voice))
-        // "Navigate to the library": the place, then the mode, then the route.
         router.register(navigation)
         commands.append(navigation)
         navigation.prompts = prompts
@@ -136,7 +163,6 @@ final class Brain {
             hud.receipt(text)
             voice.say(text)
         }
-        // News: the rail tab, every row read in full first (services/news.py).
         panels.register(news)
         news.publish = { [panels] activate in panels.publish("news", activate: activate) }
         news.sendReader = { [panels, activeLink] list in
@@ -147,9 +173,6 @@ final class Brain {
         }
         news.say = { [voice] text in voice.say(text) }
         commands.append(news)
-        // QuickNotes (voice_note_capture.py, note_commands.py) and its rail tab.
-        // Placed AHEAD of PomodoroCommands so an open voice note's "pause"/"resume"
-        // is never stolen by a background Pomodoro timer.
         panels.register(quickNotes)
         quickNotes.publishPanel = { [panels] in panels.publish("quicknotes") }
         quickNotes.say = { [voice] text in voice.say(text) }
@@ -166,15 +189,12 @@ final class Brain {
         }
         search.say = { [voice] text in voice.say(text) }
         commands.append(search)
-        // Reminders: the glasses' confirm gate, EventKit, the Planner tab and
-        // the due page (productivity_actions.py, planner_panel.py, task_monitor.py).
         router.register(confirm)
         router.register(MicResume(link: activeLink))
-        // Texts and emails wait for the glasses: off, in the case or disconnected,
-        // arrivals are held and shown when they come back (MessageHold).
         router.register(MessageHold(channels: [messages, mail], connected: { [server] in hasTestLink || server.clients > 0 }))
         router.register(reminders)
         router.register(capabilities)
+        router.register(glassesTerminal)
         router.register(cards)
         panels.register(reminders)
         reminders.publishPanel = { [panels] in panels.publish("planner") }
@@ -183,14 +203,22 @@ final class Brain {
         self.stt = stt
         self.shadow = shadow
         self.voice = voice
+        server.onPluginConnected = { [weak self, router, pomodoro] in
+            router.pluginConnected()
+            DispatchQueue.main.async {
+                self?.rotateCardConversation()
+                pomodoro.flushRecoveryCard()
+            }
+        }
         server.onAudio = { [weak stt, weak shadow, quickNotes] samples in
             stt?.feed(samples)
             shadow?.feed(samples)
             DispatchQueue.main.async { quickNotes.audioFrame(samples) }
         }
-        // Features keep their state on the main queue.
         stt.onEvent = { [weak self] event in DispatchQueue.main.async { self?.handle(event) } }
+        voice.onFinishSpeaking = { [weak self] in self?.refreshFollowUpAfterSpeechIfNeeded() }
         reminders.askFollowUp = { [weak self] question, answer in self?.ask(question, answer: answer) }
+        reminders.onListAnswered = { [weak self] req, ans in self?.publishAnsweredCommand(user: req, assistant: ans) }
         search.askFollowUp = { [weak self] question, answer in self?.ask(question, answer: answer) }
         navigation.askFollowUp = { [weak self] question, answer in self?.ask(question, answer: answer) }
         messages.askFollowUp = { [weak self] question, answer in self?.ask(question, answer: answer) }
@@ -202,7 +230,6 @@ final class Brain {
             self?.publish(user: nil, assistant: answer, state: "ready")
             self?.voice.say(answer)
         }
-        // Last, once every member is set: the poll delivers into `messages`.
         macMessages.start(deliver: { [weak self] text, done in
             guard let self else { done(); return }
             self.messages.arrivedFromMac(text, done: done)
@@ -223,19 +250,51 @@ final class Brain {
         reminders.start()
         news.start()
         mail.start()
-        // Notes saved while no model answered get summarized once one does.
         DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [quickNotes] in quickNotes.retryPendingInsights() }
         insightsTimer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [quickNotes] _ in
             quickNotes.retryPendingInsights()
         }
     }
 
+    /// Mints a fresh `conversationId` for the next glasses card while preserving
+    /// `modelHistory` (within 30 s) so follow-ups keep conversational context
+    /// without ever colliding with `AssistantConversationSurface.retired`.
+    private func rotateCardConversation() {
+        cueExpiry?.cancel()
+        cueExpiry = nil
+        extendWindowAfterSpeech = false
+        conversationId = "phone-\(UUID().uuidString.prefix(8).lowercased())"
+        revision = 0
+        turns = []
+        streamingTurnIndex = nil
+        conversationVisible = false
+    }
+
+    private func prepareConversationSession(now: Date) {
+        if now.timeIntervalSince(lastAddressedAt) > 30 {
+            modelHistory = []
+            rotateCardConversation()
+        } else if !conversationVisible || turns.isEmpty {
+            rotateCardConversation()
+        }
+    }
+
+    private func appendModelHistory(role: String, text: String) {
+        let clipped = String(text.prefix(3900))
+        guard !clipped.isEmpty else { return }
+        modelHistory.append(["role": role, "text": clipped])
+        if modelHistory.count > 16 {
+            modelHistory.removeFirst(modelHistory.count - 16)
+        }
+    }
+
     /// Ask, show and say a question; the next sentence is its answer.
     private func ask(_ question: String, answer: @escaping (String) -> Void) {
+        prepareConversationSession(now: Date())
         followUp = answer
-        // Long enough to hear the question and then say the answer.
         followUpUntil = Date().addingTimeInterval(15)
         nameOnlyUntil = .distantPast
+        nameOnlyLatchedUntil = .distantPast
         lastAddressedAt = Date()
         publish(user: currentRequest, assistant: question, state: "ready")
         currentRequest = nil
@@ -293,10 +352,6 @@ final class Brain {
         options: [.caseInsensitive]
     )
 
-    /// Strips polite conversational lead-ins (up to 2 prefixes iteratively) and
-    /// trailing `"please"` (`", please"` / `" please"`), preserving the command
-    /// body's original casing. Returns `nil` when nothing was stripped or when
-    /// stripping leaves an empty utterance.
     static func stripPoliteLeadIn(_ text: String) -> String? {
         var current = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !current.isEmpty else { return nil }
@@ -344,51 +399,39 @@ final class Brain {
                 return
             }
             quickNotes.hearing(words)
+            // Latch active listening windows as soon as non-filler speech begins so
+            // sentences that finish after the countdown still complete cleanly,
+            // without ever mounting premature volatile `assistant.conversation` cards.
             guard !confirm.hasPending, !navigation.active, !voice.wasSpeaking(at: now) else { return }
             let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return }
-            let preview: String?
-            if let stripped = WakeGate.strip(trimmed) {
-                let clean = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
-                preview = clean.isEmpty ? nil : clean
-            } else if now < nameOnlyUntil {
-                preview = trimmed
-            } else if now < conversationUntil, !Self.isFiller(trimmed) {
-                preview = trimmed
-            } else {
-                preview = nil
+            guard !trimmed.isEmpty, !Self.isFiller(trimmed) else { return }
+            if now < conversationUntil || now < speechLatchedUntil {
+                speechLatchedUntil = max(speechLatchedUntil, now.addingTimeInterval(12))
             }
-            guard let preview,
-                  preview != lastVolatilePreview,
-                  now.timeIntervalSince(lastVolatileBroadcastAt) >= 0.12 else { return }
-            lastVolatileBroadcastAt = now
-            lastVolatilePreview = preview
-            publishVolatilePreview(preview, now: now)
+            if now < nameOnlyUntil || now < nameOnlyLatchedUntil {
+                nameOnlyLatchedUntil = max(nameOnlyLatchedUntil, now.addingTimeInterval(12))
+            }
+            if now < followUpUntil, followUp != nil {
+                followUpUntil = max(followUpUntil, now.addingTimeInterval(10))
+            }
             return
 
         case .final(let words, let ms):
             text = words
             latency = ms
-            lastVolatilePreview = ""
         }
 
         let now = Date()
-        // When the sentence ended. The phone's own reply, heard back by the
-        // glasses mic, must never answer JOAT's question.
         let spokeUntil = now.addingTimeInterval(-Double(latency ?? 0) / 1000)
 
-        // A question on the glasses (a reply's words, a recipient): the next
-        // sentence is its answer, never a command or the note's.
         if prompts.active {
             if voice.wasSpeaking(at: spokeUntil) {
                 Log.add("own voice kept out of the answer: \(text.prefix(80))")
                 return
             }
-            if prompts.heard(text) { return }
+            if prompts.heard(text, spokeUntil: spokeUntil) { return }
         }
 
-        // An open note's lane: the sentence is the note's, never a command
-        // (the Mac's exclusive capture lane).
         if quickNotes.wantsSpeech(audioEnd: spokeUntil) {
             if voice.wasSpeaking(at: spokeUntil) {
                 Log.add("own voice kept out of the note: \(text.prefix(80))")
@@ -399,9 +442,6 @@ final class Brain {
             return
         }
 
-        // Active hardware confirmation gate: spoken "cancel"/"no" declines immediately;
-        // spoken "yes"/"send" reminds to tap the touchpad; background speech never
-        // clobbers the confirmation card with an assistant chat bubble.
         if confirm.hasPending {
             if voice.wasSpeaking(at: spokeUntil) {
                 Log.add("own voice ignored during confirmation: \(text.prefix(80))")
@@ -429,19 +469,19 @@ final class Brain {
                 Log.add("own voice ignored: \(text.prefix(80))")
                 return
             }
+            if Self.isFiller(text) { return }
             followUp = nil
             followUpUntil = .distantPast
             let reply = WakeGate.strip(text).flatMap { $0.isEmpty ? nil : $0 } ?? text
+            prepareConversationSession(now: now)
             lastAddressedAt = now
+            appendModelHistory(role: "user", text: reply)
             publish(user: reply, assistant: nil, state: "answering")
             Log.add("follow-up answered: \(reply.prefix(100))")
             answer(reply)
             return
         }
 
-        // A live route owns speech (session.py handle_transcript): its cancel
-        // words, its spoken choices, and "open my notes"; nothing else
-        // reaches a command or the assistant until it ends.
         if navigation.active {
             if voice.wasSpeaking(at: spokeUntil) {
                 Log.add("own voice ignored: \(text.prefix(80))")
@@ -450,6 +490,7 @@ final class Brain {
             let addressed = WakeGate.strip(text)
             if let request = addressed, !request.isEmpty, !Navigation.isCancel(request),
                let reply = capabilities.handle(request) {
+                conversationVisible = false
                 if !reply.suppressesHudReceipt {
                     hud.receipt(reply.text)
                 }
@@ -460,10 +501,8 @@ final class Brain {
             return
         }
 
-        if now < nameOnlyUntil, voice.wasSpeaking(at: spokeUntil) {
-            Log.add("own voice ignored: \(text.prefix(80))")
-            return
-        }
+        let inNameOnly = (now < nameOnlyUntil || now < nameOnlyLatchedUntil)
+        let inFollowUp = (now < conversationUntil || now < speechLatchedUntil)
 
         var query = WakeGate.strip(text)
         if query != nil, voice.wasSpeaking(at: spokeUntil) {
@@ -471,25 +510,42 @@ final class Brain {
             return
         }
 
-        // Unaddressed "reply …" arbitration across Mail and Messages.
         if query == nil, let replyChannel = arbitrateUnaddressedReply(text, now: now) {
             if voice.wasSpeaking(at: spokeUntil) {
                 Log.add("own voice ignored: \(text.prefix(80))")
                 return
             }
             let label = (replyChannel === mail) ? "email" : "text"
-            Log.add("unaddressed reply routed to newest \(label)")
+            Log.add("unaddressed reply routed to the \(label) thread on the lens")
             currentRequest = text
             defer { currentRequest = nil }
             if let reply = replyChannel.handle(text), !reply.text.isEmpty {
+                prepareConversationSession(now: now)
                 publish(user: text, assistant: reply.text, state: "ready")
                 voice.say(reply.text)
+            } else {
+                conversationVisible = false
             }
             return
         }
 
-        if query == nil, now < nameOnlyUntil { query = text }   // the follow-up after "JOAT"
-        if query == nil, now < conversationUntil, !Self.isFiller(text) {
+        // Filler words ("um", "uh") inside an active listening window must never
+        // consume the window or fire a bogus empty turn.
+        if query == nil, Self.isFiller(text), (inNameOnly || inFollowUp) {
+            return
+        }
+
+        if query == nil, inNameOnly, !Self.isFiller(text) {
+            // Only a literal single-word "yes" could echo JOAT's "Yes?" prompt.
+            let norm = Self.normalizeConfirmSpeech(text)
+            if norm == "yes", voice.wasSpeaking(at: spokeUntil) {
+                Log.add("own 'Yes?' echo ignored")
+                return
+            }
+            query = text
+        }
+
+        if query == nil, inFollowUp, !Self.isFiller(text) {
             if voice.wasSpeaking(at: spokeUntil) {
                 Log.add("own voice ignored: \(text.prefix(80))")
                 return
@@ -497,24 +553,19 @@ final class Brain {
             Log.add("follow-up heard inside the conversation window")
             query = text
         }
+
         guard let request = query else {
+            speechLatchedUntil = .distantPast
+            nameOnlyLatchedUntil = .distantPast
             Log.add("not addressed (ignored): \(text.prefix(80))")
             return
         }
+
         nameOnlyUntil = .distantPast
-        // A new conversation after 30 s of quiet, as on the Mac.
-        if now.timeIntervalSince(lastAddressedAt) > 30 {
-            if let pending = pendingConversationId {
-                conversationId = pending
-                pendingConversationId = nil
-            } else {
-                conversationId = "phone-\(UUID().uuidString.prefix(8).lowercased())"
-                revision = 0
-            }
-            turns = []
-        } else {
-            pendingConversationId = nil
-        }
+        nameOnlyLatchedUntil = .distantPast
+        speechLatchedUntil = .distantPast
+
+        prepareConversationSession(now: now)
         lastAddressedAt = now
 
         if request.isEmpty {
@@ -524,33 +575,42 @@ final class Brain {
             return
         }
 
-        // The command chain first, as the Mac's VoiceCommandRouter does.
+        // 1. Deterministic command chain first (0 ms, zero network).
         currentRequest = request
         defer { currentRequest = nil }
         if let reply = routeCommand(request) {
-            // Empty: the command drives the lens itself (a confirmation,
-            // a question) and speaks for itself.
-            if reply.text.isEmpty { return }
+            if reply.text.isEmpty {
+                if followUp == nil {
+                    conversationVisible = false
+                }
+                return
+            }
             Log.add("command answered: \(reply.text.prefix(100))")
             if reply.activated {
+                conversationVisible = false
                 if !reply.suppressesHudReceipt {
                     hud.receipt(reply.text)
                 }
+                voice.say(reply.text)
             } else {
-                publish(user: request, assistant: reply.text, state: "ready")
+                publishAnsweredCommand(user: request, assistant: reply.text)
             }
-            voice.say(reply.text)
             return
         }
 
-        // Everything else streams through OnPhoneAI (Gemini / Claude / Mac SSE).
+        // 2. Fast local on-phone queries (time, date, calendar agenda: <25 ms, zero LLM wait).
+        if handleLocalFastQuery(request) {
+            return
+        }
+
+        // 3. Streamed assistant turn via OnPhoneAI (Gemini / Claude / Mac SSE).
+        appendModelHistory(role: "user", text: request)
         publish(user: request, assistant: nil, state: "answering")
-        let conversation = conversationId
-        let streamId = UUID()
-        activeStreamId = streamId
-        dismissedStreamId = nil
+        streamEpoch += 1
+        let myEpoch = streamEpoch
+        preDismissedEpoch = nil
         streamingTurnIndex = nil
-        let promptTurns = turns
+        let promptTurns = modelHistory
 
         OnPhoneAI.shared.streamChat(
             turns: promptTurns,
@@ -559,13 +619,9 @@ final class Brain {
             search: search,
             toolBelt: toolBelt,
             onDelta: { [weak self] partial in
-                guard let self,
-                      self.conversationId == conversation,
-                      (self.activeStreamId == streamId || self.dismissedStreamId == streamId),
-                      !partial.isEmpty else { return }
-                if self.activeStreamId != streamId {
-                    self.activeStreamId = streamId
-                    self.dismissedStreamId = nil
+                guard let self, self.streamEpoch == myEpoch, !partial.isEmpty else { return }
+                if self.preDismissedEpoch == myEpoch {
+                    self.preDismissedEpoch = nil
                     self.turns.append(["role": "user", "text": String(request.prefix(3900))])
                     if self.turns.count > 16 {
                         self.turns.removeFirst(self.turns.count - 16)
@@ -574,16 +630,14 @@ final class Brain {
                 self.publishStreamingDelta(partial)
             },
             completion: { [weak self] result in
-                guard let self,
-                      self.conversationId == conversation,
-                      (self.activeStreamId == streamId || self.dismissedStreamId == streamId) else { return }
-                let wasPreDismissed = (self.dismissedStreamId == streamId && self.activeStreamId != streamId)
-                self.dismissedStreamId = nil
+                guard let self, self.streamEpoch == myEpoch else { return }
+                let wasPreDismissed = (self.preDismissedEpoch == myEpoch)
+                self.preDismissedEpoch = nil
                 switch result {
                 case .success(.claimedLens(let receipt)):
                     if !wasPreDismissed {
                         self.dismissActiveStreamingConversation()
-                        self.dismissedStreamId = nil
+                        self.preDismissedEpoch = nil
                     }
                     if let receipt, !receipt.isEmpty {
                         self.voice.say(receipt)
@@ -595,7 +649,9 @@ final class Brain {
                             self.turns.removeFirst(self.turns.count - 16)
                         }
                     }
-                    self.finishStreamingTurn(text)
+                    self.appendModelHistory(role: "assistant", text: text)
+                    self.finishStreamingTurn(text, armFollowUp: true)
+                    if self.followUpWindowOpen { self.extendWindowAfterSpeech = true }
                     self.voice.say(text)
                 case .failure(let failure):
                     if wasPreDismissed {
@@ -605,11 +661,152 @@ final class Brain {
                         }
                     }
                     let finalAnswer = MacLink.explain(failure)
-                    self.finishStreamingTurn(finalAnswer)
+                    self.appendModelHistory(role: "assistant", text: finalAnswer)
+                    self.finishStreamingTurn(finalAnswer, armFollowUp: true)
+                    if self.followUpWindowOpen { self.extendWindowAfterSpeech = true }
                     self.voice.say(finalAnswer)
                 }
             }
         )
+    }
+
+    private func publishAnsweredCommand(user: String, assistant: String) {
+        prepareConversationSession(now: Date())
+        lastAddressedAt = Date()
+        appendModelHistory(role: "user", text: user)
+        appendModelHistory(role: "assistant", text: assistant)
+        let shouldListen = scheduleFollowUpTimer()
+        publish(user: user, assistant: assistant, state: "ready", listening: shouldListen)
+        if shouldListen { extendWindowAfterSpeech = true }
+        voice.say(assistant)
+    }
+
+    // MARK: - Sub-25ms Local Fast Queries (Time, Date, Calendar)
+
+    private static let timeQueryRegex = try! NSRegularExpression(
+        pattern: #"^(?:what(?:'s|\s+is)?\s+the\s+(?:current\s+)?time|what\s+time\s+is\s+it|tell\s+me\s+the\s+time|do\s+you\s+have\s+the\s+time)(?:\s+right\s+now)?$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let dateQueryRegex = try! NSRegularExpression(
+        pattern: #"^(?:what(?:'s|\s+is)?\s+(?:today(?:'s)?\s+date|the\s+date(?:\s+today)?)|what\s+day\s+is\s+(?:it|today))$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let calendarFastRegex = try! NSRegularExpression(
+        pattern: #"^(?:what(?:'s|\s+is|\s+do\s+i\s+have)?\s+on\s+my\s+(?:calendar|schedule)|what(?:'s|\s+is)\s+my\s+schedule(?:\s+like)?|do\s+i\s+have\s+(?:any\s+)?(?:meetings|events|appointments)|check\s+my\s+(?:calendar|schedule))(?:\s+(?:for\s+)?(?<spanWord>today|tomorrow|this\s+week))?$"#,
+        options: [.caseInsensitive]
+    )
+
+    private func handleLocalFastQuery(_ request: String) -> Bool {
+        let stripped = Self.stripPoliteLeadIn(request) ?? request
+        let clean = stripped
+            .replacingOccurrences(of: "’", with: "'")
+            .trimmingCharacters(in: CharacterSet(charactersIn: " .,!?;:"))
+        guard !clean.isEmpty else { return false }
+        let nsRange = NSRange(clean.startIndex..., in: clean)
+
+        if Self.timeQueryRegex.firstMatch(in: clean, range: nsRange) != nil {
+            let now = Date()
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.dateFormat = "h:mm a"
+            publishAnsweredCommand(user: request, assistant: "It is \(f.string(from: now)).")
+            return true
+        }
+
+        if Self.dateQueryRegex.firstMatch(in: clean, range: nsRange) != nil {
+            let now = Date()
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.dateFormat = "EEEE, MMMM d, yyyy"
+            publishAnsweredCommand(user: request, assistant: "Today is \(f.string(from: now)).")
+            return true
+        }
+
+        if let match = Self.calendarFastRegex.firstMatch(in: clean, range: nsRange) {
+            let spanRaw: String
+            let spanRange = match.range(withName: "spanWord")
+            if spanRange.location != NSNotFound, let r = Range(spanRange, in: clean) {
+                spanRaw = String(clean[r]).lowercased()
+            } else {
+                spanRaw = "today"
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let answer = await self.localCalendarSummary(span: spanRaw)
+                self.publishAnsweredCommand(user: request, assistant: answer)
+            }
+            return true
+        }
+
+        return false
+    }
+
+    @MainActor
+    private func localCalendarSummary(span: String) async -> String {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        let startDay: Date
+        let days: Int
+        let label: String
+        if span == "tomorrow" {
+            startDay = cal.date(byAdding: .day, value: 1, to: today) ?? today
+            days = 1
+            label = "tomorrow"
+        } else if span.contains("week") {
+            startDay = today
+            days = 7
+            label = "this week"
+        } else {
+            startDay = today
+            days = 1
+            label = "today"
+        }
+
+        let ekStore = reminders.store.store
+        let eventsAllowed = EKEventStore.authorizationStatus(for: .event) == .fullAccess
+        let remindersAllowed = reminders.store.authorized
+        guard eventsAllowed || remindersAllowed else {
+            return "Allow Calendars and Reminders for JOAT Brain in iPhone Settings > Privacy & Security first."
+        }
+
+        let endDay = cal.date(byAdding: .day, value: days, to: startDay) ?? startDay
+        let events: [EKEvent] = eventsAllowed
+            ? ekStore.events(matching: ekStore.predicateForEvents(withStart: startDay, end: endDay, calendars: nil))
+            : []
+        let datedReminders: [EKReminder] = remindersAllowed
+            ? await reminders.store.incomplete(dueFrom: startDay, until: endDay)
+            : []
+
+        let tf = DateFormatter()
+        tf.locale = Locale(identifier: "en_US_POSIX")
+        tf.timeZone = cal.timeZone
+        tf.dateFormat = "h:mm a"
+
+        var items: [(date: Date, text: String)] = []
+        for ev in events {
+            guard let s = ev.startDate, let e = ev.endDate else { continue }
+            let overlaps = ev.isAllDay ? (cal.startOfDay(for: s) < endDay && e >= startDay) : (s < endDay && e > startDay)
+            guard overlaps else { continue }
+            let title = (ev.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanTitle = title.isEmpty ? "Untitled event" : title
+            items.append((s, ev.isAllDay ? "\(cleanTitle) (all day)" : "\(tf.string(from: s)) \(cleanTitle)"))
+        }
+        for rem in datedReminders {
+            guard let due = rem.dueDate, due >= startDay && due < endDay else { continue }
+            let title = (rem.title ?? "Reminder").trimmingCharacters(in: .whitespacesAndNewlines)
+            let timed = rem.dueDateComponents?.hour != nil
+            items.append((due, timed ? "\(tf.string(from: due)) \(title)" : "\(title) (due)"))
+        }
+
+        items.sort { $0.date < $1.date }
+        if items.isEmpty {
+            return "You have nothing scheduled \(label)."
+        }
+        let preview = items.prefix(4).map(\.text).joined(separator: "; ")
+        let more = items.count > 4 ? " (+\(items.count - 4) more)" : ""
+        return "You have \(items.count) item\(items.count == 1 ? "" : "s") \(label): \(preview)\(more)."
     }
 
     func routeCommand(_ request: String) -> CommandReply? {
@@ -638,21 +835,13 @@ final class Brain {
             || Grammar.match(Messages.bareReplyRe, norm) != nil
     }
 
-    private func arbitrateUnaddressedReply(_ text: String, now: Date) -> VoiceCommand? {
-        let mailTakes = mail.takesUnaddressed(text, now: now)
-        let msgTakes = messages.takesUnaddressed(text, now: now)
+    func arbitrateUnaddressedReply(_ text: String, now: Date) -> VoiceCommand? {
         let isGeneric = Self.isGenericReplyUtterance(text)
-
-        if capabilities.activeCapability == "MAIL" {
-            if mailTakes || (mail.threadOnGlass != nil && isGeneric) { return mail }
-        } else if capabilities.activeCapability == "MESSAGES" {
-            if msgTakes || (messages.threadOnGlass != nil && isGeneric) { return messages }
+        if capabilities.activeCapability == "MAIL", mail.threadOnGlass != nil {
+            if mail.takesUnaddressed(text, now: now) || isGeneric { return mail }
+        } else if capabilities.activeCapability == "MESSAGES", messages.threadOnGlass != nil {
+            if messages.takesUnaddressed(text, now: now) || isGeneric { return messages }
         }
-        if mailTakes && msgTakes {
-            return mail.lastArrival >= messages.lastArrival ? mail : messages
-        }
-        if mailTakes { return mail }
-        if msgTakes { return messages }
         return nil
     }
 
@@ -677,7 +866,6 @@ final class Brain {
         return reordered
     }
 
-    /// orchestrator.py _FILLER_WORDS: never a request on its own.
     static let fillerWords: Set<String> = [
         "the", "a", "an", "uh", "um", "umm", "hmm", "mm", "mhm", "ah", "oh",
         "you", "thank", "thanks", "for", "watching", "bye", "so",
@@ -689,9 +877,20 @@ final class Brain {
     }
 
     /// The conversation page's Continue / Exit (assistant-conversation input).
+    /// Tapping to exit retires `conversationId` in Even Hub (`this.retired.add`),
+    /// so we MUST immediately rotate to a fresh `conversationId` while keeping
+    /// `modelHistory` for 30 s of conversational context!
     func conversationChoice(_ action: String) {
-        if action == "exit" { conversationUntil = .distantPast }
-        if action == "continue" { conversationUntil = Date().addingTimeInterval(Self.conversationWindow) }
+        if action == "exit" {
+            conversationUntil = .distantPast
+            speechLatchedUntil = .distantPast
+            rotateCardConversation()
+        } else if action == "continue" {
+            let open = scheduleFollowUpTimer()
+            if open, conversationVisible, !turns.isEmpty {
+                sendSnapshot(state: "ready", listening: true)
+            }
+        }
         Log.add("conversation \(action)")
     }
 
@@ -703,10 +902,11 @@ final class Brain {
 
     @MainActor
     func beginStreamingConversationForTesting(user: String, partialAssistant: String? = nil) {
+        prepareConversationSession(now: Date())
+        lastAddressedAt = Date()
+        streamEpoch += 1
+        preDismissedEpoch = nil
         publish(user: user, assistant: nil, state: "answering")
-        let streamId = UUID()
-        activeStreamId = streamId
-        dismissedStreamId = nil
         streamingTurnIndex = nil
         if let partialAssistant {
             publishStreamingDelta(partialAssistant)
@@ -715,58 +915,83 @@ final class Brain {
 
     @MainActor
     func dismissActiveStreamingConversation() {
-        dismissedStreamId = activeStreamId
-        activeStreamId = UUID()
-        if let idx = streamingTurnIndex,
-           turns.indices.contains(idx),
-           turns[idx]["role"] == "assistant" {
-            turns.remove(at: idx)
+        preDismissedEpoch = streamEpoch
+        if conversationVisible {
+            let dismissedId = conversationId
+            let dismissedRev = revision
+            link.send([
+                "kind": "assistant.conversation",
+                "operation": "dismiss",
+                "conversationId": dismissedId,
+                "revision": dismissedRev,
+            ])
+            Log.add("tx assistant.conversation rev=\(dismissedRev) op=dismiss")
         }
-        streamingTurnIndex = nil
-        if turns.last?["role"] == "user" {
-            turns.removeLast()
-        }
-        revision += 1
-        link.send([
-            "kind": "assistant.conversation",
-            "operation": "dismiss",
-            "conversationId": conversationId,
-            "revision": revision,
-        ])
-        Log.add("tx assistant.conversation rev=\(revision) op=dismiss")
+        // Always rotate `conversationId` after a dismiss because Even Hub adds
+        // the dismissed `conversationId` to `AssistantConversationSurface.retired`.
+        rotateCardConversation()
     }
 
-    private func publishVolatilePreview(_ preview: String, now: Date) {
-        let stale = now.timeIntervalSince(lastAddressedAt) > 30
-        let cid: String
-        let baseTurns: [[String: String]]
-        if stale {
-            if let existing = pendingConversationId {
-                cid = existing
-            } else {
-                let fresh = "phone-\(UUID().uuidString.prefix(8).lowercased())"
-                pendingConversationId = fresh
-                revision = 0
-                cid = fresh
-            }
-            baseTurns = []
-        } else {
-            cid = conversationId
-            baseTurns = Array(turns.suffix(15))
+    @discardableResult
+    private func scheduleFollowUpTimer() -> Bool {
+        cueExpiry?.cancel()
+        cueExpiry = nil
+        let window = Self.conversationWindow
+        guard window > 0 else {
+            conversationUntil = .distantPast
+            return false
         }
-        let previewTurn: [String: String] = ["role": "user", "text": String(preview.prefix(3900)) + "…"]
-        let previewTurns = baseTurns + [previewTurn]
+        conversationUntil = Date().addingTimeInterval(window)
+        Log.add("follow-up window open for \(Int(window)) s")
+        scheduleCueExpiry(after: window)
+        return true
+    }
+
+    private func scheduleCueExpiry(after seconds: TimeInterval) {
+        cueExpiry?.cancel()
+        let expectedCid = conversationId
+        let expiry = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.conversationVisible,
+                  self.conversationId == expectedCid,
+                  !self.turns.isEmpty,
+                  !self.followUpWindowOpen else { return }
+            self.sendSnapshot(state: "ready", listening: false)
+            Log.add("follow-up window closed")
+        }
+        cueExpiry = expiry
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.02, execute: expiry)
+    }
+
+    private func refreshFollowUpAfterSpeechIfNeeded() {
+        guard extendWindowAfterSpeech else { return }
+        extendWindowAfterSpeech = false
+        let window = Self.conversationWindow
+        guard window > 0, conversationVisible else { return }
+        conversationUntil = Date().addingTimeInterval(window)
+        scheduleCueExpiry(after: window)
+    }
+
+    private func sendSnapshot(state: String, listening: Bool) {
+        guard !turns.isEmpty else { return }
         revision += 1
-        link.send([
+        conversationVisible = true
+        var wire: [String: Any] = [
             "kind": "assistant.conversation",
             "operation": "replace",
-            "conversationId": cid,
+            "conversationId": conversationId,
             "revision": revision,
-            "state": "thinking",
-            "turns": previewTurns,
+            "state": state,
+            "turns": turns,
             "continueAfterMs": 30_000,
             "earlierTurnsOmitted": false,
-        ])
+            "listening": listening,
+        ]
+        if !listening && state != "ready" {
+            wire.removeValue(forKey: "listening")
+        }
+        link.send(wire)
+        Log.add("tx assistant.conversation rev=\(revision) state=\(state) turns=\(turns.count)\(listening ? " +listening" : "")")
     }
 
     private func publishStreamingDelta(_ partial: String) {
@@ -785,6 +1010,7 @@ final class Brain {
             streamingTurnIndex = turns.count - 1
         }
         revision += 1
+        conversationVisible = true
         link.send([
             "kind": "assistant.conversation",
             "operation": "replace",
@@ -797,8 +1023,7 @@ final class Brain {
         ])
     }
 
-    private func finishStreamingTurn(_ finalAnswer: String) {
-        conversationUntil = Date().addingTimeInterval(Self.conversationWindow)
+    private func finishStreamingTurn(_ finalAnswer: String, armFollowUp: Bool = false) {
         let clipped = String((finalAnswer.isEmpty ? "…" : finalAnswer).prefix(3900))
         if let idx = streamingTurnIndex,
            turns.indices.contains(idx),
@@ -811,43 +1036,16 @@ final class Brain {
             }
         }
         streamingTurnIndex = nil
-        revision += 1
-        link.send([
-            "kind": "assistant.conversation",
-            "operation": "replace",
-            "conversationId": conversationId,
-            "revision": revision,
-            "state": "ready",
-            "turns": turns,
-            "continueAfterMs": 30_000,
-            "earlierTurnsOmitted": false,
-        ])
-        Log.add("tx assistant.conversation rev=\(revision) state=ready turns=\(turns.count)")
+        let shouldListen = armFollowUp ? scheduleFollowUpTimer() : false
+        sendSnapshot(state: "ready", listening: shouldListen)
     }
 
-    private func publish(user: String?, assistant: String?, state: String) {
-        activeStreamId = UUID()
-        dismissedStreamId = nil
+    private func publish(user: String?, assistant: String?, state: String, listening: Bool = false) {
         streamingTurnIndex = nil
-        // JOAT answered (or asked): keep listening without the name.
-        if state == "ready", assistant != nil {
-            conversationUntil = Date().addingTimeInterval(Self.conversationWindow)
-        }
         if let user, !user.isEmpty { turns.append(["role": "user", "text": String(user.prefix(3900))]) }
         if let assistant, !assistant.isEmpty { turns.append(["role": "assistant", "text": String(assistant.prefix(3900))]) }
         if turns.count > 16 { turns.removeFirst(turns.count - 16) }
         guard !turns.isEmpty else { return }
-        revision += 1
-        link.send([
-            "kind": "assistant.conversation",
-            "operation": "replace",
-            "conversationId": conversationId,
-            "revision": revision,
-            "state": state,
-            "turns": turns,
-            "continueAfterMs": 30_000,
-            "earlierTurnsOmitted": false,
-        ])
-        Log.add("tx assistant.conversation rev=\(revision) state=\(state) turns=\(turns.count)")
+        sendSnapshot(state: state, listening: listening)
     }
 }

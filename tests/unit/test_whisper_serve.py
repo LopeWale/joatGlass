@@ -231,8 +231,36 @@ class TestLifecycle:
             "whisperkit-cli", "serve", "--model", "large-v3_turbo",
             "--download-model-path", str(tmp_path / "models"),
             "--host", "127.0.0.1", "--port", "50061",
+            "--language", "en",
             "--temperature-fallback-count", "0", "--without-timestamps",
         ]
+
+    async def test_language_defaults_to_en_in_multipart_and_can_be_disabled(
+        self, stub_server, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        default_engine = WhisperServeEngine(base_url=stub_server)
+        await default_engine.feed(SPEECH)
+        assert await default_engine.flush() is not None
+        assert b'name="language"\r\n\r\nen' in StubHandler.requests[-1]
+
+        auto_engine = WhisperServeEngine(base_url=stub_server, language=None)
+        await auto_engine.feed(SPEECH)
+        assert await auto_engine.flush() is not None
+        assert b'name="language"' not in StubHandler.requests[-1]
+
+        captured: list[object] = []
+
+        class Process:
+            returncode = None
+
+        async def create_subprocess_exec(*args: object, **_kwargs: object) -> Process:
+            captured.extend(args)
+            return Process()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
+        spawn_auto = WhisperServeEngine(port=50_063, model_dir=tmp_path / "m", language=None)
+        await spawn_auto._spawn()
+        assert "--language" not in captured
 
     async def test_the_weights_never_land_in_an_icloud_synced_folder(self) -> None:
         """whisperkit-cli defaults its download to ~/Documents/huggingface.
