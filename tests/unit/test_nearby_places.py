@@ -34,14 +34,14 @@ class TestNearbyPlacesTool:
 
         async def search(query: str, point: NavigationPoint) -> list[NavigationCandidate]:
             calls.append((query, point))
-            return [_candidate("Cajun Corner", "2301 N Lincoln Ave")]
+            return [_candidate("Corner Bakery", "2301 N Lincoln Ave")]
 
         tool = nearby_places_tool(lambda: None, refresh, search)
 
         result = await tool.run({"query": "restaurants"})
 
         assert calls == [("restaurants", NavigationPoint(41.9, -87.65))]
-        assert "Cajun Corner" in result
+        assert "Corner Bakery" in result
         assert "2301 N Lincoln" in result
         assert "41.9" not in result
         assert "-87.65" not in result

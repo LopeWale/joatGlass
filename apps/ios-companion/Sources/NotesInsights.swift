@@ -5,9 +5,22 @@ import Foundation
 /// handwriting first, and what the page / list shows while that happens.
 /// Foundation only, so tests/ios/test_notes_insights.swift can compile it alone.
 enum NotesInsights {
-    /// A short writing pause: handwriting is read (and typed words summarized)
-    /// this long after the last stroke or keystroke. Was 25 s.
-    static let idleSeconds: TimeInterval = 4.0
+    /// Handwriting OCR and AI summary run only after closing/leaving a modified
+    /// page — never on a timer while the wearer is actively editing it.
+    static let summarizesWhileEditing = false
+
+    /// In the open page editor, only show the inline AI card when a previous
+    /// summary already exists or the user explicitly started OCR/summary from
+    /// the inspector — never an expanding placeholder banner while writing.
+    static func shouldShowInlineEditorCard(
+        hasSummary: Bool,
+        hasKeyPoints: Bool,
+        hasTodos: Bool,
+        reading: Bool,
+        summarizing: Bool
+    ) -> Bool {
+        hasSummary || hasKeyPoints || hasTodos || reading || summarizing
+    }
 
     // MARK: Zoom
 
@@ -49,9 +62,9 @@ enum NotesInsights {
             case .summarizing: return "Summarizing…"
             case .noKey: return "No AI key on this phone: add a Claude or Gemini key in Home to get summaries."
             case .ready: return "AI summary"
-            case .stale: return "Edited since this summary"
-            case .pending: return "Summary comes after a short pause in writing."
-            case .empty: return "Write or type, and the summary appears here."
+            case .stale: return "Edited — summary updates when you close this page"
+            case .pending: return "Summary updates when you close this page."
+            case .empty: return "Write or type, and the summary is generated when you close the page."
             }
         }
 

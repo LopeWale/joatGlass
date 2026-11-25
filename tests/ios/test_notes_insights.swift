@@ -53,10 +53,24 @@ private func expectEqual<T: Equatable>(_ a: T, _ e: T, _ m: String, line: UInt =
 }
 private func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.0001 }
 
-// MARK: Writing pause
+// MARK: Post-close summary rule (never while editing)
 
-expect(NotesInsights.idleSeconds >= 3 && NotesInsights.idleSeconds <= 5, "handwriting/summary runs after a ≈4 s writing pause")
-expect(NotesInsights.idleSeconds < 25, "the old 25 s idle is gone")
+expectEqual(NotesInsights.summarizesWhileEditing, false, "handwriting OCR and AI summary never run while actively editing a page")
+expectEqual(
+    NotesInsights.shouldShowInlineEditorCard(hasSummary: false, hasKeyPoints: false, hasTodos: false, reading: false, summarizing: false),
+    false,
+    "unsummarized page shows no shifting AI banner above the canvas while editing"
+)
+expectEqual(
+    NotesInsights.shouldShowInlineEditorCard(hasSummary: true, hasKeyPoints: false, hasTodos: false, reading: false, summarizing: false),
+    true,
+    "previously summarized page keeps its summary card visible"
+)
+expectEqual(
+    NotesInsights.shouldShowInlineEditorCard(hasSummary: false, hasKeyPoints: false, hasTodos: false, reading: true, summarizing: false),
+    true,
+    "manual inspector OCR shows progress"
+)
 
 // MARK: Zoom limits (compact phone, unfolded Duo, wide page)
 
@@ -104,15 +118,17 @@ expectEqual(NotesInsights.status(reading: false, summarizing: false, configured:
 expectEqual(NotesInsights.status(reading: false, summarizing: false, configured: true, hasSummary: false, stale: false, hasContent: false),
             .empty, "blank page")
 expectEqual(NotesInsights.status(reading: false, summarizing: false, configured: true, hasSummary: false, stale: false, hasContent: true),
-            .pending, "content waiting for the pause")
+            .pending, "content waiting for page close")
+expect(NotesInsights.Status.pending.label.lowercased().contains("close"), "pending label says summary runs on close")
+expect(NotesInsights.Status.stale.label.lowercased().contains("close"), "stale label says summary updates on close")
 expect(NotesInsights.Status.readingHandwriting.label.contains("Reading handwriting"), "reading label")
 expect(NotesInsights.Status.summarizing.label.contains("Summarizing"), "summarizing label")
 expect(NotesInsights.Status.noKey.label.lowercased().contains("key"), "no-key label names the key")
 
 // MARK: List row summary line
 
-expectEqual(NotesInsights.rowLine(summary: "  Call Mike Friday.  ", keyPoints: ["x"], paragraphs: ["raw"]), "Call Mike Friday.", "summary first")
-expectEqual(NotesInsights.rowLine(summary: nil, keyPoints: ["Spare relays"], paragraphs: ["raw"]), "Spare relays", "then key point")
+expectEqual(NotesInsights.rowLine(summary: "  Send Liam slides Friday.  ", keyPoints: ["x"], paragraphs: ["raw"]), "Send Liam slides Friday.", "summary first")
+expectEqual(NotesInsights.rowLine(summary: nil, keyPoints: ["Book review room"], paragraphs: ["raw"]), "Book review room", "then key point")
 expectEqual(NotesInsights.rowLine(summary: "", keyPoints: [], paragraphs: ["", "first words"]), "first words", "then text")
 expectEqual(NotesInsights.rowLine(summary: nil, keyPoints: [], paragraphs: []), nil, "nothing")
 

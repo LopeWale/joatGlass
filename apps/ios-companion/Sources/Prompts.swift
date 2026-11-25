@@ -106,7 +106,7 @@ final class Prompts: BrainFeature {
         Log.add("prompt \(id.prefix(6)) taken down: \(why)")
     }
 
-    /// Words under the held card ("Mike · looking up…").
+    /// Words under the held card ("Liam · looking up…").
     func note(_ text: String) {
         guard let id = held else { return }
         link.send(["kind": "prompt.partial", "promptId": id, "connectionGeneration": generation,

@@ -164,7 +164,7 @@ describe('Home from a firmware text page', () => {
     const promptPage = r.rebuilds[r.rebuilds.length - 1];
     expect(promptPage?.textObject?.find((t) => t.containerName === 'generation')?.content?.trim())
       .toBe('tap: search · 2x tap: cancel');
-    expect(await r.hud.showPromptPartial('nav-q1', 'Cajun Corner')).toBe(true);
+    expect(await r.hud.showPromptPartial('nav-q1', 'Corner Bakery')).toBe(true);
     expect(r.writes()).toContain('upgrade:wearer-turns');
 
     r.reset();
@@ -324,5 +324,18 @@ describe('the page of an open QuickNote — Even\'s "New note" (FEAT-002)', () =
     })).toBe(true);
     const other = r.rebuilds[r.rebuilds.length - 1]?.menuObject?.menuItems ?? [];
     expect(other.some((item: { itemID?: number }) => item.itemID === QUICKNOTES_UNDO_MENU_ID)).toBe(false);
+  });
+
+  it('hides AI cues in the glasses menu when cuesEnabled is false and forces rebuild when toggled', async () => {
+    const r = rig();
+    expect(await r.hud.showList(['Listening…'], { ...live, cuesEnabled: false })).toBe(true);
+    const itemsOff = r.rebuilds[r.rebuilds.length - 1]?.menuObject?.menuItems ?? [];
+    expect(itemsOff[0]).toMatchObject({ itemID: QUICKNOTES_UNDO_MENU_ID, itemName: 'Undo last input' });
+    expect(itemsOff[1]).toMatchObject({ itemID: QUICKNOTES_PREP_MENU_ID, itemName: 'Prep notes' });
+    expect(itemsOff.some((item: { itemID?: number }) => item.itemID === QUICKNOTES_CUES_MENU_ID)).toBe(false);
+
+    // Same cuesEnabled=false updates in place; flipping cuesEnabled=true forces a full showList rebuild.
+    expect(await r.hud.updateLiveTextPage(['More words'], { ...live, cuesEnabled: false })).toBe(true);
+    expect(await r.hud.updateLiveTextPage(['More words'], { ...live, cuesEnabled: true })).toBe(false);
   });
 });

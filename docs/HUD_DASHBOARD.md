@@ -111,7 +111,7 @@ same ownership boundaries.
 +----------------------------------------------+  y=0   id1 STATUS  z1  bright2  capture0
 |09:41 · JOAT · ● · ▇                          |
 +----------------------------------------------+  y=32  id2 MAIN    z2  bright4  capture1 <-- EVENT
-|Dele . Messages                               |
+|Evan . Messages                               |
 |On my way, 10 min out                         |
 |                                              |
 |                                              |
@@ -119,7 +119,7 @@ same ownership boundaries.
 |you 09:38  ok see you at 7                    |
 |                                              |
 +----------------------------------------------+  y=224 id6 TRAY    z4  bright2  capture0
-|2 waiting . Dele, Battery              12 asks|
+|2 waiting . Evan, Battery              12 asks|
 +----------------------------------------------+  y=256 id7 HINT    z5  bright1  capture0
 |                                              |
 +----------------------------------------------+  y=288
@@ -188,7 +188,7 @@ This single change fixes the `orchestrator.py:149`/`:157` clobber: query goes to
 +----------------------------------------------+  y=0   id1 STATUS  bright2
 |09:47   JOAT listening                 bat 86%|
 +----------------------------------------------+  y=32  id2 MAIN    bright4
-|!! Dele . Messages (3)                        |
+|!! Evan . Messages (3)                        |
 |Call me when you land, its urgent             |
 |                                              |
 |                                              |
@@ -313,8 +313,8 @@ interrupted Overview, Sidebar, or focus page.
 +|MESSAGES                                      |
 +----------------------------------------------+
 +|> New message · voice recipient + text        |
-+|  Adele (unread) · Attachment                 |
-+|  Marcus · Heading to the lab in 10.          |
++|  Casey (unread) · Attachment                 |
++|  Morgan · Heading to the lab in 10.          |
 +----------------------------------------------+
 |tap select · left x2 overview                 |
 +----------------------------------------------+  y=288

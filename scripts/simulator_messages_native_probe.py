@@ -95,7 +95,7 @@ async def main() -> None:
     with tempfile.TemporaryDirectory(prefix='joat-drive-') as root:
         rootp = Path(root)
         store = accept.build_fixture_store(rootp / 'chat.db')
-        # The acceptance fixture gives Dele exactly one page. Add a few
+        # The acceptance fixture gives Evan exactly one page. Add a few
         # earlier messages so the thread has an older page to tap into.
         import sqlite3
         connection = sqlite3.connect(rootp / 'chat.db')
@@ -132,11 +132,11 @@ async def main() -> None:
             report['picker_timing'] = timing_since(console(), 0)[-6:]
             ids = last_id(console())
 
-            # Dele is the thread with an older page; the picker row after
+            # Evan is the thread with an older page; the picker row after
             # "New message" that carries it depends on fixture recency.
-            dele = next((index for index, thread in enumerate(router._message_rows)
-                         if getattr(thread, 'sender', '') == 'Dele'), 0)
-            for _ in range(1 + dele):
+            evan = next((index for index, thread in enumerate(router._message_rows)
+                         if getattr(thread, 'sender', '') == 'Evan'), 0)
+            for _ in range(1 + evan):
                 await press('down', 0.4)
             await snap('2-picker-down', 0.5)
             report['picker_down_timing'] = timing_since(console(), ids); ids = last_id(console())

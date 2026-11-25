@@ -775,7 +775,7 @@ class TestDownlinkWire:
 
     def test_hud_text_carries_content_provenance_and_trace_id(self) -> None:
         wire = HudText(
-            text="Dele · Messages\nOn my way",
+            text="Evan · Messages\nOn my way",
             content_kind="notification",
             trace_id="msg-7",
         ).to_wire()
@@ -876,7 +876,7 @@ class TestDownlinkWire:
         # Mirror: `pageControls` on the hud.list downlink in types.ts. Present
         # (even empty) means the paging rows exist, so the plugin may draw the
         # thread as a firmware list; absent means the old swipe-paging thread.
-        items = ["Latest messages", "Dele · Hi", "▼ Older messages"]
+        items = ["Latest messages", "Evan · Hi", "▼ Older messages"]
         wire = HudList(items=items, page_controls=(None, 2)).to_wire()
         assert wire["pageControls"] == {"olderIndex": 2}
         wire = HudList(items=items, page_controls=(0, 9)).to_wire()
@@ -1085,14 +1085,14 @@ class TestDownlinkWire:
             "kind": "places",
             "places": [
                 {"id": "p1", "name": "  Home ", "address": " 12  Oak St "},
-                {"id": "p2", "name": "Work", "latitude": 35.2, "longitude": -97.4},
-                {"id": "p3", "name": "Gym", "address": "Campus", "latitude": 35.21, "longitude": -97.41},
+                {"id": "p2", "name": "Work", "latitude": 41.88, "longitude": -87.63},
+                {"id": "p3", "name": "Gym", "address": "Campus", "latitude": 41.89, "longitude": -87.64},
             ],
         }
         assert parse_uplink(wire) == Places(places=(
             SavedPlace(place_id="p1", name="Home", address="12 Oak St"),
-            SavedPlace(place_id="p2", name="Work", latitude=35.2, longitude=-97.4),
-            SavedPlace(place_id="p3", name="Gym", address="Campus", latitude=35.21, longitude=-97.41),
+            SavedPlace(place_id="p2", name="Work", latitude=41.88, longitude=-87.63),
+            SavedPlace(place_id="p3", name="Gym", address="Campus", latitude=41.89, longitude=-87.64),
         ))
         assert parse_uplink({"kind": "places", "places": []}) == Places(places=())
         for broken in (
@@ -1263,7 +1263,7 @@ class TestDownlinkWire:
             navigation=NavigationHudView(
                 view="mode",
                 primary="Choose travel mode",
-                secondary="Cajun Corner · 1.2 km",
+                secondary="Corner Bakery · 1.2 km",
                 hint="swipe choose · tap continue",
                 interaction="stationary",
                 options=["Walk · 18 min", "Cycle · 7 min"],
@@ -1279,7 +1279,7 @@ class TestDownlinkWire:
             "navigation": {
                 "view": "mode",
                 "primary": "Choose travel mode",
-                "secondary": "Cajun Corner · 1.2 km",
+                "secondary": "Corner Bakery · 1.2 km",
                 "hint": "swipe choose · tap continue",
                 "interaction": "stationary",
                 "options": ["Walk · 18 min", "Cycle · 7 min"],
@@ -1299,7 +1299,7 @@ class TestDownlinkWire:
         )
         wire = NavigationRoute(
             session_id="nav-1", request_id="route-request-1", generation=10,
-            route_id="route-1", revision=1, destination_label="Cajun Corner",
+            route_id="route-1", revision=1, destination_label="Corner Bakery",
             eta_minutes=18,
             plan=NavigationRoutePlan(
                 mode="walking",
@@ -1322,7 +1322,7 @@ class TestDownlinkWire:
 
         driving_wire = NavigationRoute(
             session_id="nav-2", request_id="route-request-2", generation=11,
-            route_id="route-2", revision=1, destination_label="Cajun Corner",
+            route_id="route-2", revision=1, destination_label="Corner Bakery",
             eta_minutes=6,
             phone_fixes=True,
             plan=NavigationRoutePlan(
@@ -1510,10 +1510,10 @@ class TestLocationAndIdentity:
     """New wire shapes for audit findings 12/15/16/21 — mirrored in types.ts."""
 
     def test_location_parses(self) -> None:
-        msg = parse_uplink({"kind": "location", "latitude": 35.2, "longitude": -97.4,
+        msg = parse_uplink({"kind": "location", "latitude": 41.88, "longitude": -87.63,
                             "accuracy": 12.5})
         assert isinstance(msg, Location)
-        assert (msg.latitude, msg.longitude, msg.accuracy) == (35.2, -97.4, 12.5)
+        assert (msg.latitude, msg.longitude, msg.accuracy) == (41.88, -87.63, 12.5)
 
     def test_location_accuracy_is_optional(self) -> None:
         msg = parse_uplink({"kind": "location", "latitude": 1.0, "longitude": 2.0})
@@ -1899,12 +1899,12 @@ class TestHudNotifications:
     def test_wire_shape(self) -> None:
         from joat.core.protocol import HudNotificationCard, HudNotifications
 
-        card = HudNotificationCard("a" * 32, "WhatsApp", "Elizabeth", "Mom didn't\n pick up.", 1_791_410_291_592, True)
+        card = HudNotificationCard("a" * 32, "WhatsApp", "Taylor", "Landed at\n Gate B4.", 1_791_410_291_592, True)
         assert HudNotifications((card,)).to_wire() == {
             "kind": "hud.notifications",
             "cards": [{
-                "id": "a" * 32, "app": "WhatsApp", "sender": "Elizabeth",
-                "body": "Mom didn't pick up.", "at": 1_791_410_291_592, "urgent": True,
+                "id": "a" * 32, "app": "WhatsApp", "sender": "Taylor",
+                "body": "Landed at Gate B4.", "at": 1_791_410_291_592, "urgent": True,
             }],
         }
 

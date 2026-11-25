@@ -121,8 +121,8 @@ class TestPromptedInputDispatcher:
         assert fixture.dispatcher.is_armed is False
         assert fixture.dispatcher.current_ticket == ticket
         assert fixture.acknowledge(ticket) is True
-        assert await fixture.dispatcher.dispatch(Transcript("Adele", True), receipt(ticket)) is True
-        assert fixture.received == ["Adele"]
+        assert await fixture.dispatcher.dispatch(Transcript("Casey", True), receipt(ticket)) is True
+        assert fixture.received == ["Casey"]
 
     async def test_failed_presentation_revokes_its_ticket_and_late_success_cannot_rearm(self) -> None:
         fixture = PromptFixture()
@@ -151,8 +151,8 @@ class TestPromptedInputDispatcher:
         assert fixture.acknowledge(current) is True
         assert await fixture.dispatcher.dispatch(Transcript("Old queued body", True), receipt(old)) is False
         assert fixture.dispatcher.is_armed is True
-        assert await fixture.dispatcher.dispatch(Transcript("Adele", True), receipt(current)) is True
-        assert fixture.received == ["Adele"]
+        assert await fixture.dispatcher.dispatch(Transcript("Casey", True), receipt(current)) is True
+        assert fixture.received == ["Casey"]
 
     async def test_duplicate_ack_never_extends_expiry_or_moves_the_audio_fence(self) -> None:
         fixture = PromptFixture()
@@ -370,12 +370,12 @@ class TestPromptedInputDispatcher:
         )
         fixture.acknowledge(initial)
 
-        assert await fixture.dispatcher.dispatch(Transcript("Adele", True), receipt(initial)) is True
+        assert await fixture.dispatcher.dispatch(Transcript("Casey", True), receipt(initial)) is True
         current = published[0]
         assert fixture.dispatcher.current_ticket == current
-        assert await fixture.dispatcher.dispatch(Transcript("Adele", True), receipt(initial)) is False
+        assert await fixture.dispatcher.dispatch(Transcript("Casey", True), receipt(initial)) is False
         assert await fixture.dispatcher.dispatch(Transcript("Good morning", True), receipt(current, first=21, last=24)) is True
-        assert fixture.received == ["Adele", "Good morning"]
+        assert fixture.received == ["Casey", "Good morning"]
 
     def test_ticket_and_receipt_cannot_be_relabelled_after_audio_capture(self) -> None:
         fixture = PromptFixture()

@@ -25,12 +25,18 @@ final class MacLink {
 
     let config: Config?
     let claude = ClaudeLink()
+    private let customSession: URLSession?
 
-    init() {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("mac-link.json")
-        let candidates = [docs, Bundle.main.url(forResource: "mac-link", withExtension: "json")].compactMap { $0 }
-        config = candidates.lazy.compactMap { try? JSONDecoder().decode(Config.self, from: Data(contentsOf: $0)) }.first
+    init(config explicitConfig: Config? = nil, session customSession: URLSession? = nil) {
+        self.customSession = customSession
+        if let explicitConfig {
+            self.config = explicitConfig
+        } else {
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("mac-link.json")
+            let candidates = [docs, Bundle.main.url(forResource: "mac-link", withExtension: "json")].compactMap { $0 }
+            self.config = candidates.lazy.compactMap { try? JSONDecoder().decode(Config.self, from: Data(contentsOf: $0)) }.first
+        }
         Log.add(config == nil ? "mac link: not configured" : "mac link: \(URL(string: config!.url)?.host ?? "?")")
     }
 
@@ -39,6 +45,7 @@ final class MacLink {
     var configured: Bool { OnPhoneAI.shared.anyConfigured || claude.configured || config != nil }
 
     private lazy var session: URLSession = {
+        if let customSession { return customSession }
         let c = URLSessionConfiguration.default
         // agent_endpoint REQUEST_TIMEOUT_S is 90 s; a dead route fails fast anyway.
         c.timeoutIntervalForRequest = 95

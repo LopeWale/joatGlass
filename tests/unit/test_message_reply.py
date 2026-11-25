@@ -89,8 +89,8 @@ class FakeContacts:
 
 
 THREAD = MessageThread(
-    sender="Dele",
-    handle="+14055550123",
+    sender="Evan",
+    handle="+13125550123",
     text="Are you still coming?",
     at=123.0,
 )
@@ -104,7 +104,7 @@ class TestMessageReplyController:
         sender, confirm = FakeSender(), ScriptedConfirm(accepted)
         replies = MessageReplyController(sender, confirm)
         thread = MessageThread(
-            "Project team", "+14055550123", "Latest participant", 1.0,
+            "Project team", "+13125550123", "Latest participant", 1.0,
             chat_guid="iMessage;+;group-a", is_group=True,
         )
         replies.select(thread, "group-reply")
@@ -198,34 +198,34 @@ class TestMessageReplyController:
         self,
     ) -> None:
         sender, confirm = FakeSender(), ScriptedConfirm(True)
-        contacts = FakeContacts([("Adele Vance", "+14055550177")])
+        contacts = FakeContacts([("Casey Vance", "+13125550177")])
         replies = MessageReplyController(sender, confirm, contact_search=contacts.search)
         replies.begin_compose(trace_id="hud-new-message")
 
-        result = await replies.handle_command("message Adele saying Running late")
+        result = await replies.handle_command("message Casey saying Running late")
 
-        assert result == "Submitted to Messages for Adele Vance; delivery unverified."
-        assert contacts.queries == ["Adele"]
-        assert sender.sent == [("+14055550177", "Running late")]
-        assert confirm.calls[0][1] == "Send to Adele Vance? “Running late”"
+        assert result == "Submitted to Messages for Casey Vance; delivery unverified."
+        assert contacts.queries == ["Casey"]
+        assert sender.sent == [("+13125550177", "Running late")]
+        assert confirm.calls[0][1] == "Send to Casey Vance? “Running late”"
 
     async def test_new_message_arms_a_two_step_recipient_then_body_flow(self) -> None:
         sender, confirm = FakeSender(), ScriptedConfirm(True)
-        contacts = FakeContacts([("Adele Vance", "+14055550177")])
+        contacts = FakeContacts([("Casey Vance", "+13125550177")])
         replies = MessageReplyController(sender, confirm, contact_search=contacts.search)
         replies.begin_compose(trace_id="hud-two-step-compose")
 
-        assert await replies.handle_command("Adele") == (
-            "Recipient Adele Vance selected. Say the message."
+        assert await replies.handle_command("Casey") == (
+            "Recipient Casey Vance selected. Say the message."
         )
         assert sender.sent == []
         assert confirm.calls == []
 
         assert await replies.handle_command("Good morning") == (
-            "Submitted to Messages for Adele Vance; delivery unverified."
+            "Submitted to Messages for Casey Vance; delivery unverified."
         )
-        assert contacts.queries == ["Adele"]
-        assert sender.sent == [("+14055550177", "Good morning")]
+        assert contacts.queries == ["Casey"]
+        assert sender.sent == [("+13125550177", "Good morning")]
 
     async def test_new_message_compose_expiry_never_falls_through_to_a_send(self) -> None:
         now = [100.0]
@@ -235,12 +235,12 @@ class TestMessageReplyController:
             confirm,
             selection_ttl_s=120.0,
             monotonic=lambda: now[0],
-            contact_search=FakeContacts([("Adele", "+14055550177")]).search,
+            contact_search=FakeContacts([("Casey", "+13125550177")]).search,
         )
         replies.begin_compose(trace_id="hud-expired-compose")
         now[0] = 221.0
 
-        assert await replies.handle_command("Adele") == (
+        assert await replies.handle_command("Casey") == (
             "New message draft expired. Open Messages and choose New message again."
         )
         assert confirm.calls == []
@@ -249,10 +249,10 @@ class TestMessageReplyController:
     @pytest.mark.parametrize(
         ("matches", "expected"),
         [
-            ([], "No Mac contact matched Adele. Try a fuller name."),
+            ([], "No Mac contact matched Casey. Try a fuller name."),
             (
-                [("Adele Vance", "+14055550177"), ("Adele Okafor", "+14055550188")],
-                "More than one Mac contact address matched Adele. "
+                [("Casey Vance", "+13125550177"), ("Casey Rivera", "+13125550188")],
+                "More than one Mac contact address matched Casey. "
                 "Say the full name and message again.",
             ),
         ],
@@ -270,7 +270,7 @@ class TestMessageReplyController:
         )
         replies.begin_compose(trace_id="hud-compose-safe")
 
-        assert await replies.handle_command("message Adele saying Hello") == expected
+        assert await replies.handle_command("message Casey saying Hello") == expected
         assert confirm.calls == []
         assert sender.sent == []
 
@@ -279,10 +279,10 @@ class TestMessageReplyController:
         replies = MessageReplyController(
             sender,
             confirm,
-            contact_search=FakeContacts([("Adele", "+14055550177")]).search,
+            contact_search=FakeContacts([("Casey", "+13125550177")]).search,
         )
 
-        assert await replies.handle_command("message Adele saying Hello") == (
+        assert await replies.handle_command("message Casey saying Hello") == (
             "Open Messages and choose New message first."
         )
         assert confirm.calls == []
@@ -293,13 +293,13 @@ class TestMessageReplyController:
         replies = MessageReplyController(
             sender,
             confirm,
-            contact_search=FakeContacts([("Adele", "+14055550177")]).search,
+            contact_search=FakeContacts([("Casey", "+13125550177")]).search,
         )
         replies.begin_compose(trace_id="hud-compose-home")
 
         replies.clear_selection("home")
 
-        assert await replies.handle_command("message Adele saying Hello") == (
+        assert await replies.handle_command("message Casey saying Hello") == (
             "Open Messages and choose New message first."
         )
         assert confirm.calls == []
@@ -317,7 +317,7 @@ class TestMessageReplyController:
         assert len(confirm.calls) == 1
         action_id, prompt, timeout_s = confirm.calls[0]
         assert action_id.startswith("message-reply:hud-7:")
-        assert prompt == "Send to Dele? “On my way”"
+        assert prompt == "Send to Evan? “On my way”"
         # The plugin owns an eight-second VISIBLE window. The transport gets
         # the paint before that window begins AND the restore after the tap,
         # since an acceptance is sent only once the page beneath is back.
@@ -331,8 +331,8 @@ class TestMessageReplyController:
 
         result = await replies.handle_command("reply saying On my way")
 
-        assert result == "Submitted to Messages for Dele; delivery unverified."
-        assert sender.sent == [("+14055550123", "On my way")]
+        assert result == "Submitted to Messages for Evan; delivery unverified."
+        assert sender.sent == [("+13125550123", "On my way")]
 
     async def test_accepted_confirmation_consumes_consent_not_the_conversation(self) -> None:
         """Changelog 2026-09-12: a successful legacy reply keeps its
@@ -342,15 +342,15 @@ class TestMessageReplyController:
         replies.select(THREAD, trace_id="hud-one-shot")
 
         assert await replies.handle_command("reply saying First") == (
-            "Submitted to Messages for Dele; delivery unverified."
+            "Submitted to Messages for Evan; delivery unverified."
         )
         assert len(confirm.calls) == 1
         assert await replies.handle_command("reply saying Second") == (
-            "Submitted to Messages for Dele; delivery unverified."
+            "Submitted to Messages for Evan; delivery unverified."
         )
         assert len(confirm.calls) == 2, "the second reply needed a fresh confirmation"
         assert confirm.calls[0][0] != confirm.calls[1][0], "consent is per action, never reused"
-        assert sender.sent == [("+14055550123", "First"), ("+14055550123", "Second")]
+        assert sender.sent == [("+13125550123", "First"), ("+13125550123", "Second")]
 
     async def test_restored_conversation_keeps_its_original_expiry(self) -> None:
         now = [100.0]
@@ -365,7 +365,7 @@ class TestMessageReplyController:
         now[0] = 150.0
 
         assert await replies.handle_command("reply saying First") == (
-            "Submitted to Messages for Dele; delivery unverified."
+            "Submitted to Messages for Evan; delivery unverified."
         )
         # Past the ORIGINAL expiry (100 + 120), not a renewed one from the send.
         now[0] = 221.0
@@ -373,15 +373,15 @@ class TestMessageReplyController:
             "Message selection expired. Open Messages and choose the conversation again."
         )
         assert len(confirm.calls) == 1
-        assert sender.sent == [("+14055550123", "First")]
+        assert sender.sent == [("+13125550123", "First")]
 
     @pytest.mark.parametrize(
         ("possible_external_commit", "first_result"),
         [
-            (False, "Could not send to Dele. Check Messages on your Mac."),
+            (False, "Could not send to Evan. Check Messages on your Mac."),
             (
                 True,
-                "Messages may have submitted the reply to Dele. "
+                "Messages may have submitted the reply to Evan. "
                 "Check Messages on your Mac before trying again.",
             ),
         ],
@@ -437,18 +437,18 @@ class TestMessageReplyController:
             confirm.release.set()
             await first
         assert second == "A message reply is already awaiting confirmation."
-        assert sender.sent == [("+14055550123", "First")]
+        assert sender.sent == [("+13125550123", "First")]
 
     async def test_second_compose_body_cannot_open_while_confirmation_is_visible(self) -> None:
         sender, confirm = FakeSender(), BlockingConfirm()
         replies = MessageReplyController(
             sender,
             confirm,
-            contact_search=FakeContacts([("Adele Vance", "+14055550177")]).search,
+            contact_search=FakeContacts([("Casey Vance", "+13125550177")]).search,
         )
         replies.begin_compose(trace_id="hud-compose-confirming")
-        assert await replies.handle_command("Adele") == (
-            "Recipient Adele Vance selected. Say the message."
+        assert await replies.handle_command("Casey") == (
+            "Recipient Casey Vance selected. Say the message."
         )
 
         first = asyncio.create_task(replies.handle_command("First"))
@@ -461,7 +461,7 @@ class TestMessageReplyController:
             await first
 
         assert second == "A message reply is already awaiting confirmation."
-        assert sender.sent == [("+14055550177", "First")]
+        assert sender.sent == [("+13125550177", "First")]
 
     async def test_sender_failure_is_visible_and_never_claims_sent(self) -> None:
         sender = FakeSender(MessageSendError(
@@ -471,7 +471,7 @@ class TestMessageReplyController:
         replies.select(THREAD, trace_id="hud-9")
 
         assert await replies.handle_command("reply saying On my way") == (
-            "Could not send to Dele. Check Messages on your Mac."
+            "Could not send to Evan. Check Messages on your Mac."
         )
 
     async def test_uncertain_sender_failure_never_claims_the_reply_failed(self) -> None:
@@ -482,7 +482,7 @@ class TestMessageReplyController:
         replies.select(THREAD, trace_id="hud-uncertain")
 
         assert await replies.handle_command("reply saying On my way") == (
-            "Messages may have submitted the reply to Dele. "
+            "Messages may have submitted the reply to Evan. "
             "Check Messages on your Mac before trying again."
         )
 
@@ -525,7 +525,7 @@ class TestMessageReplyController:
         replies.select(THREAD, trace_id="hud-privacy-1")
 
         assert await replies.handle_command(f"reply saying {secret_body}") == (
-            "Submitted to Messages for Dele; delivery unverified."
+            "Submitted to Messages for Evan; delivery unverified."
         )
 
         assert "hud-privacy-1" in caplog.text
@@ -573,7 +573,7 @@ class TestMessageReplyController:
             replies.select(THREAD, trace_id="hud-durable")
 
             assert await replies.handle_command("reply saying On my way") == (
-                "Submitted to Messages for Dele; delivery unverified."
+                "Submitted to Messages for Evan; delivery unverified."
             )
             action = store.execute(
                 "SELECT action_id,state FROM actions WHERE kind='message.reply'"
@@ -664,11 +664,11 @@ class TestMessagesAppSender:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
         body = '  Quote " and newline\nstay literal  \n'
-        await MessagesAppSender().send("+14055550123", body)
+        await MessagesAppSender().send("+13125550123", body)
 
         assert captured is not None
         assert captured[0] == "osascript"
-        assert captured[-2:] == ("+14055550123", body)
+        assert captured[-2:] == ("+13125550123", body)
 
     async def test_nonzero_osascript_exit_raises_a_typed_failure(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         class Process:
@@ -682,7 +682,7 @@ class TestMessagesAppSender:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
         with pytest.raises(MessageSendError, match="Messages is not signed in"):
-            await MessagesAppSender().send("+14055550123", "hello")
+            await MessagesAppSender().send("+13125550123", "hello")
 
     async def test_a_refused_apple_event_is_a_definite_not_sent(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """errAEEventNotPermitted: the Apple Event never reached Messages, so
@@ -698,7 +698,7 @@ class TestMessagesAppSender:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
         with pytest.raises(MessageSendError) as caught:
-            await MessagesAppSender().send("+14055550123", "hello")
+            await MessagesAppSender().send("+13125550123", "hello")
         assert caught.value.possible_external_commit is False
         assert caught.value.code == "automation-denied"
         assert "Automation" in str(caught.value)
@@ -756,7 +756,7 @@ class TestMessagesAppSender:
         monkeypatch.setattr(sender, "check_permission", probe)
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
         with pytest.raises(MessageSendError) as caught:
-            await sender.send_chat("iMessage;-;+14055550123", "on my way")
+            await sender.send_chat("iMessage;-;+13125550123", "on my way")
         assert caught.value.possible_external_commit is False
         assert caught.value.code == f"automation-{probe_state}"
         assert spawned == []
@@ -772,19 +772,19 @@ class TestMessagesAppSender:
             return process
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-        await MessagesAppSender(preflight=True).send_chat("iMessage;-;+14055550123", "on my way")
+        await MessagesAppSender(preflight=True).send_chat("iMessage;-;+13125550123", "on my way")
         assert [c[2] for c in calls] == [
             'tell application "Messages" to count accounts',
             calls[1][2],
         ]
-        assert calls[1][-2:] == ("iMessage;-;+14055550123", "on my way")
+        assert calls[1][-2:] == ("iMessage;-;+13125550123", "on my way")
 
     @pytest.mark.parametrize(
         ("recipient", "body"),
         [
-            ("", "hello"), ("+14055550123", " \n "),
-            ("person\0@example.test", "hello"), ("+14055550123", "hello\0there"),
-            ("\ud800", "hello"), ("+14055550123", "hello\udfff"),
+            ("", "hello"), ("+13125550123", " \n "),
+            ("person\0@example.test", "hello"), ("+13125550123", "hello\0there"),
+            ("\ud800", "hello"), ("+13125550123", "hello\udfff"),
         ],
     )
     @pytest.mark.parametrize("method", ["send", "send_chat"])
@@ -822,7 +822,7 @@ class TestMessagesAppSender:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
         sender = MessagesAppSender(timeout_s=0.01, terminate_grace_s=0.01, kill_grace_s=0.1)
         with pytest.raises(MessageSendError) as caught:
-            await asyncio.wait_for(sender.send("+14055550123", "hello"), timeout=0.3)
+            await asyncio.wait_for(sender.send("+13125550123", "hello"), timeout=0.3)
 
         assert caught.value.possible_external_commit is True
         assert calls == 1
@@ -843,7 +843,7 @@ class TestMessagesAppSender:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
         sender = MessagesAppSender(timeout_s=10.0, terminate_grace_s=0.03, kill_grace_s=0.1)
-        sending = asyncio.create_task(sender.send("+14055550123", "hello"))
+        sending = asyncio.create_task(sender.send("+13125550123", "hello"))
         try:
             await asyncio.wait_for(owned.started.wait(), timeout=0.2)
             sending.cancel()
@@ -891,7 +891,7 @@ class TestMessagesAppSender:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
         sender = MessagesAppSender(timeout_s=0.05, terminate_grace_s=0.02, kill_grace_s=0.5)
-        sending = asyncio.create_task(sender.send("+14055550123", "hello"))
+        sending = asyncio.create_task(sender.send("+13125550123", "hello"))
         try:
             await asyncio.wait_for(started.wait(), timeout=1.0)
             if cancel:
@@ -930,7 +930,7 @@ async def _completed_message(replies: MessageReplyController, action_id: str) ->
 class TestPreparedMessages:
     """Real controller tasks with controlled contacts, approval and send adapters."""
 
-    @pytest.mark.parametrize("text", ["Dele", "Tell me a joke", "Could you open News?"])
+    @pytest.mark.parametrize("text", ["Evan", "Tell me a joke", "Could you open News?"])
     async def test_typed_input_does_not_swallow_shared_conversation(self, text: str) -> None:
         sender, confirm = FakeSender(), ScriptedConfirm(True)
         replies = MessageReplyController(sender, confirm)
@@ -945,7 +945,7 @@ class TestPreparedMessages:
         finally:
             await replies.aclose()
 
-    @pytest.mark.parametrize("text", ["Dele", "Tell me a joke", "Could you open News?"])
+    @pytest.mark.parametrize("text", ["Evan", "Tell me a joke", "Could you open News?"])
     async def test_typed_confirmation_does_not_swallow_shared_conversation(self, text: str) -> None:
         sender, confirm = FakeSender(), BlockingConfirm()
         replies = MessageReplyController(sender, confirm)
@@ -959,7 +959,7 @@ class TestPreparedMessages:
         finally:
             await replies.aclose()
 
-    @pytest.mark.parametrize("text", ["reply", "reply saying Duplicate", "message Adele saying Duplicate"])
+    @pytest.mark.parametrize("text", ["reply", "reply saying Duplicate", "message Casey saying Duplicate"])
     async def test_message_shaped_duplicate_reports_pending_input(self, text: str) -> None:
         sender, confirm = FakeSender(), ScriptedConfirm(True)
         replies = MessageReplyController(sender, confirm)
@@ -998,7 +998,7 @@ class TestPreparedMessages:
             await replies.aclose()
 
     async def test_unknown_relationship_requires_a_real_contact_name(self) -> None:
-        contacts = FakeContacts([("Wrong Guess", "+14055550999")])
+        contacts = FakeContacts([("Wrong Guess", "+13125550999")])
         sender, confirm = FakeSender(), ScriptedConfirm(True)
         replies = MessageReplyController(sender, confirm, contact_search=contacts.search)
 
@@ -1015,7 +1015,7 @@ class TestPreparedMessages:
         await replies.aclose()
 
     async def test_ambiguous_contacts_require_an_opaque_candidate_choice(self) -> None:
-        contacts = FakeContacts([("Alex Chen", "+14055550111"), ("Alex Lee", "+14055550222")])
+        contacts = FakeContacts([("Alex Chen", "+13125550111"), ("Alex Lee", "+13125550222")])
         sender, confirm = FakeSender(), ScriptedConfirm(False)
         replies = MessageReplyController(sender, confirm, contact_search=contacts.search)
 
@@ -1030,7 +1030,7 @@ class TestPreparedMessages:
         assert "+14055550" not in repr(status)
         assert confirm.calls == []
         with pytest.raises(ValueError):
-            await replies.provide_message_input("alex-request", recipient_ref="+14055550222")
+            await replies.provide_message_input("alex-request", recipient_ref="+13125550222")
         chosen = status.candidates[1]
         await replies.provide_message_input("alex-request", recipient_ref=chosen.reference)
         assert await _completed_message(replies, "alex-request") == "cancelled"
@@ -1039,11 +1039,11 @@ class TestPreparedMessages:
         await replies.aclose()
 
     async def test_prompted_body_keeps_punctuation_and_never_redispatches_commands(self) -> None:
-        contacts = FakeContacts([("Adele Vance", "+14055550177")])
+        contacts = FakeContacts([("Casey Vance", "+13125550177")])
         sender, confirm = FakeSender(), ScriptedConfirm(True)
         replies = MessageReplyController(sender, confirm, contact_search=contacts.search)
         status = await replies.prepare_new_message(
-            action_id="body-request", trace_id="conversation", recipient_name="Adele",
+            action_id="body-request", trace_id="conversation", recipient_name="Casey",
         )
         assert status.state == "awaiting_input"
         assert status.needs_input == "body"
@@ -1052,15 +1052,15 @@ class TestPreparedMessages:
         await replies.provide_message_input(status.action_id, body=body)
 
         assert await _completed_message(replies, status.action_id) == "sent"
-        assert sender.sent == [("+14055550177", body)]
-        assert confirm.calls[0][1] == f"Send to Adele Vance? “{body}”"
+        assert sender.sent == [("+13125550177", body)]
+        assert confirm.calls[0][1] == f"Send to Casey Vance? “{body}”"
         await replies.aclose()
 
     async def test_replayed_action_cannot_duplicate_or_change_a_send(self) -> None:
-        contacts = FakeContacts([("Adele", "+14055550177")])
+        contacts = FakeContacts([("Casey", "+13125550177")])
         sender, confirm = FakeSender(), BlockingConfirm()
         replies = MessageReplyController(sender, confirm, contact_search=contacts.search)
-        request = dict(action_id="stable-action", trace_id="conversation", recipient_name="Adele", body="First")
+        request = dict(action_id="stable-action", trace_id="conversation", recipient_name="Casey", body="First")
         first = await replies.prepare_new_message(**request)
         try:
             await asyncio.wait_for(confirm.started.wait(), timeout=0.2)
@@ -1073,8 +1073,8 @@ class TestPreparedMessages:
             confirm.release.set()
             assert await _completed_message(replies, first.action_id) == "sent"
             assert (await replies.prepare_new_message(**request)).state == "sent"
-            assert contacts.queries == ["Adele"]
-            assert sender.sent == [("+14055550177", "First")]
+            assert contacts.queries == ["Casey"]
+            assert sender.sent == [("+13125550177", "First")]
         finally:
             await replies.aclose()
 
@@ -1200,22 +1200,22 @@ class TestPreparedMessages:
 
     async def test_input_expiry_and_home_cleanup_revoke_drafts(self) -> None:
         now = [100.0]
-        contacts = FakeContacts([("Adele", "+14055550177")])
+        contacts = FakeContacts([("Casey", "+13125550177")])
         sender, confirm = FakeSender(), ScriptedConfirm(True)
         replies = MessageReplyController(sender, confirm, contact_search=contacts.search, monotonic=lambda: now[0])
-        first = await replies.prepare_new_message(action_id="expires", trace_id="conversation", recipient_name="Adele")
+        first = await replies.prepare_new_message(action_id="expires", trace_id="conversation", recipient_name="Casey")
         now[0] = 221.0
         assert (await replies.provide_message_input(first.action_id, body="Too late")).state == "cancelled"
-        second = await replies.prepare_new_message(action_id="home", trace_id="conversation", recipient_name="Adele")
+        second = await replies.prepare_new_message(action_id="home", trace_id="conversation", recipient_name="Casey")
         replies.clear_selection("home")
         assert (await replies.provide_message_input(second.action_id, body="Too late")).state == "cancelled"
         assert sender.sent == []
         assert confirm.calls == []
         await replies.aclose()
 
-    @pytest.mark.parametrize("name", ["+14055550123", "person@example.test"])
+    @pytest.mark.parametrize("name", ["+13125550123", "person@example.test"])
     async def test_model_supplied_handles_are_rejected_before_contact_lookup(self, name: str) -> None:
-        contacts = FakeContacts([("Adele", "+14055550177")])
+        contacts = FakeContacts([("Casey", "+13125550177")])
         replies = MessageReplyController(FakeSender(), ScriptedConfirm(True), contact_search=contacts.search)
         with pytest.raises(ValueError, match="handles"):
             await replies.prepare_new_message(action_id="raw-handle", trace_id="conversation", recipient_name=name, body="Hi")
@@ -1247,12 +1247,12 @@ class TestPreparedMessages:
 
         def blocked_contacts(_query: str) -> list[tuple[str, str]]:
             release.wait(timeout=1.0)
-            return [("Adele", "+14055550177")]
+            return [("Casey", "+13125550177")]
 
         sender, confirm = FakeSender(), ScriptedConfirm(True)
         replies = MessageReplyController(sender, confirm, contact_search=blocked_contacts)
         try:
-            status = await asyncio.wait_for(replies.prepare_new_message(action_id="slow-contact", trace_id="conversation", recipient_name="Adele", body="Hello"), timeout=0.1)
+            status = await asyncio.wait_for(replies.prepare_new_message(action_id="slow-contact", trace_id="conversation", recipient_name="Casey", body="Hello"), timeout=0.1)
             assert status.state == "failed"
         finally:
             release.set()

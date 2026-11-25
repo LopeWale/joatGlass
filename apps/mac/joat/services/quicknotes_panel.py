@@ -1,17 +1,13 @@
-"""QuickNotes on the overview's rail (the wearer, 2026-10-11).
+"""QuickNotes on the overview's rail.
 
-"Replace the search on the overview tab with the quicknote … so now the
-overview has a way to quickly get to the quicknote." Like Even's QuickNote
-widget on its Dashboard: the tab shows the newest notes, and a tap on it
-opens QuickNotes itself (the plugin does that; this tab has no rows of its
-own to open). Search moved into the menu.
+Like Even's QuickNote widget on its Dashboard: the tab shows the newest
+notes, and a tap on it opens QuickNotes itself (the plugin does that; this
+tab has no rows of its own to open). Search opens from the menu instead.
 
 The age column ("5m") is text the Mac writes into each row, and the plugin
-paints whatever it last received. Until 2026-10-12 a row was only rewritten
-when a note was saved, so the overview kept saying "5m" for an hour while
-the QuickNotes page itself said "1h" (the wearer: "the quick notes time does
-not update on the overview when it is the current active tab"). `run` now
-pushes the tab again whenever an age it shows would read differently.
+paints whatever it last received. `run` pushes the tab again whenever a
+displayed relative age turns over so the overview stays in sync with the
+QuickNotes list.
 """
 
 from __future__ import annotations

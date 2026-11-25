@@ -974,13 +974,12 @@ describe('EventRouter — text and list', () => {
   });
 });
 
-describe('EventRouter — long tap never touches the mic (2026-10-12)', () => {
+describe('EventRouter — long tap never touches the mic', () => {
   /**
-   * Long tap was the mic mute. The wearer: it "is fucking up my quickNote
-   * experience because i use the long tap on quickNote to record and it also
-   * turns the mic on; the mic can stay on". It keeps its specific jobs —
-   * hold to talk on an open note, refresh on News/Search, cancel a running
-   * work session — and does nothing anywhere else. Doff still stops the mic.
+   * Long tap does not mute or unmute the mic so it never conflicts with
+   * push-to-talk recording on QuickNotes. It keeps its specific contextual
+   * roles — hold to talk on an open note, refresh on News/Search, cancel a
+   * running work session — and is a no-op elsewhere. Doff still stops the mic.
    *
    * It is still handled in EVERY event class, BEFORE each branch's relay
    * (the SDK delivers long press/release inside list, text or sys events):
@@ -1206,7 +1205,7 @@ describe('EventRouter — production Messages menu composition', () => {
 
     expect(await menu.presentList(
       'MESSAGES',
-      ['[now] Dele · Are you coming?', '[2m] Adaeze · Call me'],
+      ['[now] Evan · Are you coming?', '[2m] Taylor · Call me'],
       request.event.requestId,
       true,
       'tap select · left x2 overview',
@@ -1226,7 +1225,7 @@ describe('EventRouter — production Messages menu composition', () => {
     });
     expect(await menu.presentList(
       'MESSAGES · CONVERSATION',
-      ['Dele · Are you coming?', 'Say reply saying …'],
+      ['Evan · Are you coming?', 'Say reply saying …'],
       request.event.requestId,
       false,
     )).toBe(true);

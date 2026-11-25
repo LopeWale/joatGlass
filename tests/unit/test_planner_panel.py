@@ -84,7 +84,7 @@ def bridge(items: list[dict[str, object]], **status: str) -> FakeNativeData:
 WEEK = [
     reminder("Send the Q3 invoice", day=12),
     reminder("Call the bank", day=15, hour=9, minute=0),
-    reminder("Back up the tag provider tags", day=15),
+    reminder("Back up the staging database", day=15),
     reminder("Standup notes", day=16, hour=9, minute=0),
     reminder("Renew the domain", day=17),
     reminder("Review the dashboard", day=18, hour=10, minute=30),
@@ -101,7 +101,7 @@ async def test_loads_open_reminders_over_a_window_earliest_first() -> None:
     )
 
     assert [entry.title for entry in entries] == [
-        "Send the Q3 invoice", "Call the bank", "Back up the tag provider tags",
+        "Send the Q3 invoice", "Call the bank", "Back up the staging database",
         "Standup notes", "Renew the domain", "Review the dashboard",
     ]
     query = next(params for method, params in client.calls if method == "reminders.query")
@@ -171,7 +171,7 @@ async def test_rows_lead_with_the_word_the_glass_puts_in_its_label_column() -> N
     assert planner_rows(await _entries(), TODAY) == (
         "[Late] Send the Q3 invoice",
         "[09:00] Call the bank",
-        "[Today] Back up the tag provider tags",
+        "[Today] Back up the staging database",
         "[Tmrw] 09:00 Standup notes",
         "[Sat] Renew the domain",
         "[Sun] 10:30 Review the dashboard",

@@ -25,8 +25,8 @@ def draft(key: str = "message:trace-1") -> ActionDraft:
     ordinal = 91 if key == "message:trace-1" else 92
     return ActionDraft(
         kind="message.reply",
-        canonical_payload=b'{"body":"On my way","recipient":"+14055550123"}',
-        target_digest=digest("+14055550123"),
+        canonical_payload=b'{"body":"On my way","recipient":"+13125550123"}',
+        target_digest=digest("+13125550123"),
         idempotency_key=key,
         origin_kind="messages.thread",
         origin_id="chat-7",
@@ -45,8 +45,8 @@ def approved_action(journal: ActionJournal, *, now_us: int = 1_000_000) -> str:
             session_id="session-1",
             pairing_identity_digest=digest("paired-glasses"),
             authorization_digest=digest("bound-action-preview"),
-            payload_digest=digest('{"body":"On my way","recipient":"+14055550123"}'),
-            preview_digest=digest("Send to Dele? On my way"),
+            payload_digest=digest('{"body":"On my way","recipient":"+13125550123"}'),
+            preview_digest=digest("Send to Evan? On my way"),
             issued_at_us=now_us + 2,
             expires_at_us=now_us + 10_000_000,
             preview_completed_at_us=now_us + 3,
@@ -68,8 +68,8 @@ def test_idempotency_replays_only_the_identical_draft(tmp_path: Path) -> None:
 
         changed = ActionDraft(
             kind="message.reply",
-            canonical_payload=b'{"body":"Different","recipient":"+14055550123"}',
-            target_digest=digest("+14055550123"),
+            canonical_payload=b'{"body":"Different","recipient":"+13125550123"}',
+            target_digest=digest("+13125550123"),
             idempotency_key=first.idempotency_key,
         )
         with pytest.raises(ActionConflictError, match="idempotency"):
@@ -123,8 +123,8 @@ def test_confirmation_is_exact_bound_single_use_and_expiring(tmp_path: Path) -> 
                     session_id="session-1",
                     pairing_identity_digest=digest("paired-glasses"),
                     authorization_digest=digest("bound-action-preview"),
-                    payload_digest=digest('{"body":"On my way","recipient":"+14055550123"}'),
-                    preview_digest=digest("Send to Dele? On my way"),
+                    payload_digest=digest('{"body":"On my way","recipient":"+13125550123"}'),
+                    preview_digest=digest("Send to Evan? On my way"),
                     issued_at_us=2,
                     expires_at_us=3,
                     preview_completed_at_us=2,
@@ -156,7 +156,7 @@ def test_expired_confirmation_cannot_authorize_dispatch(tmp_path: Path) -> None:
                 session_id="session-1",
                 pairing_identity_digest=digest("paired-glasses"),
                 authorization_digest=digest("bound-action-preview"),
-                payload_digest=digest('{"body":"On my way","recipient":"+14055550123"}'),
+                payload_digest=digest('{"body":"On my way","recipient":"+13125550123"}'),
                 preview_digest=digest("preview"),
                 issued_at_us=3,
                 expires_at_us=4,
@@ -230,7 +230,7 @@ def test_restart_invalidates_unspent_authority_and_marks_ambiguous_dispatch(
                 session_id="session-2",
                 pairing_identity_digest=digest("paired-glasses"),
                 authorization_digest=digest("bound-action-preview-2"),
-                payload_digest=digest('{"body":"On my way","recipient":"+14055550123"}'),
+                payload_digest=digest('{"body":"On my way","recipient":"+13125550123"}'),
                 preview_digest=digest("preview-2"),
                 issued_at_us=2_000_002,
                 expires_at_us=9_000_000,

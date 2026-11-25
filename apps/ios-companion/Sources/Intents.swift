@@ -85,12 +85,10 @@ struct OutgoingTextEntity: TransientAppEntity {
     @Property(title: "Recipient") var recipient: String
     @Property(title: "Message") var message: String
     @Property(title: "Name") var name: String
-    /// The group chat's name for a reply in a group; no value at all for one
-    /// person. It was "" for one person, and the shortcut's "If Group has
-    /// any value" is true for "": every text to one person went through
-    /// Find Conversation, which sent texts for the wearer's wife to a
-    /// delivery driver (2026-11-12) and then failed outright with
-    /// "couldn't convert from Conversation" (2026-11-13).
+    /// The group chat's name for a reply in a group; nil for a 1:1 message.
+    /// Returning "" for a 1:1 message caused Shortcuts' "If Group has any
+    /// value" condition to evaluate true, routing individual replies into
+    /// Find Conversation instead of the recipient's direct handle.
     @Property(title: "Group") var group: String?
     /// True only for a group chat, for an If that compares a yes/no.
     @Property(title: "Is Group") var isGroup: Bool

@@ -1,6 +1,6 @@
 """Resolve phone numbers and emails to contact names.
 
-"+14055550123 · Messages" tells the wearer nothing at a glance; "Sam ·
+"+13125550123 · Messages" tells the wearer nothing at a glance; "Sam ·
 Messages" tells them everything. Messages' own store only carries the raw
 handle, so the name has to come from Contacts.
 
@@ -28,8 +28,8 @@ _SOURCES = (
 def normalize_handle(handle: str) -> str:
     """Comparable form of a phone number; emails pass through lowercased.
 
-    Numbers appear in Contacts as "(405) 555-0123" and in Messages as
-    "+14055550123", so both collapse to digits. The last 10 are the
+    Numbers appear in Contacts as "(312) 555-0123" and in Messages as
+    "+13125550123", so both collapse to digits. The last 10 are the
     comparable part — country codes are present in one source and absent
     from the other.
     """
@@ -40,7 +40,7 @@ def normalize_handle(handle: str) -> str:
 
 
 def pretty_number(handle: str) -> str:
-    """Fallback display when no contact matches: +1 (405) 555-0123."""
+    """Fallback display when no contact matches: +1 (312) 555-0123."""
     digits = re.sub(r"\D", "", handle)
     if len(digits) == 11 and digits.startswith("1"):
         digits = digits[1:]

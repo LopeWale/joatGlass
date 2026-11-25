@@ -405,7 +405,7 @@ private func testStripPoliteLeadInAndDeterministicRouting(brain: Brain, link: Re
     // Negative / word-boundary safety checks
     expectEqual(Brain.stripPoliteLeadIn("open my mail"), nil, "Unprefixed command returns nil")
     expectEqual(Brain.stripPoliteLeadIn("highlight the notes"), nil, "'hi' does not strip inside 'highlight'")
-    expectEqual(Brain.stripPoliteLeadIn("Oklahoma City weather"), nil, "'ok' does not strip inside 'Oklahoma'")
+    expectEqual(Brain.stripPoliteLeadIn("Okinawa weather"), nil, "'ok' does not strip inside 'Okinawa'")
     expectEqual(Brain.stripPoliteLeadIn("soap on the shopping list"), nil, "'so' does not strip inside 'soap'")
     expectEqual(Brain.stripPoliteLeadIn("please"), nil, "Bare 'please' leaves empty string -> nil")
     expectEqual(Brain.stripPoliteLeadIn("hey, can you please?"), nil, "Only polite words -> nil")
@@ -416,7 +416,7 @@ private func testStripPoliteLeadInAndDeterministicRouting(brain: Brain, link: Re
     _ = Recipients.rememberRelationship(
         relationship: "mom",
         contactName: "Mom",
-        fallbackCandidates: [(label: "Mom", phone: "+14055550177", email: "mom@example.com")]
+        fallbackCandidates: [(label: "Mom", phone: "+13125550177", email: "mom@example.com")]
     )
     let savedHome = brain.navigation.upsertPlace(
         name: "Home",
@@ -505,7 +505,7 @@ private func testStripPoliteLeadInAndDeterministicRouting(brain: Brain, link: Re
     expect(followUpAsked?.contains("Mom") == true, "'text Mom' resolves saved Mom relationship and asks follow-up body")
 
     link.clear()
-    let textMomWithBody = brain.routeCommand("Could you please text +14055550177 saying on my way home")
+    let textMomWithBody = brain.routeCommand("Could you please text +13125550177 saying on my way home")
     expectEqual(textMomWithBody?.text, "", "Polite 'text <number> saying ...' matched Messages")
     for _ in 0..<20 where !brain.confirm.hasPending {
         try? await Task.sleep(nanoseconds: 25_000_000)
@@ -802,13 +802,13 @@ private func testDirectToolExecutionAndHandoff(brain: Brain, link: RecordingPlug
     brain.confirm.declineActive(reason: "test")
 
     // 3e. `prepare_message`
-    brain.beginStreamingConversationForTesting(user: "Text +14055550199 saying running 5 minutes late")
+    brain.beginStreamingConversationForTesting(user: "Text +13125550199 saying running 5 minutes late")
     link.clear()
     let prepMsgOutcome = await belt.execute(
         name: "prepare_message",
         arguments: [
             "mode": "new",
-            "recipient": "+14055550199",
+            "recipient": "+13125550199",
             "body": "Running 5 minutes late!",
         ]
     )

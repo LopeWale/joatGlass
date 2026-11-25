@@ -139,7 +139,7 @@ describe('resolveHudOverview', () => {
   it('labels a typed incoming Messages card as MESSAGE, never REPLY', () => {
     expect(resolveHudOverview({
       status: '9:41   JOAT listening',
-      main: '(201) 462-3963 · Messages\nCajun Corner order confirmed',
+      main: '(312) 555-0142 · Messages\nCorner Bakery order confirmed',
       mainKind: 'notification',
       context: '',
       tray: '',
@@ -147,7 +147,7 @@ describe('resolveHudOverview', () => {
       kind: 'content',
       main: {
         label: 'MESSAGE',
-        value: '(201) 462-3963 · Messages Cajun Corner order confirmed',
+        value: '(312) 555-0142 · Messages Corner Bakery order confirmed',
         structured: false,
       },
     });
@@ -178,8 +178,8 @@ describe('resolveHudOverview', () => {
 
 describe('parseHudListItem', () => {
   it('extracts only a real Mac-provided age from a message row', () => {
-    expect(parseHudListItem('[18m] Marcus · Heading to the lab in 10.')).toEqual({
-      primary: 'Marcus',
+    expect(parseHudListItem('[18m] Morgan · Heading to the lab in 10.')).toEqual({
+      primary: 'Morgan',
       secondary: 'Heading to the lab in 10.',
       age: '18m',
     });

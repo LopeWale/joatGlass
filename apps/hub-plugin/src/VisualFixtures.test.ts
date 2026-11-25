@@ -15,7 +15,6 @@ describe('visual fixtures', () => {
   it('uses realistic content-free copy for the assistant overlay lens check', () => {
     expect(ASSISTANT_OVERLAY_VISUAL_TEXT).toContain('calendar and reminders');
     expect(ASSISTANT_OVERLAY_VISUAL_TEXT).toContain('monitoring is armed');
-    expect(ASSISTANT_OVERLAY_VISUAL_TEXT).not.toContain('Adele');
   });
 
   it('stitches renderer tiles into one native-size green optical preview', () => {
@@ -109,7 +108,6 @@ describe('visual fixtures', () => {
   it('makes the confirmation fixture unmistakably test-only', () => {
     expect(VISUAL_CONFIRMATION_PROMPT).toContain('SIMULATOR TEST (NO SEND)');
     expect(VISUAL_CONFIRMATION_PROMPT).toContain('No message will be sent');
-    expect(VISUAL_CONFIRMATION_PROMPT).not.toContain('Adele');
     expect(VISUAL_CONFIRMATION_PROMPT).not.toContain('mockups');
   });
 
@@ -173,9 +171,10 @@ describe('panel visual fixtures', () => {
     expect(panelVisualTab('panel-article')).toBe('news');
   });
 
-  it('keeps the fixture content free of anyone real', async () => {
+  it('keeps panel fixtures free of phone numbers and email addresses', async () => {
     const { panelArticleFixture, panelVisualPushes } = await import('./VisualFixtures');
     const text = JSON.stringify([panelVisualPushes(), panelArticleFixture()]);
-    expect(text).not.toMatch(/Adele|Dele|Marcus|Adaeze/);
+    expect(text).not.toMatch(/\+1\s*\(?\d{3}\)?[\s.-]*\d{3}[\s.-]*\d{4}/);
+    expect(text).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
   });
 });

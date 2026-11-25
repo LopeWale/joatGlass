@@ -95,7 +95,7 @@ describe('navigationNativeBody', () => {
     const page = navigationNativeBody(fixture('destination'))!;
     expect(lines(page.body)).toEqual([
       'CONFIRM DESTINATION',
-      'Cajun Corner',
+      'Corner Bakery',
       '2301 N Lincoln Ave, Chicago',
     ]);
     expect(page.hint).toBe('tap: confirm · swipe: retry');
@@ -105,8 +105,8 @@ describe('navigationNativeBody', () => {
     const page = navigationNativeBody(fixture('repair'))!;
     expect(lines(page.body)).toEqual([
       'REPAIR DESTINATION',
-      'Which Cajun Corner?',
-      'We heard “Cajun Corner.”',
+      'Which Corner Bakery?',
+      'We heard “Corner Bakery.”',
       '▶ 2301 N Lincoln Ave · 1.2 km',
       '  W Chicago Ave · 4.8 km',
       '  None of these · retry',
@@ -119,7 +119,7 @@ describe('navigationNativeBody', () => {
     expect(lines(page.body)).toEqual([
       'TRAVEL MODE',
       'Choose travel mode',
-      'Cajun Corner · 1.2 km',
+      'Corner Bakery · 1.2 km',
       '▶ Walk · 18 min',
       '  Cycle · 7 min',
       '  Drive · 4 min',
@@ -171,7 +171,7 @@ describe('navigationNativeBody', () => {
     const walking = navigationNativeBody(fixture('preview'))!;
     expect(lines(walking.body)).toEqual([
       'WALK · ROUTE PREVIEW',
-      'Cajun Corner',
+      'Corner Bakery',
       '1.2 km · 18 min · via Lincoln Ave',
     ]);
     expect(walking.hint).toBe('tap: start · up: mode · down: place');
@@ -244,7 +244,7 @@ describe('navigationNativeBody', () => {
     expect(lines(page.body)).toEqual([
       'ARRIVED',
       'You have arrived',
-      'Cajun Corner · on your right',
+      'Corner Bakery · on your right',
     ]);
     expect(page.hint).toBe('tap: finish');
   });
@@ -261,7 +261,7 @@ describe('navigationNativeBody', () => {
 
   it('drops empty primary/secondary rather than leaving blank rows', () => {
     const page = navigationNativeBody({ ...fixture('destination'), secondary: '   ' })!;
-    expect(lines(page.body)).toEqual(['CONFIRM DESTINATION', 'Cajun Corner']);
+    expect(lines(page.body)).toEqual(['CONFIRM DESTINATION', 'Corner Bakery']);
   });
 
   it('fits every row to the region width and folds embedded newlines', () => {

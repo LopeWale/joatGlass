@@ -58,11 +58,10 @@ final class LoopbackServer: ObservableObject, PluginLink {
 
     /// iOS takes a listening socket back while the app is suspended (TN2277)
     /// and a listener can fail on its own; either way the plugin would dial
-    /// a dead port forever (2026-10-29: "has not been able to connect back
-    /// since"). Called when the app comes forward and every 10 s: a listener
-    /// that is not listening is built again. Coming forward with no plugin
-    /// connected rebuilds it anyway, because a reclaimed socket can still
-    /// look ready. Open plugin connections are separate sockets and stay.
+    /// a dead port indefinitely. Called when the app comes forward and every
+    /// 10 s: a listener that is not listening is built again. Coming forward
+    /// with no plugin connected rebuilds it anyway, because a reclaimed socket
+    /// can still look ready. Open plugin connections are separate sockets and stay.
     func ensureListening(reason: String, rebuildIfIdle: Bool = false) {
         guard wanted, !restartPending else { return }
         if listener == nil { start(); return }

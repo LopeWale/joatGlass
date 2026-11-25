@@ -63,7 +63,7 @@ async function flushInitialLocationSeed(): Promise<void> {
 
 describe('LocationSessionManager', () => {
   it('owns one ambient host stream and preserves the coarse Mac uplink', async () => {
-    const h = harness({ latitude: 35.2, longitude: -97.4, accuracy: 12 });
+    const h = harness({ latitude: 41.88, longitude: -87.63, accuracy: 12 });
 
     expect(await h.manager.start()).toBe(true);
     await flushInitialLocationSeed();
@@ -79,7 +79,7 @@ describe('LocationSessionManager', () => {
       intervalMs: 60_000,
     });
     expect(h.link.sendLatestLocation).toHaveBeenCalledWith({
-      kind: 'location', latitude: 35.2, longitude: -97.4, accuracy: 12,
+      kind: 'location', latitude: 41.88, longitude: -87.63, accuracy: 12,
       timestamp: expect.any(Number), timeZone: 'America/Chicago',
     });
   });
@@ -88,15 +88,15 @@ describe('LocationSessionManager', () => {
     vi.useFakeTimers();
     pinHostZone();
     vi.setSystemTime(new Date('2026-08-30T22:31:00.000Z'));
-    const h = harness({ latitude: 35.2, longitude: -97.4, accuracy: 12 });
+    const h = harness({ latitude: 41.88, longitude: -87.63, accuracy: 12 });
 
     await h.manager.start();
     await flushInitialLocationSeed();
 
     expect(h.link.sendLatestLocation).toHaveBeenCalledWith({
       kind: 'location',
-      latitude: 35.2,
-      longitude: -97.4,
+      latitude: 41.88,
+      longitude: -87.63,
       accuracy: 12,
       timestamp: Date.now(),
       timeZone: 'America/Chicago',

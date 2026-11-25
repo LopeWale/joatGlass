@@ -88,7 +88,7 @@ async def confirm(action_id: str, prompt: str, timeout_s: float, **_: Any) -> bo
 
 CONTACTS = {
     "alex": [("Alex Rivera", "+14155550101"), ("Alex Chen", "alex.chen@example.com")],
-    "sam": [("Sam Okafor", "+14155550111")],
+    "sam": [("Sam Rivera", "+14155550111")],
 }
 
 
@@ -100,7 +100,7 @@ class Store:
     def _threads(self) -> list[MessageThread]:
         now = time.time()
         return [
-            MessageThread(sender="Dele", handle="+14155550102", text=LONG_TEXT, at=now - 600, chat_id=1,
+            MessageThread(sender="Evan", handle="+14155550102", text=LONG_TEXT, at=now - 600, chat_id=1,
                           chat_guid="iMessage;-;+14155550102"),
             MessageThread(sender="Priya", handle="+14155550103", text="Running 10 late", at=now - 3000,
                           chat_id=2, chat_guid="iMessage;-;+14155550103"),
@@ -115,11 +115,11 @@ class Store:
     def thread_message_page(self, thread: MessageThread, *, limit: int = 8,
                             before_row_id: int | None = None) -> MessageHistoryPage:
         now = time.time()
-        if thread.sender == "Dele":
+        if thread.sender == "Evan":
             entries = (
-                MessageEntry(text=LONG_TEXT, at=now - 600, from_me=False, row_id=3, sender="Dele"),
+                MessageEntry(text=LONG_TEXT, at=now - 600, from_me=False, row_id=3, sender="Evan"),
                 MessageEntry(text="Sure, what time?", at=now - 900, from_me=True, row_id=2),
-                MessageEntry(text="Are you still coming Saturday?", at=now - 1000, from_me=False, row_id=1, sender="Dele"),
+                MessageEntry(text="Are you still coming Saturday?", at=now - 1000, from_me=False, row_id=1, sender="Evan"),
             )
         else:
             entries = (MessageEntry(text="Running 10 late", at=now - 3000, from_me=False, row_id=5, sender="Priya"),)
@@ -171,7 +171,7 @@ async def submit_terminal(lane: str, instruction: str, operation_id: str) -> str
 
 JOURNEYS: list[tuple[str, list[str], str]] = [
     ("J1 open messages", ["could you bring up my messages?"], "open_feature:messages"),
-    ("J2 read full message", ["read the latest message from Dele in full"], "read_conversation(Dele) with the whole text"),
+    ("J2 read full message", ["read the latest message from Evan in full"], "read_conversation(Evan) with the whole text"),
     ("J3 message my wife", ["send a message to my wife", "her name is Sam", "I'll be home at six"],
      "prepare_message -> provide_message_input(Sam) -> provide_message_input(body verbatim)"),
     ("J4 tell Alex", ["tell Alex I'm running late"], "prepare_message(new, Alex, 'I'm running late') -> candidate clarification"),

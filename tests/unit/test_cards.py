@@ -40,9 +40,9 @@ class TestShorten:
 
 class TestRender:
     def test_person_card_leads_with_the_person(self) -> None:
-        c = Card("Dele", "Messages", "are you coming?", urgency=Urgency.URGENT)
+        c = Card("Evan", "Messages", "are you coming?", urgency=Urgency.URGENT)
         lines = c.render().split("\n")
-        assert lines[0] == "!! Dele · Messages"
+        assert lines[0] == "!! Evan · Messages"
         assert lines[1] == "are you coming?"
 
     def test_app_card_does_not_repeat_itself(self) -> None:
@@ -50,14 +50,14 @@ class TestRender:
         assert c.render().split("\n")[0] == "Battery"   # not "Battery · Battery"
 
     def test_coalesced_count_is_shown(self) -> None:
-        c = Card("Dele", "Messages", "hi", urgency=Urgency.NOTIFY, count=3)
+        c = Card("Evan", "Messages", "hi", urgency=Urgency.NOTIFY, count=3)
         assert "(3)" in c.render().split("\n")[0]
 
 
 class TestPolicy:
     def test_repeat_sender_coalesces_instead_of_stacking(self) -> None:
         p = DeliveryPolicy(coalesce_window_s=20)
-        counts = [p.admit(Card("Dele", "Messages", f"m{i}"), now=1000 + i).count
+        counts = [p.admit(Card("Evan", "Messages", f"m{i}"), now=1000 + i).count
                   for i in range(4)]
         assert counts == [1, 2, 3, 4]
 
@@ -69,11 +69,11 @@ class TestPolicy:
         event_class and origin_id are gone — and nothing else would notice.
         """
         p = DeliveryPolicy(coalesce_window_s=20)
-        first = Card("Dele", "Messages", "m0",
+        first = Card("Evan", "Messages", "m0",
                      event_class="messages.incoming_text", origin_id="n-1")
         assert p.admit(first, now=1000) is not None
         second = p.admit(
-            Card("Dele", "Messages", "m1",
+            Card("Evan", "Messages", "m1",
                  event_class="messages.incoming_text", origin_id="n-2"),
             now=1001,
         )
@@ -98,7 +98,7 @@ class TestSystemish:
     def test_recognizes_system_chatter(self) -> None:
         assert is_systemish("BatteriesAvocadoWidget", "Battery")
         assert is_systemish("com.apple.softwareupdate", "Update available")
-        assert not is_systemish("com.apple.MobileSMS", "Dele")
+        assert not is_systemish("com.apple.MobileSMS", "Evan")
 
 
 class TestCardLog:
@@ -125,7 +125,7 @@ class TestCardLog:
         """The defect this replaced: the log stored rendered strings, so the
         Notifications view could only replay old HUD lines."""
         log = CardLog(keep=2)
-        log.add(Card(source="Dele", channel="Messages", summary="On my way",
+        log.add(Card(source="Evan", channel="Messages", summary="On my way",
                      urgency=Urgency.URGENT, event_class="messages.incoming_text",
                      origin_id="n-1", at=1.0))
         entry = log.recent(1)[0]

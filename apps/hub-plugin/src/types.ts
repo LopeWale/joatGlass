@@ -528,6 +528,8 @@ export type DownlinkMessage =
      * events; a tap on one of these rows is the page request. Mac
      * counterpart: HudList.page_controls in core/protocol.py. */
     pageControls?: { newerIndex?: number; olderIndex?: number };
+    /** Whether live QuickNotes AI cues are enabled in JOAT Brain settings. */
+    cuesEnabled?: boolean;
   }
   | { kind: 'agent_terminal.view'; terminal: AgentTerminalHudModel }
   | { kind: 'productivity.view'; productivity: ProductivityHudModel }
@@ -657,17 +659,15 @@ export type Unsubscribe = () => void;
  * Two menus with two lists is how the wearer met a menu they could not reach.
  *
  * Notifications is deliberately absent: the resting dashboard already shows
- * the cards themselves, so a row that opens a page to re-read the home screen
- * is a page, a request, and a round trip spent on nothing (the wearer's ruling).
+ * the cards themselves, so a separate menu row to re-read the home screen
+ * would spend an extra page, request, and round trip unnecessarily.
  */
 export const CAPABILITIES = [
-  // Reminders replaced Planning and its calendar (2026-10-24); a Mac
-  // brain answers it with its Planning pages (capabilities.py).
-  // Brainstorm left the menu (2026-11-18, the wearer: the JOAT assistant
-  // is good enough for brainstorming).
+  // Reminders replaced Planning and its calendar; a Mac brain answers it
+  // with its Planning pages (capabilities.py). Brainstorm is omitted from
+  // the top-level menu in favour of the conversational JOAT assistant.
   'Messages', 'Mail', 'Reminders', 'Navigation',
-  // Search took QuickNotes' place (2026-10-11): QuickNotes moved onto the
-  // overview's rail, and Search opens its page from here.
+  // QuickNotes lives on the overview's rail; Search opens from the menu.
   'Search', 'Agent Terminal', 'Activity', 'Settings',
 ] as const;
 
@@ -698,19 +698,16 @@ export const QUICKNOTES_PREP_MENU_LABEL = 'Prep notes';
 /**
  * The overview's right panel is a vertical rail of tabs. Order is the rail
  * order, top to bottom; Notifications is first because it is what the
- * resting screen shows, and the tab every reopen lands on; Reminders (the
- * planner) is second. The wearer, 2026-11-09: "instead of having the
- * reminder as the first item … make it the notification as the first item".
- * (From 2026-10-15 to then, Notifications was a menu row and the planner
- * led.) These are NOT sidebar capabilities: the rail is reached by swiping
- * on the overview. Mac counterpart: PANEL_TABS in apps/mac/joat/core/protocol.py.
+ * resting screen shows and what every reopen lands on; Reminders (planner)
+ * is second. These are NOT sidebar capabilities: the rail is reached by
+ * swiping on the overview. Mac counterpart: PANEL_TABS in
+ * apps/mac/joat/core/protocol.py.
  */
 export const PANEL_TABS = ['notifications', 'planner', 'news', 'pomodoro', 'quicknotes'] as const;
 export type PanelTab = (typeof PANEL_TABS)[number];
 /** The tabs whose content the Mac pushes as `hud.panel`: the rail's, and
- * Search, whose page the menu opens. QuickNotes replaced Search on the rail
- * (the wearer, 2026-10-11: "so now the overview has a way to quickly get to
- * the quicknote"). Mac counterpart: PANEL_TABS in core/protocol.py. */
+ * Search, whose page the menu opens. QuickNotes sits directly on the
+ * overview rail for quick capture. Mac counterpart: PANEL_TABS in core/protocol.py. */
 export const PANEL_CONTENT_TABS = ['planner', 'news', 'pomodoro', 'quicknotes', 'search'] as const;
 export type PanelContentTab = (typeof PANEL_CONTENT_TABS)[number];
 

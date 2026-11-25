@@ -79,13 +79,13 @@ describe('HudPresenter native confirmation over the visual HUD', () => {
     await r.hud.showText('home card', ContainerId.Main);
     const framesBefore = r.frames.length;
 
-    expect(await r.hud.showConfirmation('Send to Adaeze? “On my way.”', 'send-1')).toBe(true);
+    expect(await r.hud.showConfirmation('Send to Taylor? “On my way.”', 'send-1')).toBe(true);
 
     const gate = r.rebuilds[r.rebuilds.length - 1];
     expect(gate?.imageObject ?? []).toHaveLength(0);
     expect(gate?.listObject ?? []).toHaveLength(0);
     expect(gate?.textObject?.map((c) => c.containerName)).toEqual(['status', 'main', 'context', 'tray', 'hint']);
-    expect(text(gate, 'main')).toBe('CONFIRM ACTION\n\nSend to Adaeze? “On my way.”');
+    expect(text(gate, 'main')).toBe('CONFIRM ACTION\n\nSend to Taylor? “On my way.”');
     expect(text(gate, 'status')).toBe('12:34 JOAT listening bat 80%');
     expect(text(gate, 'hint')).toBe('8 seconds · timeout cancels');
     // Nothing was painted as pixels for the gate, and nothing repaints
@@ -131,10 +131,10 @@ describe('HudPresenter native confirmation over the visual HUD', () => {
 
   it('returns a firmware list directly to its own page, without an intermediate image rebuild', async () => {
     const r = rig();
-    expect(await r.hud.showList(['New message', 'Adaeze · Call me'], {
+    expect(await r.hud.showList(['New message', 'Taylor · Call me'], {
       title: 'MESSAGES', hint: 'tap: select', selectable: true, nativeFirmwareList: true,
     })).toBe(true);
-    await r.hud.showConfirmation('Send to Adaeze?', 'from-list');
+    await r.hud.showConfirmation('Send to Taylor?', 'from-list');
     const before = r.operations.length;
 
     expect(await r.hud.dismissConfirmation('from-list')).toBe(true);
@@ -148,8 +148,8 @@ describe('HudPresenter native confirmation over the visual HUD', () => {
 
 describe('parseMessageDraft', () => {
   it('splits the plain reply consent into the JOAT question and body', () => {
-    expect(parseMessageDraft('Send to Adele? “On my way, see you at 6.”')).toEqual({
-      question: 'What do you want to say to Adele?', body: 'On my way, see you at 6.',
+    expect(parseMessageDraft('Send to Casey? “On my way, see you at 6.”')).toEqual({
+      question: 'What do you want to say to Casey?', body: 'On my way, see you at 6.',
     });
   });
 
@@ -171,10 +171,10 @@ describe('parseMessageDraft', () => {
   it.each([
     'Send this message?',
     'Send the exact reviewed message?',
-    'Send to Adele?',
-    'Send to Adele? “   ”',
+    'Send to Casey?',
+    'Send to Casey? “   ”',
     'Send to work? "plain quotes"',
-    'Delete to Adele? “words”',
+    'Delete to Casey? “words”',
     'Reply () to sarah@example.com? “words”',
     'Email (   ) to sarah@example.com? “words”',
   ])('returns undefined for anything else: %s', (prompt) => {
@@ -188,12 +188,12 @@ describe('HudPresenter Messages reply in the conversation card', () => {
   it('draws a messages question as JOAT\'s turn in the conversation card, listening', async () => {
     const r = rig();
     expect(await r.hud.showPromptQuestion(
-      'reply-question', 'What do you want to say back to Adele?', () => true, 'messages',
+      'reply-question', 'What do you want to say back to Casey?', () => true, 'messages',
     )).toBe(true);
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(page?.imageObject ?? []).toHaveLength(0);
     expect(page?.textObject?.map((c) => c.containerName)).toEqual(CARD);
-    expect(text(page, 'joat-turns')).toContain('What do you want to say back to Adele?');
+    expect(text(page, 'joat-turns')).toContain('What do you want to say back to Casey?');
     // JOAT's name in front of its question, then the working glyph on the
     // wearer's row until their words come. The box's footer names the
     // listening state's gestures (the wearer's ruling, 2026-10-11).
@@ -211,8 +211,8 @@ describe('HudPresenter Messages reply in the conversation card', () => {
   });
 
   it.each([
-    ['plain', 'Send to Adele? “On my way.”'],
-    ['reviewed', 'Send to Adele? (reviewed) “On my way.”'],
+    ['plain', 'Send to Casey? “On my way.”'],
+    ['reviewed', 'Send to Casey? (reviewed) “On my way.”'],
   ])('draws a %s messages confirmation as the question, then the wearer\'s words, then the review gestures', async (_form, prompt) => {
     const r = rig();
     expect(await r.hud.showConfirmation(prompt, 'reply-consent', 'messages')).toBe(true);
@@ -220,7 +220,7 @@ describe('HudPresenter Messages reply in the conversation card', () => {
     expect(gate?.imageObject ?? []).toHaveLength(0);
     expect(gate?.textObject?.map((c) => c.containerName)).toEqual(CARD);
     // The same card confirms a new message, so it does not say "back".
-    expect(text(gate, 'joat-turns')).toContain('What do you want to say to Adele?');
+    expect(text(gate, 'joat-turns')).toContain('What do you want to say to Casey?');
     expect(text(gate, 'joat-turns')).not.toContain('On my way.');
     expect(text(gate, 'wearer-turns')).toContain('On my way.');
     expect(text(gate, 'wearer-turns')).not.toContain('(reviewed)');
@@ -314,10 +314,10 @@ describe('HudPresenter Messages reply in the conversation card', () => {
 
   it('keeps the plain decision page for a non-messages confirmation and an unparsed messages one', async () => {
     const r = rig();
-    expect(await r.hud.showConfirmation('Send to Adele? “On my way.”', 'other-consent')).toBe(true);
+    expect(await r.hud.showConfirmation('Send to Casey? “On my way.”', 'other-consent')).toBe(true);
     let gate = r.rebuilds[r.rebuilds.length - 1];
     expect(gate?.textObject?.map((c) => c.containerName)).toEqual(['status', 'main', 'context', 'tray', 'hint']);
-    expect(text(gate, 'main')).toBe('CONFIRM ACTION\n\nSend to Adele? “On my way.”');
+    expect(text(gate, 'main')).toBe('CONFIRM ACTION\n\nSend to Casey? “On my way.”');
     expect(await r.hud.dismissConfirmation('other-consent')).toBe(true);
 
     expect(await r.hud.showConfirmation('Send the exact reviewed message?', 'unparsed', 'messages')).toBe(true);

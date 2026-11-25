@@ -154,7 +154,7 @@ def test_parse_provider() -> None:
         parse_provider("gemini")
 
 
-# ── sign-in parsing (shapes captured from the real CLIs, 2026-10-05) ───────
+# ── sign-in parsing (CLI device/code output shapes) ────────────────────────
 
 
 CODEX_DEVICE = (
@@ -163,7 +163,7 @@ CODEX_DEVICE = (
     "1. Open this link in your browser and sign in to your account\r\n"
     "   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\r\n\r\n"
     "2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m\r\n"
-    "   \x1b[94mGBEA-VS5GL\x1b[0m\r\n"
+    "   \x1b[94mABCD-12345\x1b[0m\r\n"
 )
 
 CLAUDE_LOGIN = (
@@ -178,7 +178,7 @@ def test_codex_device_flow_yields_link_and_code() -> None:
     snapshot = _advance(LoginSnapshot("codex", "default", "starting"), strip_terminal(CODEX_DEVICE))
     assert snapshot.stage == "open_link"
     assert snapshot.url == "https://auth.openai.com/codex/device"
-    assert snapshot.code == "GBEA-VS5GL"
+    assert snapshot.code == "ABCD-12345"
     assert not snapshot.needs_code
 
 

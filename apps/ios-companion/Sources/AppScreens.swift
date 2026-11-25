@@ -997,6 +997,7 @@ struct NotesView: View {
     @State private var selection: NotesSelection?
     @State private var compactPath: [NotesSelection] = []
     @State private var compactPageTarget: CompactPageTarget?
+    @State private var editingTextNote: QuickNotes.TextNote?
 
     init(model: NotesModel, filter: Binding<NotesFilter> = .constant(.all)) {
         self.model = model
@@ -1063,6 +1064,12 @@ struct NotesView: View {
                 if let savedId {
                     selection = .page(savedId)
                 }
+            }
+        }
+        .sheet(item: $editingTextNote) { textNote in
+            TextNoteEditorSheet(note: textNote) { updatedText in
+                JOATRuntime.shared.brain?.quickNotes.updateTextNote(textNote.id, text: updatedText)
+                model.reload()
             }
         }
         #if DEBUG
@@ -1341,15 +1348,21 @@ struct NotesView: View {
         if !texts.isEmpty {
             Section("Quick Text Notes") {
                 ForEach(texts) { t in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(t.text)
-                            .font(.subheadline)
-                        Text(t.updated.formatted(date: .abbreviated, time: .shortened))
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                    Button {
+                        editingTextNote = t
+                    } label: {
+                        QuickTextNoteRowView(note: t)
                     }
-                    .padding(.vertical, 2)
+                    .buttonStyle(.plain)
                     .listRowBackground(JoatTheme.card)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button(role: .destructive) {
+                            JOATRuntime.shared.brain?.quickNotes.deleteNote(t.id)
+                            model.reload()
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
                 }
             }
         }
@@ -1553,16 +1566,16 @@ struct NotesView: View {
             guard let qn = JOATRuntime.shared.brain?.quickNotes else { return }
             let typedId = "debug-typed-page-1"
             qn.ensureBlankPage(id: typedId, paperTemplate: PaperTemplate.dotGrid.rawValue)
-            qn.savePage(id: typedId, typed: "Standup: firmware 0.1.152 is signed off. Ask Dana for the TestFlight build notes before Thursday.",
+            qn.savePage(id: typedId, typed: "Standup: firmware 0.1.152 is signed off. Ask Sam for the TestFlight build notes before Thursday.",
                         inkChanged: false, paperTemplate: PaperTemplate.dotGrid.rawValue)
             qn.renameNote(typedId, to: "Standup — Firmware Sign-off")
             qn.debugSetInsights(typedId,
-                                summary: "Firmware 0.1.152 is signed off; TestFlight build notes are still needed from Dana before Thursday.",
-                                keyPoints: ["Firmware 0.1.152 signed off"], todos: ["Ask Dana for TestFlight build notes by Thursday"])
+                                summary: "Firmware 0.1.152 is signed off; TestFlight build notes are still needed from Sam before Thursday.",
+                                keyPoints: ["Firmware 0.1.152 signed off"], todos: ["Ask Sam for TestFlight build notes by Thursday"])
             qn.debugSetInsights("debug-duo-page-1",
-                                summary: "Hardware walkthrough: verify G2 lens alignment and battery telemetry, call Mike Friday at 3 pm about the tag map, and order two spare relays.",
-                                keyPoints: ["Verify G2 lens alignment", "Check battery telemetry", "Tag map needs Mike's review"],
-                                todos: ["Call Mike about the tag map — Friday 3 pm", "Order two spare relays"])
+                                summary: "Hardware walkthrough: verify G2 lens alignment and battery telemetry, send Liam the slide deck Friday at 3 pm, and book the design review room.",
+                                keyPoints: ["Verify G2 lens alignment", "Check battery telemetry", "Slide deck due Friday 3 pm"],
+                                todos: ["Send Liam the slide deck — Friday 3 pm", "Book design review room"])
             JOATRuntime.shared.notes.reload()
         }
     }
@@ -1571,9 +1584,97 @@ struct NotesView: View {
 
 // MARK: - Apple Pencil Page & Voice Note Cards
 
+private struct QuickTextNoteRowView: View {
+    let note: QuickNotes.TextNote
+
+    var body: some View {
+        let cleanSummary = (note.summary ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let summarizing = JOATRuntime.shared.brain?.quickNotes.isSummarizing(note.id) ?? false
+
+        VStack(alignment: .leading, spacing: 4) {
+            Text(note.text)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .lineLimit(3)
+            if !cleanSummary.isEmpty {
+                (Text(Image(systemName: "sparkles")).foregroundStyle(JoatTheme.accent) + Text(" ") + Text(cleanSummary))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            } else if summarizing {
+                Text("Summarizing…")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            Text(note.updated.formatted(date: .abbreviated, time: .shortened))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct TextNoteEditorSheet: View {
+    let note: QuickNotes.TextNote
+    let onCommit: (String) -> Void
+
+    @State private var draft: String
+    @Environment(\.dismiss) private var dismiss
+
+    init(note: QuickNotes.TextNote, onCommit: @escaping (String) -> Void) {
+        self.note = note
+        self.onCommit = onCommit
+        _draft = State(initialValue: note.text)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                if let summary = note.summary, !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("AI summary · updates on close", systemImage: "sparkles")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(JoatTheme.accent)
+                        Text(summary)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(JoatTheme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                TextEditor(text: $draft)
+                    .font(.body)
+                    .padding(8)
+                    .background(JoatTheme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .padding(16)
+            .background(JoatTheme.surface.ignoresSafeArea())
+            .navigationTitle("Quick Text Note")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        onCommit(draft)
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+}
+
 private struct NotebookPageCardView: View {
     let note: QuickNotes.VoiceNote
     let isSelected: Bool
+    @AppStorage(Cues.enabledKey) private var cuesOn = true
 
     private var templateInfo: (label: String, icon: String) {
         switch note.paperTemplate {
@@ -1596,7 +1697,7 @@ private struct NotebookPageCardView: View {
 
     var body: some View {
         let thumb = PageThumbnailCache.thumbnail(for: note)
-        let cueCount = note.cues?.count ?? 0
+        let cueCount = cuesOn ? (note.cues?.count ?? 0) : 0
 
         VStack(alignment: .leading, spacing: 10) {
             // Warm `#FAF8F4` stationery preview window
@@ -1766,9 +1867,10 @@ private struct NoteSummaryLine: View {
 
 private struct VoiceNoteRowView: View {
     let note: QuickNotes.VoiceNote
+    @AppStorage(Cues.enabledKey) private var cuesOn = true
 
     var body: some View {
-        let cueCount = note.cues?.count ?? 0
+        let cueCount = cuesOn ? (note.cues?.count ?? 0) : 0
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
                 Label {
@@ -1826,6 +1928,7 @@ struct OfferSheet: Identifiable {
 struct NoteDetailView: View {
     let noteId: String
     @ObservedObject var model: NotesModel
+    @AppStorage(Cues.enabledKey) private var cuesOn = true
     @State private var sheet: OfferSheet?
     @State private var finding = false
     @State private var summarizing = false
@@ -1875,7 +1978,7 @@ struct NoteDetailView: View {
                 if !n.todos.isEmpty {
                     Section("Next steps") { ForEach(n.todos, id: \.self) { Text("□ \($0)") } }
                 }
-                if let cues = n.cues, !cues.isEmpty {
+                if cuesOn, let cues = n.cues, !cues.isEmpty {
                     Section("AI cues") { ForEach(cues, id: \.self) { Text($0).font(.callout) } }
                 }
                 Section(n.page == true ? "Text" : "Transcript") {

@@ -10,13 +10,14 @@ shortcuts in source/ (XML plists); the signed files land next to this script.
     python3 make_shortcuts.py --team ABCDE12345 --bundle com.you.joatbrain
 """
 import argparse
+import os
 import plistlib
 import subprocess
 import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-TEAM, BUNDLE = "J2XU5XWJM9", "com.joat.brain"  # the TestFlight build's
+TEAM_PLACEHOLDER, BUNDLE = "YOURTEAMID", "com.joat.brain"
 
 
 def retarget(value, team, bundle):
@@ -25,7 +26,7 @@ def retarget(value, team, bundle):
         return {k: retarget(v, team, bundle) for k, v in value.items()}
     if isinstance(value, list):
         return [retarget(v, team, bundle) for v in value]
-    if value == TEAM:
+    if value == TEAM_PLACEHOLDER:
         return team
     if isinstance(value, str) and (value == BUNDLE or value.startswith(BUNDLE + ".")):
         return bundle + value[len(BUNDLE):]
@@ -34,7 +35,11 @@ def retarget(value, team, bundle):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--team", default=TEAM, help="Apple team ID that signs your JOAT Brain")
+    parser.add_argument(
+        "--team",
+        default=os.environ.get("JOAT_TEAM_ID") or TEAM_PLACEHOLDER,
+        help="Apple team ID that signs your JOAT Brain (or set JOAT_TEAM_ID)",
+    )
     parser.add_argument("--bundle", default=BUNDLE, help="your JOAT Brain bundle ID")
     args = parser.parse_args()
     sources = sorted((HERE / "source").glob("*.plist"))

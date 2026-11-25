@@ -152,8 +152,8 @@ def _incoming_message_db(path: Path, count: int) -> Path:
         CREATE TABLE chat (display_name TEXT);
         CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
         CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
-        INSERT INTO handle VALUES ('+14055550101');
-        INSERT INTO chat VALUES ('Dele');
+        INSERT INTO handle VALUES ('+13125550101');
+        INSERT INTO chat VALUES ('Evan');
     """)
     for index in range(1, count + 1):
         conn.execute("INSERT INTO message VALUES (1, ?, ?, 0)", (f"Note {index}", index))
@@ -206,7 +206,7 @@ def test_message_readers_include_committed_live_wal_rows(
     elif reader == "recent":
         assert [thread.text for thread in store.recent_threads()] == ["Note 2"]
     else:
-        thread = MessageThread("Dele", "+14055550101", "Note 2", 2.0, chat_id=1)
+        thread = MessageThread("Evan", "+13125550101", "Note 2", 2.0, chat_id=1)
         page = store.thread_message_page(thread)
         assert [(row.row_id, row.text) for row in page.entries] == [
             (2, "Note 2"), (1, "Note 1"),
@@ -299,9 +299,9 @@ def test_group_without_chat_guid_never_uses_its_latest_participant(tmp_path) -> 
         CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
         CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
     """)
-    conn.execute("INSERT INTO handle VALUES ('+14055550101')")
-    conn.execute("INSERT INTO handle VALUES ('+14055550102')")
-    conn.execute("INSERT INTO chat VALUES ('Dele')")
+    conn.execute("INSERT INTO handle VALUES ('+13125550101')")
+    conn.execute("INSERT INTO handle VALUES ('+13125550102')")
+    conn.execute("INSERT INTO chat VALUES ('Evan')")
     conn.execute("INSERT INTO chat VALUES ('Project team')")
     conn.execute("INSERT INTO message VALUES (1, 'Direct note', 1, 0)")
     direct_message_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -319,7 +319,7 @@ def test_group_without_chat_guid_never_uses_its_latest_participant(tmp_path) -> 
 
     assert [(row.sender, row.replyable) for row in rows] == [
         ("Project team", False),
-        ("Dele", True),
+        ("Evan", True),
     ]
     assert rows[0].is_group is True
     assert rows[0].reply_target is None
@@ -331,7 +331,7 @@ def test_recent_threads_target_existing_groups_by_chat_guid(tmp_path: Path) -> N
         conn.execute("ALTER TABLE chat ADD COLUMN guid TEXT")
         conn.execute("UPDATE chat SET guid = 'iMessage;-;direct-thread'")
         conn.executescript("""
-            INSERT INTO handle VALUES ('+14055550102');
+            INSERT INTO handle VALUES ('+13125550102');
             INSERT INTO chat VALUES ('Project team', 'iMessage;+;group-thread');
             INSERT INTO chat_handle_join VALUES (2, 1);
             INSERT INTO chat_handle_join VALUES (2, 2);
@@ -344,7 +344,7 @@ def test_recent_threads_target_existing_groups_by_chat_guid(tmp_path: Path) -> N
     assert group.replyable is True
     assert group.is_group is True
     assert group.chat_id == 2
-    assert group.handle == "+14055550102"
+    assert group.handle == "+13125550102"
     assert group.reply_target == ("chat", "iMessage;+;group-thread")
     assert direct.reply_target == ("chat", "iMessage;-;direct-thread")
     assert direct.is_group is False
@@ -361,8 +361,8 @@ def test_recent_threads_preserves_distinct_chats_with_the_same_display_name(
         CREATE TABLE chat (display_name TEXT);
         CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
         CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
-        INSERT INTO handle VALUES ('+14055550101');
-        INSERT INTO handle VALUES ('+14055550102');
+        INSERT INTO handle VALUES ('+13125550101');
+        INSERT INTO handle VALUES ('+13125550102');
         INSERT INTO chat VALUES ('Alex');
         INSERT INTO chat VALUES ('Alex');
         INSERT INTO message VALUES (1, 'First chat', 1, 0);
@@ -378,8 +378,8 @@ def test_recent_threads_preserves_distinct_chats_with_the_same_display_name(
     rows = IMessageStore(db).recent_threads()
 
     assert [(row.chat_id, row.handle, row.text) for row in rows] == [
-        (2, "+14055550102", "Second chat"),
-        (1, "+14055550101", "First chat"),
+        (2, "+13125550102", "Second chat"),
+        (1, "+13125550101", "First chat"),
     ]
 
 
@@ -394,8 +394,8 @@ def test_thread_messages_returns_incoming_and_outgoing_context_oldest_first(
         CREATE TABLE chat (display_name TEXT);
         CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
         CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
-        INSERT INTO handle VALUES ('+14055550101');
-        INSERT INTO chat VALUES ('Dele');
+        INSERT INTO handle VALUES ('+13125550101');
+        INSERT INTO chat VALUES ('Evan');
         INSERT INTO chat_handle_join VALUES (1, 1);
         INSERT INTO message VALUES (1, 'Are you coming?', 1, 0);
         INSERT INTO chat_message_join VALUES (1, 1);
@@ -408,8 +408,8 @@ def test_thread_messages_returns_incoming_and_outgoing_context_oldest_first(
     conn.close()
     store = IMessageStore(db)
     thread = MessageThread(
-        sender="Dele",
-        handle="+14055550101",
+        sender="Evan",
+        handle="+13125550101",
         text="Great",
         at=3.0,
         chat_id=1,
@@ -446,8 +446,8 @@ def test_thread_message_pages_include_metadata_and_attachment_only_rows(
         CREATE TABLE chat (display_name TEXT);
         CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
         CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
-        INSERT INTO handle VALUES ('+14055550101');
-        INSERT INTO chat VALUES ('Dele');
+        INSERT INTO handle VALUES ('+13125550101');
+        INSERT INTO chat VALUES ('Evan');
         INSERT INTO chat_handle_join VALUES (1, 1);
         INSERT INTO message VALUES (1, 'First', 1, 0, 0, 0, 0, 0, 0, 0);
         INSERT INTO chat_message_join VALUES (1, 1);
@@ -464,8 +464,8 @@ def test_thread_message_pages_include_metadata_and_attachment_only_rows(
     conn.close()
     store = IMessageStore(db)
     thread = MessageThread(
-        sender="Dele",
-        handle="+14055550101",
+        sender="Evan",
+        handle="+13125550101",
         text="Attachment",
         at=5.0,
         chat_id=1,

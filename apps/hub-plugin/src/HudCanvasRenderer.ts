@@ -80,10 +80,8 @@ const HAIRLINE = 51;
 
 /** Where content starts and stops on the 576px lens.
  *
- * The transcript ran x=36..540 — 504px of 576, with 72px of nothing down
- * both sides. The wearer measured it by eye before any test did: "why are
- * we still not fully using the display? Why are you making words wrap when
- * there's still the left or the right side fully empty?"
+ * Earlier layouts ran x=36..540 — 504px of 576, leaving 72px unused across
+ * the side margins and causing premature line wrapping.
  *
  * Fourteen, not zero: the outermost pixels of a waveguide are where the
  * image is least reliable, and a glyph clipped by the lens edge is worse
@@ -92,12 +90,10 @@ export const NOTIFICATION_DISMISS_HINT = 'tap: dismiss';
 
 /** One size for an answer, always.
  *
- * The card was the last draw site in the HUD still choosing its own
- * number, sweeping 21px down to 12px per reply — so the same assistant
- * rendered at three visibly different sizes depending on how much it had
- * to say, which is exactly what the wearer reported. 14 is TYPE.body: the
- * size the assistant PILL already used, and the size
- * apps/mac/joat/channels/cards.py already computes its 46-char line
+ * The card previously scaled font sizes from 21px down to 12px per reply,
+ * causing assistant answers to render at inconsistent sizes depending on
+ * length. 14 is TYPE.body: the size the assistant PILL already used, and
+ * the size apps/mac/joat/channels/cards.py computes its 46-char line
  * budget against. HudTypography.ts states the rule this restores: "no
  * draw site invents its own number any more".
  */
@@ -307,8 +303,8 @@ export interface HomeColumnMark {
 /** Inside each column tile: 16 px from the screen's edge, 16 px short of
  * the column's right edge, so nothing meets the rule or the edge. */
 /** The dimmest Even-font words (an unlit tab, a reader's hint): the
- * firmware's own dimmest text level, 179/255 measured in the simulator.
- * Below it, words looked faded on the glass (the wearer, 2026-10-07). */
+ * firmware's own dimmest text level, 179/255 measured in the simulator,
+ * avoiding lower alpha values that appear washed out on optical waveguides. */
 const DIM_WORDS = 179 / 255;
 
 /** Home's column beneath a notification card: dimmed well below the card's

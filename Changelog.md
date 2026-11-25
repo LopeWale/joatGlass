@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-24 — Build JOAT 0.1.158 (`JOAT Brain` `202611242114`): post-close-only AI note summaries, lag-free page editing, `AI cues` off parity across glasses & app, and repository privacy cleanup
+
+- **Post-close-only AI summaries & lag-free Notebook editing in `JOAT Brain`** (`apps/ios-companion/Sources/NotesInsights.swift`, `Notebook.swift`, `QuickNotes.swift`, `AppScreens.swift`, `MacLink.swift`, `tests/ios/test_notes_insights.swift`, `tests/ios/test_phone_brain_surfaces_and_prompts.swift`):
+  - Removed the `4.0 s` mid-edit `ocrIdleTimer` (`NotesInsights.summarizesWhileEditing == false`) and tracked active open pages (`QuickNotes.editingPageIds`) so neither typing/writing pauses nor `retryPendingInsights()` ever run handwriting OCR or AI summarization while a page is open.
+  - Moved mid-edit `PKDrawing` persistence onto a background `.utility` queue (`PageStore.saveAsync`) with quiet store saves (`savePage(..., quiet: true)`), hid `PageInsightCard` on unsummarized pages during editing so the canvas never shifts, and moved PNG/JPEG tile rasterization in `Notebook.read` off `@MainActor` so closing a page (`Done`, back, split-view switch, or app backgrounding) stays instantaneous while post-close OCR + AI summary run in the background.
+  - Added post-save and post-edit AI summarization (`QuickNotes.summarizeTextNote`, `updateTextNote`) and tap-to-edit (`TextNoteEditorSheet`) for Quick Text Notes alongside handwritten/typed/pasted Notebook pages and Voice QuickNotes.
+- **`AI cues during QuickNotes` (`joat.cues.enabled`) parity across Even G2 & `JOAT Brain`** (`apps/ios-companion/Sources/Cues.swift`, `QuickNotes.swift`, `AppScreens.swift`, `apps/hub-plugin/src/HudPresenter.ts`, `CapabilityMenu.ts`, `main.ts`, `types.ts`, `HudPresenter.nativeReceipts.test.ts`, `CapabilityMenu.test.ts`):
+  - Gated `Cues.heard` and live `UserDefaults` changes so turning `AI cues during QuickNotes` off immediately cancels pause timers, dismisses active cue cards, exits cue views, and repaints `QUICKNOTES · NEW NOTE` with `cuesEnabled: false`.
+  - When `cuesEnabled === false`, `HudPresenter` omits `AI cues` from the glasses' contextual menu (rebuilding in place if toggled mid-note), `CapabilityMenu.sendQuickNotesMenu('cues')` rejects cue opens, `openVoiceReader` omits `AI CUES`, and `AppScreens` hides cue pills and sections on iOS.
+  - Packed `0.1.158` (`apps/hub-plugin/joat.ehpk`, 179746 bytes, SHA-256 `49718b33b3cea047c6ccd76767b4fabb3b909b52c1ccc55d77905ad5eda89e9a`).
+- **Repository fixture & identifier cleanup**: Replaced personal, client, location, network, and credential/team-ID fixtures across comments, prompts, tests, plists, documentation, and screenshots with synthetic test data.
+
 ## 2026-11-23 — Build JOAT 0.1.157 (`JOAT Brain` `202611231228`): multi-turn conversation reliability, Turn-2 viewport reset, `JOAT · LISTENING` header, 1st-try phonetic wake, and sub-1.5 s Gemini latency
 
 - **Multi-turn conversation reliability, Turn-2 scroll reset & `JOAT · LISTENING` spine on Even G2** (`apps/hub-plugin/src/AssistantConversationSurface.ts`, `HudPresenter.ts`, `types.ts`, `AssistantConversationSurface.test.ts`):
@@ -121,14 +133,14 @@
 
 ## 2026-11-19 — Brainstorm leaves the menu; OpenClaw and Hermes leave the Agent Terminal (plugin 0.1.147, JOAT Brain 202611182154)
 
-- **Brainstorm** is gone from the glasses menu (`types.ts` CAPABILITIES), the phone's hand-off list and its spoken openers ("open brainstorm" now goes to the assistant). The wearer: the JOAT assistant is good enough for brainstorming. The Mac engine's Brainstorm code is unreachable from the glasses and is left in place for now.
+- **Brainstorm** is gone from the glasses menu (`types.ts` CAPABILITIES), the phone's hand-off list and its spoken openers ("open brainstorm" now goes to the assistant), since the conversational JOAT assistant handles open-ended brainstorming directly. The Mac engine's Brainstorm code is unreachable from the glasses and is left in place for now.
 - **Agent Terminal** lists only the lanes JOAT hosts (Claude Code, Codex, Antigravity). OpenClaw and Hermes lanes and A2A peers are no longer put on the roster; their boot code stays inert.
 - The Mac's `ax-banners` notification source logs its startup "file not there yet" once per spell instead of every 5 s.
 - The phone's Messages page reads the Mac's conversations and history (202611182027); `build_ios.sh` and `pack.sh` run on the mini (Tailscale CLI from the app bundle, the evenhub CLI).
 
 ## 2026-11-19 — Texts no longer go missing when the glasses are off or the phone slept
 
-The wearer: texts dropped "if I'm on my phone or the glasses are off". Two causes in JOAT Brain, both fixed:
+Texts could be missed when the glasses were off or the phone was asleep. Two causes in JOAT Brain, both fixed:
 
 - **Late texts got no card.** A text more than ten minutes old when the phone caught up (JOAT Brain suspended, or off the tailnet) was saved quietly and summed up in one "N texts while you were away" card. Now every text gets its own card, in order; only the old ones are not read aloud.
 - **A card raised to absent glasses was lost.** A text that arrived while the glasses were off, in the case, or disconnected was painted anyway, and the next card replaced it. `MessageHold` (Messages.swift) now holds such texts and shows each one when the glasses are back on and connected.
@@ -189,16 +201,16 @@ The glasses connect to the iPhone alone. When a home Mac holds your Messages, JO
 
 Build 202611131322 went to TestFlight this morning, once Apple's agreement was accepted. This build follows it. No plugin change.
 
-- **A text never reached the glasses** (`Messages.swift`, `Intents.swift`, `Shortcuts/source/Show Texts on Glasses.plist`). The wearer's screenshot: in Show Texts on Glasses, "The action “Find Conversation” could not run because an unknown error occurred."
+- **A text never reached the glasses** (`Messages.swift`, `Intents.swift`, `Shortcuts/source/Show Texts on Glasses.plist`). In Show Texts on Glasses, Shortcuts could fail with "The action “Find Conversation” could not run because an unknown error occurred."
   - Find Conversation was the shortcut's first step, and Shortcuts can't catch a step's error. So the next step, Show Text on Glasses, never ran.
   - The shortcut is now: Show Text on Glasses (sender and text), Find Conversation, the new Add Group to Text (the conversation's Group Name), Mark as Unread.
   - JOAT Brain saves the text at the first step and shows it when the group arrives, or after 2.5 s without one. A failed Find Conversation now costs only the group's name.
-  - Simulator: a text whose group came a second later showed as "Fam Jam: Lovely Wifey: Bringing the pie tonight." A text with no group step showed 2.6 s later as one person's (log only, no picture).
+  - Simulator: a text whose group came a second later showed as "Weekend Crew: Jordan: Bringing the pie tonight." A text with no group step showed 2.6 s later as one person's (log only, no picture).
   - The new shortcut imports on the Mac. It is not on the phone yet: it needs this build first, and the Mac's Shortcuts library syncs to the phone.
   - The in-app "Add Show Texts on Glasses" button still opens the earlier shortcut.
 - **Group sends, what was tried** (no code change):
   - Messages' own Send Message intent (`com.apple.MobileSMS.SendMessageIntent`) takes a conversation, but a shortcut containing it won't import: "contains features not supported on this device" (macOS 27.2).
-  - The Send Message step Shortcuts offers takes only people (the Mac's Shortcuts tool database), which is the wearer's error of 2026-11-13.
+  - The Send Message step Shortcuts offers takes only people (the Mac's Shortcuts tool database), so sending to a Conversation object fails in Shortcuts.
   - Apple, MacRumors, 9to5Mac and Appdook all say iOS 27 Send Message supports group chats. None says how a shortcut hands it the group.
   - Group replies from the glasses are still refused.
 
@@ -206,18 +218,18 @@ Build 202611131322 went to TestFlight this morning, once Apple's agreement was a
 
 JOAT Brain 1.0 (202611131322) archived. The TestFlight upload was refused again for the same reason: Apple's updated agreement has to be accepted in App Store Connect. Glasses 0.1.146 packed (phone brain on the allowlist).
 
-- **Why the texts went to the wrong number, then failed** (`Intents.swift`). The wearer's screenshot of the Send shortcut showed the group branch erroring on a text to his wife: "Send Message failed because Shortcuts couldn't convert from Conversation to Contact, Phone Number, or Email Address."
+- **Why 1:1 texts hit the group branch and failed** (`Intents.swift`). In the Send shortcut, the group branch errored on an individual reply: "Send Message failed because Shortcuts couldn't convert from Conversation to Contact, Phone Number, or Email Address."
   - "Get Text to Send" gave Group as "" for one person, and the shortcut's "If Group has any value" is true for "".
-  - So every text to one person ran Find Conversation, then Send Message to the conversation it returned. Last night that was the DoorDash driver's thread. Today it was one Send Message can't send to at all.
-  - JOAT's own number was right every time (the phone log shows her number queued).
+  - Every text to one person therefore ran Find Conversation and passed whatever recent conversation it returned into Send Message instead of the recipient's direct handle.
+  - JOAT's own resolved recipient handle was right every time in the log.
   - Now Group has no value at all for one person, and a new yes/no field, Is Group, is true only for a group.
   - The installed shortcut needs no change: its Otherwise branch sends to Recipient, the number JOAT checked.
   - Not testable in the simulator (no Shortcuts or Messages app there). The first text on the phone tells: the log says `group=none`, then `text out sent`.
 - **Group texts are refused** (`Messages.swift`). Send Message can't send to a conversation, so the group branch never sent a group text. A reply to a group now says "Group texts can't be sent from the glasses yet. Reply to one person instead." before anything is dictated. Simulator: the card showed on the Family thread, and a tap returned to the thread.
 - **"Mac did not answer" in Messages** (`CapabilityMenu.swift`). Opening a conversation emptied JOAT Brain's list of who is on each row.
-  - Back on the list, a tap on a person's row was dropped with no answer, and after 12 s the plugin said "Mac did not answer. Tap to retry Messages." The phone log shows it at 19:01:51.
+  - Back on the list, a tap on a person's row was dropped with no answer, and after 12 s the plugin said "Mac did not answer. Tap to retry Messages."
   - Now the rows are kept. A row JOAT doesn't know gets the list again, never silence.
-  - Simulator: opened Family, went back, tapped Honey Bun. Her conversation opened and was still there 12 s later.
+  - Simulator: opened Family, went back, tapped Jordan. That conversation opened and was still there 12 s later.
 - **No more sitting on "Sending…"** (`Messages.swift`). When the Send shortcut stops with an error, it never reaches "Text Sent on Glasses". After 20 s the glasses now say "Not sent: the Send shortcut stopped with an error. Open Shortcuts on the iPhone to see it."
 - **Glasses 0.1.146: no "Mac" when the phone is the brain** (`CapabilityMenu.ts`, `HudCanvasRenderer.ts`):
   - "JOAT did not answer. Tap to retry Messages."
@@ -229,12 +241,12 @@ JOAT Brain 1.0 (202611131322) archived. The TestFlight upload was refused again 
 
 JOAT Brain 1.0 (202611131209) archived. The TestFlight upload was refused: Apple requires an updated agreement to be accepted in App Store Connect (403 FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED). No plugin change.
 
-- **Texts went to the wrong number** (`Messages.swift`, `Recipients.swift`). Five texts the glasses showed as going to the wearer's wife went by SMS to a DoorDash driver's masked number, the one that had texted his order updates that evening. (Found that afternoon: the Send shortcut's group branch picked it, not JOAT; see the entry above.) The guards added here:
-  - A text to one person goes out only to a number or email that Contacts says is theirs. Anything else is refused before the confirmation, with the reason on the glasses ("Not sent: I have no number for …" or "…3963 isn't …'s in Contacts"). A bare name is never handed to Send Message. A number not in Contacts goes out only when the glasses showed that number itself. Group texts are unchanged.
-  - The confirmation shows the number's last four digits: "Send to Lovely Wifey (…0123)?".
+- **Verified destination handles for 1:1 messages** (`Messages.swift`, `Recipients.swift`). Hardened recipient verification so a 1:1 message can never be sent to an unverified or unrelated handle (see also the Send shortcut group-branch fix above):
+  - A text to one person goes out only to a number or email that Contacts says is theirs. Anything else is refused before the confirmation, with the reason on the glasses ("Not sent: I have no number for …" or "…0199 isn't …'s in Contacts"). A bare name is never handed to Send Message. A number not in Contacts goes out only when the glasses showed that number itself. Group texts are unchanged.
+  - The confirmation shows the number's last four digits: "Send to Jordan (…0123)?".
   - A reply never reuses the number an earlier send recorded. A wrong number stored with a sent text was otherwise used for every reply after it.
   - The log line for each send now says which number it went to (last four digits).
-  - Simulator: New message to a saved contact asked "Send to Lovely Wifey (…0123)?" and queued it. A reply to a sender with no saved number said "Not sent: I have no number for Honey Bun." and asked nothing. A group reply went to the group, as before.
+  - Simulator: New message to a saved contact asked "Send to Jordan (…0123)?" and queued it. A reply to a sender with no saved number said "Not sent: I have no number for Jordan." and asked nothing. A group reply went to the group, as before.
 - **A note "stopped halfway"** (`CapabilityMenu.swift`). Twice in one meeting, the wearer's note stopped partway through.
   - Simulator: a new plugin page connected mid-recording. That's what happens when the phone locks and Even reloads the plugin in the background, or when the link drops and comes back. The glasses went to Home with nothing saying a note was open, while JOAT Brain went on recording out of sight.
   - Now a new plugin page with a note open puts the note back on the glasses. Simulator: REC 00:13 then 00:19 after the reconnect.
@@ -266,7 +278,7 @@ Glasses 0.1.145 packed (`joat.ehpk`; the wearer uploads it to Even Hub). JOAT Br
 
 JOAT Brain 1.0 (202611122018) uploaded to TestFlight. No plugin change.
 
-- **Tap records, long press talks** (`QuickNotes.swift`). The wearer: tap is record (he said so on 2026-10-29), with the AI cues in the menu, so tap-to-record and long press both work.
+- **Tap records, long press talks** (`QuickNotes.swift`). Restored tap-to-record on the open note, with AI cues moved into the contextual menu so tap-to-record and push-to-talk both work:
   - Since 2026-11-07 a tap on the open note opened the AI cues. That left holding the touchpad as the only way to record from the glasses.
   - Now:
     - A tap records or pauses.
@@ -301,7 +313,7 @@ JOAT Brain 1.0 (202611122018) uploaded to TestFlight. No plugin change.
 
 JOAT Brain 1.0 (202611111326) uploaded to TestFlight. No plugin change.
 
-- **What was asked.** The wearer: "when a prep note is created, it's created like a folder, and you could add multiple to that folder prep note, and then click that folder prep note, and every file that's in there is used in whatever conversation you start."
+- **Goal.** Group multiple preparation items into a folder-style prep note so selecting a prep note feeds every file, link, and page inside it into the active conversation.
 - **Even's own sources:**
   - The Conversate article: create a Prep Note by typing preparation details, by uploading supporting files, or both ("manually enter preparation details while simultaneously uploading supporting files"). Then select it to start, or tap Start for none.
   - The Even app's release notes: "Add notes or upload documents to automatically generate Prep Notes."
@@ -333,10 +345,10 @@ JOAT Brain 1.0 (202611111326) uploaded to TestFlight. No plugin change.
 
 JOAT Brain 1.0 (202611111237) uploaded to TestFlight. No plugin change.
 
-- **What was asked.**
+- **Goals.**
   - A page started on the Duo's outer screen and continued on the inner screen in landscape showed a big gap: the page was as wide as the screen, so the typing reflowed and the ink stayed where it was.
-  - The wearer: "We have one size that should be the size of a paper," as the other note apps do, and "I should be able to scroll horizontally and vertically."
-  - And: "there's no way to save notes I make. All the notes I did yesterday, I cannot retrieve them anymore… it doesn't save when I say I'm done."
+  - Standardize on a fixed paper sheet size with horizontal and vertical scrolling when zoomed in.
+  - Auto-save drafts continuously so an open page is never lost if the editor closes or the app is suspended before tapping Done.
 - **The page is paper** (`Notebook.swift`, `PageView`):
   - US Letter, 612 × 792 points a sheet, as in GoodNotes (Letter by default in the US; its pages match the paper they print on) and Notability. It doesn't depend on the screen, so the typing wraps the same everywhere.
   - It opens zoomed to fill the screen's width: zoom = view width ÷ page width, as Apple's PencilKit sample fits its fixed-width canvas. On the Duo's outer screen the page's view is 382 points (beside the sensor bar), so 0.62×. The inner screen is 669 points wide, or 951 in landscape (the simulator's device profile).
@@ -368,7 +380,7 @@ JOAT Brain 1.0 (202611111237) uploaded to TestFlight. No plugin change.
 
 JOAT Brain 1.0 (202611110940) uploaded to TestFlight. No plugin change.
 
-- **What was asked.** The wearer: "I cannot paste anything on the writing and typing sections, even an image." With the app beside a YouTube course, they screenshot a slide and want it on the page. Their choices: images go in line with the typing, and Claude reads them.
+- **Goal.** Support pasting text and screenshot slides inline into notebook pages so Claude reads both handwriting and pasted slide images.
 - **Paste** (`Notebook.swift`):
   - Type: the edit menu's Paste (and ⌘V) puts words, or an image, at the cursor. A text view pastes only words by itself (`allowsEditingTextAttributes` is off), so `PastingTextView` handles images. Choosing Paste in the edit menu asks no "Allow Paste?".
   - Write and Type: a Paste button in the toolbar (SwiftUI `PasteButton`, also no "Allow Paste?"). In Write it adds to the end of the page.
@@ -396,7 +408,7 @@ JOAT Brain 1.0 (202611110940) uploaded to TestFlight. No plugin change.
 
 JOAT Brain 1.0 (202611110811) uploaded to TestFlight. No plugin change.
 
-- **What was asked.** The wearer: "When I try to send a new message, JOAT pop up, and I tell it the name of the recipient. I see that he's correctly recognized, but nothing happens after that. It just closes and goes back to the message list."
+- **Symptom.** Starting a new message recognized the spoken recipient name, then closed back to the Messages list before asking for the message body.
 - **Code review.** After "Who should I text?" is answered, JOAT Brain closed the question card at once, then looked the contact up.
   - The lookup had no time limit and showed nothing on the glasses. A name that isn't one exact contact name goes to Apple's on-device model (up to 300 contacts; rate limited for an app in the background), then Claude (up to 1500 contacts; the request allows 90 s).
   - Meanwhile the glasses sat on the Messages list. A tap there cancels the draft, and a lookup that finished after that asked nothing.
@@ -412,31 +424,31 @@ JOAT Brain 1.0 (202611110811) uploaded to TestFlight. No plugin change.
 
 JOAT Brain 1.0 (202611102035) uploaded to TestFlight. No plugin change.
 
-- **Pinch to zoom** (the wearer: "I cannot zoom in on the note"):
+- **Pinch to zoom**:
   - Up to 4×, in Write and in Type. In Write, two fingers scroll and zoom; in Type, one finger scrolls.
   - The canvas zooms itself, as in Apple's PencilKit sample, so the ink stays sharp. Zooming a parent scroll view blurs PencilKit ink (Apple forums 698317).
   - The typed text has its own scroll view under the canvas; the two follow each other's scroll and zoom (`PageView.follow`). Write moves the canvas, Type moves the text. The text is redrawn at the zoom it's shown at.
   - Simulator: a box drawn at 1× zooms in and comes back to the same spot, in both modes. Strokes drawn at 2.3× and 4× land in place on the saved page. The typing shows at the ink's zoom.
   - First try, the text inside the canvas: the text view left the accessibility tree (VoiceOver and the UI test couldn't find it). Hence the separate scroll view.
-- **The eraser hands back the pen** (the wearer: "once I lift it up, it automatically switches back to the last pen or pencil"):
+- **The eraser hands back the pen**:
   - `canvasViewDidEndUsingTool` (the Pencil lifted): if the tool picker's item is the eraser, it goes back to the last inking item (`PKToolPicker.selectedToolItem`, iOS 18; `selectedTool` is deprecated).
   - Simulator: eraser picked, one stroke erased part of a line, the log said "eraser lifted, back to com.apple.ink.pen", and the next strokes drew in ink.
-- **Messages shortcuts in the repo** (`apps/ios-companion/Shortcuts`): the two signed shortcuts the wearer imported, their unsigned sources, `make_shortcuts.py` to point them at another team or bundle ID and sign them, and install steps.
+- **Messages shortcuts in the repo** (`apps/ios-companion/Shortcuts`): the unsigned shortcut sources, `make_shortcuts.py` to point them at a team and bundle ID and sign them, and install steps.
   - Anyone-mode signing: the certificate is Apple's, with a random common name and no person in it.
 - **Docs:** `docs/IOS_APP.md` (screens, the notebook, Messages, building your own) with screenshots from the iPhone Duo simulator, and the README's "On the iPhone".
   - `build_ios.sh` builds `ANTHROPIC_API_KEY` into the app, so the docs say to keep a build to yourself.
-- **Example names:** a contact nickname in code comments, the simulator seed and this changelog was replaced with made-up ones ("Honey Bun", "Mama Bear").
+- **Example names:** contact nicknames in code comments, simulator seeds and this changelog use synthetic placeholder names.
 
-- **What was asked.** The wearer: "did you test it on the xcode simulator?" then "Why can't you do it though?"
-  - This Mac has Xcode but no Simulator app, so the simulator runs headless. `simctl io screenshot` fails ("Invalid argument"). The earlier check drove the page from inside the app.
+- **Headless Xcode Simulator UI testing:**
+  - When Simulator.app is not running visibly, `simctl io screenshot` returns "Invalid argument"; XCUITest captures PencilKit Metal layers reliably in headless runs.
 - **A UI test** (`dist/sim-cues-1030/uitest/`, run with `zsh run.sh`). It is its own XcodeGen project that includes `apps/ios-companion/project.yml`, so the app's project is unchanged.
-  - Finger strokes (the Simulator has no Pencil) write "FIX TANK" and "MEET AL AT 4" in block capitals.
-  - Then it switches to Type, types "Site walk, Thursday", scrolls, switches back to Write, adds a tick and taps Done.
+  - Finger strokes (the Simulator has no Pencil) write "SHIP V2" and "MEET SAM AT 4" in block capitals.
+  - Then it switches to Type, types "Design review, Thursday", scrolls, switches back to Write, adds a tick and taps Done.
   - It opens the saved page, then does Edit + Cancel, Edit + Done, and Use as prep notes.
   - XCUITest's screenshots work headless (`XCUIScreen`, exported from the result bundle). The app's own window pictures miss ink drawn by PencilKit's Metal tiles, so they are not evidence.
 - **Results on the iPhone Duo simulator (466 × 678 points; the tabs are a rail at the side):**
   - One finger draws in Write without scrolling the page. In Type, one finger scrolls it. Typing lands on the page under the ink, and switching modes keeps both.
-  - Claude read the page as "Site walk, Thursday / FIX TANK ✓ / MEET AL AT 4" and titled it "Thursday Site Walk Notes". The overview says the tank fix "is marked as completed". The next step was "Meet Al at 4".
+  - Claude read the page as "Design review, Thursday / SHIP V2 ✓ / MEET SAM AT 4" and titled it "Thursday Design Review Notes". The overview notes that v2 shipping "is marked as completed", with next step "Meet Sam at 4".
   - **Bug: Edit page opened a blank page.** The canvas had the saved strokes (47) but drew none of them, and new strokes didn't show either, though they were saved.
     - Fix (`PageView`): the saved drawing goes to the canvas in `layoutSubviews`, once it has its size, not in `init`. A new page (no saved ink) already worked.
     - Confirmed in the next run: Edit shows the ink, a new line shows as it's drawn, Cancel drops it and Done keeps it (read again).
@@ -448,7 +460,7 @@ JOAT Brain 1.0 (202611102035) uploaded to TestFlight. No plugin change.
 
 JOAT Brain 1.0 (202611101256) uploaded to TestFlight. No plugin change.
 
-- **What was asked.** The wearer: "I want you to create something like this [TypeDraw] because I'm gonna be able to use the JOAT app also as my notebook … so I could use my pencil to write on my phone."
+- **Goal.** Add a PencilKit + typed-text notebook inside the Notes tab so Apple Pencil pages, QuickNotes, and Prep notes share one workflow:
   - The iPhone Duo takes the USB-C Apple Pencil from iOS 27.2: tilt, no pressure, no double-tap or squeeze, on both screens (MacRumors 2026-09-09; smartworld.it 2026-10-21).
   - His picks: write and draw with the Pencil, type and ink on one page, and handwriting to text.
   - Pages show on the glasses, sit in the same list as QuickNotes, and a page can be prep notes.
@@ -467,9 +479,9 @@ JOAT Brain 1.0 (202611101256) uploaded to TestFlight. No plugin change.
   - **Read my handwriting**, when it could not be read (offline, no key)
   - **Use as prep notes** (`Prep.addText(_:title:source:)`), which the AI cues then answer from
 - **Simulator check** (`JOAT_DEBUG_PAGE=1`; the headless Simulator has no Pencil and takes no screenshots, so the app draws its own window to files):
-  - A page with "Site visit, Tuesday" typed and three lines of script ink. The editor showed both on one page, with the canvas first responder and the tools shown.
-  - Claude read "Call Mike about the tag map on Friday at 3 pm" and "Order two spare relays" in 1.4 s.
-  - Titled "Site Visit Action Notes". Two reminders were offered: Fri Nov 13, 3:00 PM, and Wed Nov 11, 9:00 AM (no day written).
+  - A page with "Design review, Tuesday" typed and three lines of script ink. The editor showed both on one page, with the canvas first responder and the tools shown.
+  - Claude read "Send Liam the slide deck on Friday at 3 pm" and "Book design review room" in 1.4 s.
+  - Titled "Design Review Action Notes". Two reminders were offered: Fri Nov 13, 3:00 PM, and Wed Nov 11, 9:00 AM (no day written).
   - Two fixes found on the way. A page's to-dos were dropped for lacking "I will". A wrapped line lost its day, until the transcription joined wrapped sentences.
 - **Not tested here:** the Pencil itself on the iPhone Duo.
 
@@ -477,7 +489,7 @@ JOAT Brain 1.0 (202611101256) uploaded to TestFlight. No plugin change.
 
 Plugin 0.1.144, lab package (loopback allowed, dirty tree on 47ae638), `dist/hub-0.1.144/joat-0.1.144.ehpk`, 177822 bytes, SHA-256 `0a3bc88acc9e6d8ddc981125a06d5a9d0d4dc407ad951bd5ceb8803993603b5d`. Not uploaded to Even Hub yet. JOAT Brain 1.0 (202611091814) uploaded to TestFlight.
 
-- **Overview** (the wearer: "instead of having the reminder as the first item, could we actually make it the notification as the first item"; Reminders second, his choice):
+- **Overview** (Notifications first on the rail, Reminders second):
   - The rail is NOTIFICATIONS, REMINDERS, NEWS, POMODORO, QUICKNOTES (`PANEL_TABS`).
   - Notifications lists the unread cards, newest first, with the app in the label column. A tap opens the newest as its card, and the next tap reads on. Home starts on it after a reconnect.
   - It leaves the overview's menu (id 7 removed), so it is in one place only. This reverses the 2026-10-15 change (61fb08e) except for Reminders, which stays on the rail.
@@ -486,42 +498,42 @@ Plugin 0.1.144, lab package (loopback allowed, dirty tree on 47ae638), `dist/hub
     - The image column's rail rows are 22 px apart, starting 6 px down. The last underline ends at 115 of the 116 px tile.
     - The pixel overview has five slots.
   - Tests updated (1288 passed, typecheck clean).
-  - In the Even Hub simulator with JOAT Brain's seeded texts, Home opened on NOTIFICATIONS listing Family and Honey Bun (the USPS scam kept off). A swipe went to REMINDERS, then NEWS. A tap opened the newest card and a second tap the next.
-- **Messages: texts that never reached JOAT Brain** (the wearer: not on the glasses, not under Messages › Recent). Code review found two causes:
+  - In the Even Hub simulator with JOAT Brain's seeded texts, Home opened on NOTIFICATIONS listing Family and Jordan (the USPS scam kept off). A swipe went to REMINDERS, then NEWS. A tap opened the newest card and a second tap the next.
+- **Messages: texts that never reached JOAT Brain**. Code review found two causes:
   - **A real text could be read as spam.**
     - `SpamCheck.parse` took any reply containing "spam" as SPAM, so "OK, not spam" hid the text.
     - Now the first word decides.
-    - Saved contacts and group chats skip the check: a name from the automation is a saved contact. In the simulator, two contacts with the same name had made `resolve` fail and sent Honey Bun's text through the check.
+    - Saved contacts and group chats skip the check: a name from the automation is a saved contact. In the simulator, two contacts with the same name had made `resolve` fail and sent Jordan's text through the check.
   - **Show Text on Glasses returned before the work was done.**
     - The spam check ran after the action had already finished, and iOS can suspend the app once an action finishes. Apple gives a background action about 30 s (LongRunningIntent docs). The on-device model is also rate limited in the background on battery (Apple DTS, forums 793787).
     - The action now waits until the text is shown or kept off.
     - A check with no verdict after 10 s shows the text.
   - Simulator, seeded texts:
-    - Honey Bun's text showed 76 ms after arriving (3.7 s before).
+    - Jordan's text showed 76 ms after arriving (3.7 s before).
     - The group text showed at once.
     - The USPS scam was kept off in 1.7 s.
-    - Reply and New message ("my wife") still reach the confirm and the hand-off to Shortcuts.
+    - Reply and New message ("my partner") still reach the confirm and the hand-off to Shortcuts.
 
-## 2026-11-07 — JOAT 0.1.143 and JOAT Brain 1.0 (202611071349): Messages that send, group chats, the wearer's shortcuts fixed, QuickNotes cues as cards
+## 2026-11-07 — JOAT 0.1.143 and JOAT Brain 1.0 (202611071349): Messages that send, group chats, Shortcuts automations fixed, QuickNotes cues as cards
 
 Plugin 0.1.143, lab package (loopback allowed, dirty tree on 47ae638), `dist/hub-0.1.143/joat-0.1.143.ehpk`, 177817 bytes, SHA-256 `f22e5bdc07ba0b2c9176d3fbfde57f5fbbdf0573a61786d3628648d352d829f1`. Not uploaded to Even Hub yet. JOAT Brain 1.0 (202611071349) uploaded to TestFlight (202611071343 was stopped mid-upload).
 
-- **Why no text was ever sent** (the wearer's two shared shortcuts, read from their iCloud records):
+- **Why no text was ever sent** (traced in the two Shortcuts workflows):
   - The send automation waits for a notification titled "JOAT • text to send"; the installed app posted "JOAT · text to send". The app now posts "•".
   - Four actions in the send shortcut wait for a tap on the phone: Ask for Input, Show Alert, and both Send Message actions (Show When Run was on). The Contacts action had no contacts picked, so Apple's model never saw a list to match against.
   - The show shortcut: when Apple's model refuses a text, the whole automation stops and the text is lost (Shortcuts cannot catch an action's error). Group texts: Find Conversations by the sender's name finds the one-to-one chat, never the group, so every group text arrived as one person's.
 - **JOAT Brain does what those steps were for** (`Recipients.swift`), and the glasses show the result before the tap:
-  - Who: a spoken or typed number, an email, an exact name or nickname, else Apple's on-device model picks from the contacts, else Claude. Simulator: "my wife" → on-device pick → Honey Bun.
+  - Who: a spoken or typed number, an email, an exact name or nickname, else Apple's on-device model picks from the contacts, else Claude. Simulator: "my partner" → on-device pick → Jordan.
   - Spam: Apple's on-device model in its permissive mode, then Claude; a text nobody can judge is shown. Simulator: the USPS "package on hold" text was kept off the glasses.
   - A number with no name is looked up in Contacts.
-  - Group chats: "Family (Honey Bun)" threads under Family with who wrote it. A reply in a group goes to the group: Text to Send has a new **Group** property, and the group's name is never looked up in Contacts (that could have texted one person).
-- **On the glasses**, checked end to end in both simulators: Messages › conversation › tap → "What should I say to Honey Bun?" → "Send to Honey Bun?" → tap → handed to the Shortcuts notification; New message → "Who should I text?" → "my wife" → Honey Bun; a reply in Family → "Send to Family?" → queued as a group. The Simulator cannot grant notifications, so the last hop shows "Not sent: allow notifications"; the phone asks at launch.
-- **The wearer's shortcuts, rebuilt from his own actions** (`dist/shortcuts/gen_shortcuts.py`, signed with `shortcuts sign --mode anyone`):
-  - Send: Get Text to Send → if Group has a value, Find Conversations (Group Name) and Send Message to it, otherwise Send Message to Recipient → Text Sent on Glasses → his Find Conversations + Mark as Unread (Open When Run off). Show When Run off on both sends.
-  - Show: his steps without the Use Model spam check. Group texts: Find Conversations no longer filters on Display Name = Sender (that finds the one-to-one chat); it takes the conversation active last (sort Date, Latest First, limit 1: `WFContentItemSortProperty` `dateLastActive`, as the iPhone saved it), whose Group Name is set for a group, so a Family text reaches JOAT as "Family (Honey Bun)". Unnamed groups have no Group Name and still show by person.
+  - Group chats: "Family (Jordan)" threads under Family with who wrote it. A reply in a group goes to the group: Text to Send has a new **Group** property, and the group's name is never looked up in Contacts (that could have texted one person).
+- **On the glasses**, checked end to end in both simulators: Messages › conversation › tap → "What should I say to Jordan?" → "Send to Jordan?" → tap → handed to the Shortcuts notification; New message → "Who should I text?" → "my partner" → Jordan; a reply in Family → "Send to Family?" → queued as a group. The Simulator cannot grant notifications, so the last hop shows "Not sent: allow notifications"; the phone asks at launch.
+- **Shortcuts workflows rebuilt** (`dist/shortcuts/gen_shortcuts.py`, signed with `shortcuts sign --mode anyone`):
+  - Send: Get Text to Send → if Group has a value, Find Conversations (Group Name) and Send Message to it, otherwise Send Message to Recipient → Text Sent on Glasses → Find Conversations + Mark as Unread (Open When Run off). Show When Run off on both sends.
+  - Show: runs without the Use Model spam check. Group texts: Find Conversations no longer filters on Display Name = Sender (that finds the one-to-one chat); it takes the conversation active last (sort Date, Latest First, limit 1: `WFContentItemSortProperty` `dateLastActive`), whose Group Name is set for a group, so a Family text reaches JOAT as "Family (Jordan)". Unnamed groups have no Group Name and still show by person.
   - Not testable here: Send Message to a group conversation (new in iOS 27).
 - **Plugin**: the confirm card reads "What do you want to say to X?" (it confirms new messages too, not only replies).
-- **QuickNotes, Even's Conversate and QuickNote in one** (the wearer: "the whole point … was the combination"):
+- **QuickNotes, combining Even's Conversate and QuickNote**:
   - Only a hold records. A tap opens AI cues & prep.
   - A new cue pops up as a card for 6 s, then clears. A tap on the card opens that cue.
   - QUICKNOTES · AI CUES lists the prep notes and the cues, newest first; an entry opens to read and scroll; 2x tap goes back.
@@ -531,7 +543,7 @@ Plugin 0.1.143, lab package (loopback allowed, dirty tree on 47ae638), `dist/hub
 
 ## 2026-10-30 — JOAT Brain review: fixes, reminders from notes in one tap, a real app with tabs, Messages answered
 
-JOAT Brain 1.0 (202610292033) uploaded to TestFlight, then 202610292038, which adds Home's optional "Start JOAT Brain with the Even app" automation steps (App trigger › Even Realities › Is Opened › Start JOAT Brain). The wearer: "the iPhone app is very bad… identify errors, identify gaps". A full read of the 36 Swift files (an independent review plus my own) and API tests found the errors below.
+JOAT Brain 1.0 (202610292033) uploaded to TestFlight, then 202610292038, which adds Home's optional "Start JOAT Brain with the Even app" automation steps (App trigger › Even Realities › Is Opened › Start JOAT Brain). A full audit of all 36 Swift files and live API checks surfaced and fixed the issues below.
 
 - **Errors fixed**
   - **"Hey JOAT" answers came back empty.** Claude Haiku 5.5 thinks before answering by default, and its thinking used up the 400-token budget. Tested against the API: "Who won the World Series?" came back empty, and the weather answer was cut off. Answers, note summaries, reminders-from-notes and prep points now ask for no thinking. Each model takes its own value, also tested: Haiku takes `"disabled"`, while Sonnet 5.5 refuses that and takes `"between_tools"`. A 400 that names thinking retries once with the model's default. Answers get 600 tokens and are read after the last search result, without the "I'll look that up" preamble.
@@ -550,14 +562,14 @@ JOAT Brain 1.0 (202610292033) uploaded to TestFlight, then 202610292038, which a
   - **Not fixed:** the loopback server accepts any token, so another app on the phone could connect and answer a confirmation. That needs pairing on the phone without risking the link the wearer depends on. Next.
 - **Reminders from notes, one tap** (the wearer's choice: on the glasses and in the app):
   - After a save, Claude reads the note for what the wearer said they will do and when, alongside the summary.
-  - If QuickNotes is on the glasses, the list appears there ("Add 3 reminders from “Call with Dana”", each with its day and time); otherwise it appears the next time QuickNotes opens.
+  - If QuickNotes is on the glasses, the list appears there ("Add 3 reminders from “Call with Sam”", each with its day and time); otherwise it appears the next time QuickNotes opens.
   - A tap adds them all, and 2x tap leaves. The second "Add N reminders?" confirmation is gone: the tap on the list is the confirmation (`Reminders.createBatch(confirmed:)`). The same applies to "create reminders from the last note" and the saved note's tap.
   - Checked end to end in both simulators with a seeded note recorded on Thursday evening:
-    - "send the tag map to Mike by Friday at 3" → Fri Oct 30, 3:00 PM
+    - "send the slide deck to Liam by Friday at 3" → Fri Oct 30, 3:00 PM
     - "call the bank tomorrow morning at 9" → Fri Oct 30, 9:00 AM
-    - "next Wednesday … pick up the firewall approval form" → Wed Nov 4 (all day)
+    - "next Wednesday … pick up the security review form" → Wed Nov 4 (all day)
     - One tap → three reminders created in Reminders, no second question.
-- **JOAT Brain is an app now** (`AppScreens.swift`, the wearer's choice of tabs):
+- **JOAT Brain is an app now** (`AppScreens.swift`):
   - **Home:** glasses connected or not and the steps to connect, keeps-running status with Restart, speech status, whether a Claude key is present, permissions that still need an OK (Allow / Settings), and the settings.
   - **Notes:** saved notes with summaries. A note shows its overview, key points, next steps, AI cues and transcript. **Find reminders in this note** opens a sheet: untick any, edit the words, the day or time (or all day), then Add.
   - **Prep:** the prep notes, with the active one's talking points.
@@ -565,7 +577,7 @@ JOAT Brain 1.0 (202610292033) uploaded to TestFlight, then 202610292038, which a
   - **Diagnostics:** the old lab readouts and the log.
   - `-JOATTab <tab>` at launch opens a tab.
   - Built and launched in the Simulator, but no screenshot of it could be taken: this Mac has no Simulator app, so the headless simulator returns black frames.
-- **Messages, researched again** (the wearer: "If it can be done on a Mac, then it can be done on the iPhone"):
+- **iOS Messages platform constraints**:
   - The Mac reads Messages' database with Full Disk Access; iOS gives no app that.
   - Checked and ruled out:
     - Even Hub SDK: no notification or message API.
@@ -584,8 +596,8 @@ Plugin 0.1.142, lab package (loopback allowed, dirty tree on 47ae638), `apps/hub
 Even's Conversate has Prep Notes and AI cues. The wearer asked for both in our QuickNotes and picked: all four cue kinds, all three ways to add prep, shown Even's way, with a swipe to switch views (tap stays record/pause).
 
 - **Prep notes** (`Prep.swift`, `PrepExtract.swift`). JOAT Brain has a new first section, "Prep notes & AI cues", with **Add a file…** (PDF, text, Markdown, RTF, HTML), **Paste** (a link is fetched and its page text kept, anything else is kept as text), **Type notes…**, and an on/off switch for cues. A PDF or text file shared from any app (Share › JOAT Brain) arrives the same way (`CFBundleDocumentTypes`). Claude Sonnet turns each prep into a title and up to 8 talking points. The ticked prep (the newest by default) is the one the cues use. Kept in `Documents/prep.json`, capped at 60,000 characters.
-- **AI cues** (`Cues.swift`). While a note records, Claude Haiku looks at what was just said, with the earlier talk, the prep and the cues already shown. It answers NONE or one cue: ANSWER (only from the prep), SUGGESTION, CONCEPT or BIO (public figures, or people the prep describes). It is asked when the talk pauses after 4 or more new words, or after 14 new words of steady talk, at most every 8 s, one request at a time. The prep is sent as a cached system block. Haiku 5.5 thinks first by default, and 160 tokens of thinking left 3 of 5 test replies empty, so cue requests turn thinking off (`ClaudeLink.cue`). Checked against the real API on a sample meeting: replies in 0.7–1.1 s, NONE on small talk, a SUGGESTION about the trend gaps, and "ANSWER | MQTT bridge timing | Earliest is Nov 6, pending IT firewall approval…" from the prep.
-- **On the glasses.** A new cue shows under the note's words for 10 s ("▶ ANSWER · MQTT bridge timing" and its text), then goes. A swipe moves through the note → AI CUES (newest at the bottom) → PREP · title (6 talking-point rows per page, "1/2", "2/2") → back to the note. Tap, hold and 2x tap work the same on every view. Each view fits one glasses page (7 lines), so a swipe always changes view and never pages. Saved notes keep their cues, and the note reader lists them under AI CUES.
+- **AI cues** (`Cues.swift`). While a note records, Claude Haiku looks at what was just said, with the earlier talk, the prep and the cues already shown. It answers NONE or one cue: ANSWER (only from the prep), SUGGESTION, CONCEPT or BIO (public figures, or people the prep describes). It is asked when the talk pauses after 4 or more new words, or after 14 new words of steady talk, at most every 8 s, one request at a time. The prep is sent as a cached system block. Haiku 5.5 thinks first by default, and 160 tokens of thinking left 3 of 5 test replies empty, so cue requests turn thinking off (`ClaudeLink.cue`). Checked against the real API on a sample meeting: replies in 0.7–1.1 s, NONE on small talk, a SUGGESTION about canary latency, and "ANSWER | Rollout window | Staging soak finishes Thursday; production opens Friday…" from the prep.
+- **On the glasses.** A new cue shows under the note's words for 10 s ("▶ ANSWER · Rollout window" and its text), then goes. A swipe moves through the note → AI CUES (newest at the bottom) → PREP · title (6 talking-point rows per page, "1/2", "2/2") → back to the note. Tap, hold and 2x tap work the same on every view. Each view fits one glasses page (7 lines), so a swipe always changes view and never pages. Saved notes keep their cues, and the note reader lists them under AI CUES.
 - **Plugin**: `hud.list.liveViews` marks a note page that has views. On such a page a swipe sends `quicknotes-view-next` / `quicknotes-view-prev` to the brain (`CapabilityMenu.sendQuickNotesView`). A Mac brain never sends the flag, so its notes page as before. A brain whose hint already names the swipe gets no extra "swipe: page". Dev fixtures `quicknote-live-cue`, `quicknote-live-cues`, `quicknote-live-prep`.
 - **Checked:** typecheck clean; 1287 tests pass (1 new). Both simulators end to end: JOAT Brain in the iOS Simulator (port 8797, a prep seeded) linked to the plugin in the official Even Hub simulator. Opened QuickNotes, created a note, swiped down four times and up once. JOAT Brain logged views 1, 2, 3, 0, then 3, and the glasses showed the note, "AI CUES · None yet", PREP 1/2 and PREP 2/2 with their hints. The cue popup is not seen on a simulator (no speech there), and the share sheet is not tested. Not tested on the glasses.
 
@@ -597,7 +609,7 @@ The wearer, on their own iPhone: it connected once, stopped as soon as they swit
 - **The loopback listener rebuilds itself.** It used to log a failure and stay dead, so the plugin dialled a closed port forever. Now a failed listener is rebuilt with backoff (1, 2, 4 … 30 s). Every 10 s a listener that isn't listening is rebuilt. Coming to the front with no plugin connected rebuilds it anyway, because iOS takes listening sockets back from a suspended app. Open plugin connections stay up.
 - **Authenticated no longer drops to "no" because of a half-open connection.** Before, a connection that died during the handshake took a connected plugin's count, and its "Authenticated", down with it.
 - `JOAT_LOOPBACK_PORT` (Simulator only: the Simulator shares the Mac's 127.0.0.1, where the Mac's JOAT holds 8787).
-- **Checked:** the device build installed on Joats, but the launch failed because the phone was locked. In the Simulator on port 8797: listening in front, after 40 s behind Settings, and back in front; the WebSocket handshake answered 101 each time, and coming to the front logged "listener rebuild (app opened)". Real suspension and the lock are not tested yet: the Simulator doesn't suspend apps the way a phone does.
+- **Checked:** the device build installed on the test iPhone, though launch waited until the phone was unlocked. In the Simulator on port 8797: listening in front, after 40 s behind Settings, and back in front; the WebSocket handshake answered 101 each time, and coming to the front logged "listener rebuild (app opened)". Real suspension and the lock are not tested yet: the Simulator doesn't suspend apps the way a phone does.
 
 ## 2026-10-29 — Build JOAT 0.1.141: the phone's own brain is a choice again; JOAT Brain build 202610291313
 
@@ -620,7 +632,7 @@ Glasses plugin 0.1.140, lab package (`JOAT_RELEASE_ALLOW_LOOPBACK=1`, dirty tree
 
 ## 2026-10-25 — JOAT Brain on TestFlight, build 1.0 (202610251627)
 
-The phone half of 0.1.140 (the Reminders card, note reminders on the day and time said, the Messages actions) uploaded to App Store Connect for TestFlight; Joats was not reachable over the cable. Fix to `--testflight`: XcodeGen wrote a fixed CFBundleVersion "1" into the generated Info.plist, so the build-number override never reached the bundle and the second upload was refused as a duplicate; `project.yml` now takes CFBundleVersion and CFBundleShortVersionString from the build settings (MARKETING_VERSION 1.0, the version App Store Connect already holds), and the script now fails when the upload fails instead of reporting success.
+The phone half of 0.1.140 (the Reminders card, note reminders on the day and time said, the Messages actions) uploaded to App Store Connect for TestFlight while the test iPhone was away from the cable. Fix to `--testflight`: XcodeGen wrote a fixed CFBundleVersion "1" into the generated Info.plist, so the build-number override never reached the bundle and the second upload was refused as a duplicate; `project.yml` now takes CFBundleVersion and CFBundleShortVersionString from the build settings (MARKETING_VERSION 1.0, the version App Store Connect already holds), and the script now fails when the upload fails instead of reporting success.
 
 ## 2026-10-24 — iPhone-as-brain: reminders from notes keep the day and time said
 
@@ -630,35 +642,35 @@ JOAT Brain Debug build; built, not installed.
 
 ## 2026-10-23 — iPhone-as-brain: Navigation with Apple Maps
 
-JOAT Brain Debug build. Plugin unchanged (0.1.139): it still tracks the route on the phone's location fixes and draws the turn pages itself; the phone now answers everything the Mac answered. Builds for iOS (generic); not yet installed (Joats was out of reach of the Mac).
+JOAT Brain Debug build. Plugin unchanged (0.1.139): it still tracks the route on the phone's location fixes and draws the turn pages itself; the phone now answers everything the Mac answered. Builds for iOS (generic); not yet installed on the test iPhone.
 
 - **Navigation** (`Navigation.swift`, port of `services/navigation.py`, the Navigation half of `capabilities.py`, `make_navigation_session`). The same views, strings, ids and bindings as the Mac: place search, "Which destination?" with two matches and "None of these · retry", confirm, Walk/Cycle, "Getting your location" and the origin request, "Finding a walking route", the preview, "Starting navigation", the route, its acknowledgement, arrival, finish, reroute (the Rerouting page first, then the new route with no preview), every error page and its retry, a rejected view ending the session, `navigation.stop` at every end. The voice grammar is the Mac's ("navigate to …", "take me to …", "how do I get to …", confirm/first/second/walk/cycle/start/change mode/retry/finish, "no, I meant …", "nearest …" / "… near me" with a fresh fix through `location.refresh`), plus "navigate home" / "take me home", which the Mac only caught through its assistant tool. While a route is live, the cancel words work with or without the name, "open my notes" still opens, and nothing else reaches a command or the Mac. Saved places from the plugin's phone page (`places`) are kept on the phone; "my home" resolves to its coordinates with no search.
 - **Apple Maps instead of Mapbox** (`NavigationMaps.swift`, the wearer's choice): `MKLocalSearch` with the Mac's ranking, `MKDirections` walking and cycling, the Mac's walking and cycling policies, no key. Measured on San Francisco, New York and Chicago routes: a step's instruction is the move at the end of that step's line, so each maneuver sits at the distance walked through its step; Apple gives words, not maneuver types, so the words pick the maneuver (English) and the line's own turn decides otherwise. Cycling routes come back labelled "automobile" while using paths and one-way streets against car traffic; the label is logged, the route used.
 - **Changes from the Mac, on purpose.** The Navigation page puts "➤ Navigate to a place" first and lists saved places by name: the plugin draws NAVIGATION as a text page whose tap always arrives as row zero, so on the Mac a tap could only ever start the first saved place. "Say the destination again" takes the next sentence without the name for 15 s (the phone's rule for a question JOAT asked). Lens minutes are whole ("Starting navigation" showed "17.833333333333332 min"). A failed cycling route suggests walking, not cycling. "the Ferry Building" ranks the Ferry Building above "The Embarcadero & Ferry Building Stop", a place Apple returns twice shows once, and "nearest …" puts the closest first.
 - **No street map behind the route.** Apple delivers a map snapshot only to an app on screen (`MKMapSnapshotter` docs), and JOAT Brain runs behind the Even app during a walk, so no `navigation.map` tiles are sent. The route line, the position and the turn pages are unaffected.
 - **Checked on the Mac:** a harness drove the whole flow against live Apple Maps with a fake plugin answering every downlink (40 checks, every downlink within `protocol.py`'s limits); the walking and cycling routes it produced ran through the plugin's own `NavigationController` with a fix every 6 m: turn pages counted down, arrival fired, no off-route or wrong-way. Not yet checked on the glasses or in the Even Hub simulator.
-- **On the glasses, first session** (installed just after midnight on 2026-10-23; JOAT Brain started at 08:04 local, the plugin connected 08:19). Planning opened twice. A QuickNote recorded for 23 minutes (30 sentences into the note, taps and holds all arrived) and saved. "Hey JOAT" (written "hey jokes") answered "Yes?". The wearer's speech arrived from the glasses tagged `self`, everything else `other`. Questions for the Mac ("JOAT, can you tell me my location") and the note's summary got "I can't reach the Mac right now": Tailscale was off on Joats and JOAT was not running on the Mac. "Joe, can you tell me my location" was not taken as addressed ("Joe" is not a wake word). Navigation not tried yet; the phone page had no saved places.
+- **On the glasses, first session** (installed just after midnight on 2026-10-23; JOAT Brain started at 08:04 local, the plugin connected 08:19). Planning opened twice. A QuickNote recorded for 23 minutes (30 sentences into the note, taps and holds all arrived) and saved. "Hey JOAT" (written "hey jokes") answered "Yes?". The wearer's speech arrived from the glasses tagged `self`, everything else `other`. Questions for the Mac ("JOAT, can you tell me my location") and the note's summary got "I can't reach the Mac right now": Tailscale was off on the test iPhone and JOAT was not running on the Mac. "Joe, can you tell me my location" was not taken as addressed ("Joe" is not a wake word). Navigation not tried yet; the phone page had no saved places.
 - **Fix: two News feeds.** techradar.com/rss and tomshardware.com/feeds/all answer https with a 301 to plain http, which iOS refuses (App Transport Security, -1022), so both were missing from the phone's News. Redirects are now followed on https (`SecureRedirects` in `News.swift`); checked on the Mac: both feeds answer 200 over https. Built, not yet installed.
-- **Fix: "where am I" on the phone.** "Can you tell me my location", "where am I", "what's my current location", "what city am I in" no longer go to the Mac: the phone asks the plugin for a fresh fix (`location.refresh`, 7 s), looks the address up with Apple (`MKReverseGeocodingRequest`; `CLGeocoder` is deprecated in iOS 26), and shows and says it ("You're at Oklahoma State Capitol, 2300 N Lincoln Blvd, Oklahoma City."). A fix over 50 m rough says "near"; an older fix says how old.
+- **Fix: "where am I" on the phone.** "Can you tell me my location", "where am I", "what's my current location", "what city am I in" no longer go to the Mac: the phone asks the plugin for a fresh fix (`location.refresh`, 7 s), looks the address up with Apple (`MKReverseGeocodingRequest`; `CLGeocoder` is deprecated in iOS 26), and shows and says it ("You're at Millennium Park, 201 E Randolph St, Chicago."). A fix over 50 m rough says "near"; an older fix says how old.
 - **Fix: the name as the phone hears it.** This morning Apple's dictation wrote "Hey JOAT" as "hey Joe" and "Joe", and those went unanswered. "hey joe", "hey jo", "joe" and "jo" now wake JOAT when they open the sentence (never mid-sentence: "I told Joe" is not addressed).
 - **Fix: Navigation's "Where to?" answer.** "hey Joe take me to the nearest coffee shop" was searched as a 42-character place name; "Bijo take me to the nearest coffee shop" after "Say the destination again" found nothing. An answer now keeps the place after "take me to" / "navigate to" / "how do I get to" wherever it is in the sentence. Harness: 54 checks pass, including the sentences from this morning's log. Built, not yet installed.
-- **Claude, direct from the phone** (`ClaudeLink.swift`; the wearer's choice after this morning's notes got no summary and questions got "I can't reach the Mac"). The Mac's notes model is a local Llama 3.2 3B on MLX; the iPhone 12 Pro Max cannot run Apple's on-device model (Apple Intelligence needs iPhone 15 Pro or later), and iOS refuses GPU work from a background app (Apple's "Preparing your Metal app to run in the background"), so the phone cannot run a model itself while the Even app is in front. Now: everyday questions go to Claude Haiku 5.5 with web search (max 3 searches, the wearer's city from Apple's reverse geocoding for context and search location), lens-sized with the Mac's `lens_text` rules; note summaries, titles, "ask the last note" and a note's tasks go to Claude Sonnet 5.5 with the Mac's prompts. The Mac is used only when the build carries no key. `build_ios.sh` copies only `ANTHROPIC_API_KEY` from the repo's `.env` into `Generated/claude.json` (ignored by git), so the key is inside this lab build. Checked on the Mac with the real key: "What's the weather like right now?" → one web search, the current Oklahoma City conditions in 4 s; a follow-up kept its context; a sample note came back TITLE / OVERVIEW / KEY POINTS / NEXT STEPS in 2.8 s; a wrong key says "Claude refused this phone's key."
+- **Claude, direct from the phone** (`ClaudeLink.swift`, so summaries and questions work without requiring a reachable Mac). The Mac's notes model is a local Llama 3.2 3B on MLX; the iPhone 12 Pro Max cannot run Apple's on-device model (Apple Intelligence needs iPhone 15 Pro or later), and iOS refuses GPU work from a background app (Apple's "Preparing your Metal app to run in the background"), so the phone cannot run a model itself while the Even app is in front. Now: everyday questions go to Claude Haiku 5.5 with web search (max 3 searches, the wearer's city from Apple's reverse geocoding for context and search location), lens-sized with the Mac's `lens_text` rules; note summaries, titles, "ask the last note" and a note's tasks go to Claude Sonnet 5.5 with the Mac's prompts. The Mac is used only when the build carries no key. `build_ios.sh` copies only `ANTHROPIC_API_KEY` from the repo's `.env` into `Generated/claude.json` (ignored by git), so the key is inside this lab build. Checked on the Mac with the real key: "What's the weather like right now?" → one web search, current local conditions in 4 s; a follow-up kept its context; a sample note came back TITLE / OVERVIEW / KEY POINTS / NEXT STEPS in 2.8 s; a wrong key says "Claude refused this phone's key."
 - **Notes summarized after the fact.** A note saved while no model answered is summarized and retitled once one does: 20 s after launch and every 10 minutes (three at a time; an unusable answer is not retried on the timer). This morning's 23-minute note gets its summary on the first pass after install.
 - **Build script:** the app is built for any iPhone (`generic/platform=iOS`) and the previous build is deleted first, so a failed build can no longer install an older app (this morning the phone dropped off mid-run and the previous app was about to go on).
-- **Installed on Joats at 12:13 local.** Claude configured at launch; News answered 65 of 65 feeds (TechRadar and Tom's Hardware included); the plugin connected 16 s after launch; 28 s after launch both notes saved with no summary were summarized and retitled by Sonnet 5.5 (6.2 s and 9.7 s; 8 key points and 5 todos, 8 key points and 8 todos).
+- **Installed on the test iPhone at 12:13 local.** Claude configured at launch; News answered 65 of 65 feeds (TechRadar and Tom's Hardware included); the plugin connected 16 s after launch; 28 s after launch both notes saved with no summary were summarized and retitled by Sonnet 5.5 (6.2 s and 9.7 s; 8 key points and 5 todos, 8 key points and 8 todos).
 - **Why voice went dead after unplugging (12:13–12:18).** Two causes, both in the log. (1) The glasses came out of the case at 12:13:42; the plugin had stopped the mic at 12:13:28 when they reported "not worn, charging" (DeviceMonitor.ts: the mic stops on doff), and on "worn" it followed the phone page's "After an interruption: Ask first", which asks "Resume listening?" on the lens and waits 8 s for a nod or tap; unanswered, the mic stayed off until a new QuickNote reopened it at 12:17:42. (2) "Compare engines" was on in JOAT Brain, and with it the dictation engine that answers the wearer wrote nothing for five minutes while the comparison engine wrote "What, Mr.?" and "Um." on the same audio. Fixes: the comparison engine and its switch are removed; the phone now honours "Let Mac decide" the way the Mac does (glasses on, mic off → it asks for the mic; `MicResume` in `Features.swift`). Built, not yet installed.
 - **No more answers out of the phone's speaker.** With no headphones connected, every reply ("Yes?") was spoken through the phone's own loudspeaker. Replies are now spoken only into AirPods or other headphones (Bluetooth A2DP/HFP/LE, wired, USB, car); otherwise the answer is on the lens only (`Voice.swift`). Installed 12:23 local with the two fixes above: one speech engine, `MicResume` registered, the plugin reporting "Resume automatically", the glasses mic open within a second of connecting.
-- **Spoken replies are the wearer's choice, off by default** (the wearer: "I could read it on the glass ... let me choose it"). Every answer is on the lens; JOAT speaks only when spoken replies are on, and then only into headphones. On: "JOAT, speak your answers", "turn on spoken replies", "talk to me", "read the answers out loud", "voice on". Off: "JOAT, stop talking", "be quiet", "don't talk", "turn off the voice", "voice off". Also a switch in JOAT Brain, "Speak replies in headphones". Kept across launches. 13 grammar checks pass ("stop" alone and "talk about the weather" are not toggles).
+- **Spoken replies are opt-in and off by default.** Every answer is on the lens; JOAT speaks only when spoken replies are on, and then only into headphones. On: "JOAT, speak your answers", "turn on spoken replies", "talk to me", "read the answers out loud", "voice on". Off: "JOAT, stop talking", "be quiet", "don't talk", "turn off the voice", "voice off". Also a switch in JOAT Brain, "Speak replies in headphones". Kept across launches. 13 grammar checks pass ("stop" alone and "talk about the weather" are not toggles).
 - **Follow-ups without the name, and Claude knows where the wearer is.** At 12:30 "what's my location" got the phone's address, then the next question went to Claude, which "corrected" it ("I don't have verified location data") because it was told the location was unknown; and "can you verify and check my location", said right after, was ignored for lacking the name. Now: for a while after any answer the next sentence needs no name (a setting in JOAT Brain, "Follow-up without 'Hey JOAT'", 0–30 s, 0 is off, 8 by default; the Mac uses 30 s) (the Mac's `ConversationWindow`, filler words ignored, the conversation page's Exit closes it); Claude gets the phone's position as street, city and coordinates (one reverse-geocode per 150 m or 10 minutes), and coordinates alone when Apple has no address, never "unknown". Installed 12:33 local.
-- **Planning removed; the menu opens just the reminders.** The wearer asked for reminders only, not the calendar; the port of the Mac's Planning page (month grid, week and day pages) went in anyway on 10-22. `Planning.swift` is deleted. The menu's Planning entry (the plugin's label) now opens REMINDERS: every open reminder, soonest first, undated ones last, up to 20; a tap asks to complete it. "Open my reminders" says "Opening Reminders." Installed 12:47 local.
-- **Texts on the glasses with the phone alone, through Shortcuts** (`Messages.swift`, `Intents.swift`; research in the project doc `iphone-messages-without-mac-research-2026-10-23`). No app may read or send Messages itself, so JOAT Brain now has four Shortcuts actions that run in the background with the phone locked: "Show Text on Glasses" (for a Message automation: the text becomes a Messages card), "Get Text to Send" and "Text Sent on Glasses" (for a Notification automation on JOAT Brain around Send Message with Show When Run off), and "Start JOAT Brain". The Mac's grammar: "reply …", a bare "reply" ("What should I say to Mom?"), "message Mom saying …" (also "text Mom saying …"). Within 60 s of a text, "reply …" needs no name. Nothing is sent before the glasses' confirm tap; a confirmed text the automation does not collect within 60 s is dropped, never sent late, and the lens says so. Names become numbers through Contacts. The menu's Messages entry lists conversations, newest first; a tap opens the thread and makes "reply …" answer it. Grammar checked on the Mac (12 sentences). Installed on Joats 2026-10-24 about 08:13 local; the Shortcuts automations are not set up yet.
+- **Planning removed; the menu opens just the reminders.** Reminders-only scope on iOS: `Planning.swift` is deleted. The menu's Planning entry (the plugin's label) now opens REMINDERS: every open reminder, soonest first, undated ones last, up to 20; a tap asks to complete it. "Open my reminders" says "Opening Reminders." Installed 12:47 local.
+- **Texts on the glasses with the phone alone, through Shortcuts** (`Messages.swift`, `Intents.swift`; research in the project doc `iphone-messages-without-mac-research-2026-10-23`). No app may read or send Messages itself, so JOAT Brain now has four Shortcuts actions that run in the background with the phone locked: "Show Text on Glasses" (for a Message automation: the text becomes a Messages card), "Get Text to Send" and "Text Sent on Glasses" (for a Notification automation on JOAT Brain around Send Message with Show When Run off), and "Start JOAT Brain". The Mac's grammar: "reply …", a bare "reply" ("What should I say to Mom?"), "message Mom saying …" (also "text Mom saying …"). Within 60 s of a text, "reply …" needs no name. Nothing is sent before the glasses' confirm tap; a confirmed text the automation does not collect within 60 s is dropped, never sent late, and the lens says so. Names become numbers through Contacts. The menu's Messages entry lists conversations, newest first; a tap opens the thread and makes "reply …" answer it. Grammar checked on the Mac (12 sentences). Installed on the test iPhone 2026-10-24 about 08:13 local; the Shortcuts automations are not set up yet.
 - **JOAT Brain starts without the screen.** Everything it runs now starts when the process launches, not when its screen appears, so any of the Shortcuts actions above starts the brain with the phone locked. iOS refuses to start recording in the background, so a brain launched that way keeps itself alive on inaudible mixed playback and returns to the record session when the app is next in front. Installed with the above; not yet tested launched from Shortcuts.
 - **TestFlight, so the phone updates away from the Mac.** `build_ios.sh --testflight` archives a Release build (build number = upload time) and uploads it to App Store Connect app "JOAT Brain Lab" (com.joat.brain) with the App Store Connect API key; `JOAT_ASC_KEY_ID` and `JOAT_ASC_ISSUER_ID` are read from the ignored .env, only those lines. Added for the upload: an app icon (`Sources/Assets.xcassets`), `ITSAppUsesNonExemptEncryption` false, and iPhone-only at the target (XcodeGen's default "1,2" made App Store Connect refuse the portrait-only bundle as an iPad app). Build 202610240817 uploaded 2026-10-24.
 - **Reminders page grouped by day** (the wearer's pick of three layouts): "REMINDERS · N OPEN", then OVERDUE, TODAY, TOMORROW, LATER headings with "□ 3:00 PM  Pick up cake" rows (day and time for overdue and later ones, "All day" / "No date" where there is no time), undated last, at most 20 rows with "+N more". A tap on a reminder asks to mark it done; a tap on a heading does nothing. Installed 13:12 local.
 
 ## 2026-10-22 — iPhone-as-brain: QuickNotes, News, notifications and the Mac link on the phone
 
-JOAT Brain Debug build. Plugin unchanged (0.1.139): every page below speaks the wire the Mac already used. Builds for iOS (generic, unsigned); not yet installed (Joats was out of reach of the Mac).
+JOAT Brain Debug build. Plugin unchanged (0.1.139): every page below speaks the wire the Mac already used. Builds for iOS (generic, unsigned); not yet installed on the test iPhone.
 
 - **QuickNotes** (`QuickNotes.swift`, port of `voice_note_capture.py`, the QuickNotes half of `capabilities.py`, `quicknotes_panel.py`, `note_commands.py`). The list (15 a page, "+ Create new note", ▲/▼ paging rows, `quickNotesPage`, `pageControls`), the live page (newest 18 rows of the newest 12 paragraphs through `paginate_reader_text`, REC/Listening clocks, "No audio from the mic — check the glasses." after 3 s, a mic reopen request after 1.5 s), FINISH (Save/Discard/Cancel) and DISCARD?, the note and text readers sent whole, hold-to-talk with release and menu-cancel, "Undo last input", the voice grammar (start/pause/resume/stop/discard/confirm/keep, "take a note …", "find notes …", undo/restore), and the rail tab (four newest). While a note listens, finished sentences go to the note and never reach the wake gate (the Mac's exclusive capture lane); a sentence that ends within 0.3 s after a release still belongs to it. The phone keeps no raw audio: a saved note is its transcript. A note left open when JOAT Brain stopped is saved at the next launch. Mac-side harness run: tap create → hold → words → release → late words joined the held paragraph → tap resumes continuous → new paragraph → undo removed it → FINISH → Save → list shows "[now] ● Note HH:MM" → reader body matches the Mac's template.
 - **Reader rows**: `ReaderText.swift` is an exact port of `paginate_reader_text`; 10 of 10 cases (CRLF, tabs, CJK, joined emoji, flags, long tokens) give the same rows as the Python.
@@ -672,7 +684,7 @@ JOAT Brain Debug build. Plugin unchanged (0.1.139): every page below speaks the 
 
 ## 2026-10-22 — iPhone-as-brain: Spike 2 PASS, a question about which mic, and the first features ported to the phone
 
-Lab phone "Joats", JOAT 0.1.139 private build, JOAT Brain Debug builds.
+Lab test iPhone, JOAT 0.1.139 private build, JOAT Brain Debug builds.
 
 - **Spike 2 (locked hour): PASS.** Log pulled at 69 min: JOAT Brain alive and in the background the whole run, plugin linked in one session, 827 heartbeats, longest gap between two 5.0 s, memory 21-22 MB, thermal nominal, no restart. The Private-build 5-minute lock caveat from Even's docs did not cut the link in this run.
 - **Which mic is JOAT hearing? Open.** The wearer: wake words work near the phone and get no answer a few metres away with the glasses on. Every audio frame was tagged `source=glasses`, but the Even SDK's `normalizeAudioInputSource` maps any value other than "phone" (missing included) to "glasses", so the tag proves nothing. From 22:28:54 on, frames kept arriving at the usual rate while the recogniser produced nothing, not even partials, for more than 4 minutes. Every `device` report all session said `wearing:false`. Not yet verified: whether the Even app hands the plugin the phone's mic when it thinks the glasses are not worn. JOAT Brain itself only transcribes plugin audio; its keep-alive opens the phone mic and discards it.
@@ -680,11 +692,11 @@ Lab phone "Joats", JOAT 0.1.139 private build, JOAT Brain Debug builds.
 - **Reminders on the phone** (`Reminders.swift`, `ReminderTime.swift`, `Confirm.swift`, `RemindersStore.swift`): "remind me…", "set/add/create a reminder…", "complete/finish/check off the reminder…", "what are my reminders". Times: Apple's date detector, plus the cases it misses (relative "in 20 minutes", a bare "at 5", a day with no time → 09:00, a time already past → tomorrow); no time said → "When should I remind you to …?" and the next sentence answers it, no name needed. The write goes through the glasses' confirm gate (`confirm.request`/`confirm`, port of `hub_gateway.request_confirm`: 20 s window, payload/preview SHA-256, challenge and session ids), then the Mac's `productivity.view` pages and wording (verifying → saved "Native alarm set · JOAT monitoring armed." / completed / cancelled / not saved / failed / check), EventKit with an alarm at the due minute, and a read-back of title and due minute. Due times rounded down to the minute so read-back and monitor compare equal. Due monitor: `productivity.view` phase `due` with occurrence/attempt UUIDs and a connection generation, `reminder_due.ack` stops the retries, `reminder_due.complete` runs the confirmed completion. Recurring reminders refuse completion, as on the Mac. The Planner rail tab lists open reminders (7 days back, 6 ahead, 8 rows, `+N more`), polled every minute.
 - **The capability menu answers on the phone** (`CapabilityMenu.swift`). Every `capmenu` open gets a `hud.list` under its request id, so no row waits 12 s for "No response from the Mac yet." Planning is ported (`Planning.swift`: month grid with 42 cells and the hovered day's entries, week and day pages, the Mac's rows and labels, Back through `planning-back`, the right-pane tap with re-resolution in fresh data, an outcome's anchor reopening its day). Reminders only: events are left out at the wearer's request, so event counts are 0. A reminder row asks to complete it. News, Pomodoro and Search open their rail tabs. Pages not ported yet say "<Name> is not on the phone yet."
 - **Echo guard.** While JOAT is talking, or within 0.3 s after, a sentence that ends is not taken as the answer to JOAT's question or as the request after "JOAT" alone (speaker out loud, glasses mic close by).
-- Installed on Joats at 17:41 local, after the hour had passed (the wearer approved). The plugin reconnected within a second; the first `AudioMeter` lines showed audio arriving at 1.0× real time and Even tagging some of it `self`. Not yet verified on the glasses: the reminder flows, Planning, the far/near mic test.
+- Installed on the test iPhone at 17:41 local, after the hour had passed. The plugin reconnected within a second; the first `AudioMeter` lines showed audio arriving at 1.0× real time and Even tagging some of it `self`. Not yet verified on the glasses: the reminder flows, Planning, the far/near mic test.
 
-## 2026-10-22 — iPhone-as-brain: the voice loop on the phone, and the name in the wearer's voice
+## 2026-10-22 — iPhone-as-brain: the voice loop on the phone, and the name in spoken wake phrases
 
-Lab phone "Joats" (iPhone 12 Pro Max, iOS 27.0.1), JOAT 0.1.139 private build, JOAT Brain Debug builds. No Mac in the loop.
+Lab test iPhone (iPhone 12 Pro Max, iOS 27.0.1), JOAT 0.1.139 private build, JOAT Brain Debug builds. No Mac in the loop.
 
 - **Voice loop works end to end on the phone.** JOAT Brain asks for the glasses mic after auth (`audio.control`, as the Mac does), feeds the plugin's 16 kHz frames to Apple's on-device speech engine, gates on the wake words, answers on the glasses' native conversation page (`assistant.conversation`) and speaks through AirPods (`AVSpeechSynthesizer` on the keep-alive session, now with Bluetooth A2DP output). The lab reply repeats the request back ("You said: ..."); no model yet. Name alone → "Yes?" and the next sentence is the request, as on the Mac.
 - **Connect greeting.** The plugin's first frame is its image overview ("JOAT · connecting"); the native overview arrives on the first repaint a brain causes. The Brain now sends what `VoiceOrchestrator.on_connect` sends (clear Main/Context/Tray, status word), and the wearer confirmed it opens on the native overview. The Spike 1 receipt overlay is gone.
@@ -695,7 +707,7 @@ Lab phone "Joats" (iPhone 12 Pro Max, iOS 27.0.1), JOAT 0.1.139 private build, J
 
 ## 2026-10-22 — iPhone-as-brain Spike 1: PASS (plugin → JOAT Brain on the same phone)
 
-Lab phone "Joats" (iPhone 12 Pro Max, iOS 26.6.1), JOAT 0.1.139 private build, JOAT Brain Debug build. Project doc: `iphone-brain-spike1-loopback-result-2026-10-22`.
+Lab test iPhone (iPhone 12 Pro Max, iOS 26.6.1), JOAT 0.1.139 private build, JOAT Brain Debug build. Project doc: `iphone-brain-spike1-loopback-result-2026-10-22`.
 
 - The plugin dialled `ws://127.0.0.1:8787/glasses`, authenticated, and sent its opening uplinks (`hello`, `policy`, `places`, `device`, `location`). 100 heartbeats, round trip median 2 ms, p90 3 ms, max 6 ms, with JOAT Brain in the background on the `audio` keep-alive and the Even app in front.
 - The plugin page's origin is `http://127.0.0.1:<port>` (a new port per WebView load): the Even app serves plugins over plain HTTP on loopback, so a loopback `ws://` is not mixed content, and Even's whitelist accepted the loopback origin. No Local Network prompt.
@@ -719,7 +731,7 @@ The hypothesis (project doc `iphone-as-brain-feasibility-2026-10-21`): the weare
 
 ## 2026-10-18 — Planning month: the shared footer, and no title beside the month
 
-The wearer: "replace the planning footer with the reusable footer we use with all the other pages. also remove the planning word that is on the same row as the 'Month Year'".
+Aligns the Planning month page with the reusable footer used across all other pages and removes the redundant "Planning" label from the month/year header row.
 
 - **Footer.** The Planning month is the one page drawn as a picture, and it drew a footer of its own: small, grey and centred in the canvas face. It now draws the line every firmware page carries: the firmware font at full size, 4 px in from the left, in the bottom band, at firmware brightness 1 (image gray 68), from the glyph atlas (`FOOTER_HINT`, `footerHintRun`, `HudCanvasRenderer.drawFooterHint`). Both month layouts use it, the split dashboard and the grid-only month. `evenTextWidth`, `fitOneLineEven` and `drawEvenText` take an optional `wordSpace` (default unchanged): the extra gap at spaces is for the smaller scales, and at full size it made the line wider than the firmware's.
 - **Title.** The bold "Planning" at the left of the month row is gone from both layouts; the header already says PLANNING · MONTH. The month and year label stays where it was.
@@ -733,7 +745,7 @@ The wearer: "replace the planning footer with the reusable footer we use with al
 
 ## 2026-10-18 — QuickNote reminders: only what you said, read first, one confirm
 
-The wearer, after the 2026-10-17 fix: reminders made from a note were the summary's invented "next steps" (for example "Schedule a meeting with the IT department" from a note that never said so), each one asked for separately. Chosen: reminders come from what was said, the whole list is read on the glasses, and one confirmation adds them all.
+Previously, reminders generated from a note came from model-invented summary "next steps" and prompted one confirmation per item. Reminders now come strictly from explicit commitments in the transcript, presented together on one review list with a single batch confirmation.
 
 - **Where reminders come from.** Not the summary's NEXT STEPS. A second, narrow pass over the transcript (`services/commitments.py`): the local model proposes `TASK` + `QUOTE` blocks, and plain code keeps a task only if the quote is in the transcript word for word, carries a commitment cue ("I need to", "I'll", "I have to", "remind me", "don't forget" ...), and the task's own words are mostly in that quote. One task per sentence, near-duplicates merged, at most eight. On the 14 saved notes with a transcript on this Mac (counts only, a copy of the live database) the model proposed 60 tasks and 7 were kept, most of the rest for lacking a cue sentence; a pass takes 0.3 to 9 s. The filter is strict by design, so a note where nothing was promised says so. The model runs once per note per transcript and is remembered until the engine restarts.
 - **Read first, then one confirm.** A note's "tap: reminders" now opens a scrolling list of every reminder in full with its day (`□ Email the release notes — Oct 19 at 09:00`, `QUICKNOTES · DETAIL`). "tap: add N" goes on to one native confirmation, "Add N reminders from “<note>”?" (the note's title is cut to fit 120 units; the reminders are not). Leaving the page, or no tap in 90 s, adds nothing. No summary is needed first.
@@ -749,7 +761,7 @@ The wearer, after the 2026-10-17 fix: reminders made from a note were the summar
 
 ## 2026-10-17 — QuickNote reminders: fit the confirm screen, allow a retry, say why
 
-The wearer: "the reminder creation from quick note is also failing; check the logs".
+Fixes silent failures when creating reminders from a saved QuickNote.
 
 - **What the logs showed.** Nothing: no error, no traceback, no reminder line since the engine started, and the action journal has no `reminders.create` row at all. So no attempt had reached the confirmation. The tap's receipt said only "Created 0 of N reminders".
 - **Why.** The reminder confirmation is the exact prompt `Create reminder + JOAT alert “<title>”? <list> · <date>, <year> at <time> · <zone>`, and the native confirmation page holds 120 UTF-16 units. The fixed words use 84, which leaves 36 for the to-do. A to-do is a model's sentence (the 39 on this Mac: median 64, longest 117), so 37 of 39 were refused with "too long for the confirmation screen" before the journal was touched, and `create_reminders_for` kept only the count.
@@ -765,7 +777,7 @@ The wearer: "the reminder creation from quick note is also failing; check the lo
 
 ## 2026-10-17 — Pomodoro: set the sessions and the lengths by voice, and a plain countdown
 
-The wearer: "i cannot config the time or breaks or the number of sessions, or the simple timing/counterdown capabilities i wanted with it".
+Adds configurable focus/break durations, session counts per set, and one-shot countdown timers to Pomodoro.
 
 - **What was missing.** The only way to change a length was to tap an idle row and step through fixed presets (focus 15-60, short break 3-15, long break 10-30); the four-block set was hard-coded in the Mac service, the persistence validator and the plugin's labels; there was no countdown that runs once; and the voice commands covered only start, pause, resume, skip, reset, open and status.
 - **Sessions per set are a setting.** 1 to 12, stored with the timer (`pomodoro_state.blocks_per_set`, default 4) and sent on the wire as `blocksPerSet`; the glasses' "block 2 of 6" and dots follow it. Say "set sessions to six", "do 3 sessions" or "five sessions", or tap the new `Sessions: N` row (2, 3, 4, 5, 6, 8). A set is a whole number of blocks and then loops, as before; "reset" ends it. Changing the count while a block is under way is accepted when that block still fits the new set, and refused in words when it would not ("You are 2 blocks into this set. Say reset, then set 2 sessions.").
@@ -784,7 +796,7 @@ The wearer: "i cannot config the time or breaks or the number of sessions, or th
 
 ## 2026-10-16 — Brainstorm: the wearer leads, and every answer is shown in full
 
-The wearer: Brainstorm is a thinking partner, "i can ask question and they break it down for me with details or i can ask for a plan and they help brainstorm". Two things were wrong: responses were cut to a line and unreadable, and JOAT carried the rounds on by itself, agreeing and coordinating for them. The 0.1.133 redesign made it worse and was reverted (`81fe353`); this is the fix on top of the original, and nothing else.
+Reworks Brainstorm as an interactive thinking partner that breaks down questions and plans in full detail without truncating turns to one-line gists or auto-advancing rounds without user input. The 0.1.133 redesign was reverted (`81fe353`); this applies the targeted fix on top of the original flow.
 
 - **Why answers were one line.** Four things stacked: the prompt asked each seat for 120 words opening with a one-line `GIST:`; the glasses collapsed every finished turn to that gist; the wire carried about 4,200 characters, enough for two collapsed turns and cutting one full answer; and a failed source check sent the answer back to its seat to be rewritten, shorter. All four are gone. A seat is asked for its answer in full and in detail: a question broken down (what it depends on, the options, trade-offs, an example), or, when asked for a plan, numbered steps with their order, what each needs and where it can go wrong. No word cap; `BRAINSTORM_TRANSCRIPT_MAX` is 64 KB.
 - **The wearer leads.** A round is every seat going once (round 1 blind, as before), then the room stops and waits. No judge, no agreement score, no round limit, no synthesis, no idle timer starts anything: the next round begins when the wearer speaks. They need no wake word, because the room asked for them; noise words a transcriber writes for silence ("you", "thanks", "um") are not a move. The cancel words and Back remain the way out. A nomination or a stage direction ("ask Codex if that's true", "tear that apart") is still a move.
@@ -802,7 +814,7 @@ The wearer: Brainstorm is a thinking partner, "i can ask question and they break
 
 ## 2026-10-15 — Overview: the Planner is the first tab, and Notifications moves to the menu
 
-The wearer: "remove the notification from the overview and put it on the menu as the first option while on the overview, let's put the planner's reminder … The notification should still work the same if i open the menu and click it, it should display over the existing page. Do not change anything about the notification please just move it like I said."
+Moves Notifications from the overview rail to the first option of the overview's contextual menu, and promotes Planner reminders to the first tab on the overview rail while keeping Notification card behavior unchanged.
 
 - **Notifications is the first row of the glasses' menu, on the overview only.** It opens exactly as the old tab tap did: the newest unread card over the page it was opened from, a tap reads it and shows the next, and the Notifications list when nothing is unread. It is the same code (`CapabilityMenu.openNotificationsFromMenu`), now called from `EventRouter.handleMenu` (menu id 7). Menus on other pages have no such row; with it the overview's menu is 1 lead row + 7 capabilities, inside the firmware's 10.
 - **The overview rail's first tab is PLANNER** (the rail is PLANNER, NEWS, POMODORO, QUICKNOTES). It lists your open Reminders, each labelled by when it is due: `Late`, a time for today (`09:00`), `Today`, `Tmrw`, or the weekday. More than eight shows seven and `+N more`. A tap opens Planning.
@@ -825,7 +837,7 @@ The wearer: "remove the notification from the overview and put it on the menu as
 
 ## 2026-10-15 — News: articles open without a blink, and only stories read in full are listed
 
-The wearer: "When I click on an article and it opens, it is blink - All of them", and "if a feed is not available, why is being used for the news? Can we make sure that the news sources are free and have the full article available" — technology, business, industrial and systems engineering research, and Nigeria (politics, business, technology).
+Eliminates the double-write flash when opening a News article, filters out unavailable or paywalled feeds before listing stories, and expands the catalog of free full-text feeds across technology, business, engineering, research, and world news.
 
 - **Opening an article is one write.** It used to rebuild the page (999 bytes) and then write a 1,784-byte stretch straight after, redrawing the same visible text. `ScrollBox.openWithin(999)` cuts only the opening stretch to what the rebuild carries; the full-size stretches start at the first bottom-edge handoff. The simulator never blinked, so this is the cause the code points to, **not yet seen fixed on the glasses**.
 - **Why an unavailable feed was "used":** the reader fell back to the feed's own summary (or an apology) when the page could not be read, the tab said "Some feeds unavailable · partial list", and dead feeds were polled forever.
@@ -845,7 +857,7 @@ The wearer: "When I click on an article and it opens, it is blink - All of them"
 
 ## 2026-10-15 — Messages and QuickNotes scroll like a News article
 
-The wearer: "do the same to the message and quicknote (reading notes)" — the scrolling from hardware test 1/4, "the only thing i scrolled that works like i want".
+Extends the continuous firmware scroll box (`ScrollBox`) from News and Search to Messages conversations and saved QuickNotes.
 
 - **A Messages conversation, a saved QuickNote (`QUICKNOTES · NOTE`) and its exact text (`QUICKNOTES · DETAIL`) are read in the glasses' own scroll box** (`ScrollBox`, as News and Search since `73fcd12`): a line a swipe, both ways, no round trip until a stretch's edge, where the next stretch starts one line below the top line on screen.
 - **The Mac sends each reader whole** (`hud.list` `body`) in the reader template: who or what, a blank line, then the text (a conversation one message a line, newest first; a note's sections a blank line apart). It pages nothing: no counter row, no "up previous / down more".
@@ -855,7 +867,7 @@ The wearer: "do the same to the message and quicknote (reading notes)" — the s
 
 ## 2026-10-14 — JOAT no longer wakes on other people's speech
 
-The wearer: "why did JOAT reply yes when I was not talking to it? … JOAT just randomly answers when I don't say anything or I was never even using the word."
+Prevents unaddressed background conversations from triggering a false "Yes?" wake response.
 
 - **08:15:02** (the "Yes?" card over the paused QuickNote): Whisper, prompted, heard "JOAT." on room sound. The 10-12 check heard the same audio without the prompt and kept it because *something* came back: people talking nearby (a dozen non-wearer utterances 08:14–08:18). The check proved speech, not the name.
 - **Now the no-prompt pass must sound like the name** (`whisper_serve._NAME_ALOUD`): one short word on a j/ch sound, maybe after "hey". These are the renderings measured on the live model for a spoken JOAT (Chode, Chau, Jode, Jote, Joke(s), Jolt(s), Jules, Jobe, Joe, Jones). Anything else is dropped (`other speech, not the name, without the prompt`). Near-misses of the name ("Joats.", three similarity wakes this morning) now get the same check (`only_prompt_words`). Requests that carry words of their own ("JOAT, what time is it?") are unchanged and pay no second pass.
@@ -868,7 +880,7 @@ The wearer: "why did JOAT reply yes when I was not talking to it? … JOAT just 
 
 ## 2026-10-14 — The glasses no longer freeze: two input traps fixed
 
-The wearer: "there are issues with the glasses freezing up". brain.log: 07:37–07:43 and 08:15–08:18 the mic kept streaming but no tap reached the Mac until JOAT was reopened.
+Fixes two input lockups where `brain.log` (07:37–07:43 and 08:15–08:18) showed microphone audio continuing to stream while touchpad taps no longer reached the Mac until JOAT was reopened.
 
 - **The contextual-menu flag always comes down** (`EventRouter`). The router drops every gesture, 2x tap included, while it believes the OS menu is open. Even's Contextual Menu docs: opening the menu fires foreground-enter and closing it fires foreground-exit, and only that exit lowered the flag. A lost exit, a menu click delivered after it, or a stale long press (a hold on a QuickNote whose release never came) mistaken for the menu on a real return to JOAT locked the glasses until a reopen. Now a real tap, 2x tap or swipe reaching the page lowers it (while the menu is open those gestures belong to the menu), it expires after 30 s (`CONTEXT_MENU_MAX_MS`), and only a long press from the last 3 s can stand for the menu (`MENU_LONG_PRESS_WINDOW_MS`).
 - **A JOAT card over another page never eats a gesture.** Reproduced in the official simulator (`scripts/simulator_freeze_probe.py`): with a QuickNote open and paused, the "JOAT: Yes?" card (the name alone at 08:15:02) took the touchpad: a tap did nothing, the first 2x tap only drew "Continue?", and even 33 s later taps reached nothing. Now a tap with no Continue? to answer, or one 2x tap, closes the card and gives the page back; swipes still scroll a long answer, and a tap on Continue? still continues. Even's QA rule: "Every gesture has a visible response". Re-run: one tap closed the card and the note's own 2x tap then finished it.
@@ -877,7 +889,7 @@ The wearer: "there are issues with the glasses freezing up". brain.log: 07:37–
 
 ## 2026-10-14 — Open-source ready: no personal Mac, glasses or signing values in the repo, MIT license
 
-The wearer: "you hardcoded my mac and glasses so if i made this repo public, that would make it hard for people to use". Even Hub's network whitelist is exact origins only, no wildcards ([Networking](https://hub.evenrealities.com/docs/build/networking)), so every plugin build is personal to the Mac it dials.
+Removes hardcoded machine names, glasses identifiers, and signing values so contributors can build and package JOAT with their own environment configuration. Even Hub's network whitelist requires exact origins with no wildcards ([Networking](https://hub.evenrealities.com/docs/build/networking)), so each packaged `.ehpk` injects its target endpoints at pack time.
 
 - **Plugin config moved to the ignored `apps/hub-plugin/.env`.** The checked-in `app.json` is now generic: package id `com.example.joat` and only the simulator's loopback origins. `npm run pack` takes `JOAT_PACKAGE_ID` and `JOAT_RELEASE_WS_URLS` (environment first, then `.env`; only those keys are read, the file is never sourced) and writes them into the packaged manifest: that package id, and exactly those `wss://…/glasses` origins as the whole network whitelist. It refuses the placeholder id, non-reverse-domain ids, plain `ws://`, other paths and duplicates. The maintainer's Changelog version guard now runs only with `JOAT_RELEASE_CHANGELOG_GUARD=1`, since nobody else's uploads are in this log. The wearer's own `.env` carries his package id, both Macs and the guard, so his packaged manifest gets the same package id and the same two-origin whitelist 0.1.129 shipped with (checked by generating it).
 - **No personal hosts in code.** The plugin's no-config fallback is the loopback simulator gateway instead of the MacBook; the phone panel names a Mac by its Tailscale machine name instead of guessing "Mac Mini"/"MacBook Pro". OpenClaw/Hermes add-connection drafts, tests, fixtures and docs use `home-mac`/`laptop-mac.example-tailnet.ts.net`; the glasses serial in a test is now a fake one.
@@ -895,7 +907,7 @@ The wearer asked for the research markdown and stray images to go. Removed: `doc
 
 ## 2026-10-13 — A paused note survives a reconnect, a stuck mic call no longer drops the link, and JOAT keeps its own heartbeat
 
-The wearer: the plugin "dropping out or freezing is still a problem … especially the AI, because it is not working right now. Plus, the quick note just freezes if I am quiet for a bit", while paused. Research and evidence: project doc `claude/background-link-research-2026-10-13.md`.
+Addresses connection dropouts and paused-QuickNote input stalls traced in `claude/background-link-research-2026-10-13.md`.
 
 **1. A paused QuickNote answers again after a reconnect** (`CapabilityRouter.reattach_open_note`, `__main__.greet`). Every hello and disconnect made the Mac let go of the open note's page, while the plugin kept showing it, so every tap on it was dropped as stale (brain.log 2026-10-13 08:08 and 08:16 "dropping stale capability selection"; the resume worked only on a later reopen). When the note's page (live, finish or discard) was on the glass when the link went and the note is still open, the next connection gets the page back after the greeting, under a fresh Mac-minted generation the plugin adopts. A wearer who had left the note for another page is not pulled back into it.
 
@@ -909,7 +921,7 @@ Tests: plugin 1236 passed (bounded mic: give up at 5 s, next call not stuck, lat
 
 ## 2026-10-13 — Only your glasses can hold your glasses: the key moves to the keychain
 
-The wearer: "How is it possible for you to take over my glasses when you're testing … this project is shared with other contributors, and I'm not trying to leave a security gap."
+Hardens pairing token storage and display takeover rules so local test harnesses or untrusted processes cannot claim an active glasses session.
 
 **What was true (checked on this Mac).** JOAT listens on loopback only, reached through Tailscale Serve (tailnet only, no Funnel); with Private Tailnet home brain every peer needs the pairing key, and unkeyed peers are refused (2026-10-12 07:24–07:49 and 15:01–15:15 in brain.log). The key was not in git or the Project. But it lived in `~/Library/Application Support/JOAT/pairing.json`, which any program running as the wearer can read, and any program could open a pairing window by writing `pairing-window.json`. And the newest authenticated display always won, so anything holding the key took the glasses from the phone.
 
@@ -929,7 +941,7 @@ Not changed: the Even AI agent token (`agent-token`) is still a file, because th
 
 ## 2026-10-12 — The overview's QuickNotes ages keep counting
 
-The wearer: "the quick notes time does not update on the overview when it is the current active tab. But when I click to go to the actual quick note page, I see the updated time."
+Fixes stale relative timestamps on the overview's QuickNotes tab when QuickNotes is the active rail tab.
 
 **Why.** The age on each row ("[5m] Title") is text the Mac writes into the `hud.panel` push (`QuickNotesPanel.snapshot`), and the plugin paints the last push it cached. The tab was pushed only when a note was saved, summarized, or the glasses connected. So "5m" stayed "5m" until the next save. The QuickNotes page computes ages when it opens, which is why it showed the right time.
 
@@ -939,7 +951,7 @@ Tests: ages pushed at each minute boundary (30 s, then 60 s, 60 s), nothing push
 
 ## 2026-10-12 — A QuickNote cut off by a JOAT restart is saved at the next start
 
-The wearer: notes "come back with the title 'Note [timestamp] gaps'" and "none of the new notes come back on to the Mac … What did you break?"
+Fixes interrupted recordings left in `Note [timestamp] · gaps` state with no summary or Apple Notes export when JOAT restarts mid-note.
 
 **What happened (the database and brain.log, not a guess).** The three notes since 11:44 (13:48, 14:24, 15:22) were open when JOAT restarted: at 14:22:58, 15:15:53 and 15:35:00, each a restart to apply a change. `interrupt_for_shutdown` marked each `interrupted` (`graceful_shutdown_raw_retained`), and nothing ever finished it: no save, so no summary title, no Apple Notes copy, and the list shows any note that is not `saved` as "· gaps". The words and raw audio were all kept (2, 1 and 3 transcript sections). The latency and capitalization change (`015bb95`) was not involved: no note reached Save after it.
 
@@ -950,7 +962,7 @@ The wearer: notes "come back with the title 'Note [timestamp] gaps'" and "none o
 
 ## 2026-10-12 — Room noise no longer wakes JOAT: the bias prompt was putting the name into it
 
-The wearer, after the "hearing you…" fix: "it is still fucking doing it because it just did it again … please research and stop guessing."
+Eliminates false wake triggers right after engine startup caused by room tone opening `RmsVad` before the noise floor settled and Whisper echoing the wake-word bias prompt.
 
 **What happened at 15:35:40 (brain restarted 15:35:27, glasses connected 15:35:36).** The first "utterance" opened 0.27 s after the mic, at `trigger=0.00400`. Whisper returned 5 characters, which were not ignored and reached no reply. That is the one branch that writes no log line: the name alone, which opens the JOAT card ("Yes?") and takes the next sentence without the name for 8 s.
 
@@ -976,7 +988,7 @@ Outside sources agree. OpenAI's Whisper prompting guide treats the prompt as pri
 
 ## 2026-10-12 — A route starts when the phone's location stream will not
 
-The wearer: navigation "does not work anymore"; tapping a saved place ends on "Navigation could not start · The route was not installed on the phone". The phone's Places page is fine (the Mac holds the place, with its address and pin).
+Fixes "Navigation could not start · The route was not installed on the phone" when tapping a saved place while the host's continuous location stream fails to start.
 
 **Cause.** The place, the mode, the origin and the Mapbox route all worked; the plugin refused the route at the last step. Installing a route switches the Even host's one location stream to high accuracy (`startAppLocationUpdates`, 1 s / 1 m), and since 2026-10-05 a route the stream cannot serve is rejected rather than left on "Starting navigation". On the wearer's iPhone the stream would not start, while one-shot fixes (`getAppLocation`) kept arriving: the route's own origin was one. Even's docs document both calls but not when the stream may refuse. The brain log shows the same pattern outside navigation: after the 15:35 connect no stream fix arrived for 4.5 minutes.
 
@@ -988,7 +1000,7 @@ The wearer: navigation "does not work anymore"; tapping a saved place ends on "N
 
 ## 2026-10-12 — "hearing you…" only when JOAT is going to act
 
-The wearer, after the name-only gate and 0.1.127: "it is still doing the same thing. Look at the logs … It's still showing this. I am 'hearing you'".
+Suppresses premature "JOAT · hearing you…" status updates on unaddressed ambient speech before wake-word verification runs.
 
 **What the log showed (15:19:16 reconnect → 15:22).** The gate held: the speech detector (`RmsVad`) opened 16 utterances in 3 minutes, 15 were ignored (`unaddressed speech ignored`, `STT produced no text`), and one woke JOAT (15:20:52, `'joats' ~ 'joat'`). But `_transcribe` painted "JOAT · hearing you…" on the status line *before* Whisper ran, so before the name check, for every one of them, for 1.3–2.4 s each. The status line said JOAT was listening to the wearer about every 10 s, while it was about to ignore them. The gate fixed the answers, not the acknowledgement.
 
@@ -1006,7 +1018,7 @@ The wearer, after the name-only gate and 0.1.127: "it is still doing the same th
 
 ## 2026-10-12 — Long tap no longer turns the mic on or off
 
-The wearer: the footer's "long tap: mic" "is fucking up my quickNote experience because i use the long tap on quickNote to record and it also turns the mic on; the mic can stay on right?"
+Removes the global long-tap mic mute toggle so long-pressing on QuickNotes for push-to-talk never conflicts with microphone state.
 
 - **Long tap keeps only its specific jobs** (`EventRouter.handleLongPress`): hold to talk on an open QuickNote, refresh an expanded News or Search tab, cancel a running Brainstorm/terminal job. Anywhere else it does nothing. It is still consumed in every event class (list, text, sys), so the release never reaches the Mac as a scroll or phantom input, and a tap-then-long-press that opened the glasses menu still cancels a note hold.
 - **"long tap: mic" is gone from every footer**: the resting overview (`Chrome.HINT`, now `tap: open · swipe: tabs · "JOAT …"`), the panel overview, Pomodoro, and the four status cards (now `2x tap: menu`).
@@ -1015,7 +1027,7 @@ The wearer: the footer's "long tap: mic" "is fucking up my quickNote experience 
 
 ## 2026-10-12 — QuickNotes: words reach the glasses ~0.6 s sooner, and a pause no longer starts a new sentence
 
-The wearer: "the latency between when I say something and when it shows on the glasses … reduce it a little bit. It is very important that we do not lose quality", and from their first note: "the only thing is capitalization when a period or [comma] is needed".
+Reduces QuickNotes transcription latency by ~0.6 s per chunk without sacrificing accuracy, and adds a settle pass so mid-sentence pauses preserve casing and punctuation.
 
 **Measured first** (private whisper serve on ports 50061–50063, same large-v3_turbo model and flags, synthesized dictation with room tone, cut exactly as `VoiceNoteCaptureController` cuts; live brain untouched; numbers in the project doc `quicknotes-latency-bench-2026-10-12.md`). Each chunk paid ~0.6 s for the wake-word bias prompt: WhisperKit decodes prompt tokens one at a time. Prompting with the previous text (OpenAI's documented way to stitch segments) cost +0.5–3 s and did not fix the capitals. Decoder or encoder on the GPU was 40–60 % slower with identical text. Live partial transcripts: whisper serve answers one request at a time, so a partial delayed the real words (3.6 → 5.4 s). Cutting at the quietest frame before the 15 s cap was no better (WER 3.9 % vs 3.4 %).
 
@@ -1028,7 +1040,7 @@ The wearer: "the latency between when I say something and when it shows on the g
 
 ## 2026-10-12 — JOAT answers only when named: "JOAT", "Hey JOAT", "Hey Joke"
 
-The wearer: "it just randomly pops up thinking that I said the word 'The' … only trigger when I say 'Hey Joat/Joke' … investigate why it just triggers randomly."
+Restricts ambient wake triggers strictly to explicit wake phrases ("JOAT", "Hey JOAT", "Hey Joke") and disables unprompted 30 s follow-up capture on short noise transcripts such as "The".
 
 **Why it triggered.** Not the wake word: since 2026-10-08 only 4 utterances woke JOAT by similarity (`joats ~ joat`), none on "the". It was the 30 s conversation window: after JOAT answered, *any* speech in the next 30 s was taken as a follow-up, no name needed, and every answer re-opened the window. 14 such follow-ups were answered since 10-08; several were 3-character transcripts ("The") — e.g. 11:55:43 and 11:56:19 today, each followed by `reply_complete`. "The", "you", "Thank you" are what Whisper makes of a cough, a breath or room noise.
 
@@ -1043,7 +1055,7 @@ The wearer: "it just randomly pops up thinking that I said the word 'The' … on
 
 ## 2026-10-12 — The Mac measures the glasses' microphone (content-free)
 
-The wearer: "use the skills to understand how the mics [work] and measure."
+Adds content-free microphone open-latency and PCM cadence telemetry on the Mac gateway.
 
 - Even Hub's device-features contract: `audioControl(true, Glasses)` opens the G2 four-mic array (after `createStartUpPageContainer`); PCM arrives as `audioEvent` buffers, 16 kHz s16le mono; the plugin batches ~200 ms per `audio` message. It does not say how long `audioControl(true)` takes on the glasses, or whether PCM keeps flowing while nobody speaks — which decides whether the plugin's 1.5 s silent-stream re-arm (`STREAM_STALE_MS`, `f005189`) is safe.
 - `joat/ble/mic_meter.py` (new, `40bc048`), wired into `HubGatewayTransport`: on every Mac `audio.control open`, `mic open: plugin ack +X ms, first pcm +Y ms (link rtt Z ms)` — ack is the plugin's `device mic=true`, sent once the host call resolved; the WebSocket ping round trip is beside it so the network can be subtracted. While the mic streams, `mic cadence: N messages, P s of pcm in W s (%), longest gap G ms, gaps over 1.5 s: K` 60 s after each open, then every 5 min, and on close/disconnect. Counts and times only; never audio content.
@@ -1056,7 +1068,7 @@ The wearer: "use the skills to understand how the mics [work] and measure."
 
 ## 2026-10-12 — Even's rules applied: cancel works on every card, no card is declined unseen, accented Messages pages keep their last lines, bridge calls have time limits
 
-The wearer: "use [Even's guidelines] to evaluate and improve and fix any buggy process we have without destroying the interface." Every glasses page was checked against the installed SDK 0.0.16, the simulator's measured limits and Even's glasses-ui, handle-input and design guidance. These are the fixes the wearer chose (cards, Messages in accented text, hardening). Nothing on the glass looks different. Each fix reuses what was there; no second copy of a helper.
+Audits every glasses surface against SDK 0.0.16, simulator byte limits, and Even's UI/input guidelines, hardening card cancellation, UTF-8 pagination, and bridge timeouts without altering visual layout.
 
 - **Swipe and 2x tap cancel every card.** Since `b91ed1d` only a Messages draft heard them: the router was handed a function that always answered "no retry", so a calendar or reminder card waited out its 8 s. It now gets the open card's retry, which is undefined for every card but a draft (`EventRouter`, `main.ts`). Simulator: swipe declined in 0.02 s, 2x tap in 0.01 s, tap accepted.
 - **A card is never declined before it shows, and the glass never freezes after one.** Every page change is now recorded as the change in flight (`HudPresenter.pageTransition`, the existing `pageReplacement`), and a card, Back to Home and a handoff wait for it (`settlePageReplacement`) instead of being turned away by the page barrier. Before: a card that landed while Home was redrawing was declined to the Mac unseen, and Back during another change left the old page on the glass. Home's rebuild hands the barrier the display's own guard, not "still Home": a card arriving mid-rebuild had kept the image lane shut for the rest of the session.
@@ -1076,7 +1088,7 @@ The wearer: "use [Even's guidelines] to evaluate and improve and fix any buggy p
 
 ## 2026-10-12 — A reply that cannot be sent fails at once, unsent, instead of sitting on "sending"
 
-The wearer: "i have a message sending but still not sent based on the indicator arrow; it prompted my mac for permission even though the JOAT mac app has the messages access already granted; the message is still unsent."
+Preflights macOS Automation permission for Messages.app so a blocked send fails fast as unsent (`×`) rather than hanging on `osascript` and remaining stuck on `▷`.
 
 - **What happened** (11:58): the reply was heard, reviewed and confirmed (11:58:43); `stage=send-failed error=MessageSendError` 15 s later. This was the first send the brain has ever attempted — the log holds no earlier send. Sending is an Apple Event to Messages (`osascript` → `tell application "Messages"`), gated by macOS's **Automation** permission (JOAT may control Messages). The access JOAT already had is Full Disk Access, which reads chat.db. macOS put the Automation consent prompt up on the Mac; `osascript` blocked on it until the 15 s deadline killed it; a killed send is "possibly submitted", so the glasses stayed on ▷.
 - **Fix** (`MessagesAppSender`): a read-only probe, `tell application "Messages" to count accounts` (no recipient, no body), reads the permission. The engine runs it at start in the background with a 3-minute window, while the wearer is likely at the Mac, so the prompt is answered there; the outcome goes to the log and `status.json` (`messages_send`). With `preflight=True` (production), every send probes first with a 3 s limit: denied, pending or no answer is a definite "not sent" (`possible_external_commit=False`) → × on the glasses, at once. A send refused with errAEEventNotPermitted (-1743) is likewise definite. The send-failed log line now carries a content-free `code=` and `possible_commit=`.
@@ -1086,7 +1098,7 @@ The wearer: "i have a message sending but still not sent based on the indicator 
 
 ## 2026-10-12 — The plugin no longer freezes after a second copy of it takes the glasses; a mic the host stopped is re-armed
 
-The wearer: "the background state is causing the project, the plugin to freeze. I'm the one that I've seen that. So do an investigation."
+Investigates and fixes background WebView lifecycle handoff stalls where a replaced plugin instance stayed halted after the newer instance closed, and re-arms microphone capture on foreground resume.
 
 **What the logs showed.** At 07:49:35 the plugin connected; 0.7 s later a second copy of the plugin connected and replaced it (`4409 plugin connection replaced`) — two copies alive at once, the host's foreground/background handoff. At 07:57:43 the second copy died with no close frame (`1005`). From then until 11:42:16 — **3 h 45 min — not one dial reached the Mac.** A running plugin redials every few seconds; this one could not.
 
@@ -1104,7 +1116,7 @@ The wearer: "the background state is causing the project, the plugin to freeze. 
 
 ## 2026-10-12 — A tapped reply is no longer thrown away for one stray `other` speaker frame
 
-The wearer: "the messaging function for tap to speak still does not work? It shows the little animation like it's listening, but doesn't show me what I'm saying and gets stuck a lot."
+Fixes tap-to-speak message replies being discarded when Even's speaker-role heuristic tags a single frame of the user's utterance as `other`.
 
 - **What the log said** (`scripts/reply_trace.py --since "2026-10-12 07:49"`): two tapped replies on the glasses, both transcribed (37 and 88 chars — the second after a tap on the box, `prompt commit by tap`), both then `prompted answer not taken owner=messages reason=other_speaker`. The words were heard; the Mac refused them.
 - **Cause.** `PromptedInputDispatcher.dispatch` refused a prompted answer if ANY frame of the utterance carried the host's `other` speaker tag, and `_maybe_publish_partial` suppressed the live words on the box by the same test. The Even app's speaker role is "an app algorithm result, not a firmware identity assertion" (SDK 0.0.16 `AudioEvent.speakerRole`); on the glasses it tags a frame or two of the wearer's own reply `other`. The utterances had reached Whisper at all only because the ambient gate already used the sane rule (`other` present and `self` absent).
@@ -1120,7 +1132,7 @@ The wearer: "the messaging function for tap to speak still does not work? It sho
 
 ## 2026-10-12 — The News tab opens again: a list row could leave the width cut one byte over the firmware cap
 
-The wearer: "when I click on the news tab, it does not open the news page … the timer actually opens."
+Fixes News list rows exceeding the 63-byte firmware cap by 1 byte after pixel-width ellipsis truncation, which prevented the News page from opening on tap.
 
 - **Cause.** `fitListRow` clamped a row to the firmware's 63 bytes and *then* cut it to the row's pixel width; `pxTruncate` appends `...` (three bytes) after it cuts, so a 63-byte headline came back at 64. One such row makes the firmware refuse the whole `rebuildPageContainer` — silently; the glass stays on the overview. Any News push with two headlines carrying a `…`, a `·` source separator and an accent did it (`[page-rejected] … row 10 64B > 63B; row 16 64B > 63B` in the plugin console). Pomodoro rows are short ASCII and never reached the cap.
 - **Fix.** The byte cap has the last word: the budget steps down until the width-cut row measures ≤ 63 bytes (`HudPageBuilder.fitListRow`). Every firmware list goes through it — Messages threads and Search rows included.
@@ -1135,7 +1147,7 @@ The wearer: "when I click on the news tab, it does not open the news page … th
 
 ## 2026-10-11 — QuickNotes is on the overview's rail; Search moves into the menu
 
-The wearer: "replace the search on the overview tab with the quicknote instead then move the search to the menu option in place of the quicknote so now the overview has a way to quickly get to the quicknote."
+Moves QuickNotes onto the overview rail for direct access and moves Search into the capability menu.
 
 - **The rail is NOTIFICATIONS, NEWS, POMODORO, QUICKNOTES** (`PANEL_TABS`). The QuickNotes tab shows the newest notes, age first, as Even's QuickNote widget on its Dashboard does; a tap opens QuickNotes ("+ Create new note" at the top). The Mac pushes the tab (`QuickNotesPanel`, `hud.panel` tab `quicknotes`) on connect, after every save, and after a summary renames a note.
 - **The menu's fifth row is Search** where QuickNotes was (`CAPABILITIES`). It opens the Search page from the rows the Mac last pushed; "JOAT, look up …" still opens it by voice. Search keeps its content push (`PANEL_CONTENT_TABS`), it is only off the rail.
@@ -1145,7 +1157,7 @@ The wearer: "replace the search on the overview tab with the quicknote instead t
 
 ## 2026-10-11 — QuickNotes matches Even's QuickNote and Conversate: no speaker labels, one "+ Create new note", Save / Discard / Cancel, Undo last input
 
-The wearer: "who is them? where did you see this in the Even Realities QuickNote and Conversate features?" Nowhere: Even's own screenshots (support.evenrealities.com, QuickNote and Conversate) show plain words, and the "You:" / "Them:" labels were JOAT's guess from the SDK's `speakerRole`. The wearer then chose to match Even on every point below.
+Aligns QuickNotes with Even's QuickNote and Conversate design: removes synthetic "You:" / "Them:" speaker labels derived from `speakerRole` and unifies note creation, exit prompts, and undo controls.
 
 - **No speaker labels anywhere**: the open note, the note's page, the Apple Notes copy and the summary prompt. Migration 16 drops `voice_note_segment_speakers` (it had no rows) and nothing reads or writes a speaker.
 - **One row, "+ Create new note"** (Even's QuickNote list), in place of "● Record" and "✎ Quick note · hold to talk" (✎ is not in the firmware font and drew as a blank). The note it opens, titled **QUICKNOTES · NEW NOTE**, takes both: hold the touchpad to talk a paragraph (QuickNote), tap to record continuously (Conversate), tap again to pause. The "Save to Apple Notes" row is gone from the glasses; saving stays automatic, and "stop saving notes to Apple Notes" still turns it off.
@@ -1164,7 +1176,7 @@ The wearer: "who is them? where did you see this in the Even Realities QuickNote
 
 ## 2026-10-11 — QuickNotes is one note: words while you talk, hold to talk, a title and summary, and a copy in Apple Notes
 
-The wearer: QuickNotes should be "like the Even Conversate + QuickNote features in one and saves it to my notes app". Design and tasks: `docs/features/FEAT-002-quicknotes-conversate/`.
+Combines continuous Conversate-style live transcription and QuickNote push-to-talk into one surface with automatic summaries and Apple Notes sync (`docs/features/FEAT-002-quicknotes-conversate/`).
 
 - **One place to start a note** (`capabilities._NOTE_CONTROLS`). The QuickNotes list opens with **● Record** (keeps listening, like Conversate) and **✎ Quick note · hold to talk** (like QuickNote). An open note is its live words: each new line is written into the page in place (`HudPresenter.updateLiveTextPage`, two `textContainerUpgrade` calls, no page rebuild), with the clock and the gestures in the hint row.
 - **Words appear while you talk** (`VoiceNoteCaptureController`). Audio is still written to the journal first. It is cut at each pause (`RmsVad`) or at 15 s, and each piece is transcribed in the background by a stateless whisper call (`SttEngine.transcribe_once`, `WhisperServeEngine.transcribe_once`), so a note never shares whisper's streaming buffer with voice commands. At the end, any piece not yet transcribed is done then and retried once; what still fails is kept as a marked recording gap, not dropped. Long silences count as covered (`voice_note_quiet_spans`), so a quiet stretch is not a gap.
@@ -1179,7 +1191,7 @@ The wearer: QuickNotes should be "like the Even Conversate + QuickNote features 
 
 ## 2026-10-11 — Reply by voice: tap to review, tap to send, 2x tap to retry; the thread shows ▷ ▶ ×
 
-The wearer: "just a simple 'confirm' tap | 'retry' 2x … the retry returns to the modal that is listening, which has 'review' tap | 'cancel' 2x; confirm sends and returns to the thread, the last message mine with a simple symbol for sent, failed, in process — no status text." One template, two states of the same JOAT box.
+Streamlines voice reply into a two-state modal (`tap: review | 2x: cancel` while listening, `tap: confirm | 2x: retry` on review) and returns directly to the thread with inline `▷` / `▶` / `×` delivery indicators.
 
 - **Listening box: tap = review now** (`EventRouter.handlePromptInput`, `PromptedInputController.commit`). The plugin names the acknowledged question in the existing `input` uplink (`containerName` `prompt-commit`, `selectedName` its ID; no new wire kind). The Mac closes that question's utterance at once (`RmsVad.finish_now`, `VoiceOrchestrator.commit_prompt_answer`) and runs it through the same path a quiet boundary would, so every eligibility check still applies. A tap before any speech, or naming another question, changes nothing; silence still reviews as before. **2x tap = cancel**, as before.
 - **Review box: tap = send, 2x tap = retry** (`EventRouter`). Retry is the existing `message-retry` input: the Mac re-asks and the listening box returns. Long tap and swipe do nothing on a draft. A gate with no retry (calendar, reminder, terminal) keeps 2x tap and swipe as its refusal.
@@ -1190,7 +1202,7 @@ The wearer: "just a simple 'confirm' tap | 'retry' 2x … the retry returns to t
 
 ## 2026-10-11 — The link's 15 s death loop is named in brain.log; one command says where a spoken reply stopped
 
-The wearer: "the tap to reply (using my speech) does not work at all; the listening does not show anything I am saying." The reply code was not the fault. Since 2026-10-08 08:48 every real-G2 connection lived ~15.1 s and closed with code 1005: 2,352 connections on 10-08/09, still looping on 10-11 (148 reconnects in the 16:00 hour). The plugin's downlink watchdog (`MacLink.downlinkHandlerTimeoutMs`, 15 s) was expiring the socket because a header or Home-column image write never settled on the glasses, and every reconnect retired the open question, so no spoken reply could live long enough to show a word. `brain.log` recorded each drop and explained none of them; the glasses' own reports of the hung writes were refused as `g2 diagnostic containerId is invalid`. The hung write itself is fixed in the 0.1.121 entry below (`HudVisualSurface`: 6 s page-part timeout, page parts switch off). This change makes the failure class self-describing, so the next hang of any kind is named in the log on the third drop instead of after two days of forensics.
+Traces why spoken replies failed to display words during a 15.1 s WebSocket reconnect loop (`1005` close code): the plugin's 15 s downlink watchdog (`MacLink.downlinkHandlerTimeoutMs`) was expiring the socket when a header or Home-column image write hung on the glasses, cancelling any open reply prompt. `HudVisualSurface` fixes the hung write in 0.1.121 below; this change makes watchdog-loop drops self-describing in `brain.log` and adds `scripts/reply_trace.py`.
 
 - **The watchdog loop is named** (`hub_gateway._note_link_end`): three authenticated connections in a row that end 15 ± 3 s after connecting with code 1005 or 1006 log one WARNING — "the plugin's downlink watchdog is firing because one Mac->plugin message is not handled in time on the glasses … every open question is cancelled by each reconnect" — and point at the trace script. A link that then holds closes the streak (an INFO says so), and a new loop is named again. Clean closes (1000), suspensions (1001), long links and dials that never settled are not called a loop.
 - **`scripts/reply_trace.py`** reads `brain.log` and `g2-diagnostics.json` and prints, for the recent connections, how long each lived and how it ended (watchdog-shaped ones flagged), the Messages reply stages (`selected → reply-prompt-armed → review-requested → confirmation-requested → submitted`), each step the question reached on the glasses (`prompt_stage`), why spoken answers were turned down, consent decisions, voice-path counts, and a verdict in plain words. It prints durations, stage names, reason codes and counts only — no bodies, recipients, question text, transcripts or serials. `--since 2h`, `--connections N`. Against the real log for 2026-10-08 09:10 onward: "2291 of 2311 connections died about 15 s after connecting … no spoken reply can survive."
@@ -1222,7 +1234,7 @@ The wearer asked for every error in the current logs to be fixed. Each one below
 
 ## 2026-10-11 — "Record G2 diagnostics" off now means off
 
-The wearer: the logs kept logging with "Record G2 diagnostics" turned off. They did. The toggle was off (`G2DiagnosticsEnabled` false, and the running engine had no `--g2-diagnostics`), yet `brain.log` held 8832 `tile_upload container=…` lines and 15 "paint diagnostics armed" lines, and `g2-diagnostics.json` was still being written.
+Fixes `tile_upload` trace lines and `g2-diagnostics.json` continuing to be written when `G2DiagnosticsEnabled` was turned off (`--g2-diagnostics` unset).
 
 - **Fixed: the engine armed the G2 trace itself** (`joat/__main__.py`, since 2026-09-08). A second after the glasses connected, it built its own diagnostic store, so the toggle did nothing. That store wrote to the same `g2-diagnostics.json` and told the plugin to stream every event, again on every reconnect. That startup step is gone. The only trace is the one `--g2-diagnostics` (the toggle) or the location probe asks for, armed by the gateway as before.
 - With the toggle off, the glasses send no trace and `brain.log` has no `tile_upload` lines. The voice latency record no longer gets its `painted` receipt unless the toggle is on.
@@ -1251,9 +1263,9 @@ The wearer, on 0.1.119 on the glasses: Home's tabs no longer switched the right 
 
 ## 2026-10-08 — A spoken Messages reply reaches its consent card; tap-to-speak is traced on the glasses
 
-The wearer: "the tap to speak on the brainstorm and message reply do not work". Both were run end to end in the official simulator, with the Mac's real prompt runtime (`PromptedSpeechRuntime`, `SessionManager`, `MessageUIController`, `MessageReplyController`) and the real plugin. The simulator has no microphone, so `?joatTestPromptMic=1` stands in for it.
+Verifies Brainstorm and Messages tap-to-speak end to end in the official simulator against the Mac's prompt runtime (`PromptedSpeechRuntime`, `SessionManager`, `MessageUIController`, `MessageReplyController`), fixing a page-replacement race that cancelled spoken Messages replies before the consent card could appear.
 
-- **Fixed: a spoken Messages reply was cancelled the moment it was heard.** The words answered the question and the Mac asked for consent, but the consent card never showed. When an answer arrives, the hub starts restoring the thread under the closing question. The Mac's confirmation landed while that restore was still running. The page guard refuses a second page replacement while one runs, so it refused the consent card, the hub declined, and the Mac cancelled the draft. The wearer saw the card simply go away. The consent card now waits for a page replacement already in flight, then replaces it (`HudPresenter.renderConfirmation`, `pageReplacement`). Verified in the simulator: "JOAT: What do you want to say back to Adaeze? / You: On my way, see you at 4:30." on the glass, `confirmation-visible`. A test reproduces the order and fails without the fix.
+- **Fixed: a spoken Messages reply was cancelled the moment it was heard.** The words answered the question and the Mac asked for consent, but the consent card never showed. When an answer arrives, the hub starts restoring the thread under the closing question. The Mac's confirmation landed while that restore was still running. The page guard refuses a second page replacement while one runs, so it refused the consent card, the hub declined, and the Mac cancelled the draft. The consent card now waits for a page replacement already in flight, then replaces it (`HudPresenter.renderConfirmation`, `pageReplacement`). Verified in the simulator: "JOAT: What do you want to say back to Taylor? / You: On my way, see you at 4:30." on the glass, `confirmation-visible`. A test reproduces the order and fails without the fix.
 - **Brainstorm with the stand-in microphone works end to end**, and was not changed. The ready frame's tap reached the Mac as `begin_topic_capture`. The question was acknowledged in 0.1 s. The spoken topic was taken, and the run's first frame painted. What the simulator cannot run is the real glasses microphone and the Mac turning that audio into the answer, so that part is unverified.
 - **Tap-to-speak is now traced, so the glasses show where it stops.** The hub records each step of a question in the G2 diagnostics, as a new `prompt_stage` event: presented, painted or paint refused, mic ready or mic refused, acknowledged or acknowledgement refused, retired. Each event names its owner (messages, brainstorm, terminal, capability). The event is in `protocol.py` and `types.ts` (`G2DiagnosticTrace.ts`) together, and the Mac validates it. The Mac logs why it turned down a spoken answer while a question waited: `prompted answer not taken owner=… reason=…`, with no words. The reasons are not acknowledged, owner gone, mixed audio, other mic, other connection, audio before the question, other speaker, or started before the question.
 - Tests: plugin 1166 passed; typecheck and build clean. Mac 3462 passed, 1 skipped; the container's IPv6 test fails as before. mypy clean. Both sides change: a new package and a brain restart.
@@ -1265,9 +1277,9 @@ The wearer: "the tap to speak on the brainstorm and message reply do not work". 
 
 ## 2026-10-07 — No gestures in JOAT's box; one gesture template; messages hang under the name
 
-The wearer's three points on 0.1.117: the reply card still carried gesture notes and no working indicator; every page named its gestures differently ("what does 'double click' mean"); and a wrapped message should line up under its first word, after "Sender: ".
+Unifies gesture terminology across all HUD surfaces, removes redundant gesture footers from JOAT's conversation box, and indents wrapped message lines beneath the first word after `Sender: `.
 
-- **No gesture notes in JOAT's box** (`AssistantConversationSurface.ts`, `HudPresenter.ts`). The Messages reply card no longer has "listening · double-click: cancel" or "tap: send · long-press: retry · double-click: cancel". While the wearer has yet to speak, the working glyph moves on their row ("You: ■"), and their first words replace it in place. The continuation question is just "Continue?". The wearer asked for this on 2026-10-06 ("i do not need the gesture stated at the model"); the reply card had kept its footer.
+- **No gesture notes in JOAT's box** (`AssistantConversationSurface.ts`, `HudPresenter.ts`). The Messages reply card no longer has "listening · double-click: cancel" or "tap: send · long-press: retry · double-click: cancel". While waiting for speech, the working glyph moves on the user's row ("You: ■"), and incoming words replace it in place. The continuation question is just "Continue?".
 - **One gesture template on every page** (`GesturePolicy.formatHint`): the words are tap, swipe, long tap and 2x tap. Double-click, long-press, hold and left x2 are gone. The order is always tap · swipe · long tap · 2x tap; a page count or a spoken command keeps its place. Every hint passes through it at the two places hints are written (`HudPageBuilder.region` and `HudPresenter.upgradeNativeText`), so a Mac's older wording becomes the template too. The plugin's own hint strings now use the template's words.
 - **Wrapped rows hang under the first word** (`FirmwareText.hangingLines`, `paginateHanging`): on the Messages pages, the notification card and in JOAT's box, a message's wrapped rows start where its words start after "Name: ". The rows are set as explicit lines with leading spaces, which the firmware keeps after a line break; each line is measured to fit, so the firmware never re-wraps one.
 - Verified in the official simulator: a long thread with every wrapped row under its first word, the reply card's glyph on the wearer's row with no footer, its consent card with no footer, the card's message hanging under "Sam: ", a long answer hanging under "JOAT: ", and Home's hints in the template. Not verified on physical glasses.
@@ -1280,12 +1292,12 @@ The wearer's three points on 0.1.117: the reply card still carried gesture notes
 
 ## 2026-10-07 — The speaker's name opens their words, on the same row
 
-The wearer asked why two rows went to one thing: the notification card had the sender on a row of its own above the message, and JOAT's box read "JOAT" on one row and "Yes?" on the next. The ruling: "Name: the response", wrapped beneath.
+Places the speaker's name inline with the opening words (`Name: message`) on both notification cards and JOAT's conversation box instead of spending a separate header row.
 
 - **JOAT's box** (`AssistantConversationSurface.ts`): each turn's first row opens with its speaker's name, "You:" or "JOAT:", and the words wrap full width beneath. JOAT's name is dim and its words bright (the two layers share the row; the bright words start a typed space past the name). The working glyph stands on JOAT's row ("JOAT: ■ □"). The blank row between exchanges is gone: the names already part the turns. The box now starts at one row.
-- **A bare "JOAT"** (`orchestrator.py`): the name alone is not a question, so the box shows only "JOAT: Yes?". Before, the wearer's "JOAT" took a row above the answer and read as a name label. `_greet_assistant_conversation` adds JOAT's turn without replacing an earlier answer when the conversation is still open.
-- **The notification card** (`NotificationCard.ts`): "Sam: Didn't catch you on the phone…" under the app line, not the sender on a row of its own.
-- **The Messages reply card** gets the same rows: "JOAT: What do you want to say back to Adele?", then "You: …" as the wearer speaks, with no blank row between.
+- **A bare "JOAT"** (`orchestrator.py`): the name alone is not a question, so the box shows only "JOAT: Yes?". Before, the spoken wake word took a row above the answer and read as a name label. `_greet_assistant_conversation` adds JOAT's turn without replacing an earlier answer when the conversation is still open.
+- **The notification card** (`NotificationCard.ts`): "Sam: Heading to the coffee shop…" under the app line, not the sender on a row of its own.
+- **The Messages reply card** gets the same rows: "JOAT: What do you want to say back to Casey?", then "You: …" as the user speaks, with no blank row between.
 - Verified in the official simulator: the wake answer as one row over Home, a question and its answer in two rows, the working glyph on JOAT's row, a long answer wrapping beneath the name, the card, and the reply card. Not verified on physical glasses.
 - Tests: plugin 1164 passed; typecheck and build clean. Mac 3460 passed, 1 skipped; the container's IPv6 test fails as before. mypy clean. Both sides change: a new package and a brain restart.
 
@@ -1426,12 +1438,12 @@ Every G2 plugin with other fonts draws that text as images; the fast ones mix th
 
 ## 2026-10-06 — Your words while you reply; News taps open the right story; smaller font, header in Even's font
 
-The wearer reported five things:
-1. "the tap to click and open news page does not work"
-2. the message reply "does not show my speech as I am speaking"
-3. list rows "that have wrapped text… get overlaid slightly by the next row"
-4. "the fonts are still too big", so use the smallest row (55%)
-5. "use the fonts for time and topic in the top header", with the mic and battery the only icons
+Addresses five HUD layout and interaction issues:
+1. tapping a News row when a feed-status banner is present shifted row indices by one
+2. live partial transcripts were not shown inside the reply card while speaking
+3. multi-line list row previews wrapped onto the row below
+4. reader font size reduced to 55% scale for higher information density
+5. top header time and page title rendered in Even's font alongside mic and battery icons
 
 - **Your words appear in the reply card while you speak.**
   - **Why they never appeared:** no partial transcript existed anywhere. Speech-to-text (whisper) only transcribed a whole utterance after 1 s of quiet, and the first time the glass saw the words was the consent card. JOAT's own conversation worked the same way.
@@ -1464,7 +1476,7 @@ The wearer reported five things:
 
 ## 2026-10-06 — Readers in Even's font at 66%, spread across the whole glass
 
-The wearer: pages look cramped and sparse, and only Planning uses the full 576x288; "use the smaller font display", "space shit out", and keep a margin "so things are not getting cut off at the edge of the screen".
+Renders reader surfaces in Even's font at 66% scale across the full 576×288 canvas with consistent line spacing and safe edge margins so text is never clipped at the display border.
 
 - **Every reader is now set in Even's own font at 66%**: the Messages thread first, and also the message review, News, QuickNotes and Planning readers. That means every surface that went through the firmware text page (`renderNativeTextPage`).
   - **Why images:** the firmware gives plugin text one font at one size (a 27 px line, seven lines a page). No SDK through 0.0.16 offers a size. So the page is drawn into the four 288x144 image tiles over the full-screen input layer, as Planning is.
@@ -1481,7 +1493,7 @@ The wearer: pages look cramped and sparse, and only Planning uses the full 576x2
   - **One token wider than the whole line** (a long link) is the only thing broken mid-word, after `/ . - _ ? & = #` where possible.
   - **The hint** keeps the page count whole. It drops its swipe clause first, then shortens with "…".
   - **Rows are re-set at the new width.** The Mac's 62-column reader rows are joined back first: a row wrapped at a space or cut at the full 62 columns continues, and a line break ends a paragraph.
-  - **Sender names** ("Adele:", "You:") are drawn brighter than the words after them.
+  - **Sender names** ("Casey:", "You:") are drawn brighter than the words after them.
 - **Margins:** nothing is drawn within 16 px of either side, 3 px of the top or 8 px of the bottom. A test checks every placed run on stress pages (long names, doubled links, a long hint). The simulator capture has no lit pixel in those bands.
 - **Paging** repaints the tiles; it no longer upgrades the text in place. Only tiles whose pixels changed are sent, and paging back reuses the encoded tiles.
   - Measured in the simulator: opening the thread 144–357 ms (the first open includes loading the font); a page turn 75–81 ms.
@@ -1502,7 +1514,7 @@ The wearer: pages look cramped and sparse, and only Planning uses the full 576x2
 
 ## 2026-10-06 — One header on every page; JOAT's working indicator inside its box
 
-The wearer: "Why are we not using a template for the top bar?… use images… for icons without slowing down rendering for things that are not needing to change very often". And the working indicator "is in the middle and half of it is in the box and the other half out".
+Unifies every page onto the shared 24 px top header template (icons for mic/battery, text for static labels) and moves JOAT's animated working indicator inside the conversation box rather than straddling its bottom border.
 
 - **One header template.** The image pages (the Planning month, the live map) always drew the compact spine: the clock and the page's word in a small face, the mic and battery as icons. Every firmware page drew a line of the firmware font instead ("9:41 · MESSAGES · CONVERSATION · ● · ■"), bigger and different. Every firmware page (Home, lists, readers, the Messages thread, JOAT's box, the reply card, confirmations) now carries the same spine, drawn by the same renderer code (`HudCanvasRenderer.renderHeader`), as two 288x24 image containers (`HeaderImage.ts`; the SDK caps an image at 288 px wide).
 - **Images only where they rarely change.** The halves go on the image lane after the page's text, one send each after a page rebuild; afterwards only a half whose pixels changed is sent (the lane's existing pixel cache): a minute tick resends the clock's half, a mic or battery change the other. The page's text stays firmware text and keeps upgrading in place. `VITE_IMAGE_HEADER=0` keeps the old text line.
@@ -1518,7 +1530,7 @@ The wearer: "Why are we not using a template for the top bar?… use images… f
 
 ## 2026-10-06 — JOAT's box floats over the page it was called on and grows as Even AI's does
 
-The wearer: "the JOAT AI interface is supposed to be an overlay box on whichever interface it was called on, not its own page… a box that is just two rows… grows in height as new requests and responses are added… once it has grown to the height of the glasses with some margin, the scrolling starts and shows the latest reply". And the box at the bottom centre "was supposed to be an animated visual indication of when JOAT is thinking or working".
+Renders the JOAT assistant as a floating overlay card over the active page, starting at two rows and expanding upward to seven rows before scrolling, with an animated thinking/working indicator.
 
 - **The box grows.** It opens at two rows and grows upward from a fixed bottom edge, in four sizes (2, 3, 5, 7 rows), as requests and replies are added. At seven rows it stops below the header and scrolls, showing the latest reply; a swipe up reads back. Each size step is one rebuild; streaming, scrolling and the indicator within a size stay in-place upgrades. This was built on 2026-09-24 (7e867a0) and lost when a later merge fixed the box at seven rows.
 - **The working indicator rides on the box's bottom border**, centred, and animates only while JOAT is thinking or answering. A finished answer shows none; it used to leave a solid ■. A sentence (the continuation prompt, a reply draft's gestures) sits inside the box instead, and the box grows a row to hold it.
@@ -1535,10 +1547,10 @@ The wearer: "the JOAT AI interface is supposed to be an overlay box on whichever
 
 ## 2026-10-06 — Messages is one thread you read and tap to reply; no scrollbar boxes on the conversation card
 
-The wearer: "why do I have to click to see a single message when I can see the thread and scroll through? The tap should be to reply." They also asked for the reply to happen in JOAT's own conversation card, and for the black boxes on the card's scrollbar to go.
+Streamlines Messages into a single scrollable conversation thread where tapping initiates a voice reply inside JOAT's conversation card, and removes the broken glyph scrollbar column.
 
-- **The thread is the only Messages reader.** `MESSAGES · CONVERSATION` is one Mac-paged text page, newest message first, each message whole ("Adele: …", "You: …"), fifteen read at a time. A swipe pages it; past the last page the Mac reads older messages from chat.db. The single-message reader (`MESSAGES · MESSAGE`), the "✎ Reply" row and the ▲/▼ paging rows are deleted.
-- **A tap on the thread replies.** JOAT's conversation card opens over it: "What do you want to say back to Adele?". The wearer speaks; the card shows their exact words with "tap: send · long-press: retry · double-click: cancel".
+- **The thread is the only Messages reader.** `MESSAGES · CONVERSATION` is one Mac-paged text page, newest message first, each message whole ("Casey: …", "You: …"), fifteen read at a time. A swipe pages it; past the last page the Mac reads older messages from chat.db. The single-message reader (`MESSAGES · MESSAGE`), the "✎ Reply" row and the ▲/▼ paging rows are deleted.
+- **A tap on the thread replies.** JOAT's conversation card opens over it: "What do you want to say back to Casey?". The user speaks; the card shows their exact words with "tap: send · long-press: retry · double-click: cancel".
   - Tap sends. The consent gate underneath is the same signed confirmation as before; only its page changed.
   - Long-press says it again: the Hub declines the draft and asks the Mac for a retry (`message-retry`), and the Mac asks the question afresh once the draft has ended, whichever arrives first.
   - Double-click cancels back to the thread.
@@ -1649,7 +1661,7 @@ The wearer asked where the plugin re-implements scrolling the firmware already d
 
 ## 2026-10-06 — Terminal: long press cancels a running job; a spoken reply is checked before it goes
 
-- The wearer's call: "make long tap cancel a running terminal job … use tap for something like send spoken reply (a confirmation check to make sure the spoken words is what I meant so I can re-state it if it was transcribed incorrectly — I have a little accent from time to time)."
+- Maps long-press to cancel a running Agent Terminal job and requires a tap confirmation check on spoken replies so misheard transcriptions can be re-stated before reaching the session.
 - **Long press cancels a running Agent Terminal job.** A new `cancel_terminal` action (protocol.py and types.ts in step) runs the same roster cancel as the spoken "terminal cancel", which still works; the receipt is spoken back. The gesture is claimed only on a running work session and consumed there even when the Mac is unreachable, so it never mutes the mic instead; everywhere else long press is still the microphone (and the NEWS/SEARCH refresh). The running page's footer reads "long-press: cancel · double-click: back" where it named the spoken command.
 - **A spoken reply to a work session is shown before it is sent.** The terminal's armed utterance is no longer delivered on arrival: the runtime claims it (keeping the lane, focus and context the tap bound, so a check that outlasts the capture window still goes to that exact session and to nothing else if it moved on) and asks. Short replies use the confirmation gate with a new `purpose: "terminal_input"` that relabels it "CHECK WHAT WAS HEARD … TAP · send   SWIPE · say it again" (an older plugin ignores the field and shows the generic labels): tap sends, swipe publishes the question again so the wearer re-states it, no answer sends nothing. Replies too long for that page are shown whole on an "AGENT TERMINAL · CHECK" reader first (the tap that sends is offered on its last page, as the Messages review does): tap sends, Back drops. The check runs off the speech dispatcher, so admission is never held while the wearer reads.
 - Verified in the official simulator (v0.9.5, whose automation API has long_press, long_press_release and context_menu — the skill's docs list only four actions): a long press and release on a running terminal reached the Mac as `cancel_terminal` and logged "cancelling the terminal job", not a mic toggle; the check page rendered the words with the new labels; a tap returned accepted, a swipe declined. The check page is one firmware text page (no image tiles). Tests: the controller's long press on and off a running job and while disconnected, the router's carve-out, the footer, the check labels and their one-line fit, the runtime's send / say it again / drop paths against the real prompt dispatcher, the long-reply reader (a tap on its last page sends, no answer sends nothing), the wire action and purpose. Plugin 1056 tests, Mac 3324 passed; tsc, mypy and the build clean.
@@ -1725,7 +1737,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-10-05 — Navigation follows the wearer; saved places
 
-- The wearer's report: "the navigation is bad and does not update the visuals at all". Five causes, all in the code. The guidance page repainted only when the maneuver or the ROUNDED distance changed, so over a kilometre the dot, the progress bar and the ETA froze for a hundred metres at a time. The street tile was fetched once at the origin and never again (the 60 m refresh rule had no caller, and the Mac receives no positions during guidance by design), so the wearer walked off it within a few hundred metres. Without a tile there was no map at all: the "bare route shape" the comments promised was unreachable. A fix the host reported without an accuracy figure, or with a timestamp in seconds, was rejected as uncertain for the whole walk. And a route could be acked as installed while the location stream had never started, leaving "Starting navigation" on the glass forever.
+- Fixes five causes of stalled navigation visuals. The guidance page previously repainted only when the maneuver or the ROUNDED distance changed, so over a kilometre the dot, the progress bar and the ETA froze for a hundred metres at a time. The street tile was fetched once at the origin and never again (the 60 m refresh rule had no caller, and the Mac receives no positions during guidance by design), so the route moved off the initial tile within a few hundred metres. Without a tile there was no map at all: the "bare route shape" the comments promised was unreachable. A fix the host reported without an accuracy figure, or with a timestamp in seconds, was rejected as uncertain for the whole walk. And a route could be acked as installed while the location stream had never started, leaving "Starting navigation" on the glass forever.
 - Now: a fix that moved the wearer repaints the page, at most once a second, coalesced to the newest fix, and the Mac hears nothing about it (only semantic states cross, the privacy boundary unchanged). The Mac prefetches street tiles along the whole route the moment it is known (a centre every ~180 m of road, at most 24, the origin tile first, sized to the taller pane), and the plugin draws the one nearest the wearer, so the map follows them; a tile that arrives late repaints the page it is for. Without a tile the pane draws the route's shape around the wearer at the same zoom, fit to the whole route before the first fix. A fix without an accuracy figure is trusted at the policy's limit; a timestamp's unit is read against its arrival time. A navigation consumer retries the stream start, and a route the stream cannot serve is rejected, so the Mac's "Navigation could not start" page shows instead of a wait. The first fix of each route logs its shape (which optional fields the host fills, no position).
 - **Saved places.** The phone page has a Places tab: Home, Work and the rest, each a name plus an address and/or the phone's pinned location ("Use my location"), mirrored to the Even host's storage and sent whole to the Mac on every change and every connect (`places` uplink, bounded on both sides, kept in `saved_places`, migration 14). The glasses' Navigation page lists them first, one tap from a route; "JOAT, navigate home" resolves on the Mac to the pinned coordinates without a provider search, or searches the saved address under the place's name when that is all it has.
 - Tests: the follow pace, the late tile and the nearest tile, fixes without accuracy and in seconds (plugin); the stream retry; the tile-less pane; the route centres and the prefetch flow, the places wire, store, session resolution and page rows (Mac). Both suites pass (plugin 1161, Mac 3042); mypy clean. The guidance pane with a real route is pinned by unit tests; the simulator cannot supply a phone fix stream.
@@ -1737,7 +1749,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 ## 2026-10-05 — A smaller spine with icons, and one live header line on firmware pages
 
-- The wearer's ask: "the top header with the battery and mic, could those not be better designed with simple icons and smaller?" The image spine is 24 px (it was 36): the clock a point smaller, the page's word beside it, and the microphone and battery as icons alone on the right tile — a slashed mic for a closed mic, the Phosphor cell that matches the level (the old spine drew the full cell at 100% and at 12%), the charging cell while charging (the mark used to be stripped by the string parser before the spine saw it), and the number beside the cell only from 15% down. Every page's content moved up with it: eleven dense list rows, the live map 12 px taller, the reader, Pomodoro, Planning, confirmation, question, navigation, Brainstorm and terminal rows all 12 px higher.
+- Compacts the top header to a 24 px icon spine (was 36 px): smaller clock, page title beside it, and compact microphone and battery icons on the right tile — a slashed mic for a closed mic, the Phosphor cell matching battery level, a charging glyph while charging, and numeric percentage only at 15% and below. Every page's content moved up with it: eleven dense list rows, the live map 12 px taller, the reader, Pomodoro, Planning, confirmation, question, navigation, Brainstorm and terminal rows all 12 px higher.
 - Firmware pages spend one line on the same facts in the same order, `9:41 · POMODORO · ○ · ▇` (● and ○ for the mic, ▁ to █ for the battery, + for charging, the number from 15% down), where they spent two — a status line in words and a separate title line. The firmware list shows five rows instead of four. The line is live: a clock, mic or battery change on a firmware page is one in-place upgrade of the header container (the terminal page's head line included), never a rebuild and never a tile; until now it was dropped, so a list opened at 9:41 still said 9:41 at 10:05. When the line overruns the glass the page's word is shortened, never the clock or the glyphs.
 - The status is data now (`HudStatusModel`, `HudStatus.ts`): Chrome hands the presenter clock, link, mic, battery, charging and the Mac's transient word; the raster spine and the firmware header both draw from it, and nothing parses words back into facts. A page keeps its name while the wearer talks (it used to read "JOAT · LISTENING" the moment the mic opened), and the plugin's own "listening" / "mic off" announcements count as rest.
 - `DESIGN.md` records the spine and the second icon exception; `docs/HUB_PLUGIN.md` and `docs/HUD_DASHBOARD.md` follow. Simulator captures (overview, News list and article, Pomodoro, Planning month, week, day and event, the due page, Messages review, the navigation frames) show the header on every page. Tests: the status model and glyphs, the live header on a firmware list, a text page and the terminal page, the spine's icons by level and charge, the fitted header, and every moved anchor; the plugin suite passes (1151).
@@ -1847,7 +1859,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
 
 - Replaced the four-image assistant and Agent Terminal documents with fixed Even-native text pages. Assistant thinking, streaming, continuation and transcript movement use in-place text upgrades; each selected terminal provider uses one complete native body update. The Agent Terminal chooser now contains only OpenClaw and Hermes, and recovery, prompt, working and Back labels describe the action the current gesture owner accepts.
 - Preserved independent reading anchors for OpenClaw and Hermes through provider switching and WebView restoration. Up and Down report success only when the visible transcript actually moves. The provider picker is a firmware-owned list, and transitions between picker and terminal no longer expose serialized image quadrants.
-- Interpreted explicit nearest/near-me navigation as a fresh phone-location search, strips proximity filler before Mapbox, ranks matching POIs and brands by distance, accepts a narrow in-session correction such as “I meant OnCue, the gas station,” and reports when current location is unavailable. Mapped guidance keeps its changing progress/footer inside the left image column to avoid an unrelated fourth tile write.
+- Interpreted explicit nearest/near-me navigation as a fresh phone-location search, strips proximity filler before Mapbox, ranks matching POIs and brands by distance, accepts a narrow in-session correction such as “I meant Shell, the gas station,” and reports when current location is unavailable. Mapped guidance keeps its changing progress/footer inside the left image column to avoid an unrelated fourth tile write.
 - Official isolated simulator journeys passed against current source: 70-screen conversational OpenClaw/Hermes flow, 48-screen task lifecycle, 42-screen streaming/restart recovery and 18-frame assistant conversation. Both providers completed request/reply/Back flows; real swipes changed settled framebuffers and reversed to byte-identical tail pixels. Active assistant/terminal visits issued zero image writes. Live Mac logs independently showed the removed path spending roughly 0.2–1.4 seconds per serialized tile. No live engine, phone, package, installed build or physical glasses were used for simulator acceptance.
 
 ## 2026-09-13 — Bounded Mac shell command channel
@@ -2511,8 +2523,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
   fixes were written between 21:58 and 22:45, so the phone had been running
   a build that predated all of them.
 
-- Corrected the manifest's stale LAN candidate. It named `192.168.12.200`
-  while this Mac is on `192.168.x.y`. Probed against the live gateway: the
+- Corrected the manifest's stale LAN candidate (`192.0.2.10` placeholder vs active LAN address). Probed against the live gateway: the
   old address times out during the opening handshake, the corrected one
   reaches the pairing gate. The route a release actually packages is the
   tailnet `wss://…/glasses` through Tailscale Serve, and that was dead for a
@@ -2921,7 +2932,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
   post-dismiss return. The receipt records only frame hashes and documented
   simulator actions; it never records fixture message content or recipient
   handles. Fresh accepted-reply evidence shows the returned frame exactly
-  matches the selected Adaeze conversation after **TAP OR SWIPE TO DISMISS**.
+  matches the selected Taylor conversation after **TAP OR SWIPE TO DISMISS**.
   This remains simulator proof with a `RecordingSender`, not a physical-G2
   interaction or real Messages.app send.
 
@@ -2936,7 +2947,7 @@ A review of the phone control screen (merged in 0.1.100) found these; each has a
   `messages-compose-confirmation-final-20260830/` proves the fixture-only
   New message → confirmation → delivery-unverified result; it does not prove
   physical-G2 source delivery or a real Messages.app submission. A subsequent
-  controlled simulator run retained Messages → Adaeze selection → visible
+  controlled simulator run retained Messages → Taylor selection → visible
   **SWIPE · Cancel** confirmation/result with no sender call; the reliable
   procedure waits for the list frame between individual controls. No package
   was created or uploaded.

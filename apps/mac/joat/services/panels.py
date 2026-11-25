@@ -209,9 +209,8 @@ class PanelPublisher:
             return
         # A tap counts the tab's rows; a provider opens its items. News puts
         # a "[!] feeds unavailable" row above its headlines whenever a feed
-        # fails, and until 2026-10-06 that shifted every tap down a story
-        # and made the last row open nothing (the wearer: "tap to open news
-        # does not work"). The status row itself opens nothing.
+        # fails; subtracting status_rows aligns each tap with its headline
+        # while tapping the status row itself only republishes.
         offset = int(getattr(self._providers[tab], "status_rows", 0))
         if index < offset:
             await self.publish(tab)

@@ -326,7 +326,7 @@ describe('BrainHandoff', () => {
       (entry) => entry.url === MAC_A && (entry.msg.event as { containerName?: string } | undefined)?.containerName === 'capmenu',
     )!;
     const requestId = (capmenuSend.msg.event as { requestId: string }).requestId;
-    expect(await menu.presentList('MESSAGES', ['Adele · On my way'], requestId, true, 'tap: open · 2x tap: back')).toBe(true);
+    expect(await menu.presentList('MESSAGES', ['Casey · On my way'], requestId, true, 'tap: open · 2x tap: back')).toBe(true);
     expect(rebuilds).toHaveLength(2);
 
     // Voice "JOAT, go home" sends `hud.rebuild` on the Mac -> releases menu, resets tab, shows Home, and hands back to PHONE!

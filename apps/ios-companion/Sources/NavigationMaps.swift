@@ -312,8 +312,8 @@ enum NavigationMaps {
         return "\(name), \(address)"
     }
 
-    /// Where a point is, for Claude: "5800 Will Rogers Rd, Oklahoma City,
-    /// United States (35.44690, -97.42109)", the city name and the ISO
+    /// Where a point is, for Claude: "201 E Randolph St, Chicago,
+    /// United States (41.88260, -87.62260)", the city name and the ISO
     /// country code.
     static func area(at point: NavPoint) async -> (context: String, city: String?, country: String?)? {
         guard let request = MKReverseGeocodingRequest(location: CLLocation(latitude: point.latitude,

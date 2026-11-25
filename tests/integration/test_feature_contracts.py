@@ -234,7 +234,7 @@ async def test_mcp_message_clarification_returns_before_review_and_submits_once(
 
     def contacts(name: str) -> list[tuple[str, str]]:
         lookups.append(name)
-        return [("Dele", "fixture-recipient")] if name == "Dele" else []
+        return [("Evan", "fixture-recipient")] if name == "Evan" else []
 
     replies = MessageReplyController(Sender(), confirm, contact_search=contacts)
     belt = ToolBelt(message_tools(replies), timeout_s=0.03)
@@ -251,14 +251,14 @@ async def test_mcp_message_clarification_returns_before_review_and_submits_once(
         first = await call("prepare_message", request)
         assert first["state"] == "awaiting_input" and first["needs_input"] == "recipient"
         assert lookups == [] and sends == []
-        recipient = await call("provide_message_input", {"action_id": first["action_id"], "recipient_name": "Dele"})
-        assert recipient["needs_input"] == "body" and lookups == ["Dele"]
+        recipient = await call("provide_message_input", {"action_id": first["action_id"], "recipient_name": "Evan"})
+        assert recipient["needs_input"] == "body" and lookups == ["Evan"]
         body = "  I'll be home at six.  "
         pending = await call("provide_message_input", {"action_id": first["action_id"], "body": body})
         await asyncio.wait_for(confirmation_started.wait(), timeout=0.3)
         # The RPC and ToolBelt have returned; the review is still pending.
         assert pending["state"] == "awaiting_confirmation" and sends == []
-        assert prompts == [f"Send to Dele? “{body}”"]
+        assert prompts == [f"Send to Evan? “{body}”"]
         assert (await call("message_action_status", {"action_id": first["action_id"]}))["state"] == "awaiting_confirmation"
         confirmation_release.set()
         await asyncio.wait_for(submitted.wait(), timeout=0.3)

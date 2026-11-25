@@ -45,14 +45,14 @@ class TestStore:
     def test_reads_new_records_with_app_identity(self, tmp_path: Path) -> None:
         db = tmp_path / "db"
         make_db(db, [
-            ("com.apple.MobileSMS", "Dele", "", "are you coming?"),
+            ("com.apple.MobileSMS", "Evan", "", "are you coming?"),
             ("com.spam.deals", "50% OFF", "", "limited time!"),
         ])
         store = NotificationStore(db)
         assert store.latest_rec_id() == 2
         fresh = store.read_since(0)
         assert [n.app for n in fresh] == ["com.apple.MobileSMS", "com.spam.deals"]
-        assert fresh[0].title == "Dele" and fresh[0].body == "are you coming?"
+        assert fresh[0].title == "Evan" and fresh[0].body == "are you coming?"
         assert fresh[0].delivered_unix > COCOA_EPOCH_UNIX
         assert store.read_since(2) == []
 
@@ -81,7 +81,7 @@ class TestTriageParse:
         from joat.persistence.notifications import NotificationObservationStore
 
         cases = [
-            ("com.apple.MobileSMS", "Dele", "messages.incoming_text"),
+            ("com.apple.MobileSMS", "Evan", "messages.incoming_text"),
             ("com.apple.mail", "Bank statement", "mail.banner"),
             ("com.apple.iCal", "Standup", "calendar.banner"),
             ("com.apple.reminders", "Milk", "reminders.banner"),
@@ -90,8 +90,8 @@ class TestTriageParse:
             # reserved for the authoritative iMessage lane. Display still
             # shows the sender via PERSON_CHANNELS — taxonomy and display
             # are separate decisions.
-            ("com.tinyspeck.slackmacgap", "Adaeze", "notifications.banner"),
-            ("com.hnc.Discord", "Marcus", "notifications.banner"),
+            ("com.tinyspeck.slackmacgap", "Taylor", "notifications.banner"),
+            ("com.hnc.Discord", "Morgan", "notifications.banner"),
         ]
         for app, title, expected in cases:
             notification = Notification(
@@ -105,8 +105,8 @@ class TestTriageParse:
         assert classify_event_class("com.apple.mail", "Bank") != "messages.incoming_text"
 
     def test_levels_and_summary(self) -> None:
-        assert parse_triage("URGENT — Dele is waiting for a reply") == (
-            Urgency.URGENT, "Dele is waiting for a reply")
+        assert parse_triage("URGENT — Evan is waiting for a reply") == (
+            Urgency.URGENT, "Evan is waiting for a reply")
         assert parse_triage("ignore - promo blast") == (Urgency.IGNORE, "promo blast")
         assert parse_triage("total nonsense") is None
 
@@ -130,7 +130,7 @@ class TestChannel:
         channel = NotificationChannel(
             NotificationStore(db),
             ScriptedTriage({
-                "are you coming": "URGENT — Dele asks if you are coming",
+                "are you coming": "URGENT — Evan asks if you are coming",
                 "50% OFF": "IGNORE — promotional",
             }),
             delivered.append,
@@ -144,7 +144,7 @@ class TestChannel:
         # a fixed 2026-05 stamp would (correctly) deliver nothing here.
         delivered_cocoa = time.time() - COCOA_EPOCH_UNIX
         for rid, (app, title, body) in enumerate([
-            ("com.apple.MobileSMS", "Dele", "are you coming?"),
+            ("com.apple.MobileSMS", "Evan", "are you coming?"),
             ("com.spam.deals", "50% OFF", "act now"),
         ], start=10):
             blob = plistlib.dumps({"req": {"titl": title, "body": body}}, fmt=plistlib.FMT_BINARY)
@@ -159,7 +159,7 @@ class TestChannel:
         # New contract: humanized channel, sender headline, two lines, and a
         # SHORT message shown verbatim rather than model-paraphrased. The
         # promo is still classified IGNORE by the model and never delivered.
-        assert [c.render() for c in delivered] == ["Dele · Messages\nare you coming?"]
+        assert [c.render() for c in delivered] == ["Evan · Messages\nare you coming?"]
 
     async def test_stale_card_is_withheld_from_the_lens(self) -> None:
         """A backlog draining after a reconnect must not seize the screen for
@@ -173,17 +173,17 @@ class TestChannel:
             delivered.append,
         )
         stale = Notification(
-            rec_id=1, app="com.apple.MobileSMS", title="Dele", subtitle="",
+            rec_id=1, app="com.apple.MobileSMS", title="Evan", subtitle="",
             body="old news", delivered_unix=time.time() - NotificationChannel.STALE_CARD_S - 60,
         )
         fresh = Notification(
-            rec_id=2, app="com.apple.MobileSMS", title="Dele", subtitle="",
+            rec_id=2, app="com.apple.MobileSMS", title="Evan", subtitle="",
             body="just now", delivered_unix=time.time(),
         )
 
         assert await channel._handle(stale) is False
         assert await channel._handle(fresh) is True
-        assert [c.render() for c in delivered] == ["Dele · Messages\njust now"]
+        assert [c.render() for c in delivered] == ["Evan · Messages\njust now"]
 
     async def test_unreadable_store_goes_dormant_not_fatal(self, tmp_path: Path) -> None:
         channel = NotificationChannel(

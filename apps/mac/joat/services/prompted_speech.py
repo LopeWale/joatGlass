@@ -127,9 +127,9 @@ class PromptedSpeechRuntime:
     async def _check_then_send(
         self, commands: AgentTerminalCommands, claimed: ClaimedTerminalInput,
     ) -> None:
-        """Show the words before they go: the transcription is a guess, and a
-        wrong one sent to a work session is a wrong instruction (2026-10-06,
-        the wearer: "so I can re-state it if it was transcribed incorrectly").
+        """Show the words before they go: speech transcription can mishear
+        technical terms, so the user confirms or re-states the prompt before
+        it reaches an agent work session.
         """
         assert self._check_terminal_input is not None
         try:

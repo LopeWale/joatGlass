@@ -20,7 +20,7 @@ TRANSCRIPT = (
     "So today was long and the kitchen is still a mess. "
     f"{PLUMBER} "
     "The invoice from the tile shop arrived on Monday. "
-    "I'll send Dele the signed contract on Friday. "
+    "I'll send Evan the signed contract on Friday. "
     "Anyway, that is where things stand."
 )
 
@@ -45,13 +45,13 @@ class TestParseBlocks:
             "TASK: Call the plumber about the leak\n"
             f"QUOTE: {PLUMBER}\n"
             "\n"
-            "TASK: Send Dele the contract\n"
-            "QUOTE: I'll send Dele the signed contract on Friday.\n"
+            "TASK: Send Evan the contract\n"
+            "QUOTE: I'll send Evan the signed contract on Friday.\n"
         )
 
         assert parse_blocks(raw) == [
             ("Call the plumber about the leak", PLUMBER),
-            ("Send Dele the contract", "I'll send Dele the signed contract on Friday."),
+            ("Send Evan the contract", "I'll send Evan the signed contract on Friday."),
         ]
 
     def test_tolerates_numbering_bold_and_curly_quotes(self) -> None:
@@ -170,23 +170,23 @@ class TestKeepBackedCommitments:
     def test_only_the_sentence_with_the_cue_is_kept_from_a_longer_quote(self) -> None:
         kept = keep_backed_commitments(
             [(
-                "Send Dele the signed contract",
-                "The tile shop wrote. I'll send Dele the signed contract on Friday.",
+                "Send Evan the signed contract",
+                "The tile shop wrote. I'll send Evan the signed contract on Friday.",
             )],
             TRANSCRIPT,
         )
 
-        assert [item.quote for item in kept] == ["I'll send Dele the signed contract on Friday."]
+        assert [item.quote for item in kept] == ["I'll send Evan the signed contract on Friday."]
         assert kept[0].day == "friday"
 
     def test_case_punctuation_and_curly_apostrophes_do_not_hide_a_match(self) -> None:
-        transcript = "okay so I’ll send DELE the signed contract on friday!"
+        transcript = "okay so I’ll send EVAN the signed contract on friday!"
         kept = keep_backed_commitments(
-            [("Send Dele the signed contract", "I'll send Dele the signed contract on Friday.")],
+            [("Send Evan the signed contract", "I'll send Evan the signed contract on Friday.")],
             transcript,
         )
 
-        assert [item.task for item in kept] == ["Send Dele the signed contract"]
+        assert [item.task for item in kept] == ["Send Evan the signed contract"]
 
     def test_titles_are_cleaned_into_short_instructions(self) -> None:
         kept = keep_backed_commitments(
@@ -229,8 +229,8 @@ class TestExtractCommitments:
         return (
             "TASK: Call the plumber about the leak\n"
             f"QUOTE: {PLUMBER}\n"
-            "TASK: Send Dele the signed contract\n"
-            "QUOTE: I'll send Dele the signed contract on Friday.\n"
+            "TASK: Send Evan the signed contract\n"
+            "QUOTE: I'll send Evan the signed contract on Friday.\n"
             "TASK: Book a flight to Lagos\n"
             "QUOTE: I will book a flight to Lagos.\n"
         )
@@ -243,7 +243,7 @@ class TestExtractCommitments:
         assert found is not None
         assert [item.task for item in found] == [
             "Call the plumber about the leak",
-            "Send Dele the signed contract",
+            "Send Evan the signed contract",
         ]
         assert [item.day for item in found] == ["tomorrow", "friday"]
         assert completer.systems == [COMMITMENT_SYSTEM]

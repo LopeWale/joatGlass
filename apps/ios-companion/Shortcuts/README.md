@@ -4,8 +4,8 @@ Two Shortcuts automations let JOAT read and send your texts from the glasses, fr
 
 | File | When it runs | What it does |
 |---|---|---|
-| [Show Texts on Glasses.shortcut](https://github.com/LopeWale/joatGlass/raw/main/apps/ios-companion/Shortcuts/Show%20Texts%20on%20Glasses.shortcut) | A text arrives (any text with a space in it) | Three actions: Find Conversations (the newest), JOAT Brain's Show Text on Glasses (the sender, the text, the group's name), Mark as Unread. JOAT Brain finds the sender's name in Contacts, shows a group text as "Group (Person)", and keeps spam from unsaved numbers off the glasses. |
-| [Send Message from JOAT Brain.shortcut](https://github.com/LopeWale/joatGlass/raw/main/apps/ios-companion/Shortcuts/Send%20Message%20from%20JOAT%20Brain.shortcut) | JOAT Brain posts "JOAT • text to send" | Sends the text you confirmed on the glasses, to the group when you replied in a group, then tells the glasses it was sent. |
+| `Show Texts on Glasses.shortcut` (built via `make_shortcuts.py`) | A text arrives (any text with a space in it) | Three actions: Find Conversations (the newest), JOAT Brain's Show Text on Glasses (the sender, the text, the group's name), Mark as Unread. JOAT Brain finds the sender's name in Contacts, shows a group text as "Group (Person)", and keeps spam from unsaved numbers off the glasses. |
+| `Send Message from JOAT Brain.shortcut` (built via `make_shortcuts.py`) | JOAT Brain posts "JOAT • text to send" | Sends the text you confirmed on the glasses, to the group when you replied in a group, then tells the glasses it was sent. |
 
 Since iOS 27 a shortcut carries its automation, so adding one adds its automation too.
 
@@ -19,7 +19,7 @@ Since iOS 27 a shortcut carries its automation, so adding one adds its automatio
 6. If you had the older **Show Messages on Glasses with Contact Names**, delete it, or texts come through it as well.
 7. Test: ask someone to text you. The text shows on the glasses and in JOAT Brain › Messages › Recent. On the glasses, open Messages, tap the conversation, tap to reply, say it, then tap to confirm.
 
-The buttons open iCloud links to the two shortcuts, for the repo owner's JOAT Brain (Apple team `J2XU5XWJM9`, bundle `com.joat.brain`). With your own build, use the files instead ([Your own build](#your-own-build)).
+Sign the two shortcuts with your own Apple Developer Team ID (`YOURTEAMID`) and bundle identifier (`com.joat.brain` or your custom bundle ID); see [Your own build](#your-own-build).
 
 ## Limits
 

@@ -39,7 +39,7 @@ class ArmedComposeReplies(RecordingReplies):
 
     async def handle_command(self, text: str) -> str | None:
         self.seen.append(text)
-        return "Recipient Adele selected. Say the message."
+        return "Recipient Casey selected. Say the message."
 
 
 class RecordingProductivity:
@@ -66,7 +66,7 @@ class TestVoiceCommandRouter:
         replies = ArmedComposeReplies()
         commands = VoiceCommandRouter(replies, ModelRegistry([]))
 
-        assert await commands("Good morning") == "Recipient Adele selected. Say the message."
+        assert await commands("Good morning") == "Recipient Casey selected. Say the message."
         assert replies.seen == ["Good morning"]
 
     async def test_substantive_greeting_falls_through(self) -> None:

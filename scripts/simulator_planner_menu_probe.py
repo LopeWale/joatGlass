@@ -92,7 +92,7 @@ def cards() -> HudNotifications:
         HudNotificationCard(card_id='a' * 32, app='Messages', sender='Ada',
                             body='Lunch at one? I booked the corner table by the window.',
                             at_unix_ms=now_ms - 60_000),
-        HudNotificationCard(card_id='b' * 32, app='Mail', sender='Chidi',
+        HudNotificationCard(card_id='b' * 32, app='Mail', sender='Quinn',
                             body='The invoice is attached. Please confirm receipt today.',
                             at_unix_ms=now_ms - 600_000, urgent=True),
     ))

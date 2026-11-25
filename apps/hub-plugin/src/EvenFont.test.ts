@@ -10,13 +10,13 @@ import { readerLayout } from './HudCanvasRenderer';
 /** A thread page exactly as the Mac sends it: paginate_reader_text's
  * 62-column slices (services/reader.py), a link cut mid-token included. */
 const MAC_THREAD = [
-  '1/2 · Adele',
-  'Adele: Can you send the latest mockups before the review? I ',
-  'want to walk Marcus through the onboarding flow first.\n',
+  '1/2 · Casey',
+  'Casey: Can you send the latest mockups before the review? I ',
+  'want to walk Morgan through the onboarding flow first.\n',
   'You: Both palettes are in the file. Link: ',
   'https://www.figma.com/design/k3J9xQ2/joat-hud-review?node-id=1',
   '204-5521&t=Ab12\n',
-  'Adele: You are a lifesaver.',
+  'Casey: You are a lifesaver.',
 ];
 
 const LINK = 'https://www.figma.com/design/k3J9xQ2/joat-hud-review?node-id=1204-5521&t=Ab12';
@@ -33,7 +33,7 @@ describe('Even font measurement', () => {
 
 describe('responsive layout', () => {
   it('wraps prose at word boundaries, never wider than the line, losing nothing', () => {
-    const prose = 'Can you send the latest mockups before the review? I want to walk Marcus '
+    const prose = 'Can you send the latest mockups before the review? I want to walk Morgan '
       + 'through the onboarding flow first, and then the empty states for the inbox screen.';
     const lines = wrapEven(prose, 300);
     expect(lines.length).toBeGreaterThan(1);
@@ -59,10 +59,10 @@ describe('responsive layout', () => {
 
   it("joins the Mac's 62-column slices back into messages", () => {
     expect(readerParagraphs(MAC_THREAD)).toEqual([
-      '1/2 · Adele',
-      'Adele: Can you send the latest mockups before the review? I want to walk Marcus through the onboarding flow first.',
+      '1/2 · Casey',
+      'Casey: Can you send the latest mockups before the review? I want to walk Morgan through the onboarding flow first.',
       `You: Both palettes are in the file. Link: ${LINK}`,
-      'Adele: You are a lifesaver.',
+      'Casey: You are a lifesaver.',
     ]);
   });
 
@@ -87,7 +87,7 @@ describe('responsive layout', () => {
   });
 
   it('marks the speaker only on Messages pages', () => {
-    expect(paginateEven(['Adele: hello\n'], true)[0]?.[0]?.speaker).toBe('Adele:'.length);
+    expect(paginateEven(['Casey: hello\n'], true)[0]?.[0]?.speaker).toBe('Casey:'.length);
     expect(paginateEven(['Note: hello\n'], false)[0]?.[0]?.speaker).toBeUndefined();
   });
 
@@ -166,7 +166,7 @@ describe('reader paragraphs', () => {
   it('still joins the Mac\'s slices: a wrap at a space, and a link cut at 62 columns', () => {
     const link = 'https://www.figma.com/design/k3J9xQ2/joat-hud-review?node-id=1';
     expect(link.length).toBe(62);
-    expect(readerParagraphs(['Adele: Can you send the mockups? I ', 'want them first.\n', link, '204-5521\n']))
-      .toEqual(['Adele: Can you send the mockups? I want them first.', `${link}204-5521`]);
+    expect(readerParagraphs(['Casey: Can you send the mockups? I ', 'want them first.\n', link, '204-5521\n']))
+      .toEqual(['Casey: Can you send the mockups? I want them first.', `${link}204-5521`]);
   });
 });

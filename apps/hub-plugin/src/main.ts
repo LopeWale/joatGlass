@@ -658,14 +658,12 @@ async function boot(): Promise<void> {
       link.resumeIfReplaced();
       location.setForeground(true);
       // The host may have cleared the page while we were behind its own UI —
-      // the exit dialog's "No" was the measured case: the glasses stayed
-      // BLACK because only the status line repainted (wearer report,
-      // 2026-09-05). Repaint the whole restored surface, then the status.
+      // dismissing the exit dialog left the glasses blank when only the
+      // status line repainted. Repaint the whole restored surface, then status.
       void hud.repaintRestoredSurface();
       // Even Hub's Background & Lifecycle page: capture stops while the app
       // is backgrounded; re-enable it on foreground with the same source and
-      // never assume the stream is still live. The status said "listening"
-      // over a dead mic (the wearer, 2026-10-12).
+      // never assume the stream is still live.
       void (audio.isOpen ? audio.rearm('foreground') : Promise.resolve(false)).then(() => {
         if (!exiting) void hud.setStatus(audio.isOpen ? 'JOAT · listening' : 'JOAT · mic off');
       });
@@ -1011,6 +1009,7 @@ async function boot(): Promise<void> {
           msg.readerPage,
           msg.planningNavigation,
           msg.pageControls,
+          msg.cuesEnabled,
         ))) {
           break;
         }
@@ -1358,7 +1357,7 @@ async function loadDevMapPanel(): Promise<NavigationMapPanelModel | undefined> {
       image.src = `/__joat-dev-fixtures/dev-map-sample.png?v=${Date.now()}`;
     });
     return {
-      latitude: 35.477809, longitude: -97.525642, zoom: 16,
+      latitude: 41.925410, longitude: -87.646200, zoom: 16,
       width: 284, height: 208, image,
     };
   } catch {
@@ -1398,7 +1397,7 @@ async function renderLiveConcurrency(hud: HudPresenter): Promise<void> {
     await hud.showAssistantConversation({
       conversationId: 'walk-and-talk', revision: 1, state: 'ready',
       turns: [
-        { role: 'user', text: 'What did Dele say about the gate?' },
+        { role: 'user', text: 'What did Evan say about the gate?' },
         { role: 'assistant', text: 'Park on the left side of the building; the gate code is the same as last time.' },
       ],
       continueAfterMs: 120_000, earlierTurnsOmitted: false,
@@ -1511,7 +1510,7 @@ async function renderVisualState(
     hud.acceptNotifications([
       {
         id: '1'.padStart(32, '0'), app: 'Messages', sender: 'Sam', at: now - 20_000, urgent: false,
-        body: 'Didn\u2019t catch you on the phone. Can you pick up some onions and peppers on the way home?',
+        body: 'Heading to the coffee shop on 4th Street. Want me to grab you an iced oat latte?',
       },
       {
         id: '2'.padStart(32, '0'), app: 'Slack', sender: '#team-design', at: now - 4 * 60_000, urgent: false,
@@ -1664,7 +1663,7 @@ async function renderVisualState(
   }
   if (state === 'message-reply-question') {
     await hud.showPromptQuestion(
-      'visual-reply-question', 'What do you want to say back to Adele?', () => true, 'messages',
+      'visual-reply-question', 'What do you want to say back to Casey?', () => true, 'messages',
     );
     // `&joatReplyWords=...`: the words so far, as the Mac's prompt.partial
     // would deliver them while the wearer speaks (the simulator has no mic).
@@ -1675,7 +1674,7 @@ async function renderVisualState(
   if (state === 'message-reply-confirm') {
     const id = 'visual-reply-confirm';
     const visible = await hud.showConfirmation(
-      'Send to Adele? “On my way, see you at 4:30.”', id, 'messages',
+      'Send to Casey? “On my way, see you at 4:30.”', id, 'messages',
     );
     if (imu) {
       imu.prepare(id, () => { void hud.dismissConfirmation(id); });

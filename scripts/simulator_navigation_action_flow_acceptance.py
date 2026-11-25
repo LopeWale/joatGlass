@@ -144,8 +144,8 @@ class CandidateOnlyProvider(NavigationProvider):
     ) -> list[NavigationCandidate]:
         del query, proximity
         return [NavigationCandidate(
-            choice_id="cajun-corner",
-            label="Cajun Corner",
+            choice_id="corner-bakery",
+            label="Corner Bakery",
             address="2301 N Lincoln Ave, Chicago",
             point=NavigationPoint(latitude=41.92, longitude=-87.65),
         )]
@@ -425,7 +425,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     origin_failures: list[NavigationOriginFailure] = []
     route_acks: list[NavigationRouteAck] = []
     session = NavigationSession(
-        "Cajun Corner",
+        "Corner Bakery",
         CandidateOnlyProvider(),
         gateway,
         session_id="nav-simulator-action-flow",

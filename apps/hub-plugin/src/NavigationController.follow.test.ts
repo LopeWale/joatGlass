@@ -26,7 +26,7 @@ const plan: NavigationRoutePlan = {
   ],
   steps: [
     { id: 's1', maneuver: 'turn_right', instruction: 'onto Test Ave', distanceAlongRouteM: 2000 },
-    { id: 's2', maneuver: 'arrive', instruction: 'Cajun Corner', distanceAlongRouteM: 3000 },
+    { id: 's2', maneuver: 'arrive', instruction: 'Corner Bakery', distanceAlongRouteM: 3000 },
   ],
   policy: {
     maxAccuracyM: 25, staleAfterMs: 5_000, corridorRadiusM: 25, ambiguityMarginM: 6,
@@ -66,7 +66,7 @@ function harness(clockStart = 1_700_000_000_000) {
   const install = () => controller.installRoute({
     kind: 'navigation.route', sessionId: 'nav-1', requestId: 'route-request-1',
     generation: 10, routeId: 'route-1', revision: 1,
-    destinationLabel: 'Cajun Corner', etaMinutes: 24, plan,
+    destinationLabel: 'Corner Bakery', etaMinutes: 24, plan,
   });
   const states = () => sent.filter((message) => message.kind === 'navigation.state');
   return { controller, frames, sent, walk, install, states, tick: (seconds: number) => { now = clockStart + seconds * 1000; } };
@@ -192,7 +192,7 @@ describe('a route in progress never takes the glass on its own', () => {
     await controller.installRoute({
       kind: 'navigation.route', sessionId: 'nav-1', requestId: 'route-request-1',
       generation: 10, routeId: 'route-1', revision: 1,
-      destinationLabel: 'Cajun Corner', etaMinutes: 24, plan,
+      destinationLabel: 'Corner Bakery', etaMinutes: 24, plan,
     });
     consumer?.({ latitude: 0, longitude: 100 * METRE_DEG, accuracy: 5, timestamp: now - 100 }, now);
     await controller.whenIdle();

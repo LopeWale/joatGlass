@@ -1483,7 +1483,7 @@ class TestReminderBatch:
         bridge, controller, confirms, journal, store = self.rig_with_list(tmp_path)
         items = [
             self.item("Call the plumber", "a"),
-            self.item("Send the invoice to Dele", "b"),
+            self.item("Send the invoice to Evan", "b"),
             self.item("Book the dentist for Friday", "c", date="2026-10-20"),
         ]
 
@@ -1493,7 +1493,7 @@ class TestReminderBatch:
         assert confirms.prompts == ["Add 3 reminders from “Plumbing and invoices”?"]
         assert self.written_titles(bridge) == [
             "Call the plumber",
-            "Send the invoice to Dele",
+            "Send the invoice to Evan",
             "Book the dentist for Friday",
         ]
         assert self.batch_state(store) == "succeeded"

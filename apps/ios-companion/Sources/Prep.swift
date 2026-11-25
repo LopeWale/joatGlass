@@ -1,6 +1,6 @@
 import Foundation
 
-/// Prep notes, as Even's Conversate has them (the wearer, 2026-11-11): a prep
+/// Prep notes, modelled on Even's Conversate prep workflow: a prep
 /// note is a folder. It holds typed notes, files (shared to JOAT Brain or
 /// picked in it), links and notebook pages, as many as the conversation
 /// needs. Claude turns all of it into talking points for the glasses, and the

@@ -37,7 +37,7 @@ enum DebugSeed {
             Task { @MainActor in
                 let pageId = "debug-duo-page-1"
                 let drawing = Notebook.debugDrawing(
-                    ["Call Mike about the tag map", "on Friday at 3 pm", "Order two spare relays"],
+                    ["Send Liam the slide deck", "on Friday at 3 pm", "Book design review room"],
                     top: 140
                 )
                 PageStore.save(drawing, pageId)
@@ -72,31 +72,29 @@ enum DebugSeed {
         }
         guard env["JOAT_DEBUG_TEXTS"] == "1" else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-            brain.messages.arrived(from: "Honey Bun", body: "Are you picking up the kids today?")
+            brain.messages.arrived(from: "Jordan", body: "Are you picking up coffee on the way in?")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
-            brain.messages.arrived(from: "+1 (405) 555-0199",
+            brain.messages.arrived(from: "+1 (312) 555-0199",
                                    body: "USPS: your package is on hold. Update your address now at usps-redelivery-help.top to avoid return.")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
-            brain.messages.arrived(from: "Family (Honey Bun)", body: "Dinner at 7 at Mom's, bring the dessert.")
+            brain.messages.arrived(from: "Family (Jordan)", body: "Dinner at 7 on Friday, bring the dessert.")
         }
-        // The one-action shortcut (2026-11-12): the raw sender and the group
-        // on its own; JOAT Brain finds the name in Contacts.
+        // Raw sender and group in one step; JOAT Brain resolves the name in Contacts.
         DispatchQueue.main.asyncAfter(deadline: .now() + 14) {
-            brain.messages.arrived(from: "+14055550123", body: "Running late, start without me.", group: "Book Club")
+            brain.messages.arrived(from: "+13125550123", body: "Running late, start without me.", group: "Book Club")
         }
-        // The text-first shortcut (2026-11-14): the text, then its group
-        // from "Add Group to Text" a second later.
+        // Text-first shortcut: the text arrives, then its group from "Add Group to Text" a second later.
         DispatchQueue.main.asyncAfter(deadline: .now() + 16) {
-            brain.messages.arrived(from: "+14055550123", body: "Bringing the pie tonight.")
+            brain.messages.arrived(from: "+13125550123", body: "Bringing the pie tonight.")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 17) {
-            brain.messages.conversation(group: "Fam Jam")
+            brain.messages.conversation(group: "Weekend Crew")
         }
         // Find Conversation failed: no group step. The text still shows.
         DispatchQueue.main.asyncAfter(deadline: .now() + 21) {
-            brain.messages.arrived(from: "Honey Bun", body: "Call me when you can.")
+            brain.messages.arrived(from: "Jordan", body: "Call me when you can.")
         }
     }
 
@@ -108,22 +106,22 @@ enum DebugSeed {
             Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { timer in
                 guard notes.active else { timer.invalidate(); return }
                 n += 1
-                notes.debugAppend(["Meeting paragraph \(n): we went over the schedule, the open items on the Madison build, who owns the tag map review, and what needs to be ready before Friday's walkthrough with the client."])
+                notes.debugAppend(["Meeting paragraph \(n): we went over the release schedule, the open items on the Northwind build, who owns QA sign-off, and what needs to be ready before Friday's design review."])
             }
         }
         guard env["JOAT_DEBUG_SEED"] == "1" else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             notes.debugAppend((1...14).map {
-                "Paragraph \($0): we walked through the historian cutover, the tag paths and who signs off on the MQTT bridge."
+                "Paragraph \($0): we walked through the canary rollout, the endpoint migration and who signs off on the rate-limit tier."
             })
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-            cues?.debugCue(Cues.Cue(kind: "ANSWER", title: "MQTT bridge date",
-                                    body: "Prep says IT firewall approval comes first; the earliest is Nov 6.", at: Date()))
+            cues?.debugCue(Cues.Cue(kind: "ANSWER", title: "Rollout window",
+                                    body: "Prep says staging soak finishes Thursday; production opens Friday at 09:00 UTC.", at: Date()))
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
-            cues?.debugCue(Cues.Cue(kind: "CONCEPT", title: "Historian",
-                                    body: "A database that stores plant tag values over time, for trends and reports.", at: Date()))
+            cues?.debugCue(Cues.Cue(kind: "CONCEPT", title: "Canary rollout",
+                                    body: "Shifting a small slice of live traffic to the new build before full cutover.", at: Date()))
         }
     }
 

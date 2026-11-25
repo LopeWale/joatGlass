@@ -112,10 +112,8 @@ final class Messages: VoiceCommand, HoldableChannel {
 
     /// Why a text to one person must not go out, or nil when it may: only to
     /// a number or email Contacts says is theirs, or to a number not in
-    /// Contacts that the glasses showed as itself. Never a bare name: Send
-    /// Message does not refuse one (2026-11-13: the wearer's texts to his
-    /// wife went to a delivery service's number while the glasses said her
-    /// name).
+    /// Contacts that the glasses showed as itself. Never pass a bare display
+    /// name to Send Message without verifying the destination handle first.
     static func refusal(label: String, recipient: String) -> String? {
         let to = recipient.trimmingCharacters(in: .whitespacesAndNewlines)
         let who = fit(label, units: 24)
@@ -134,7 +132,7 @@ final class Messages: VoiceCommand, HoldableChannel {
         s.contains("@") ? s.lowercased().trimmingCharacters(in: .whitespaces) : String(s.filter(\.isNumber).suffix(10))
     }
 
-    /// "…3963" for a number, the address for an email: what the glasses show
+    /// "…0199" for a number, the address for an email: what the glasses show
     /// so the wearer sees where a text goes.
     static func shortHandle(_ s: String) -> String {
         s.contains("@") ? fit(s, units: 24) : "…" + String(s.filter(\.isNumber).suffix(4))
@@ -639,8 +637,7 @@ final class Messages: VoiceCommand, HoldableChannel {
     /// The plugin knows these pages by their exact titles (MessagesViewState):
     /// "MESSAGES" is the picker whose rows open a conversation, "MESSAGES ·
     /// CONVERSATION" the thread a tap replies to. Any other title is drawn
-    /// as an untappable page, which is why a tap did nothing before
-    /// (2026-10-30: "MESSAGES · 3" and "MESSAGES · MOM").
+    /// as an untappable page (e.g. "MESSAGES · 3" or "MESSAGES · MOM").
     static let newMessageRow = "New message · voice recipient + text"
 
     /// The Mac's conversation list and histories, last fetched (Mac road).

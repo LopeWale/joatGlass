@@ -55,8 +55,8 @@ class Contacts:
     def __init__(self) -> None:
         self.queries: list[str] = []
         self.matches = {
-            "Sam": [("Sam", "+14055550111")],
-            "Alex": [("Alex One", "+14055550222"), ("Alex Two", "+14055550333")],
+            "Sam": [("Sam", "+13125550111")],
+            "Alex": [("Alex One", "+13125550222"), ("Alex Two", "+13125550333")],
         }
 
     def search(self, name: str) -> list[tuple[str, str]]:
@@ -272,7 +272,7 @@ async def test_spoken_contact_advances_to_a_fresh_body_question_without_a_model(
 
 
 @pytest.mark.parametrize(("field", "rejected"), [
-    pytest.param("recipient", "+1 (405) 555-0111", id="raw-phone-contact"),
+    pytest.param("recipient", "+1 (312) 555-0111", id="raw-phone-contact"),
     pytest.param("body", "Rejected\x00body", id="nul-body"),
     pytest.param("body", "x" * 2001, id="overlength-body"),
 ])

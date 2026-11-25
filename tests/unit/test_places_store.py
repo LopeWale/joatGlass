@@ -17,7 +17,7 @@ def test_places_replace_whole_in_order_and_reload(tmp_path: Path) -> None:
         places = PlaceStore(store)
         assert places.list() == []
         home = SavedPlace(place_id="p1", name="Home", address="12 Oak St")
-        work = SavedPlace(place_id="p2", name="Work", latitude=35.2, longitude=-97.4)
+        work = SavedPlace(place_id="p2", name="Work", latitude=41.88, longitude=-87.63)
         places.replace_all([work, home])
         assert places.list() == [work, home]
         places.replace_all([home])

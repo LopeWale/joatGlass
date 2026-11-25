@@ -347,9 +347,9 @@ async def test_mcp_lists_and_calls_the_belt(mcp_door: AgentEndpoint) -> None:
     assert reply["result"]["tools"][0]["inputSchema"]["type"] == "object"
     _, reply = await rpc(mcp_door.port, {
         "jsonrpc": "2.0", "id": 4, "method": "tools/call",
-        "params": {"name": "get_weather", "arguments": {"location": "Norman"}},
+        "params": {"name": "get_weather", "arguments": {"location": "Denver"}},
     })
-    assert reply["result"] == {"content": [{"type": "text", "text": "72F in Norman"}], "isError": False}
+    assert reply["result"] == {"content": [{"type": "text", "text": "72F in Denver"}], "isError": False}
     _, reply = await rpc(mcp_door.port, {
         "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "broken"},
     })

@@ -48,6 +48,7 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         var created: Date
         var updated: Date
         var deleted: Bool = false
+        var summary: String? = nil
     }
 
     private struct Stored: Codable {
@@ -73,12 +74,12 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         catch { SafeStore.quarantine(file, error) }
     }
 
-    private func persist() {
+    private func persist(notify: Bool = true) {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         do { try encoder.encode(stored).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) }
         catch { Log.add("quicknotes save failed: \(error)") }
-        onStoreChange?()
+        if notify { onStoreChange?() }
     }
 
     /// JOAT Brain's Notes tab: saved voice notes newest first, text notes.
@@ -112,9 +113,20 @@ final class QuickNotes: VoiceCommand, PanelProvider {
     weak var reminders: Reminders?
     /// AI cues while a note records, and the prep they answer from.
     var cues: Cues? {
-        didSet { cues?.onCue = { [weak self] cue in self?.cueArrived(cue) } }
+        didSet {
+            cues?.onCue = { [weak self] cue in self?.cueArrived(cue) }
+            lastKnownCuesEnabled = cues?.enabled ?? (UserDefaults.standard.object(forKey: Cues.enabledKey) as? Bool ?? true)
+        }
     }
     weak var prep: Prep?
+    /// Pages currently open in `PageView` — never summarized in the background until closed.
+    private var editingPageIds = Set<String>()
+    private var lastKnownCuesEnabled: Bool = UserDefaults.standard.object(forKey: Cues.enabledKey) as? Bool ?? true
+    private var defaultsObserver: NSObjectProtocol?
+
+    func beginEditingPage(_ id: String) { editingPageIds.insert(id) }
+    func endEditingPage(_ id: String) { editingPageIds.remove(id) }
+    func isEditingPage(_ id: String) -> Bool { editingPageIds.contains(id) }
     private var insightsAvailable: Bool { macLink?.configured == true }
     /// A model (Gemini, Claude or the Mac) can summarize notes on this phone.
     var insightsConfigured: Bool { insightsAvailable }
@@ -137,8 +149,42 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         t.setEventHandler { [weak self] in self?.pushPanelIfChanged() }
         t.resume()
         panelTimer = t
+        defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleCuesSettingChanged()
+        }
     }
     private var panelTimer: DispatchSourceTimer?
+
+    deinit {
+        panelTimer?.cancel()
+        if let defaultsObserver {
+            NotificationCenter.default.removeObserver(defaultsObserver)
+        }
+    }
+
+    private func handleCuesSettingChanged() {
+        let nowEnabled = cues?.enabled ?? (UserDefaults.standard.object(forKey: Cues.enabledKey) as? Bool ?? true)
+        guard nowEnabled != lastKnownCuesEnabled else { return }
+        lastKnownCuesEnabled = nowEnabled
+        cues?.syncEnabledState()
+        if !nowEnabled {
+            for id in cueCards.keys {
+                link.send(["kind": "hud.text", "containerId": 2, "text": "", "contentKind": "notification", "traceId": id])
+            }
+            cueCards.removeAll()
+            if active, current, page == .cues || (page == .reader && readerFrom == .cues) {
+                showLive()
+                return
+            }
+        }
+        if active, current, page == .live {
+            paintLive(force: true)
+        }
+    }
 
     /// A note still open when JOAT Brain stopped is saved as Save would
     /// have saved it (voice_note_capture recover at launch).
@@ -684,6 +730,7 @@ final class QuickNotes: VoiceCommand, PanelProvider {
     private var readerFrom: Page = .live
 
     private func cueArrived(_ cue: Cues.Cue) {
+        guard cues?.enabled == true else { return }
         guard let index = cues?.given.lastIndex(of: cue) else { return }
         guard active, current, page == .live || page == .cues || page == .reader else { return }
         let id = ConfirmGate.hex(16)
@@ -792,13 +839,20 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         let hint = holding ? "● Listening \(clock) · let go: done"
             : capturing ? "● REC \(clock) · tap: pause · left x2: finish"
             : "\(clock) · tap: record · hold: talk"
-        let key = "\(rowsOut)|\(capturing)|\(holding)"
+        let cuesOn = cues?.enabled ?? (UserDefaults.standard.object(forKey: Cues.enabledKey) as? Bool ?? true)
+        let key = "\(rowsOut)|\(capturing)|\(holding)|\(cuesOn)"
         if !force, key == liveKey, page == .live { return }
         rows = [.control("live", "toggle")]
         page = .live
         liveKey = key
         liveClock = s
-        menu?.sendCurrent(["title": Self.liveTitle, "items": rowsOut, "hint": hint, "selectable": true])
+        menu?.sendCurrent([
+            "title": Self.liveTitle,
+            "items": rowsOut,
+            "hint": hint,
+            "selectable": true,
+            "cuesEnabled": cuesOn,
+        ])
     }
 
     private func ensureTicker() {
@@ -1031,7 +1085,8 @@ final class QuickNotes: VoiceCommand, PanelProvider {
             if latest, insightsAvailable { lines.append("Say: summarize the last note.") }
         }
         if latest, insightsAvailable { lines += ["", "Say: ask the last note …"] }
-        if let c = n.cues, !c.isEmpty { lines += ["", "AI CUES"] + c }
+        let cuesOn = cues?.enabled ?? (UserDefaults.standard.object(forKey: Cues.enabledKey) as? Bool ?? true)
+        if cuesOn, let c = n.cues, !c.isEmpty { lines += ["", "AI CUES"] + c }
         lines += ["", "TRANSCRIPT"] + sections
         if sections.isEmpty { lines.append("No transcript is available; retained audio may need recovery.") }
         readerOpen = true
@@ -1180,13 +1235,48 @@ final class QuickNotes: VoiceCommand, PanelProvider {
         return rest.drop(while: { $0 == " " || ".,:;!?-—".contains($0) }).trimmingCharacters(in: .whitespaces)
     }
 
+    /// Minimum word count before a Quick Text Note warrants an AI summary
+    /// (short 4-5 word codes like "the gate code is 7741" stay self-explanatory
+    /// and never make an LLM round-trip on the deterministic voice path).
+    static let textNoteSummaryMinWords = 8
+
+    private func scheduleTextNoteSummaryIfWarranted(_ id: String, text: String) {
+        guard Self.words(text).count >= Self.textNoteSummaryMinWords else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            // Touch OnPhoneAI / Keychain off the main actor first so deterministic
+            // voice commands never block @MainActor on cold Keychain reads.
+            _ = OnPhoneAI.shared.anyConfigured
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.insightsAvailable else { return }
+                self.summarizeTextNote(id)
+            }
+        }
+    }
+
     private func saveText(_ text: String) -> String {
         let now = Date()
-        stored.text.append(TextNote(id: UUID().uuidString.lowercased(), text: text, created: now, updated: now))
+        let id = UUID().uuidString.lowercased()
+        stored.text.append(TextNote(id: id, text: text, created: now, updated: now))
         persist()
         publishPanel?()
+        scheduleTextNoteSummaryIfWarranted(id, text: text)
         let preview = text.count <= 72 ? text : String(text.prefix(69)) + "…"
         return "Saved QuickNote: \(preview)"
+    }
+
+    /// Updates a Quick Text Note once the wearer finishes editing and closes its sheet,
+    /// then refreshes its AI summary in the background.
+    func updateTextNote(_ id: String, text rawText: String) {
+        let cleaned = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, let i = stored.text.firstIndex(where: { $0.id == id && !$0.deleted }) else { return }
+        guard stored.text[i].text != cleaned else { return }
+        stored.text[i].text = cleaned
+        stored.text[i].summary = nil
+        stored.text[i].updated = Date()
+        insightsGaveUp.remove(id)
+        persist()
+        publishPanel?()
+        scheduleTextNoteSummaryIfWarranted(id, text: cleaned)
     }
 
     // MARK: - Assistant Tool Belt Hooks
@@ -1323,6 +1413,7 @@ extension QuickNotes.TextNote {
         created = try c.decode(Date.self, forKey: .created)
         updated = try c.decodeIfPresent(Date.self, forKey: .updated) ?? created
         deleted = try c.decodeIfPresent(Bool.self, forKey: .deleted) ?? false
+        summary = try c.decodeIfPresent(String.self, forKey: .summary)
     }
 }
 
@@ -1358,13 +1449,12 @@ extension QuickNotes {
         Work WHEN out from the speaker's own words only, counting from the moment the note was recorded (given below): "Wednesday next week at 5 o'clock" said on a Saturday is the Wednesday four days later at 17:00; "tomorrow" is the day after the recording; a bare hour from 1 to 6 is in the afternoon.
         """
 
-    /// A notebook page is the person's own writing: its to-dos are theirs
-    /// (2026-11-10: "Call Mike about the tag map on Friday at 3 pm" on a page
-    /// was not offered, as it says no "I will").
+    /// A notebook page is the person's own writing: imperative to-dos written
+    /// on the page count as commitments even without an explicit "I will".
     static let pageCommitmentNote = """
 
         This is a page the person wrote in their own notebook, not a recording. A task written as a to-do or as an \
-        instruction to themselves ("Call Mike about the tag map", "Order two spare relays") is a task they will do. \
+        instruction to themselves ("Send Liam the slide deck", "Book design review room") is a task they will do. \
         QUOTE is copied exactly from the page.
         """
 
@@ -1385,11 +1475,47 @@ extension QuickNotes {
     func retryPendingInsights() {
         guard insightsAvailable else { return }
         let pending = retained.filter {
-            ($0.summary == nil || ($0.page == true && $0.summaryStale == true)) && !transcript($0).isEmpty
-                && !summaryRuns.isRunning($0.id) && !insightsGaveUp.contains($0.id)
+            !editingPageIds.contains($0.id)
+                && ($0.summary == nil || ($0.page == true && $0.summaryStale == true))
+                && !transcript($0).isEmpty
+                && !summaryRuns.isRunning($0.id)
+                && !insightsGaveUp.contains($0.id)
         }.prefix(3)
         for n in pending {
             summarize(n.id) { receipt in Log.add("pending summary: \(receipt)") }
+        }
+        let pendingTexts = activeText.filter {
+            $0.summary == nil
+                && Self.words($0.text).count >= Self.textNoteSummaryMinWords
+                && !summaryRuns.isRunning($0.id)
+                && !insightsGaveUp.contains($0.id)
+        }.prefix(2)
+        for t in pendingTexts {
+            summarizeTextNote(t.id)
+        }
+    }
+
+    func summarizeTextNote(_ id: String) {
+        guard let link = macLink, link.configured else { return }
+        guard let t = stored.text.first(where: { $0.id == id && !$0.deleted }) else { return }
+        let body = t.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty, summaryRuns.begin(id) else { return }
+        insightsChanged(id)
+        link.complete(instructions: Self.insightsSystem, text: "QUICK TEXT NOTE:\n\(body)") { [weak self] result in
+            guard let self else { return }
+            let rerun = self.summaryRuns.finish(id)
+            defer {
+                self.insightsChanged(id)
+                if rerun { self.summarizeTextNote(id) }
+            }
+            guard case .success(let raw) = result,
+                  let parsed = Self.parseInsights(raw),
+                  let i = self.stored.text.firstIndex(where: { $0.id == id && !$0.deleted }) else {
+                if case .success = result { self.insightsGaveUp.insert(id) }
+                return
+            }
+            self.stored.text[i].summary = parsed.summary
+            self.persist()
         }
     }
 
@@ -1656,9 +1782,8 @@ extension QuickNotes {
         return ahead
     }
 
-    /// When a note's task is due (the wearer, 2026-10-24: "Wednesday next
-    /// week at 5 o'clock" must become that Wednesday at 5 PM). Claude's WHEN,
-    /// counted from the recording, is taken only when the sentence itself
+    /// When a note's task is due (e.g. "Wednesday next week at 5 o'clock"
+    /// resolves to that Wednesday at 5 PM). Claude's WHEN, counted from the recording, is taken only when the sentence itself
     /// names a day or a time; a day with no time is an all-day reminder.
     /// Nothing said: the old rule, 09:00 on the note's day or the next 09:00.
     static func due(for c: Commitment, recorded: Date, now: Date) -> (date: Date, allDay: Bool) {
@@ -1947,7 +2072,7 @@ extension QuickNotes {
     /// Its text is the typed words, then the handwriting as read by vision OCR.
     /// `inkChanged`: the handwriting is read again (Notebook.read).
     @discardableResult
-    func savePage(id: String?, typed: String, inkChanged: Bool, paperTemplate: String? = nil) -> String {
+    func savePage(id: String?, typed: String, inkChanged: Bool, paperTemplate: String? = nil, quiet: Bool = false) -> String {
         let now = Date()
         if let id, let i = stored.voice.firstIndex(where: { $0.id == id }) {
             let previousTyped = stored.voice[i].typed ?? ""
@@ -1957,17 +2082,16 @@ extension QuickNotes {
             if let paperTemplate {
                 stored.voice[i].paperTemplate = paperTemplate
             }
-            // Changed ink keeps the last reading (and the summary stays on
-            // show, marked stale) until the page is read again a few seconds
-            // after writing stops: insights no longer vanish while writing.
+            // Changed ink keeps the last reading (and any prior summary stays
+            // marked stale) until the page is closed and re-read.
             stored.voice[i].paragraphs = Self.pageParagraphs(typed: typed, handwriting: stored.voice[i].handwriting)
             if typedChanged || inkChanged {
                 insightsGaveUp.remove(id)
                 if stored.voice[i].summary != nil { stored.voice[i].summaryStale = true }
             }
             stored.voice[i].updated = now
-            persist()
-            publishPanel?()
+            persist(notify: !quiet)
+            if !quiet { publishPanel?() }
             Log.add("notebook: page \(id.prefix(6)) auto-saved (\(typed.count) typed chars)")
             return id
         }
@@ -1977,8 +2101,8 @@ extension QuickNotes {
                                       paragraphs: Self.pageParagraphs(typed: typed, handwriting: nil),
                                       page: true, typed: typed,
                                       paperTemplate: paperTemplate ?? "ruled"))
-        persist()
-        publishPanel?()
+        persist(notify: !quiet)
+        if !quiet { publishPanel?() }
         Log.add("notebook: page \(newId.prefix(6)) saved (\(typed.count) typed chars)")
         return newId
     }

@@ -1037,10 +1037,10 @@ class TestConfirm:
         caplog.set_level(logging.INFO)
         sender = RecordingSender()
         replies = MessageReplyController(sender, t.request_confirm)
-        secret_handle = "+14055559876"
+        secret_handle = "+13125559876"
         secret_body = "Bring the obsidian notebook"
         replies.select(MessageThread(
-            sender="Cajun Corner",
+            sender="Corner Bakery",
             handle=secret_handle,
             text="Order confirmed",
             at=123.0,
@@ -1065,7 +1065,7 @@ class TestConfirm:
                 "previewDigest": request["previewDigest"],
             }))
             assert await task == (
-                "Submitted to Messages for Cajun Corner; delivery unverified."
+                "Submitted to Messages for Corner Bakery; delivery unverified."
             )
 
         assert sender.sent == [(secret_handle, secret_body)]
@@ -1185,9 +1185,8 @@ class TestPluginReplacement:
     async def test_a_display_naming_other_glasses_waits_instead_of_taking_the_link(
         self, paired_transport, caplog,
     ) -> None:
-        """The wearer, 2026-10-13: "how is it possible for you to take over my
-        glasses when you're testing". A simulator or harness holding the key
-        names other glasses (or none); it may not evict the phone's link."""
+        """A simulator or harness holding the pairing key names other glasses
+        (or none); it may not evict the phone's active link."""
         t, url, store = paired_transport
         token = await _pair(url)
         await _wait_for(lambda: not t.connected)

@@ -93,7 +93,7 @@ async def main() -> None:
                     text=long_text if index == 23 else f'Fixture note {index} · buy batteries for the ring',
                     source=NoteSource(kind='dictation'), now_us=now_us - (24 - index) * 60_000_000)
             cards = CardLog()
-            cards.add(Card(source='Dele', channel='Messages', summary='Call me when you arrive.',
+            cards.add(Card(source='Evan', channel='Messages', summary='Call me when you arrive.',
                            body='Call me when you arrive. The gate code is the same as last time, '
                                 'and park on the left side of the building.'))
             cards.add(Card(source='Calendar', channel='Calendar', summary='Design review in 15 minutes'))

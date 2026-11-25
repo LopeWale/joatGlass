@@ -81,10 +81,9 @@ export class ScrollBox {
   /**
    * The stretch the page opens on is the one its rebuild carries: cut to
    * `maxBytes` this once, so the glasses are written to once when a story
-   * opens. Every later stretch is full size. A full-size first stretch
-   * went in as a second write straight after the rebuild, which redraws
-   * the text the glasses were just showing (the wearer reported that every
-   * article blinks as it opens, 2026-10-15).
+   * opens. Every later stretch is full size. Sending a full-size first
+   * stretch as a second write right after rebuild caused a visible flash
+   * when opening an article.
    */
   openWithin(maxBytes: number): void {
     this.end = this.fit(this.start, Math.min(maxBytes, this.maxBytes));

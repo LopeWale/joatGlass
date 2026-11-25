@@ -144,6 +144,7 @@ interface DataSurfaceSnapshot {
   /** An expanded panel tab keeps its rail lit, on the page and on the
    * list Back restores; without this the rail vanished on return. */
   railTab?: PanelPageTab;
+  cuesEnabled?: boolean;
 }
 
 interface TerminalOpeningBinding {
@@ -762,6 +763,7 @@ export class CapabilityMenu {
     readerPage?: { id: string; index: number; count: number },
     planningNavigation?: { canGoBack: boolean; selectedIndex: number },
     pageControls?: { newerIndex?: number; olderIndex?: number },
+    cuesEnabled?: boolean,
   ): Promise<boolean> {
     // Read-only Planning details answer a row tap. Once Back retires that
     // tap, a delayed detail cannot replace its restored agenda.
@@ -809,7 +811,10 @@ export class CapabilityMenu {
     if (!matches) return false;
     if (normalized === LIVE_NOTE_TITLE && this.view === 'data'
       && this.dataSurface?.title.trim().toUpperCase() === LIVE_NOTE_TITLE
-      && await this.hud.updateLiveTextPage?.(items, { title, hint, selectable })) {
+      && await this.hud.updateLiveTextPage?.(items, {
+        title, hint, selectable,
+        ...(typeof cuesEnabled === 'boolean' ? { cuesEnabled } : {}),
+      })) {
       // The same live note, newer words (or its tap's answer): updated in
       // place, never rebuilt.
       if (this.view === 'data' && this.pendingRequestId === requestId && this.dataSurface) {
@@ -818,7 +823,10 @@ export class CapabilityMenu {
         this.dataRowsSelectable = selectable;
         this.dataSelectionPending = false;
         this.dataHint = hint;
-        this.dataSurface = { ...this.dataSurface, items: [...items], hint, selectable };
+        this.dataSurface = {
+          ...this.dataSurface, items: [...items], hint, selectable,
+          ...(typeof cuesEnabled === 'boolean' ? { cuesEnabled } : { cuesEnabled: undefined }),
+        };
       }
       return true;
     }
@@ -949,6 +957,7 @@ export class CapabilityMenu {
       ...(nativeTextPage ? { nativeTextPage: true } : {}),
       ...(textPageFromEnd ? { nativeTextPageFromEnd: true } : {}),
       ...(nativeTextPage && REVIEW_READER_TITLES.has(normalized) ? { reviewTapOnLastPage: true } : {}),
+      ...(normalized === LIVE_NOTE_TITLE && typeof cuesEnabled === 'boolean' ? { cuesEnabled } : {}),
     });
     if (
       !this.isCurrentTransition(transition)
@@ -987,6 +996,7 @@ export class CapabilityMenu {
       messagesRetry: this.messagesRetry,
       messagesScreen: this.messagesScreen,
       ...(railTab ? { railTab } : {}),
+      ...(normalized === LIVE_NOTE_TITLE && typeof cuesEnabled === 'boolean' ? { cuesEnabled } : {}),
     };
     if (this.pendingTitle === 'AGENT TERMINAL') {
       if (normalized === 'AGENT TERMINAL' && effectiveSelectable) {
@@ -1772,6 +1782,7 @@ export class CapabilityMenu {
    * the brain opens that page. */
   sendQuickNotesMenu(item: 'cues' | 'prep'): boolean {
     if (!this.isQuickNotesLive()) return false;
+    if (item === 'cues' && this.dataSurface?.cuesEnabled === false) return false;
     this.link.send({
       kind: 'input',
       event: {
@@ -2177,6 +2188,7 @@ export class CapabilityMenu {
       selectable: parent.selectable,
       ...(parent.reminderCard ? { reminderCard: parent.reminderCard } : {}),
       ...(parent.railTab ? { railTab: parent.railTab } : {}),
+      ...(typeof parent.cuesEnabled === 'boolean' ? { cuesEnabled: parent.cuesEnabled } : {}),
     });
     if (!this.isCurrentTransition(transition)) return;
     if (!shown) {

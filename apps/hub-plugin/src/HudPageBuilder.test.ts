@@ -261,11 +261,11 @@ describe('HudPageBuilder invariants', () => {
   it('keeps every firmware list row on one line, with room for the selection border', () => {
     // A multi-line message preview: the firmware breaks the row at "\n"
     // and draws two 27 px lines into a 40 px row, over the next one.
-    const multiLine = '[2m] ● Adele · Running late\nsee you at 3';
+    const multiLine = '[2m] ● Casey · Running late\nsee you at 3';
     const long = '[1d] Maximilian Wolfeschlegel · WOW MEMBERSHIP WORKSHOP AT NOON';
     const page = builder.listLayout([multiLine, long]) as Page;
     const names = page.listObject?.[0]?.itemContainer?.itemName ?? [];
-    expect(names[0]).toBe('[2m] ● Adele · Running late see you at 3');
+    expect(names[0]).toBe('[2m] ● Casey · Running late see you at 3');
     for (const row of names) {
       expect(row).not.toMatch(/[\r\n\t]/u);
       // 536 px of row, less the selection border's room: one line at 524.
@@ -383,14 +383,14 @@ describe('HudPageBuilder invariants', () => {
   });
 
   it('confirmation is a dedicated full-screen decision surface with no list or button chrome', () => {
-    const page = builder.confirmationLayout('Send reply to Adele?') as Page;
+    const page = builder.confirmationLayout('Send reply to Casey?') as Page;
     const byId = (id: number) => page.textObject?.find((c) => c.containerID === id);
 
     expect(page.listObject).toBeUndefined();
     expect(page.containerTotalNum).toBe(5);
     expect(byId(ContainerId.Main)).toMatchObject({
       yPosition: 35, height: 144, textColor: 4,
-      content: 'CONFIRM ACTION\n\nSend reply to Adele?',
+      content: 'CONFIRM ACTION\n\nSend reply to Casey?',
     });
     expect(byId(ContainerId.Context)?.content).toBe('TAP · confirm   SWIPE · cancel');
     expect(byId(ContainerId.Tray)?.content).toBe('');

@@ -211,9 +211,9 @@ export class EventRouter {
         this.menu.refreshPanel();
         return true;
       }
-      // Long tap no longer mutes (the wearer, 2026-10-12: it fought the
-      // QuickNotes hold, and "the mic can stay on"). Outside the carve-outs
-      // above and a held note it does nothing; doff still stops the mic.
+      // Long tap does not toggle mic mute so it never collides with
+      // push-to-talk on an open QuickNote. Outside the carve-outs above
+      // and a held note it does nothing; doff still stops the mic.
       // Consumed silently: the release must not reach the Mac as a phantom
       // input. (`pendingMicLongPress` keeps its name: it still separates a
       // plain long press from the OS menu's tap-then-long-press.)
@@ -876,10 +876,8 @@ export class EventRouter {
       return false;
     }
     // Tap (with no Continue? to answer) and 2x tap both close the card and
-    // give the page underneath back, in one gesture. Before 2026-10-14 a tap
-    // did nothing and 2x tap only drew "Continue?", so a "Yes?" card over an
-    // open QuickNote ate every gesture until the wearer found a second 2x
-    // tap — reproduced in the simulator, and the freeze the wearer reported.
+    // restore the underlying page in one gesture, rather than requiring a
+    // second double-tap through a confirmation prompt.
     // Even's QA rule: "Every gesture has a visible response".
     void owner.dismissAssistantConversation(identity.conversationId, identity.revision)
       .then((exited) => {

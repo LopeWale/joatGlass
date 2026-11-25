@@ -938,11 +938,8 @@ class TestTheFrameAlwaysFitsTheWire:
 
 
 class TestReplyRouting:
-    """JOAT is the glue: a Brainstorm reply becomes terminal input.
-
-    The wearer's design, verbatim: "asking to take the last response from
-    claude or codex and send it to the hermes in the Agent Terminal; you
-    need to understand what i am trying to build here."
+    """JOAT routes the latest Brainstorm reply from Claude or Codex directly
+    into an Agent Terminal lane on command.
     """
 
     def _commands(self, replies=None):
@@ -1005,7 +1002,7 @@ class TestReplyRouting:
 
 
 class TestWatchingConcurrentWork:
-    """The wearer's requirement, in their words: "watch concurrent work".
+    """Background lanes repaint the LANES strip when their state changes.
 
     `_narrate` returned before `repaint()` for any unfocused lane, so a
     background lane going idle → run → ask → err never repainted anything.
@@ -1225,9 +1222,7 @@ class TestTheTerminalVocabularies:
 
 
 class TestSwitchingSessionsByGesture:
-    """The wearer's ask, verbatim: "switch among sessions" — and their
-    complaint about the alternative: "why do I have to say something to
-    choose a work session?"
+    """Cycles focus among active terminal sessions by gesture without speaking.
 
     Both existing paths fail while work is RUNNING, which is exactly when
     switching matters: the idle picker deliberately yields to live output
@@ -1422,9 +1417,8 @@ class TestInspectAsksTheRuntimeNotOurselves:
 
 
 class TestBrainstormMaterialReachesABusyLane:
-    """The wearer's headline ask, across BOTH features: "take the last
-    response from claud or codex and send it to the hermes in the Agent
-    Terminal" — into a lane that is already working.
+    """Routes the latest Brainstorm response from Claude or Codex into an
+    Agent Terminal lane that is already busy running work.
 
     Two things changed today meet here: routing resolves the material per
     speaker, and a busy lane queues one line instead of refusing. Each is

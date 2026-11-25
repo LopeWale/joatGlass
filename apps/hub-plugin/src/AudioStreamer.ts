@@ -78,8 +78,8 @@ export class AudioStreamer {
    * Background & Lifecycle page — `audioControl(true, ...)` capture "stops if
    * the WebView is suspended", re-enable it on foreground with the same
    * `AudioInputSource`, and do not assume the stream is still live. `open`
-   * is only this page's belief. A reply box opened on that belief listened
-   * to nothing, forever (the wearer, 2026-10-12).
+   * is only this page's local state; without re-arming, a reply prompt
+   * opened after resume would wait on a silent mic stream.
    */
   private lastFrameAtMs = 0;
   private lastRearmAtMs = Number.NEGATIVE_INFINITY;

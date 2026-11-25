@@ -100,8 +100,8 @@ its true start and the real silence between two fragments.
 BYTES_PER_SECOND = 16_000 * 2
 
 #: How much more speech before the words so far are transcribed again for
-#: an open prompt's card (the wearer: "it does not show my speech as I am
-#: speaking"). About once a second while they talk, one request at a time.
+#: an open prompt's card so live speech streams into the box while talking.
+#: About once a second while speaking, one request at a time.
 PARTIAL_STEP_BYTES = int(BYTES_PER_SECOND * 0.9)
 
 SPLIT_REQUEST_WINDOW_S = 6.0
@@ -115,9 +115,9 @@ would not have admitted anyway.
 """
 
 CONVERSATION_WINDOW_S = 30.0
-#: What the wearer says to JOAT (2026-10-12): "JOAT" or "Hey JOAT"; with
-#: his accent the name can come back as "joke", so "Hey Joke" counts too.
-#: The renderings that are ordinary English (joke, jokes, choke, jot, jolt)
+#: Wake phrases recognized for JOAT: "JOAT" or "Hey JOAT", plus common ASR
+#: phonetic near-misses ("Hey Joke", "Hey Jot", etc.).
+#: Renderings that are ordinary English words (joke, jokes, choke, jot, jolt)
 #: count ONLY after "hey" — "that's a joke" is room talk. The name itself,
 #: and "jote", are not English words and may appear anywhere.
 WAKE_WORDS: tuple[str, ...] = (

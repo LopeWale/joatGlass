@@ -284,7 +284,7 @@ async def test_terminal_rejects_created_session_with_telegram_delivery_route() -
     connection = FakeConnection(
         session_route={
             "channel": "telegram",
-            "deliveryContext": {"channel": "telegram", "to": "8245150068"},
+            "deliveryContext": {"channel": "telegram", "to": "1000000001"},
         }
     )
 
@@ -374,7 +374,7 @@ async def test_terminal_read_only_attestation_rejects_delivery_route() -> None:
         granted_scopes=("operator.read",),
         session_route={
             "channel": "telegram",
-            "deliveryContext": {"channel": "telegram", "to": "8245150068"},
+            "deliveryContext": {"channel": "telegram", "to": "1000000001"},
         },
     )
 
@@ -433,7 +433,7 @@ async def test_terminal_rejects_existing_session_when_tools_bind_another_agent()
     "poisoned_key",
     [
         "agent:main:main",
-        "agent:main:telegram:direct:8245150068",
+        "agent:main:telegram:direct:1000000001",
         "agent:hermes:telegram:group:-1001234567890:topic:42",
     ],
 )
@@ -456,8 +456,8 @@ async def test_terminal_never_adopts_main_or_telegram_existing_session(
     "poisoned_key",
     [
         "agent:main:main",
-        "agent:main:telegram:direct:8245150068",
-        "agent:hermes:telegram:direct:8245150068",
+        "agent:main:telegram:direct:1000000001",
+        "agent:hermes:telegram:direct:1000000001",
     ],
 )
 async def test_terminal_never_follows_poisoned_created_session(
@@ -537,7 +537,7 @@ async def test_terminal_rechecks_delivery_isolation_before_every_send() -> None:
     terminal = await OpenClawAgentTerminal.create(connection=connection, agent_id="hermes")
     connection.session["deliveryContext"] = {
         "channel": "telegram",
-        "to": "8245150068",
+        "to": "1000000001",
     }
 
     with pytest.raises(OpenClawGatewayError, match="not isolated from delivery routes"):

@@ -176,7 +176,7 @@ async def run(port: int, *, auto: str | None, words: str, fail: bool, flow: str,
                     await asyncio.to_thread(_input, auto, action)
                     await asyncio.sleep(wait)
                 await asyncio.sleep(2)
-                # reply: Dele (10 messages); compose: row 0; the thread's tap replies.
+                # reply: Evan (10 messages); compose: row 0; the thread's tap replies.
                 gestures = (
                     (("context_menu", 2.5), ("click", 3), ("click", 2.5))
                     if flow == "compose"

@@ -86,9 +86,9 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
   it.each(['MESSAGES · CONVERSATION', 'MAIL · CONVERSATION'] as const)('shows a %s thread as firmware text, the slices joined back into speaker-indented sentences', async (title) => {
     const r = rig();
     expect(await r.hud.showList([
-      '1/1 · Adele',
-      'Adele: Can you send the latest mockups before the review? I ',
-      'want to walk Marcus through the onboarding flow first.\n',
+      '1/1 · Casey',
+      'Casey: Can you send the latest mockups before the review? I ',
+      'want to walk Morgan through the onboarding flow first.\n',
       'You: Exporting them now.\n',
     ], {
       title, hint: 'tap: reply · 2x tap: back', selectable: true, nativeTextPage: true,
@@ -101,15 +101,15 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     // One sentence, not a 62-column slice per line: set at the page's width
     // with the sender's name in front, its wrapped rows standing under the
     // first row's words.
-    expect(lines[0]).toBe('1/1 · Adele');
-    expect(lines[1]).toMatch(/^Adele: Can you send the latest mockups/u);
+    expect(lines[0]).toBe('1/1 · Casey');
+    expect(lines[1]).toMatch(/^Casey: Can you send the latest mockups/u);
     expect(lines[2]).toMatch(/^ +\S/u);
     expect(lines[lines.length - 1]).toBe('You: Exporting them now.');
     const message = lines.slice(1, -1).map((line) => line.trim()).join(' ');
-    expect(message).toBe('Adele: Can you send the latest mockups before the review? I want to walk Marcus through the onboarding flow first.');
-    // The wrapped row starts where the words after "Adele: " start.
+    expect(message).toBe('Casey: Can you send the latest mockups before the review? I want to walk Morgan through the onboarding flow first.');
+    // The wrapped row starts where the words after "Casey: " start.
     const lead = getTextWidth(/^ */u.exec(lines[2]!)![0]);
-    expect(Math.abs(lead - getTextWidth('Adele: '))).toBeLessThanOrEqual(getTextWidth(' ') / 2);
+    expect(Math.abs(lead - getTextWidth('Casey: '))).toBeLessThanOrEqual(getTextWidth(' ') / 2);
     expect(text(page, 'hint')).toBe('tap: reply · swipe: scroll · 2x tap: back');
   });
 
@@ -119,13 +119,13 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
     await r.hud.showText('home card', ContainerId.Main);
     const framesBefore = r.frames.length;
 
-    expect(await r.hud.showList(['1/1 · From Dele', 'Call me when you arrive.'], READER)).toBe(true);
+    expect(await r.hud.showList(['1/1 · From Evan', 'Call me when you arrive.'], READER)).toBe(true);
 
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(page?.imageObject ?? []).toHaveLength(0);
     expect(page?.listObject ?? []).toHaveLength(0);
     expect(page?.textObject?.map((c) => c.containerName)).toEqual(['status', 'main', 'hint']);
-    expect(text(page, 'main')).toBe('1/1 · From Dele\nCall me when you arrive.');
+    expect(text(page, 'main')).toBe('1/1 · From Evan\nCall me when you arrive.');
     // The header names the page: clock · page · mic glyph · battery glyph,
     // one line composed from the status model, instead of a status line in
     // words plus a second line for the title.
@@ -240,7 +240,7 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
       .toBe(`1/${pages.length} · tap: continue · swipe: page · 2x tap: back`);
     expect(r.hud.isTextPageAtEnd()).toBe(false);
     // A firmware list replaces the reader: its page state no longer counts.
-    expect(await r.hud.showList(['Latest messages', 'Dele · Hi'], {
+    expect(await r.hud.showList(['Latest messages', 'Evan · Hi'], {
       title: 'MESSAGES · CONVERSATION', hint: 'tap read', selectable: true, nativeFirmwareList: true,
     })).toBe(true);
     expect(r.hud.isTextPageAtEnd()).toBe(true);
@@ -258,17 +258,17 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
   it('accepts a bound reader on the rebuild receipt and refuses a retired one', async () => {
     const r = rig();
     let current = true;
-    expect(await r.hud.showList(['1/1 · From Dele', 'Hi'], READER, () => current)).toBe(true);
+    expect(await r.hud.showList(['1/1 · From Evan', 'Hi'], READER, () => current)).toBe(true);
     expect(r.visual.paintExact).not.toHaveBeenCalled();
     current = false;
-    expect(await r.hud.showList(['1/1 · From Dele', 'Again'], READER, () => current)).toBe(false);
+    expect(await r.hud.showList(['1/1 · From Evan', 'Again'], READER, () => current)).toBe(false);
   });
 
   it('keeps the reader page across a confirmation and returns to it without an image rebuild', async () => {
     const r = rig();
     expect(await r.hud.showList(longMessage, READER)).toBe(true);
     expect(r.hud.scrollTextPage('down')).toBe(true);
-    await r.hud.showConfirmation('Send to Dele? “On my way.”', 'send-1');
+    await r.hud.showConfirmation('Send to Evan? “On my way.”', 'send-1');
     const before = r.operations.length;
 
     expect(await r.hud.dismissConfirmation('send-1')).toBe(true);
@@ -283,9 +283,9 @@ describe('HudPresenter native text page for a Mac-paged reader', () => {
   it('hands the reader straight to a firmware list, with no image page between', async () => {
     const r = rig();
     await r.hud.showText('home card', ContainerId.Main);
-    expect(await r.hud.showList(['1/1 · From Dele', 'Hi'], READER)).toBe(true);
+    expect(await r.hud.showList(['1/1 · From Evan', 'Hi'], READER)).toBe(true);
     const before = r.operations.length;
-    expect(await r.hud.showList(['Latest messages', 'Dele · Hi'], {
+    expect(await r.hud.showList(['Latest messages', 'Evan · Hi'], {
       title: 'MESSAGES · CONVERSATION', hint: 'tap read', selectable: true,
     })).toBe(true);
     const since = r.operations.slice(before);
@@ -455,10 +455,10 @@ describe('HudPresenter News article in the glasses\' scroll box', () => {
 describe('HudPresenter Messages and QuickNotes in the glasses\' scroll box', () => {
   const THREAD = { title: 'MESSAGES · CONVERSATION', hint: 'tap: reply · left x2: back', selectable: true, nativeTextPage: true };
   const message = (index: number) => (
-    `${index % 2 ? 'You' : 'Dele'}: Message ${index} runs long enough to wrap onto a second line of the reader, as messages do.`
+    `${index % 2 ? 'You' : 'Evan'}: Message ${index} runs long enough to wrap onto a second line of the reader, as messages do.`
   );
   const messages = (count: number) => Array.from({ length: count }, (_, index) => message(count - index)).join('\n');
-  const thread = (count: number) => readerRows([], `Dele\n\n${messages(count)}`);
+  const thread = (count: number) => readerRows([], `Evan\n\n${messages(count)}`);
   const mains = (r: ReturnType<typeof rig>) => r.upgrades.filter((u) => u.containerName === 'main');
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -470,14 +470,14 @@ describe('HudPresenter Messages and QuickNotes in the glasses\' scroll box', () 
     expect(main?.height).toBe(SCROLL_BOX_LINES * 27 + 2 * (main?.paddingLength ?? 0));
     expect(text(page, 'hint')).toBe('tap: reply · swipe: scroll · 2x tap: back');
     const lines = (main?.content ?? '').split('\n');
-    expect(lines.slice(0, 2)).toEqual(['Dele', '']);
-    const first = lines.findIndex((line) => line.startsWith('Dele: Message 4 '));
+    expect(lines.slice(0, 2)).toEqual(['Evan', '']);
+    const first = lines.findIndex((line) => line.startsWith('Evan: Message 4 '));
     expect(first).toBe(2);
     // The wrapped row starts under the words, not under the name.
     const pad = lines[first + 1]!;
     expect(pad.startsWith(' ')).toBe(true);
     expect(getTextWidth(pad.slice(0, pad.length - pad.trimStart().length)))
-      .toBeGreaterThanOrEqual(getTextWidth('Dele:'));
+      .toBeGreaterThanOrEqual(getTextWidth('Evan:'));
   });
 
   it('carries on into older messages a line below where the wearer stopped', async () => {
@@ -493,14 +493,14 @@ describe('HudPresenter Messages and QuickNotes in the glasses\' scroll box', () 
     expect(r.hud.isTextPageAtEnd()).toBe(true);
     const shown = (mains(r)[mains(r).length - 1]!.content ?? '').split('\n');
     const lastScreen = shown.slice(shown.length - SCROLL_BOX_LINES);
-    const grown = readerRows([], `Dele\n\n${messages(20)}\n${[0, -1, -2].map(message).join('\n')}`);
+    const grown = readerRows([], `Evan\n\n${messages(20)}\n${[0, -1, -2].map(message).join('\n')}`);
     expect(await r.hud.showList(grown, THREAD)).toBe(true);
     const reopened = (text(r.rebuilds[r.rebuilds.length - 1], 'main') ?? '').split('\n');
     // Not back at the top: the last screen moved up a line, then the older
     // messages below it.
-    expect(reopened[0]).not.toBe('Dele');
+    expect(reopened[0]).not.toBe('Evan');
     expect(reopened.slice(0, SCROLL_BOX_LINES - 1)).toEqual(lastScreen.slice(1));
-    expect(reopened.some((line) => line.startsWith('Dele: Message 0 '))).toBe(true);
+    expect(reopened.some((line) => line.startsWith('Evan: Message 0 '))).toBe(true);
   });
 
   it('opens a thread that changed at its top (a sent reply) at the top', async () => {
@@ -510,9 +510,9 @@ describe('HudPresenter Messages and QuickNotes in the glasses\' scroll box', () 
     r.hud.scrollTextPage('down');
     await vi.waitFor(() => expect(mains(r)).toHaveLength(1));
     await settle();
-    const replied = readerRows([], `Dele\n\nYou: On my way ▶\n${messages(20)}`);
+    const replied = readerRows([], `Evan\n\nYou: On my way ▶\n${messages(20)}`);
     expect(await r.hud.showList(replied, THREAD)).toBe(true);
-    expect(text(r.rebuilds[r.rebuilds.length - 1], 'main')?.startsWith('Dele\n\nYou: On my way ▶')).toBe(true);
+    expect(text(r.rebuilds[r.rebuilds.length - 1], 'main')?.startsWith('Evan\n\nYou: On my way ▶')).toBe(true);
   });
 
   it('scrolls a saved QuickNote and its exact text the same way', async () => {
@@ -574,7 +574,7 @@ describe('HudPresenter native prompt question over the visual HUD', () => {
 
   it('returns a firmware list thread directly to its own page after the question', async () => {
     const r = rig();
-    expect(await r.hud.showList(['Latest messages', 'Dele · Hi'], {
+    expect(await r.hud.showList(['Latest messages', 'Evan · Hi'], {
       title: 'MESSAGES · CONVERSATION', hint: 'tap read · say reply', selectable: true, nativeFirmwareList: true,
     })).toBe(true);
     await r.hud.showPromptQuestion('prompt-3', 'What should I say?', () => true);

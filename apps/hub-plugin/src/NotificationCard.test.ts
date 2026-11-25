@@ -16,9 +16,9 @@ import { ContainerId, HomeColumnId, type HudNotificationCard } from './types';
 
 const NOW = 1_791_410_291_592;
 const card = (body: string, extra: Partial<HudNotificationCard> = {}): HudNotificationCard => ({
-  id: 'a'.repeat(32), app: 'WhatsApp', sender: 'Elizabeth', body, at: NOW, urgent: false, ...extra,
+  id: 'a'.repeat(32), app: 'WhatsApp', sender: 'Taylor', body, at: NOW, urgent: false, ...extra,
 });
-const SHORT = 'Mom didn’t pick up the phone. Can you ask her to buy some onions and pepper?';
+const SHORT = 'Just landed at Terminal 2. Can you meet me outside baggage claim door 4 in ten minutes?';
 
 describe('notification card', () => {
   it('lays out as Even\'s card: app and age, then sender and the whole message, within the page', () => {
@@ -31,12 +31,12 @@ describe('notification card', () => {
     // The sender's name opens the message's first row, not a row of its
     // own, and the wrapped rows stand under the first row's words.
     const lines = by(NotificationCardId.Body).content!.split('\n');
-    expect(lines[0]).toMatch(/^Elizabeth: Mom/u);
+    expect(lines[0]).toMatch(/^Taylor: Just/u);
     expect(lines.length).toBeGreaterThan(1);
-    expect(lines.map((line) => line.trim()).join(' ')).toBe(`Elizabeth: ${SHORT}`);
+    expect(lines.map((line) => line.trim()).join(' ')).toBe(`Taylor: ${SHORT}`);
     for (const line of lines.slice(1)) {
       const lead = getTextWidth(/^ */u.exec(line)![0]);
-      expect(Math.abs(lead - getTextWidth('Elizabeth: '))).toBeLessThanOrEqual(getTextWidth(' ') / 2);
+      expect(Math.abs(lead - getTextWidth('Taylor: '))).toBeLessThanOrEqual(getTextWidth(' ') / 2);
     }
     // The body takes input; nothing else does.
     expect(texts.filter((t) => t.isEventCapture === 1).map((t) => t.containerID)).toEqual([NotificationCardId.Body]);
@@ -68,8 +68,8 @@ describe('notification card', () => {
   });
 
   it('reads a card from the Mac\'s short line until the full list arrives', () => {
-    expect(cardFromRenderedText('b'.repeat(32), '!! Dele · Messages (2)\nOn my way', NOW)).toEqual({
-      id: 'b'.repeat(32), app: 'Messages', sender: 'Dele', body: 'On my way', at: NOW, urgent: true,
+    expect(cardFromRenderedText('b'.repeat(32), '!! Evan · Messages (2)\nOn my way', NOW)).toEqual({
+      id: 'b'.repeat(32), app: 'Messages', sender: 'Evan', body: 'On my way', at: NOW, urgent: true,
     });
   });
 

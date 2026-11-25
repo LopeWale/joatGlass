@@ -318,13 +318,13 @@ wait for the complete **MESSAGES** list, send one official-simulator `down`,
 wait for its new highlighted-row frame, then tap the selected conversation.
 The reply driver intentionally waits for that real `capdata` selection instead
 of preselecting a fixture thread. The controlled official-simulator record
-shows **Adaeze** selected this way, followed by the visible **SWIPE · Cancel**
+shows **Taylor** selected this way, followed by the visible **SWIPE · Cancel**
 confirmation outcome with no sender invocation. It remains simulator-only:
 physical-G2 source delivery, temple behavior, optical legibility, live voice,
 and a real Messages.app submission still require separate evidence.
 
 Run `--flow history` for the non-writing conversation proof. Select the
-fixture **Dele** conversation (it has more than one eight-message page), scroll
+fixture **Evan** conversation (it has more than one eight-message page), scroll
 down until the HUD says **Older messages — up for newer**, then scroll up until
 the latest page returns. The driver records only the paging stages and fails if
 the fixture `RecordingSender` is reached. This is official-simulator proof of

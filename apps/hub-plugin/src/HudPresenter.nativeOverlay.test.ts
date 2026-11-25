@@ -64,12 +64,12 @@ describe('HudPresenter native answer page over the visual HUD', () => {
     await r.hud.showText('home card', ContainerId.Main);
     const framesBefore = r.frames.length;
 
-    expect(await r.hud.showAssistantOverlay('Submitted to Messages for Adaeze; delivery unverified.')).toBe(true);
+    expect(await r.hud.showAssistantOverlay('Submitted to Messages for Taylor; delivery unverified.')).toBe(true);
 
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(page?.imageObject ?? []).toHaveLength(0);
     expect(page?.textObject?.map((c) => c.containerName)).toEqual(['status', 'main', 'hint']);
-    expect(text(page, 'main')).toBe('Submitted to Messages for Adaeze; delivery unverified.');
+    expect(text(page, 'main')).toBe('Submitted to Messages for Taylor; delivery unverified.');
     expect(text(page, 'status')).toBe('12:34 JOAT listening bat 80%');
     expect(text(page, 'hint')).toBe('tap: dismiss');
     expect(r.frames).toHaveLength(framesBefore);

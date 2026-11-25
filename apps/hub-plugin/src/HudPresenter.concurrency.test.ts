@@ -55,7 +55,7 @@ function conversation(revision = 1): AssistantConversationSnapshot {
     revision,
     state: 'ready',
     turns: [
-      { role: 'user', text: 'Remind me what Dele said about the gate.' },
+      { role: 'user', text: 'Remind me what Evan said about the gate.' },
       { role: 'assistant', text: 'Park on the left; the code is the same as last time.' },
     ],
     continueAfterMs: 30_000,
@@ -158,7 +158,7 @@ describe('the Pomodoro rides along on every page', () => {
     });
     expect(r.headerOf(r.rebuilds[r.rebuilds.length - 1])).toBe('9:41 · POMODORO · ● · ▆');
 
-    await r.hud.showList(['Dele · On my way'], { title: 'MESSAGES', selectable: true, nativeFirmwareList: true });
+    await r.hud.showList(['Evan · On my way'], { title: 'MESSAGES', selectable: true, nativeFirmwareList: true });
     expect(r.headerOf(r.rebuilds[r.rebuilds.length - 1])).toBe('9:41 · MESSAGES · Focus 12m · ● · ▆');
 
     // 11:30 left: at the minute boundary the chip reads 11, written in place.

@@ -75,8 +75,8 @@ export function cardFromRenderedText(id: string, text: string, nowMs: number): H
 }
 
 /** The card's text: the sender's name in front of their message on the
- * same row ("Elizabeth: Mom didn't…"), never on a row of its own (the
- * wearer's ruling, 2026-10-07), fitted to the room. */
+ * same row ("Taylor: Just landed…"), never on a row of its own, fitted to
+ * the available lines. */
 function bodyText(card: HudNotificationCard, maxLines: number): string {
   const sender = card.sender.trim();
   const message = card.body.trim() || ' ';

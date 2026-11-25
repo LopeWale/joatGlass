@@ -147,20 +147,20 @@ class EphemeralMessagesStore:
         self.threads: list[MessageThread] = [
             MessageThread(
                 sender="Maya Lin",
-                handle="+14055550142",
+                handle="+13125550142",
                 text="Are we still meeting at Blue Bottle at 6?",
                 at=now - 300.0,
                 chat_id=11,
-                chat_guid="iMessage;-;+14055550142",
+                chat_guid="iMessage;-;+13125550142",
                 unread=True,
             ),
             MessageThread(
                 sender="Jordan Park",
-                handle="+14055550188",
+                handle="+13125550188",
                 text="Uploaded the optical calibration curves.",
                 at=now - 1800.0,
                 chat_id=12,
-                chat_guid="iMessage;-;+14055550188",
+                chat_guid="iMessage;-;+13125550188",
                 unread=False,
             ),
         ]
@@ -1038,7 +1038,7 @@ async def run_e2e(output_dir: Path) -> dict[str, Any]:
                     {
                         "kind": "mac_message",
                         "rowId": 703,
-                        "source": "Dele",
+                        "source": "Evan",
                         "summary": "Prototype PCB arrived on bench 2.",
                         "ageSeconds": 15 * 60 + 20,
                     },
@@ -1055,7 +1055,7 @@ async def run_e2e(output_dir: Path) -> dict[str, Any]:
         s1_lower = norm_ws(s1_ocr)
         assert "15m ago" in s1_lower, f"Expected '15m ago' on popup card, got:\n{s1_ocr}"
         assert "1/3" in s1_lower, f"Expected '1/3' unread position on popup card, got:\n{s1_ocr}"
-        assert "dele" in s1_lower, f"Expected sender 'Dele' on popup card, got:\n{s1_ocr}"
+        assert "evan" in s1_lower, f"Expected sender 'Evan' on popup card, got:\n{s1_ocr}"
         assert "now · 1/3" not in s1_lower, f"Old notification wrongly showed 'Now':\n{s1_ocr}"
 
         s1_bridge = [
@@ -1153,7 +1153,7 @@ async def run_e2e(output_dir: Path) -> dict[str, Any]:
                     {
                         "kind": "mac_message",
                         "rowId": 703,
-                        "source": "Dele",
+                        "source": "Evan",
                         "summary": "Prototype PCB arrived on bench 2.",
                         "ageSeconds": 15 * 60 + 20,
                     },
@@ -1307,7 +1307,7 @@ async def run_e2e(output_dir: Path) -> dict[str, Any]:
         await until(lambda: len(msg_sender.sent) == 1, timeout=10)
         assert msg_sender.sent[0] == (
             "chat",
-            "iMessage;-;+14055550142",
+            "iMessage;-;+13125550142",
             combined_expected,
         ), f"Expected exact Mac relay send of combined sentences, got {msg_sender.sent}"
 

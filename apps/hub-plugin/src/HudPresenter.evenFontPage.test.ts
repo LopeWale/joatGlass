@@ -52,8 +52,8 @@ function rig(canPaintReader = true) {
  * two Even-font pages. A conversation is not one: the glasses scroll it
  * themselves (ScrollBox), so it stays firmware text. */
 const THREAD = [
-  '1/1 · Adele',
-  ...Array.from({ length: 14 }, (_, index) => `${index % 2 ? 'You' : 'Adele'}: Message ${index + 1} about the review and the mockups.\n`),
+  '1/1 · Casey',
+  ...Array.from({ length: 14 }, (_, index) => `${index % 2 ? 'You' : 'Casey'}: Message ${index + 1} about the review and the mockups.\n`),
 ];
 const OPTIONS = {
   title: 'MESSAGES · REVIEW', hint: 'down more · tap: reply · 2x tap: back',
@@ -70,15 +70,15 @@ describe('HudPresenter Even-font reader page', () => {
   it('opens the reader as the four-tile image page, set in Even font', async () => {
     const r = rig();
     // From the Messages list, a firmware list, as the wearer gets there.
-    await r.hud.showList(['[2m] Adele · Can you send…'], { title: 'MESSAGES', hint: 'tap: open', selectable: true });
+    await r.hud.showList(['[2m] Casey · Can you send…'], { title: 'MESSAGES', hint: 'tap: open', selectable: true });
     expect(await r.hud.showList(THREAD, OPTIONS)).toBe(true);
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(page?.imageObject).toHaveLength(4);
     expect(page?.textObject?.[0]?.isEventCapture).toBe(1);
     const frame = lastReader(r.frames);
     expect(frame.title).toBe('MESSAGES · REVIEW');
-    expect(frame.lines[0]?.text).toBe('1/1 · Adele');
-    expect(frame.lines.find((line) => line.text.startsWith('Adele:'))?.speaker).toBe('Adele:'.length);
+    expect(frame.lines[0]?.text).toBe('1/1 · Casey');
+    expect(frame.lines.find((line) => line.text.startsWith('Casey:'))?.speaker).toBe('Casey:'.length);
     expect(frame.hint.startsWith('1/2 · ')).toBe(true);
     expect(r.operations).not.toContain('upgrade');
   });
@@ -94,7 +94,7 @@ describe('HudPresenter Even-font reader page', () => {
     await vi.waitFor(() => expect(r.frames.length).toBeGreaterThan(before));
     const second = lastReader(r.frames);
     expect(second.hint.startsWith('2/2 · ')).toBe(true);
-    expect(second.lines[0]?.text).not.toBe('1/1 · Adele');
+    expect(second.lines[0]?.text).not.toBe('1/1 · Casey');
     expect(r.hud.isTextPageAtEnd()).toBe(true);
     // Past the last local page the menu asks the Mac for its next page.
     expect(r.hud.scrollTextPage('down')).toBe(false);
@@ -113,15 +113,15 @@ describe('HudPresenter Even-font reader page', () => {
   it('keeps a Messages conversation a firmware text page the glasses scroll themselves', async () => {
     const r = rig();
     const thread = readerRows([], [
-      'Adele', '',
-      ...Array.from({ length: 14 }, (_, index) => `${index % 2 ? 'You' : 'Adele'}: Message ${index + 1} about the review.`),
+      'Casey', '',
+      ...Array.from({ length: 14 }, (_, index) => `${index % 2 ? 'You' : 'Casey'}: Message ${index + 1} about the review.`),
     ].join('\n'));
     expect(await r.hud.showList(thread, {
       title: 'MESSAGES · CONVERSATION', hint: 'tap: reply · left x2: back', selectable: true, nativeTextPage: true,
     })).toBe(true);
     const page = r.rebuilds[r.rebuilds.length - 1];
     expect(page?.imageObject?.some((image) => image.containerID === ContainerId.Image) ?? false).toBe(false);
-    expect(page?.textObject?.some((text) => text.content?.includes('Adele: Message 1 '))).toBe(true);
+    expect(page?.textObject?.some((text) => text.content?.includes('Casey: Message 1 '))).toBe(true);
     expect(r.frames.some((frame) => frame.kind === 'reader')).toBe(false);
   });
 
@@ -176,7 +176,7 @@ describe('HudPresenter Even-font reader page', () => {
   it('keeps the reader in Even font above JOAT\'s box, and whole again after it', async () => {
     const r = rig();
     await r.hud.showList(THREAD, OPTIONS);
-    expect(await r.hud.showPromptQuestion('p1', 'What do you want to say back to Adele?', () => true, 'messages')).toBe(true);
+    expect(await r.hud.showPromptQuestion('p1', 'What do you want to say back to Casey?', () => true, 'messages')).toBe(true);
     const page = r.rebuilds[r.rebuilds.length - 1];
     // The thread's four tiles stay beneath the box; the box takes input.
     expect(page?.imageObject).toHaveLength(4);

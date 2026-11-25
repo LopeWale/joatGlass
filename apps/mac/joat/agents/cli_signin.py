@@ -6,7 +6,7 @@ finish without the Mac's browser:
 
 - ``codex login --device-auth`` (Codex 0.160.0): a link,
   ``https://auth.openai.com/codex/device``, and a one-time code such as
-  ``GBEA-VS5GL`` that "expires in 15 minutes". The CLI exits 0 once the
+  ``ABCD-12345`` that "expires in 15 minutes". The CLI exits 0 once the
   code is accepted in any browser. Personal accounts must allow device
   code sign-in in ChatGPT → Settings → Security first.
 - ``claude auth login --claudeai`` (Claude Code 2.1.287): "If the browser

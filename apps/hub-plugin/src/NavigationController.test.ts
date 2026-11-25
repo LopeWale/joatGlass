@@ -53,7 +53,7 @@ const routePlan = {
   ],
   steps: [
     { id: 'turn', maneuver: 'turn_right' as const, instruction: 'onto Test Ave', distanceAlongRouteM: 500 },
-    { id: 'arrive', maneuver: 'arrive' as const, instruction: 'Cajun Corner', distanceAlongRouteM: 1_111 },
+    { id: 'arrive', maneuver: 'arrive' as const, instruction: 'Corner Bakery', distanceAlongRouteM: 1_111 },
   ],
   policy: {
     maxAccuracyM: 20,
@@ -329,7 +329,7 @@ describe('NavigationController', () => {
     await controller.installRoute({
       kind: 'navigation.route', sessionId: 'nav-1', requestId: 'route-1',
       generation: 2, routeId: 'route-1', revision: 1,
-      destinationLabel: 'Cajun Corner', etaMinutes: 18, plan: routePlan,
+      destinationLabel: 'Corner Bakery', etaMinutes: 18, plan: routePlan,
     });
 
     expect(await controller.stopAll()).toBe(true);
@@ -349,7 +349,7 @@ describe('NavigationController', () => {
     await controller.installRoute({
       kind: 'navigation.route', sessionId: 'nav-1', requestId: 'route-1',
       generation: 2, routeId: 'route-1', revision: 1,
-      destinationLabel: 'Cajun Corner', etaMinutes: 18, plan: routePlan,
+      destinationLabel: 'Corner Bakery', etaMinutes: 18, plan: routePlan,
     });
     emit({ latitude: 0, longitude: 0.0009, accuracy: 5, timestamp: 10_000 });
     await controller.whenIdle();
@@ -378,7 +378,7 @@ describe('NavigationController', () => {
     expect(await controller.installRoute({
       kind: 'navigation.route', sessionId: 'nav-1', requestId: 'route-1',
       generation: 2, routeId: 'route-1', revision: 1,
-      destinationLabel: 'Cajun Corner', etaMinutes: 18, plan: routePlan,
+      destinationLabel: 'Corner Bakery', etaMinutes: 18, plan: routePlan,
     })).toBe(false);
     expect(sent).toEqual([{
       kind: 'navigation.route.ack', sessionId: 'nav-1', routeId: 'route-1',
@@ -395,7 +395,7 @@ describe('NavigationController', () => {
       generation: 10,
       routeId: 'route-1',
       revision: 1,
-      destinationLabel: 'Cajun Corner',
+      destinationLabel: 'Corner Bakery',
       etaMinutes: 18,
       plan: routePlan,
     })).toBe(true);
@@ -421,7 +421,7 @@ describe('NavigationController', () => {
     await controller.installRoute({
       kind: 'navigation.route', sessionId: 'nav-1', requestId: 'route-request-1',
       generation: 10, routeId: 'route-1', revision: 1,
-      destinationLabel: 'Cajun Corner', etaMinutes: 18, plan: routePlan,
+      destinationLabel: 'Corner Bakery', etaMinutes: 18, plan: routePlan,
     });
     emit({ latitude: 0.001, longitude: 0.001, accuracy: 5, timestamp: 10_000 });
     emit({ latitude: 0.001, longitude: 0.0011, accuracy: 5, timestamp: 11_000 }, 11_100);
@@ -444,7 +444,7 @@ describe('NavigationController', () => {
     await controller.installRoute({
       kind: 'navigation.route', sessionId: 'nav-1', requestId: 'route-request-1',
       generation: 10, routeId: 'route-1', revision: 1,
-      destinationLabel: 'Cajun Corner', etaMinutes: 18, plan: routePlan,
+      destinationLabel: 'Corner Bakery', etaMinutes: 18, plan: routePlan,
     });
     emit({ latitude: 0, longitude: 0.0009, accuracy: 5, timestamp: 10_000 });
     await controller.whenIdle();
@@ -490,7 +490,7 @@ describe('NavigationController', () => {
     await controller.installRoute({
       kind: 'navigation.route', sessionId: 'nav-1', requestId: 'route-request-1',
       generation: 10, routeId: 'route-1', revision: 1,
-      destinationLabel: 'Cajun Corner', etaMinutes: 18, plan: routePlan,
+      destinationLabel: 'Corner Bakery', etaMinutes: 18, plan: routePlan,
     });
 
     emit?.({ latitude: 0, longitude: 0.0001, accuracy: 5, timestamp: 10_000 });
@@ -536,7 +536,7 @@ describe('NavigationController', () => {
       generation: 1,
       routeId: 'route-1',
       revision: 1,
-      destinationLabel: 'Cajun Corner',
+      destinationLabel: 'Corner Bakery',
       etaMinutes: 18,
       plan: routePlan,
       phoneFixes: true,

@@ -99,7 +99,7 @@ describe('paginateMeasured', () => {
 
 describe('fitLines', () => {
   it('returns a prompt that fits unchanged, with its whitespace folded', () => {
-    expect(fitLines('Send reply to  Adele?', WIDTH, 3)).toBe('Send reply to Adele?');
+    expect(fitLines('Send reply to  Casey?', WIDTH, 3)).toBe('Send reply to Casey?');
   });
 
   it('cuts at a word to the measured line budget and ends in an ellipsis', () => {

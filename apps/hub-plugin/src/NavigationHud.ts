@@ -146,20 +146,20 @@ export function formatNavigationDistance(distanceM: number): string {
  * Deterministic review data used by the browser preview and official G2
  * simulator. It never starts location, search, routing, or native actions.
  */
-/** A real walking route near 1007 N Shartel Ave, Oklahoma City: north up
- * Shartel, right at the corner ~57 m ahead, then a short dog-leg. The
- * schematic draws it heading-up, so the turn reads as a right turn. */
+/** Synthetic walking route near N Lincoln Ave & W Fullerton Ave, Chicago:
+ * north up Lincoln, right at the corner ~57 m ahead, then a short dog-leg.
+ * The schematic draws it heading-up, so the turn reads as a right turn. */
 const VISUAL_ROUTE_MAP: NavigationMapModel = {
   geometry: [
-    { latitude: 35.47590, longitude: -97.52564 },
-    { latitude: 35.47660, longitude: -97.52564 },
-    { latitude: 35.47730, longitude: -97.52564 },
-    { latitude: 35.47781, longitude: -97.52564 },
-    { latitude: 35.47781, longitude: -97.52430 },
-    { latitude: 35.47781, longitude: -97.52300 },
-    { latitude: 35.47850, longitude: -97.52300 },
+    { latitude: 41.92350, longitude: -87.64620 },
+    { latitude: 41.92420, longitude: -87.64620 },
+    { latitude: 41.92490, longitude: -87.64620 },
+    { latitude: 41.92541, longitude: -87.64620 },
+    { latitude: 41.92541, longitude: -87.64473 },
+    { latitude: 41.92541, longitude: -87.64331 },
+    { latitude: 41.92610, longitude: -87.64331 },
   ],
-  position: { latitude: 35.47730, longitude: -97.52564 },
+  position: { latitude: 41.92490, longitude: -87.64620 },
   maneuverAlongM: 212,
   maneuverLabel: 'W Fullerton Ave',
 };
@@ -169,7 +169,7 @@ export function navigationVisualFixture(state: NavigationVisualState): Navigatio
     case 'nav-destination':
       return {
         view: 'destination',
-        primary: 'Cajun Corner',
+        primary: 'Corner Bakery',
         secondary: '2301 N Lincoln Ave, Chicago',
         hint: 'tap: confirm · swipe: retry',
         interaction: 'stationary',
@@ -179,8 +179,8 @@ export function navigationVisualFixture(state: NavigationVisualState): Navigatio
     case 'nav-repair':
       return {
         view: 'repair',
-        primary: 'Which Cajun Corner?',
-        secondary: 'We heard “Cajun Corner.”',
+        primary: 'Which Corner Bakery?',
+        secondary: 'We heard “Corner Bakery.”',
         hint: 'swipe: choose · tap: confirm',
         interaction: 'stationary',
         options: [
@@ -195,7 +195,7 @@ export function navigationVisualFixture(state: NavigationVisualState): Navigatio
       return {
         view: 'mode',
         primary: 'Choose travel mode',
-        secondary: 'Cajun Corner · 1.2 km',
+        secondary: 'Corner Bakery · 1.2 km',
         hint: 'swipe: choose · tap: continue',
         interaction: 'stationary',
         options: ['Walk · 18 min', 'Cycle · 7 min', 'Drive · 4 min'],
@@ -205,7 +205,7 @@ export function navigationVisualFixture(state: NavigationVisualState): Navigatio
     case 'nav-preview':
       return {
         view: 'preview',
-        primary: 'Cajun Corner',
+        primary: 'Corner Bakery',
         secondary: '1.2 km · 18 min · via Lincoln Ave',
         hint: 'tap: start · up: mode · down: place',
         interaction: 'stationary',
@@ -296,7 +296,7 @@ export function navigationVisualFixture(state: NavigationVisualState): Navigatio
       return {
         view: 'arrived',
         primary: 'You have arrived',
-        secondary: 'Cajun Corner · on your right',
+        secondary: 'Corner Bakery · on your right',
         hint: 'tap: finish',
         interaction: 'stationary',
         options: [],

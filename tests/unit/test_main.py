@@ -33,7 +33,7 @@ def test_direct_development_gateway_preserves_requested_listener() -> None:
 def test_private_tailnet_gateway_rejects_an_ambiguous_explicit_listener() -> None:
     with pytest.raises(ValueError, match="cannot be combined"):
         gateway_network_policy(
-            requested_host="192.168.12.200",
+            requested_host="192.0.2.10",
             private_tailnet_gateway=True,
         )
 

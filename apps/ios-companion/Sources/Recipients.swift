@@ -2,15 +2,14 @@ import Foundation
 import Contacts
 import FoundationModels
 
-/// Who the wearer means when they say who to text (2026-10-30). The wearer:
-/// a name had to be said exactly ("my wife" is saved as "Honey Bun"), and
-/// a number that is not in Contacts did not work, so his own shortcut asked
-/// Apple Intelligence to pick the contact. The same here, before the glasses
-/// ask "Send to Honey Bun?":
-///   1. a number, said or typed ("four oh five, five five five, …");
+/// Resolves who the wearer means when choosing a message recipient:
+/// contacts may be referenced by relationship ("my partner", "mom"), nickname,
+/// or raw number/email rather than exact saved display name. Resolution order
+/// before confirmation on the glasses ("Send to Jordan?"):
+///   1. a number, said or typed ("three one two, five five five, …");
 ///   2. an email address;
-///   3. one exact name or nickname;
-///   4. Apple's on-device model picks from the contact list, else Claude.
+///   3. a saved relationship, exact name, or nickname;
+///   4. Apple's on-device model picks from the contact list, else cloud AI.
 /// Nothing is sent before the glasses show the match and the wearer taps yes.
 enum Recipients {
     struct Match {
@@ -189,7 +188,7 @@ enum Recipients {
         "four": "4", "for": "4", "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
     ]
 
-    /// "405-555-1234", "+1 (405) 555 1234", "four oh five five five five one
+    /// "312-555-1234", "+1 (312) 555 1234", "three one two five five five one
     /// two three four", "double five": the digits, or nil when anything else
     /// was said. Seven digits at least.
     static func spokenNumber(_ said: String) -> String? {
@@ -265,7 +264,7 @@ enum Recipients {
         return out
     }
 
-    /// The saved name for a number or email ("+14055551234" → "Honey Bun").
+    /// The saved name for a number or email ("+13125550123" → "Jordan").
     static func name(forHandle raw: String) -> String? {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard contactsAllowed, !value.isEmpty else { return nil }
@@ -284,9 +283,8 @@ enum Recipients {
     }
 
     /// Whether `raw` (a number or an email) is one of the saved contact
-    /// `person`'s own, by Contacts. Nil when Contacts can't say (no access).
-    /// 2026-11-13: texts the glasses showed as going to the wearer's wife
-    /// went to a delivery service's number.
+    /// `person`'s own handles in Contacts. Nil when Contacts access is not
+    /// granted. Guards against sending a 1:1 reply to an unrelated handle.
     static func handle(_ raw: String, belongsTo person: String) -> Bool? {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let wanted = person.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -528,7 +526,7 @@ enum Recipients {
                 return
             }
             // One contact has every word said: a first or a last name
-            // ("Mike" for Mike Johnson), with no model to wait for.
+            // ("Liam" for Liam Johnson), with no model to wait for.
             let spoken = nameWords(lower)
             if !spoken.isEmpty {
                 let byWords = all.filter { e in e.names.contains { spoken.isSubset(of: nameWords($0.lowercased())) } }
@@ -634,8 +632,8 @@ enum Recipients {
     private static let instructions = """
     You pick which saved contact a person means when they say who to text. \
     They may say a nickname, part of a name, a misheard name, or how they \
-    know the person (my wife, mom, my boss); contacts are often saved under \
-    pet names such as "Honey Bun" or "Mama Bear". Reply with only the \
+    know the person (my partner, mom, my boss); contacts may also be saved \
+    under nicknames or terms of endearment. Reply with only the \
     number of the one contact they mean, or 0 when none fits.
     """
 

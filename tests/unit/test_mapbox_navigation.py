@@ -54,8 +54,8 @@ class TestMapboxNavigationProvider:
         http = FakeHttp([{"features": [{
             "geometry": {"type": "Point", "coordinates": [-87.64, 41.91]},
             "properties": {
-                "mapbox_id": "poi.cajun-corner",
-                "name": "Cajun Corner",
+                "mapbox_id": "poi.corner-bakery",
+                "name": "Corner Bakery",
                 "full_address": "2301 N Lincoln Ave, Chicago, Illinois 60614",
                 "coordinates": {"routable_points": [{
                     "latitude": 41.9101, "longitude": -87.6401,
@@ -64,11 +64,11 @@ class TestMapboxNavigationProvider:
         }]}])
 
         results = await provider(http).search(
-            "Cajun Corner", NavigationPoint(latitude=41.9, longitude=-87.65),
+            "Corner Bakery", NavigationPoint(latitude=41.9, longitude=-87.65),
         )
 
         assert len(results) == 1
-        assert results[0].label == "Cajun Corner"
+        assert results[0].label == "Corner Bakery"
         assert results[0].address.startswith("2301 N Lincoln")
         assert results[0].point == NavigationPoint(41.9101, -87.6401)
         assert results[0].choice_id.startswith("mbx-")
@@ -81,80 +81,80 @@ class TestMapboxNavigationProvider:
     async def test_named_pois_are_filtered_then_ranked_by_provider_distance(self) -> None:
         http = FakeHttp([{"features": [
             {
-                "geometry": {"type": "Point", "coordinates": [-97.5201, 35.475]},
+                "geometry": {"type": "Point", "coordinates": [-87.6201, 41.885]},
                 "properties": {
                     "mapbox_id": "address.nearby",
                     "feature_type": "address",
-                    "name": "On Cue Street",
-                    "full_address": "1 On Cue Street",
+                    "name": "Shell Street",
+                    "full_address": "1 Shell Street",
                 },
             },
             {
-                "geometry": {"type": "Point", "coordinates": [-97.550, 35.475]},
+                "geometry": {"type": "Point", "coordinates": [-87.650, 41.885]},
                 "properties": {
-                    "mapbox_id": "poi.oncue-far",
+                    "mapbox_id": "poi.shell-far",
                     "feature_type": "poi",
-                    "name": "OnCue #102",
-                    "brand": ["OnCue"],
+                    "name": "Shell #102",
+                    "brand": ["Shell"],
                     "poi_category": ["Gas Station"],
                     "distance": 3000,
                     "full_address": "9000 West Ave",
                 },
             },
             {
-                "geometry": {"type": "Point", "coordinates": [-97.522, 35.475]},
+                "geometry": {"type": "Point", "coordinates": [-87.622, 41.885]},
                 "properties": {
-                    "mapbox_id": "poi.oncue-near",
+                    "mapbox_id": "poi.shell-near",
                     "feature_type": "poi",
-                    "name": "OnCue #117",
-                    "brand": ["OnCue"],
+                    "name": "Shell #117",
+                    "brand": ["Shell"],
                     "poi_category": ["Gas Station"],
                     "distance": 200,
                     "full_address": "1201 N Main St",
                 },
             },
         ]}])
-        here = NavigationPoint(latitude=35.475, longitude=-97.520)
+        here = NavigationPoint(latitude=41.885, longitude=-87.620)
 
-        results = await provider(http).search("OnCue", here)
+        results = await provider(http).search("Shell", here)
 
-        assert [result.label for result in results] == ["OnCue #117", "OnCue #102"]
+        assert [result.label for result in results] == ["Shell #117", "Shell #102"]
         assert [result.distance_m for result in results] == [200, 3000]
-        assert all(result.label.startswith("OnCue") for result in results)
+        assert all(result.label.startswith("Shell") for result in results)
         _, params = http.calls[0]
-        assert params["q"] == "OnCue"
-        assert params["proximity"] == "-97.52,35.475"
+        assert params["q"] == "Shell"
+        assert params["proximity"] == "-87.62,41.885"
         assert params["limit"] == "10"
 
     async def test_missing_provider_distance_uses_coordinate_distance(self) -> None:
         http = FakeHttp([{"features": [
             {
-                "geometry": {"type": "Point", "coordinates": [-97.540, 35.475]},
+                "geometry": {"type": "Point", "coordinates": [-87.640, 41.885]},
                 "properties": {
-                    "mapbox_id": "poi.oncue-far",
+                    "mapbox_id": "poi.shell-far",
                     "feature_type": "poi",
-                    "name": "OnCue West",
-                    "brand": ["OnCue"],
+                    "name": "Shell West",
+                    "brand": ["Shell"],
                     "full_address": "9000 West Ave",
                 },
             },
             {
-                "geometry": {"type": "Point", "coordinates": [-97.521, 35.475]},
+                "geometry": {"type": "Point", "coordinates": [-87.621, 41.885]},
                 "properties": {
-                    "mapbox_id": "poi.oncue-near",
+                    "mapbox_id": "poi.shell-near",
                     "feature_type": "poi",
-                    "name": "OnCue Main",
-                    "brand": ["OnCue"],
+                    "name": "Shell Main",
+                    "brand": ["Shell"],
                     "full_address": "1201 N Main St",
                 },
             },
         ]}])
 
         results = await provider(http).search(
-            "OnCue", NavigationPoint(latitude=35.475, longitude=-97.520),
+            "Shell", NavigationPoint(latitude=41.885, longitude=-87.620),
         )
 
-        assert [result.label for result in results] == ["OnCue Main", "OnCue West"]
+        assert [result.label for result in results] == ["Shell Main", "Shell West"]
         assert results[0].distance_m is not None
         assert results[1].distance_m is not None
         assert results[0].distance_m < results[1].distance_m
@@ -162,7 +162,7 @@ class TestMapboxNavigationProvider:
     async def test_exact_poi_category_beats_an_irrelevant_named_place(self) -> None:
         http = FakeHttp([{"features": [
             {
-                "geometry": {"type": "Point", "coordinates": [-97.521, 35.475]},
+                "geometry": {"type": "Point", "coordinates": [-87.621, 41.885]},
                 "properties": {
                     "mapbox_id": "place.gas",
                     "feature_type": "place",
@@ -171,11 +171,11 @@ class TestMapboxNavigationProvider:
                 },
             },
             {
-                "geometry": {"type": "Point", "coordinates": [-97.523, 35.475]},
+                "geometry": {"type": "Point", "coordinates": [-87.623, 41.885]},
                 "properties": {
                     "mapbox_id": "poi.fuel",
                     "feature_type": "poi",
-                    "name": "OnCue #117",
+                    "name": "Shell #117",
                     "poi_category": ["Gas Station"],
                     "poi_category_ids": ["gas_station"],
                     "full_address": "1201 N Main St",
@@ -184,10 +184,10 @@ class TestMapboxNavigationProvider:
         ]}])
 
         results = await provider(http).search(
-            "gas station", NavigationPoint(latitude=35.475, longitude=-97.520),
+            "gas station", NavigationPoint(latitude=41.885, longitude=-87.620),
         )
 
-        assert [result.label for result in results] == ["OnCue #117"]
+        assert [result.label for result in results] == ["Shell #117"]
 
     async def test_ordinary_address_search_still_returns_the_canonical_address(self) -> None:
         http = FakeHttp([{"features": [{
@@ -215,12 +215,12 @@ class TestMapboxNavigationProvider:
             features.append({
                 "geometry": {"type": "Point", "coordinates": [longitude, 41.9]},
                 "properties": {
-                    "mapbox_id": identifier, "name": "Cajun Corner",
+                    "mapbox_id": identifier, "name": "Corner Bakery",
                     "full_address": address,
                 },
             })
         results = await provider(FakeHttp([{"features": features}])).search(
-            "Cajun Corner", None,
+            "Corner Bakery", None,
         )
         assert len(results) == 2
         assert {item.repair_hint for item in results} == {"street, city, or postcode"}
@@ -245,7 +245,7 @@ class TestMapboxNavigationProvider:
             ]}],
         }]}])
         destination = NavigationCandidate(
-            choice_id="place", label="Cajun Corner", address="2301 N Lincoln",
+            choice_id="place", label="Corner Bakery", address="2301 N Lincoln",
             point=NavigationPoint(41.91, -87.64),
         )
 

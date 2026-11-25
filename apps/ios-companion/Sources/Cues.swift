@@ -86,10 +86,23 @@ final class Cues {
     #if DEBUG
     /// DebugSeed: a cue as if Claude had given it.
     func debugCue(_ cue: Cue) {
+        guard enabled else { return }
         given.append(cue)
         onCue?(cue)
     }
     #endif
+
+    /// Synchronize an open note's cue engine when the wearer flips `AI cues during QuickNotes`.
+    func syncEnabledState() {
+        if !enabled {
+            generation += 1
+            inFlight = false
+            pauseTimer?.cancel()
+            pauseTimer = nil
+        } else if running {
+            askedUpTo = transcript.count
+        }
+    }
 
     /// The note was saved or discarded.
     func end() {
@@ -97,11 +110,12 @@ final class Cues {
         running = false
         inFlight = false
         pauseTimer?.cancel()
+        pauseTimer = nil
     }
 
     /// Words that went into the note.
     func heard(_ text: String) {
-        guard running else { return }
+        guard running, enabled else { return }
         let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !words.isEmpty else { return }
         transcript += (transcript.isEmpty ? "" : " ") + words

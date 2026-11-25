@@ -2,13 +2,12 @@ import { ImageContainerProperty, RebuildPageContainer } from '@evenrealities/eve
 import { ContainerId, HeaderImageId } from './types';
 
 /**
- * One header on every page (the wearer's ask, 2026-10-06: "why are we not
- * using a template for the top bar?"). The image pages (the Planning month,
- * the live map) always drew the compact spine: the clock and the page's
- * word in a small face, the mic and battery as icons. The firmware pages
- * drew a line of the firmware font instead, bigger and different. Now every
- * firmware page carries the same spine as two 288x24 images (the SDK caps
- * an image at 288 px wide), drawn by the same renderer code.
+ * Shared top header template across every page. The image pages (the
+ * Planning month, the live map) always drew the compact spine: the clock and
+ * the page's word in a small face, the mic and battery as icons. The firmware
+ * pages drew a line of the firmware font instead, bigger and different. Now
+ * every firmware page carries the same spine as two 288x24 images (the SDK
+ * caps an image at 288 px wide), drawn by the same renderer code.
  *
  * Images cost a send each, so the header is the part that rarely changes:
  * both halves after a page rebuild, then only a half whose pixels changed

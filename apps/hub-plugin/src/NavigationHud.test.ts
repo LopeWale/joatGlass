@@ -53,7 +53,7 @@ describe('navigation HUD contract', () => {
 
   it('makes destination repair and explicit walking/cycling selection visible', () => {
     const destination = navigationVisualFixture('nav-destination');
-    expect(destination.primary).toBe('Cajun Corner');
+    expect(destination.primary).toBe('Corner Bakery');
     expect(destination.secondary).toContain('2301 N Lincoln Ave');
     expect(destination.hint).toMatch(/confirm/i);
 

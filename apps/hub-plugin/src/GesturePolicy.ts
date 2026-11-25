@@ -48,9 +48,7 @@ export class GesturePolicy {
 
   /**
    * One gesture template on every page, whatever a Mac version or an older
-   * screen authored (the wearer's ruling, 2026-10-07: "'tap', 'long tap'
-   * and '2x tap' as a template so it can be the same on the pages that
-   * need it"). The words: tap, swipe, long tap, 2x tap — never
+   * screen authored. The words: tap, swipe, long tap, 2x tap — never
    * double-click, long-press, hold or left x2. The order: tap · swipe ·
    * long tap · 2x tap; anything that is not a gesture (a page count, a
    * spoken command) keeps its place.

@@ -23,14 +23,14 @@ afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('a saved place', () => {
   it('needs a name and an address or a pin, within the wire bounds', () => {
-    expect(normalisePlace({ name: '  Home ', address: ' 12 Oak St,  Norman ' }, 'p1'))
-      .toEqual({ id: 'p1', name: 'Home', address: '12 Oak St, Norman' });
-    expect(normalisePlace({ name: 'Work', latitude: 35.2, longitude: -97.4 }, 'p2'))
-      .toEqual({ id: 'p2', name: 'Work', latitude: 35.2, longitude: -97.4 });
+    expect(normalisePlace({ name: '  Home ', address: ' 12 Oak St,  Denver ' }, 'p1'))
+      .toEqual({ id: 'p1', name: 'Home', address: '12 Oak St, Denver' });
+    expect(normalisePlace({ name: 'Work', latitude: 41.88, longitude: -87.63 }, 'p2'))
+      .toEqual({ id: 'p2', name: 'Work', latitude: 41.88, longitude: -87.63 });
     expect(normalisePlace({ name: 'Nowhere' }, 'p3')).toBeUndefined();
     expect(normalisePlace({ name: '', address: 'x' }, 'p4')).toBeUndefined();
     // A pin needs both halves, within range.
-    expect(normalisePlace({ name: 'Half', latitude: 35.2 }, 'p5')).toBeUndefined();
+    expect(normalisePlace({ name: 'Half', latitude: 41.88 }, 'p5')).toBeUndefined();
     expect(normalisePlace({ name: 'Off', latitude: 95, longitude: 0 }, 'p6')).toBeUndefined();
     expect(normalisePlace({ name: 'x'.repeat(60), address: 'a' }, 'p7')?.name).toHaveLength(40);
   });
@@ -44,7 +44,7 @@ describe('the places list', () => {
     const home = places.add({ name: 'Home', address: '12 Oak St' });
     expect(home?.id).toMatch(/^place-/);
     expect(places.add({ name: 'Nowhere' })).toBeUndefined();
-    const work = places.add({ name: 'Work', latitude: 35.2, longitude: -97.4 });
+    const work = places.add({ name: 'Work', latitude: 41.88, longitude: -87.63 });
     expect(places.update(home!.id, { name: 'Home', address: '14 Oak St' })?.address).toBe('14 Oak St');
     expect(places.update('missing', { name: 'x', address: 'y' })).toBeUndefined();
     expect(places.remove(work!.id)).toBe(true);

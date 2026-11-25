@@ -20,7 +20,7 @@
 					<key>Name</key>
 					<string>JOAT Brain</string>
 					<key>TeamIdentifier</key>
-					<string>J2XU5XWJM9</string>
+					<string>YOURTEAMID</string>
 				</dict>
 				<key>UUID</key>
 				<string>217293D3-2CBC-4182-9ADF-927382C9E488</string>
@@ -331,7 +331,7 @@
 					<key>Name</key>
 					<string>JOAT Brain</string>
 					<key>TeamIdentifier</key>
-					<string>J2XU5XWJM9</string>
+					<string>YOURTEAMID</string>
 				</dict>
 				<key>UUID</key>
 				<string>2F628D78-546F-4E64-B402-5B4C3FCE336E</string>
@@ -591,7 +591,7 @@
 					<key>Name</key>
 					<string>JOAT Brain</string>
 					<key>TeamIdentifier</key>
-					<string>J2XU5XWJM9</string>
+					<string>YOURTEAMID</string>
 				</dict>
 				<key>Title</key>
 				<string>JOAT • text to send</string>

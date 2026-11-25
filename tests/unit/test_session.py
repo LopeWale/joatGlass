@@ -220,7 +220,7 @@ class TestSessionManager:
             ],
             on_state=states.append,
         )
-        assert manager.handle_transcript("navigate to Cajun Corner") is True
+        assert manager.handle_transcript("navigate to Corner Bakery") is True
         await running.wait()
         assert manager.handle_transcript("the street number is 2301") is True
         assert received == ["the street number is 2301"]
@@ -325,7 +325,7 @@ class TestSessionManager:
         transport = SinkTransport()
         manager = SessionManager(HudWriter(transport))
 
-        manager.notify(Card(source="Dele", channel="Messages", summary="On my way"))
+        manager.notify(Card(source="Evan", channel="Messages", summary="On my way"))
         await asyncio.sleep(0)
 
         cards = [m for m in transport.sent if isinstance(m, HudText)]
@@ -337,7 +337,7 @@ class TestSessionManager:
         transport = SinkTransport()
         manager = SessionManager(HudWriter(transport))
 
-        manager.notify(Card(source="Dele", channel="Messages", summary="Call me",
+        manager.notify(Card(source="Evan", channel="Messages", summary="Call me",
                             urgency=Urgency.URGENT))
         await asyncio.sleep(0)
         manager.notify(Card(source="News", channel="News", summary="Digest ready",
@@ -393,13 +393,13 @@ class TestSessionManager:
 
         assert manager.try_start_session(held) is True
         await asyncio.sleep(0)
-        manager.notify(Card(source="Dele", channel="Messages", summary="queued one"))
-        manager.notify(Card(source="Marcus", channel="Messages", summary="queued two"))
+        manager.notify(Card(source="Evan", channel="Messages", summary="queued one"))
+        manager.notify(Card(source="Morgan", channel="Messages", summary="queued two"))
         held.gate.set()
         for _ in range(6):
             await asyncio.sleep(0)
 
-        assert [c.source for c in card_log.recent(5)] == ["Ada", "Dele", "Marcus"]
+        assert [c.source for c in card_log.recent(5)] == ["Ada", "Evan", "Morgan"]
         await manager.close()
 
     async def test_an_abandoned_queued_card_is_withdrawn_not_painted_later(self) -> None:
@@ -1422,9 +1422,9 @@ async def test_terminal_retry_and_cancel_bind_before_scheduled_action(action: st
 
 def test_notification_stack_is_newest_first_with_the_whole_message() -> None:
     old = Card(source="Ann", channel="Mail", summary="Lunch?", body="Lunch on Friday at noon?", at=100.0)
-    new = Card(source="Dele", channel="Messages", summary="On my way", at=200.0, urgency=Urgency.URGENT)
+    new = Card(source="Evan", channel="Messages", summary="On my way", at=200.0, urgency=Urgency.URGENT)
     wire = notification_stack([old, new]).to_wire()
-    assert [card["sender"] for card in wire["cards"]] == ["Dele", "Ann"]
+    assert [card["sender"] for card in wire["cards"]] == ["Evan", "Ann"]
     assert wire["cards"][1]["body"] == "Lunch on Friday at noon?"
     assert wire["cards"][0]["body"] == "On my way"
     assert wire["cards"][0]["urgent"] is True

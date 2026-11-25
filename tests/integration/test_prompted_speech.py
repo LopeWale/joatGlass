@@ -209,11 +209,11 @@ async def test_fresh_spoken_body_reaches_exact_message_review(text: str) -> None
         return False
 
     replies = MessageReplyController(
-        Sender(), confirm, contact_search=lambda _name: [("Dele", "fixture-address")],
+        Sender(), confirm, contact_search=lambda _name: [("Evan", "fixture-address")],
     )
     try:
         status = await replies.prepare_new_message(
-            action_id="message-1", trace_id="fixture", recipient_name="Dele",
+            action_id="message-1", trace_id="fixture", recipient_name="Evan",
         )
         assert status.needs_input == "body"
 
@@ -225,7 +225,7 @@ async def test_fresh_spoken_body_reaches_exact_message_review(text: str) -> None
         await journey.idle()
         await until(lambda: bool(reviewed))
         assert journey.received == [text]
-        assert reviewed == [f"Send to Dele? “{text}”"]
+        assert reviewed == [f"Send to Evan? “{text}”"]
         assert replies.message_action_status("message-1").state == "awaiting_confirmation"
         assert sends == []
         assert journey.command_calls == journey.replier.queries == []
@@ -505,7 +505,7 @@ async def test_exclusive_recording_never_feeds_prompted_conversation() -> None:
 async def test_message_tool_and_bridge_accept_two_fresh_spoken_answers() -> None:
     """Typed tool to visible-question receipt to PCM to exact controller review."""
     body = "  I'll be home at six.  "
-    journey = Journey("Dele", body)
+    journey = Journey("Evan", body)
     questions: list[tuple[PromptTicket, str]] = []
     reviewed: list[str] = []
     confirmation_release = asyncio.Event()
@@ -521,7 +521,7 @@ async def test_message_tool_and_bridge_accept_two_fresh_spoken_answers() -> None
 
     replies = MessageReplyController(
         Sender(), confirm,
-        contact_search=lambda name: [("Dele", "fixture-address")] if name == "Dele" else [],
+        contact_search=lambda name: [("Evan", "fixture-address")] if name == "Evan" else [],
     )
 
     async def publish(ticket: PromptTicket, question: str, activate: ActivatePrompt) -> bool:
@@ -556,7 +556,7 @@ async def test_message_tool_and_bridge_accept_two_fresh_spoken_answers() -> None
         journey.transport.utterance(epoch=body_question.prompt_id)
         await journey.idle()
         await until(lambda: bool(reviewed))
-        assert reviewed == [f"Send to Dele? “{body}”"]
+        assert reviewed == [f"Send to Evan? “{body}”"]
         assert journey.command_calls == journey.replier.queries == []
         assert replies.message_action_status("spoken-message").state == "awaiting_confirmation"
         assert len(questions) == 2 and not journey.dispatcher.is_armed
@@ -578,7 +578,7 @@ async def test_authenticated_gateway_questions_accept_immediately_following_pcm(
     )
     await gateway.start()
     dispatcher = PromptedInputDispatcher()
-    stt = Stt("Dele", "  stop, open Messages, keep these words.  ")
+    stt = Stt("Evan", "  stop, open Messages, keep these words.  ")
     replier = Replier()
     command_calls: list[str] = []
     reviewed: list[str] = []
@@ -603,7 +603,7 @@ async def test_authenticated_gateway_questions_accept_immediately_following_pcm(
 
     replies = MessageReplyController(
         Sender(), confirm,
-        contact_search=lambda name: [("Dele", "fixture-address")] if name == "Dele" else [],
+        contact_search=lambda name: [("Evan", "fixture-address")] if name == "Evan" else [],
     )
 
     async def publish(ticket: PromptTicket, question: str, activate: ActivatePrompt) -> bool:
@@ -657,7 +657,7 @@ async def test_authenticated_gateway_questions_accept_immediately_following_pcm(
             await asyncio.wait_for(preparation, 1)
             await until(lambda: bool(reviewed))
             assert ids[0] != ids[1]
-            assert reviewed == ["Send to Dele? “  stop, open Messages, keep these words.  ”"]
+            assert reviewed == ["Send to Evan? “  stop, open Messages, keep these words.  ”"]
             assert command_calls == replier.queries == []
             assert not dispatcher.is_armed
             assert stt.calls == 2

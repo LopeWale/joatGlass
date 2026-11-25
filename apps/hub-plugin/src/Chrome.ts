@@ -7,11 +7,8 @@ import type { HudStatusModel } from './HudStatus';
  * Plugin-owned chrome: the parts of the HUD that must render WITHOUT the Mac.
  *
  * The dashboard design gave the plugin the status bar and the hint line for
- * exactly this reason, but only the containers were built — nothing ever
- * painted into them. On real glasses that read as a dead assistant: one
- * status line on an otherwise blank canvas, with no clock, no battery, and
- * no clue what any gesture does. (Wearer, on 0.1.5: "all I see is JOAT ·
- * listening".)
+ * exactly this reason, so the resting canvas always shows clock, battery,
+ * link state, and gesture affordances even during a backend outage.
  *
  * Everything here is derived from state the PHONE already has, so it keeps
  * updating through a Mac outage — which is the whole point.

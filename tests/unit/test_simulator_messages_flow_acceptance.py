@@ -389,13 +389,13 @@ def test_messages_reply_outcome_contract_is_explicit_and_truthful(
 @pytest.mark.parametrize(
     ("outcome", "expected"),
     [
-        ("accepted", "Submitted to Messages for Adaeze; delivery unverified."),
+        ("accepted", "Submitted to Messages for Taylor; delivery unverified."),
         (
             "uncertain",
-            "Messages may have submitted the reply to Adaeze. "
+            "Messages may have submitted the reply to Taylor. "
             "Check Messages on your Mac before trying again.",
         ),
-        ("failed", "Could not send to Adaeze. Check Messages on your Mac."),
+        ("failed", "Could not send to Taylor. Check Messages on your Mac."),
     ],
 )
 def test_messages_reply_outcome_uses_the_actual_selected_recipient(
@@ -405,7 +405,7 @@ def test_messages_reply_outcome_uses_the_actual_selected_recipient(
     driver = _driver()
     assert driver is not None
 
-    assert driver.reply_outcome_expectation(outcome).result_for("Adaeze") == expected
+    assert driver.reply_outcome_expectation(outcome).result_for("Taylor") == expected
 
 
 @pytest.mark.parametrize(
@@ -459,7 +459,7 @@ def test_fixture_store_contains_distinct_conversations_and_history(tmp_path) -> 
 
     rows = store.recent_threads()
 
-    assert [row.sender for row in rows] == ["Adaeze", "Dele"]
+    assert [row.sender for row in rows] == ["Taylor", "Evan"]
     page = store.thread_message_page(rows[1], limit=8)
     assert page.has_older is True
     assert len(page.entries) == 8

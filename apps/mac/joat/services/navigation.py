@@ -599,7 +599,7 @@ class NavigationSession(Session):
         if ready.proximity is not None:
             # Keep the accepted request-bound fix for a conversational
             # correction in this same session. A follow-up such as "I meant
-            # OnCue, the gas station" should not fall back to an older fix.
+            # Shell, the gas station" should not fall back to an older fix.
             self._proximity = ready.proximity
         self._search_proximity = ready.proximity
         self._nearby_search = ready.nearby

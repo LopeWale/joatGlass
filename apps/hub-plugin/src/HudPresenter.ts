@@ -151,6 +151,8 @@ export interface ListSurfaceOptions {
   nativeTextPageFromEnd?: boolean;
   /** A review: its tap is offered only on the last local page. */
   reviewTapOnLastPage?: boolean;
+  /** Whether QuickNotes AI cues are enabled (false hides AI cues in the glasses menu). */
+  cuesEnabled?: boolean;
 }
 
 interface ResolvedListSurfaceOptions {
@@ -168,6 +170,7 @@ interface ResolvedListSurfaceOptions {
   nativeTextPage?: boolean;
   nativeTextPageFromEnd?: boolean;
   reviewTapOnLastPage?: boolean;
+  cuesEnabled?: boolean;
 }
 
 interface HudContentState {
@@ -210,16 +213,14 @@ const imageHeaderEnabled = String(import.meta.env.VITE_IMAGE_HEADER ?? '1') !== 
  * `VITE_EVEN_FONT_PAGES=1` brings the image readers back. */
 let evenFontPagesEnabled = String(import.meta.env.VITE_EVEN_FONT_PAGES ?? '0') === '1';
 /** Readers that stay firmware text pages even where Even-font pages are on.
- * A News article is long prose the wearer scrolls through page after page:
- * the firmware text pages in place (one upgrade per swipe) and draws every
- * stroke at full brightness, where the 55% image's thin strokes look faded
- * (the wearer, 2026-10-07). */
+ * A News article is long prose scrolled page after page: firmware text
+ * pages update in place (one upgrade per swipe) and draw strokes at full
+ * brightness rather than rasterized greyscale. */
 const FIRMWARE_TEXT_READERS = new Set(['NEWS · ARTICLE', QUICKNOTES_NOTE_TITLE]);
-/** Long text the glasses scroll themselves (ScrollBox): the Mac sends it
- * whole, and it reads as one scroll, a line a swipe, with no round trip
- * until a stretch's edge (the wearer's ruling after the hardware test,
- * 2026-10-14): a News article, a Search result, a Messages conversation
- * and a saved QuickNote (its note page and its exact text). */
+/** Long text the glasses scroll themselves (ScrollBox): the backend sends it
+ * whole, and it reads as one continuous scroll, a line per swipe, with no
+ * round trip until a stretch boundary: News articles, Search results,
+ * Messages/Mail conversations, and saved QuickNotes. */
 const SCROLL_BOX_READERS = new Set([
   'NEWS · ARTICLE', 'SEARCH · RESULT', 'MESSAGES · CONVERSATION', 'MAIL · CONVERSATION',
   'QUICKNOTES · NOTE', 'QUICKNOTES · DETAIL',
@@ -251,6 +252,15 @@ const QUICKNOTES_NOTE_MENU = [
   { id: QUICKNOTES_CUES_MENU_ID, name: QUICKNOTES_CUES_MENU_LABEL },
   { id: QUICKNOTES_PREP_MENU_ID, name: QUICKNOTES_PREP_MENU_LABEL },
 ] as const;
+
+const QUICKNOTES_NOTE_MENU_NO_CUES = [
+  { id: QUICKNOTES_UNDO_MENU_ID, name: QUICKNOTES_UNDO_MENU_LABEL },
+  { id: QUICKNOTES_PREP_MENU_ID, name: QUICKNOTES_PREP_MENU_LABEL },
+] as const;
+
+function quickNotesMenuLead(cuesEnabled?: boolean) {
+  return cuesEnabled === false ? QUICKNOTES_NOTE_MENU_NO_CUES : QUICKNOTES_NOTE_MENU;
+}
 /**
  * A Messages or Mail page scrolls on the glass instead of turning seven-line pages
  * (the wearer's ruling, 2026-10-11). The firmware scrolls an overflowing
@@ -2508,7 +2518,7 @@ export class HudPresenter {
         : textPageHint(page, shown.length, surface.options.hint, surface.options.reviewTapOnLastPage);
     const ok = await this.replaceNativePage(
       this.layouts.textPageLayout(body, { status: this.nativeHeader(surface.options.title), hint }, {
-        inset: true, ...(note ? { menuLead: QUICKNOTES_NOTE_MENU } : {}),
+        inset: true, ...(note ? { menuLead: quickNotesMenuLead(surface.options.cuesEnabled) } : {}),
         ...(box ? { scrollLines: SCROLL_BOX_LINES } : {}),
       }),
       'text-page-native',
@@ -2582,13 +2592,14 @@ export class HudPresenter {
    * false otherwise, and the caller draws it as a new page. The newest
    * words are the last page, so that is the page shown. */
   async updateLiveTextPage(
-    items: string[], options: { title: string; hint?: string; selectable?: boolean },
+    items: string[], options: { title: string; hint?: string; selectable?: boolean; cuesEnabled?: boolean },
   ): Promise<boolean> {
     const state = this.nativeTextPage;
     const surface = this.surface;
     if (this.confirmation || this.promptQuestion || !state || this.pageOwner !== 'text-page-native'
       || surface.kind !== 'list' || surface.options.title !== options.title
-      || !this.usesNativeTextPage(surface.options)) return false;
+      || !this.usesNativeTextPage(surface.options)
+      || (surface.options.cuesEnabled ?? true) !== (options.cuesEnabled ?? true)) return false;
     const displayCurrent = this.captureDisplayGuard();
     const macHint = options.hint ?? '';
     // The wearer swiped back to read earlier words: the page holds still and
@@ -4099,6 +4110,7 @@ export class HudPresenter {
       ...(options.nativeTextPage ? { nativeTextPage: true } : {}),
       ...(options.nativeTextPage && options.nativeTextPageFromEnd ? { nativeTextPageFromEnd: true } : {}),
       ...(options.nativeTextPage && options.reviewTapOnLastPage ? { reviewTapOnLastPage: true } : {}),
+      ...(typeof options.cuesEnabled === 'boolean' ? { cuesEnabled: options.cuesEnabled } : {}),
       ...(options.railTab ? { railTab: options.railTab } : {}),
       ...(reminderCard ? { reminderCard } : {}),
       ...(planningEntries ? { planningEntries } : {}),

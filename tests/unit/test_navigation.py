@@ -200,7 +200,7 @@ class TestNavigationSession:
     def test_requires_an_explicit_navigation_invocation(self) -> None:
         from joat.services.navigation import navigation_parsed_query
 
-        assert navigation_query("navigate to Cajun Corner") == "Cajun Corner"
+        assert navigation_query("navigate to Corner Bakery") == "Corner Bakery"
         assert navigation_query("Directions to 2301 N Lincoln Ave?") == (
             "2301 N Lincoln Ave"
         )
@@ -209,34 +209,34 @@ class TestNavigationSession:
         assert navigation_query("joat directions to 2301 N Lincoln Ave") == (
             "2301 N Lincoln Ave"
         )
-        assert navigation_query("Could you take me to the nearest OnCue near me?") == (
-            "the nearest OnCue near me"
+        assert navigation_query("Could you take me to the nearest Shell near me?") == (
+            "the nearest Shell near me"
         )
-        assert navigation_query("JOAT, please help me get to OnCue") == "OnCue"
+        assert navigation_query("JOAT, please help me get to Shell") == "Shell"
         assert navigation_query("How do I get to the airport?") == "the airport"
         assert navigation_query("What's the best way to the library?") == "the library"
         assert navigation_parsed_query("walk to Starbucks") == ("Starbucks", "walking")
         assert navigation_parsed_query("bike to the park") == ("the park", "cycling")
         assert navigation_parsed_query("cycle to the park") == ("the park", "cycling")
-        assert navigation_parsed_query("drive to Cajun Corner") == ("Cajun Corner", "driving")
+        assert navigation_parsed_query("drive to Corner Bakery") == ("Corner Bakery", "driving")
         assert navigation_parsed_query("drive home") == ("home", "driving")
         assert navigation_parsed_query("walk home") == ("home", "walking")
         assert navigation_parsed_query("bike home") == ("home", "cycling")
         assert navigation_parsed_query("navigate to Navy Pier") == ("Navy Pier", None)
-        assert navigation_query("Cajun Corner") is None
+        assert navigation_query("Corner Bakery") is None
         assert navigation_query("I talked about the way to the library") is None
 
     async def test_nearest_request_refreshes_phone_location_and_cleans_provider_query(
         self,
     ) -> None:
         candidate = NavigationCandidate(
-            choice_id="oncue-nearby",
-            label="OnCue",
+            choice_id="shell-nearby",
+            label="Shell",
             address="1201 N Main St",
-            point=NavigationPoint(latitude=35.480, longitude=-97.520),
+            point=NavigationPoint(latitude=41.890, longitude=-87.620),
         )
         provider = FakeProvider([candidate])
-        refreshed = NavigationPoint(latitude=35.475, longitude=-97.520)
+        refreshed = NavigationPoint(latitude=41.885, longitude=-87.620)
         refresh_calls = 0
 
         async def refresh_proximity() -> NavigationPoint | None:
@@ -246,10 +246,10 @@ class TestNavigationSession:
 
         transport = SinkTransport()
         session = NavigationSession(
-            "the nearest OnCue near me",
+            "the nearest Shell near me",
             provider,
             transport,
-            session_id="nav-nearest-oncue",
+            session_id="nav-nearest-shell",
             proximity=NavigationPoint(latitude=0, longitude=0),
             refresh_proximity=refresh_proximity,
         )
@@ -258,18 +258,18 @@ class TestNavigationSession:
         destination = await wait_for(transport, NavigationView)
         assert isinstance(destination, NavigationView)
         assert refresh_calls == 1
-        assert provider.searches == ["OnCue"]
+        assert provider.searches == ["Shell"]
         assert provider.search_proximities == [refreshed]
         assert "About " in destination.navigation.secondary
         assert "1201 N Main St" in destination.navigation.secondary
 
-        assert session.consume_transcript("I meant OnCue, the gas station") is True
+        assert session.consume_transcript("I meant Shell, the gas station") is True
         for _ in range(100):
             if len(provider.searches) == 2:
                 break
             await asyncio.sleep(0)
         assert refresh_calls == 1
-        assert provider.searches == ["OnCue", "OnCue gas station"]
+        assert provider.searches == ["Shell", "Shell gas station"]
         assert provider.search_proximities == [refreshed, refreshed]
 
         session.cancel()
@@ -285,7 +285,7 @@ class TestNavigationSession:
 
         transport = SinkTransport()
         session = NavigationSession(
-            "closest OnCue",
+            "closest Shell",
             provider,
             transport,
             session_id="nav-nearest-no-location",
@@ -310,10 +310,10 @@ class TestNavigationSession:
             choice_id="library",
             label="Downtown Library",
             address="300 Park Ave",
-            point=NavigationPoint(latitude=35.48, longitude=-97.52),
+            point=NavigationPoint(latitude=41.89, longitude=-87.62),
         )
         provider = FakeProvider([candidate])
-        cached = NavigationPoint(latitude=35.47, longitude=-97.51)
+        cached = NavigationPoint(latitude=41.88, longitude=-87.61)
 
         async def must_not_refresh() -> NavigationPoint | None:
             raise AssertionError("ordinary destinations do not require a new phone fix")
@@ -342,15 +342,15 @@ class TestNavigationSession:
         self,
     ) -> None:
         candidate = NavigationCandidate(
-            choice_id="oncue",
-            label="OnCue",
+            choice_id="shell",
+            label="Shell",
             address="1201 N Main St",
-            point=NavigationPoint(latitude=35.48, longitude=-97.52),
+            point=NavigationPoint(latitude=41.89, longitude=-87.62),
         )
         provider = FakeProvider([candidate])
         transport = SinkTransport()
         session = NavigationSession(
-            "Onsen",
+            "Shelf",
             provider,
             transport,
             session_id="nav-spoken-correction",
@@ -358,13 +358,13 @@ class TestNavigationSession:
         task = asyncio.create_task(session.run())
         await wait_for(transport, NavigationView)
 
-        assert session.consume_transcript("No, I mean OnCue, the gas station") is True
+        assert session.consume_transcript("No, I mean Shell, the gas station") is True
         for _ in range(100):
             if len(provider.searches) == 2:
                 break
             await asyncio.sleep(0)
 
-        assert provider.searches == ["Onsen", "OnCue gas station"]
+        assert provider.searches == ["Shelf", "Shell gas station"]
         assert session.consume_transcript("That gas station is new") is False
 
         session.cancel()
@@ -381,13 +381,13 @@ class TestNavigationSession:
             raising=False,
         )
         candidate = NavigationCandidate(
-            choice_id="place-1", label="Cajun Corner",
+            choice_id="place-1", label="Corner Bakery",
             address="2301 N Lincoln Ave, Chicago",
             point=NavigationPoint(latitude=41.92, longitude=-87.65),
         )
         transport = SinkTransport()
         session = NavigationSession(
-            "Cajun Corner", FakeProvider([candidate]), transport,
+            "Corner Bakery", FakeProvider([candidate]), transport,
             session_id="nav-voice-controls",
         )
         task = asyncio.create_task(session.run())
@@ -423,18 +423,18 @@ class TestNavigationSession:
     ) -> None:
         candidates = [
             NavigationCandidate(
-                choice_id="west", label="Cajun Corner West",
+                choice_id="west", label="Corner Bakery West",
                 address="100 W Main St", point=NavigationPoint(1, 1),
             ),
             NavigationCandidate(
-                choice_id="east", label="Cajun Corner East",
+                choice_id="east", label="Corner Bakery East",
                 address="100 E Main St", point=NavigationPoint(2, 2),
             ),
         ]
         provider = FakeProvider(candidates)
         transport = SinkTransport()
         session = NavigationSession(
-            "Cajun Corner", provider, transport, session_id="nav-voice-complete",
+            "Corner Bakery", provider, transport, session_id="nav-voice-complete",
         )
         task = asyncio.create_task(session.run())
 
@@ -444,7 +444,7 @@ class TestNavigationSession:
         assert session.consume_transcript("second") is True
         destination = await wait_for(transport, NavigationView, count=2)
         assert isinstance(destination, NavigationView)
-        assert destination.navigation.primary == "Cajun Corner East"
+        assert destination.navigation.primary == "Corner Bakery East"
         assert session.consume_transcript("confirm") is True
         mode = await wait_for(transport, NavigationView, count=3)
         assert isinstance(mode, NavigationView)
@@ -476,13 +476,13 @@ class TestNavigationSession:
 
     async def test_voice_can_replace_an_active_destination_or_stop_navigation(self) -> None:
         candidate = NavigationCandidate(
-            choice_id="place-1", label="Cajun Corner", address="2301 N Lincoln Ave",
+            choice_id="place-1", label="Corner Bakery", address="2301 N Lincoln Ave",
             point=NavigationPoint(1, 1),
         )
         provider = FakeProvider([candidate])
         transport = SinkTransport()
         session = NavigationSession(
-            "Cajun Corner", provider, transport, session_id="nav-voice-replace",
+            "Corner Bakery", provider, transport, session_id="nav-voice-replace",
         )
         task = asyncio.create_task(session.run())
         await wait_for(transport, NavigationView)
@@ -492,7 +492,7 @@ class TestNavigationSession:
             if provider.searches[-1:] == ["the library"]:
                 break
             await asyncio.sleep(0)
-        assert provider.searches == ["Cajun Corner", "the library"]
+        assert provider.searches == ["Corner Bakery", "the library"]
         assert session.consume_transcript("stop navigation") is True
         await task
         assert isinstance(transport.sent[-1], NavigationStop)
@@ -557,13 +557,13 @@ class TestNavigationSession:
             raising=False,
         )
         candidate = NavigationCandidate(
-            choice_id="place-1", label="Cajun Corner",
+            choice_id="place-1", label="Corner Bakery",
             address="2301 N Lincoln Ave, Chicago",
             point=NavigationPoint(latitude=41.92, longitude=-87.65),
         )
         transport = SinkTransport()
         session = NavigationSession(
-            "Cajun Corner", FakeProvider([candidate]), transport,
+            "Corner Bakery", FakeProvider([candidate]), transport,
             session_id="nav-origin-failure",
         )
         task = asyncio.create_task(session.run())
@@ -603,13 +603,13 @@ class TestNavigationSession:
 
     async def test_left_temple_cancel_is_honored_while_location_is_pending(self) -> None:
         candidate = NavigationCandidate(
-            choice_id="place-1", label="Cajun Corner",
+            choice_id="place-1", label="Corner Bakery",
             address="2301 N Lincoln Ave, Chicago",
             point=NavigationPoint(latitude=41.92, longitude=-87.65),
         )
         transport = SinkTransport()
         session = NavigationSession(
-            "Cajun Corner", FakeProvider([candidate]), transport,
+            "Corner Bakery", FakeProvider([candidate]), transport,
             session_id="nav-cancel-locating",
         )
         task = asyncio.create_task(session.run())
@@ -714,21 +714,21 @@ class TestNavigationSession:
 
     async def test_canonical_confirmation_mode_origin_preview_and_route_install(self) -> None:
         candidate = NavigationCandidate(
-            choice_id="place-1", label="Cajun Corner",
+            choice_id="place-1", label="Corner Bakery",
             address="2301 N Lincoln Ave, Chicago",
             point=NavigationPoint(latitude=41.92, longitude=-87.65),
         )
         provider = FakeProvider([candidate])
         transport = SinkTransport()
         session = NavigationSession(
-            "Cajun Corner", provider, transport, session_id="nav-test",
+            "Corner Bakery", provider, transport, session_id="nav-test",
         )
         task = asyncio.create_task(session.run())
 
         destination = await wait_for(transport, NavigationView)
         assert isinstance(destination, NavigationView)
         assert destination.navigation.view == "destination"
-        assert destination.navigation.primary == "Cajun Corner"
+        assert destination.navigation.primary == "Corner Bakery"
         assert "2301 N Lincoln" in destination.navigation.secondary
         assert destination.navigation.hint == "tap/say confirm · swipe retry"
 
@@ -770,7 +770,7 @@ class TestNavigationSession:
         assert starting.navigation.interaction == "none"
         route = await wait_for(transport, NavigationRoute)
         assert isinstance(route, NavigationRoute)
-        assert route.destination_label == "Cajun Corner"
+        assert route.destination_label == "Corner Bakery"
         assert provider.routes[0][2] == "walking"
         session.accept_route_ack(NavigationRouteAck(
             session_id="nav-test", route_id="route-1", revision=1,
@@ -792,7 +792,7 @@ class TestNavigationSession:
         assert session.completion_state != "arrived"
         assert len([m for m in transport.sent if isinstance(m, NavigationRoute)]) == 1
         assert session.consume_transcript("ambient room speech") is False
-        assert provider.searches == ["Cajun Corner"]
+        assert provider.searches == ["Corner Bakery"]
         session.accept_reroute(NavigationRerouteRequest(
             session_id="nav-test", route_id="route-1", base_revision=1,
             request_id="reroute-1", latitude=41.905, longitude=-87.645,
@@ -839,19 +839,19 @@ class TestNavigationSession:
     async def test_ambiguous_candidate_selection_and_spoken_retry_preserve_canonical_loop(self) -> None:
         candidates = [
             NavigationCandidate(
-                choice_id="west", label="Cajun Corner West",
+                choice_id="west", label="Corner Bakery West",
                 address="100 W Main St", point=NavigationPoint(1, 1),
                 repair_hint="street direction",
             ),
             NavigationCandidate(
-                choice_id="east", label="Cajun Corner East",
+                choice_id="east", label="Corner Bakery East",
                 address="100 E Main St", point=NavigationPoint(2, 2),
                 repair_hint="street direction",
             ),
         ]
         provider = FakeProvider(candidates)
         transport = SinkTransport()
-        session = NavigationSession("Cajun Corner", provider, transport, session_id="nav-test")
+        session = NavigationSession("Corner Bakery", provider, transport, session_id="nav-test")
         task = asyncio.create_task(session.run())
 
         repair = await wait_for(transport, NavigationView)
@@ -868,7 +868,7 @@ class TestNavigationSession:
                 break
             await asyncio.sleep(0)
         chosen = views[-1]
-        assert chosen.navigation.primary == "Cajun Corner East"
+        assert chosen.navigation.primary == "Corner Bakery East"
 
         session.accept_action(action(chosen, "retry_destination"))
         retry = await wait_for(transport, NavigationView, count=3)
@@ -879,7 +879,7 @@ class TestNavigationSession:
             if provider.searches[-1] == "100 West Main Street":
                 break
             await asyncio.sleep(0)
-        assert provider.searches == ["Cajun Corner", "100 West Main Street"]
+        assert provider.searches == ["Corner Bakery", "100 West Main Street"]
         session.cancel()
         await task
 
@@ -1102,14 +1102,14 @@ class TestRouteTilePrefetch:
 
         monkeypatch.setattr(navigation_service, "render_map_tile", fake_tile)
         candidate = NavigationCandidate(
-            choice_id="place-1", label="Cajun Corner",
+            choice_id="place-1", label="Corner Bakery",
             address="2301 N Lincoln Ave, Chicago",
             point=NavigationPoint(latitude=41.92, longitude=-87.65),
         )
         provider = FakeProvider([candidate])
         transport = SinkTransport()
         session = NavigationSession(
-            "Cajun Corner", provider, transport, session_id="nav-test", map_token="map-token",
+            "Corner Bakery", provider, transport, session_id="nav-test", map_token="map-token",
         )
         task = asyncio.create_task(session.run())
         try:
@@ -1178,7 +1178,7 @@ class TestSavedPlaces:
 
         saved = [SavedPlace(place_id="p2", name="Work", address="2301 N Lincoln Ave, Chicago")]
         candidate = NavigationCandidate(
-            choice_id="place-1", label="Cajun Corner",
+            choice_id="place-1", label="Corner Bakery",
             address="2301 N Lincoln Ave, Chicago",
             point=NavigationPoint(latitude=41.92, longitude=-87.65),
         )
@@ -1205,21 +1205,21 @@ class TestSavedPlaces:
 
         saved = [SavedPlace(place_id="p1", name="Home", address="12 Oak St")]
         candidate = NavigationCandidate(
-            choice_id="place-1", label="Cajun Corner",
+            choice_id="place-1", label="Corner Bakery",
             address="2301 N Lincoln Ave, Chicago",
             point=NavigationPoint(latitude=41.92, longitude=-87.65),
         )
         provider = FakeProvider([candidate])
         transport = SinkTransport()
         session = NavigationSession(
-            "Cajun Corner", provider, transport, session_id="nav-test", places=lambda: saved,
+            "Corner Bakery", provider, transport, session_id="nav-test", places=lambda: saved,
         )
         task = asyncio.create_task(session.run())
         try:
             destination = await wait_for(transport, NavigationView)
             assert isinstance(destination, NavigationView)
-            assert destination.navigation.primary == "Cajun Corner"
-            assert provider.searches == ["Cajun Corner"]
+            assert destination.navigation.primary == "Corner Bakery"
+            assert provider.searches == ["Corner Bakery"]
         finally:
             session.cancel()
             await task
@@ -1262,14 +1262,14 @@ class TestSavedPlaces:
                 )
 
         candidate = NavigationCandidate(
-            choice_id="place-1", label="Cajun Corner",
+            choice_id="place-1", label="Corner Bakery",
             address="2301 N Lincoln Ave, Chicago",
             point=NavigationPoint(latitude=41.92, longitude=-87.65),
         )
         provider = DrivingProvider([candidate])
         transport = SinkTransport()
         session = NavigationSession(
-            "drive to Cajun Corner", provider, transport,
+            "drive to Corner Bakery", provider, transport,
             session_id="nav-drive-test", map_token="map-token",
         )
         task = asyncio.create_task(session.run())
@@ -1277,7 +1277,7 @@ class TestSavedPlaces:
             destination = await wait_for(transport, NavigationView)
             assert isinstance(destination, NavigationView)
             assert destination.navigation.view == "destination"
-            assert provider.searches == ["Cajun Corner"]
+            assert provider.searches == ["Corner Bakery"]
 
             # Confirming destination skips _show_mode and goes directly to locating / origin request!
             session.accept_action(action(destination, "confirm_destination"))
@@ -1314,13 +1314,13 @@ class TestSavedPlaces:
     @pytest.mark.asyncio
     async def test_mode_view_accepts_spoken_drive_command(self) -> None:
         candidate = NavigationCandidate(
-            choice_id="place-1", label="Cajun Corner",
+            choice_id="place-1", label="Corner Bakery",
             address="2301 N Lincoln Ave, Chicago",
             point=NavigationPoint(latitude=41.92, longitude=-87.65),
         )
         provider = FakeProvider([candidate])
         transport = SinkTransport()
-        session = NavigationSession("Cajun Corner", provider, transport, session_id="nav-voice-drive")
+        session = NavigationSession("Corner Bakery", provider, transport, session_id="nav-voice-drive")
         task = asyncio.create_task(session.run())
         try:
             destination = await wait_for(transport, NavigationView)

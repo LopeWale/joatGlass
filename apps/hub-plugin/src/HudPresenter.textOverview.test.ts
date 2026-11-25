@@ -187,11 +187,11 @@ describe('Home as firmware text', () => {
     expect(pane(h).split('\n')[0]).toBe('Waiting for JOAT on your Mac…');
     await h.hud.acceptPanel({
       kind: 'hud.panel', tab: 'planner', revision: 1,
-      rows: ['[Late] Send the Q3 invoice', '[09:00] Call the bank', '[Tmrw] Run the alarm history script', '+2 more'],
+      rows: ['[Late] Send the Q3 invoice', '[09:00] Call the bank', '[Tmrw] Run the release smoke suite', '+2 more'],
     });
     expect(h.hud.activeTab()).toBe('planner');
     expect(pane(h).split('\n').slice(0, 4)).toEqual([
-      'Send the Q3 invoice', 'Call the bank', 'Run the alarm history script', '+2 more',
+      'Send the Q3 invoice', 'Call the bank', 'Run the release smoke suite', '+2 more',
     ]);
     expect(pane(h, 'pane-l').split('\n').slice(0, 3)).toEqual(['Late', '09:00', 'Tmrw']);
     // An empty list says what it means and how to open Reminders.

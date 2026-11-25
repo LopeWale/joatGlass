@@ -85,7 +85,7 @@ class ReplyOutcomeExpectation:
     @property
     def result_text(self) -> str:
         """Legacy fixed-recipient contract used by the unit-level matrix."""
-        return self.result_for("Dele")
+        return self.result_for("Evan")
 
     def result_for(self, recipient: str) -> str:
         """Expected production wording for the thread actually selected."""
@@ -547,10 +547,10 @@ def build_fixture_store(path: Path) -> IMessageStore:
         CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
         CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
 
-        INSERT INTO handle VALUES ('fixture-dele');
-        INSERT INTO handle VALUES ('fixture-adaeze');
-        INSERT INTO chat VALUES ('Dele');
-        INSERT INTO chat VALUES ('Adaeze');
+        INSERT INTO handle VALUES ('fixture-evan');
+        INSERT INTO handle VALUES ('fixture-taylor');
+        INSERT INTO chat VALUES ('Evan');
+        INSERT INTO chat VALUES ('Taylor');
         INSERT INTO chat_handle_join VALUES (1, 1);
         INSERT INTO chat_handle_join VALUES (2, 2);
 
@@ -940,7 +940,7 @@ async def run(
                     initial_selection_receipt_input(flow),
                 ))
             if flow == "history":
-                # Select the fixture Dele conversation, then use official
+                # Select the fixture Evan conversation, then use official
                 # simulator scroll input. No voice command or confirmation is
                 # injected: this trace is deliberately a no-send page-routing
                 # proof, not a Messages.app submission test.

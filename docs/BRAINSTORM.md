@@ -151,9 +151,8 @@ The advance is MEASURED, not assumed: a 63-character row rendered by the
 real simulator spans 326px, so 5.18px per character.
 
 That column used to be 504px (x=36 to x=540) in a monospace face at 74
-columns, and this paragraph said so for a release after the face changed —
-which is what the wearer saw: "why are some words being cut off when there
-is obviously room on the right". Both numbers move together. If the font
+columns, which clipped lines prematurely while leaving empty margin on the
+right. Both numbers move together. If the font
 or the column changes again, **this paragraph is wrong until it is
 re-derived**, and `BRAINSTORM_ROW_COLUMNS` in `core/protocol.py` carries
 the derivation next to the constant.

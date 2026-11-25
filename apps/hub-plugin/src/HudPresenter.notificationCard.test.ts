@@ -230,7 +230,7 @@ describe('notification card', () => {
     const r = rig();
     await r.hud.showDefault();
     r.hud.acceptNotifications([
-      { id: id(1), app: 'Messages', sender: 'Adele', body: 'Running 5 minutes late', at: baseTime - 10_000, urgent: false },
+      { id: id(1), app: 'Messages', sender: 'Casey', body: 'Running 5 minutes late', at: baseTime - 10_000, urgent: false },
     ]);
     expect(await r.hud.browseNotifications()).toBe(true);
     await vi.advanceTimersByTimeAsync(10);

@@ -156,6 +156,8 @@ func runEntry() {
     }
 }
 #else
+import UIKit
+import PencilKit
 
 // MARK: - Assertions & Mock Infrastructure
 
@@ -679,7 +681,7 @@ private func testPromptsMultiClauseFenceAndMessagesSync() async {
         "Opaque Mac thread label omits '(…)' suffix"
     )
     expectEqual(
-        Messages.confirmHandleSuffix(label: "Maya Lin", recipient: "+14055551234", isGroup: false),
+        Messages.confirmHandleSuffix(label: "Maya Lin", recipient: "+13125551234", isGroup: false),
         " (…1234)",
         "Phone number recipient renders last 4 digits"
     )
@@ -1165,12 +1167,206 @@ private func testGlassesTerminalThreeLevelsGesturesAndActivity() async {
     brain.capabilities.openHome()
 }
 
+// MARK: - 5. Post-Close-Only Note Summaries (All Note Types) & AI Cues Off Parity
+
+@MainActor
+private func testNotesCloseOnlySummaryAllNoteTypesAndCuesOff() async {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [MockRelayURLProtocol.self]
+    let mockSession = URLSession(configuration: config)
+
+    let prevEngineChoice = OnPhoneAI.shared.engineChoice
+    OnPhoneAI.shared.engineChoice = .mac
+    defer { OnPhoneAI.shared.engineChoice = prevEngineChoice }
+
+    var summaryCallCount = 0
+    var summaryVersion = 1
+    MockRelayURLProtocol.install { req, body in
+        let path = req.url?.path ?? ""
+        if path.hasSuffix("/agent") {
+            let messages = body?["messages"] as? [[String: Any]] ?? []
+            let promptText = messages.compactMap { $0["content"] as? String }.joined(separator: "\n")
+            if promptText.contains("TITLE:") && promptText.contains("OVERVIEW:") {
+                summaryCallCount += 1
+                let reply = """
+                TITLE:
+                Design Review v\(summaryVersion)
+                OVERVIEW:
+                Summary v\(summaryVersion) generated after closing the modified note.
+                KEY POINTS:
+                - Finalized launch checklist v\(summaryVersion)
+                NEXT STEPS:
+                - Send Liam the slide deck
+                """
+                let resp: [String: Any] = ["choices": [["message": ["content": reply]]]]
+                return .init(statusCode: 200, body: try! JSONSerialization.data(withJSONObject: resp))
+            }
+            if promptText.contains("TASK:") && promptText.contains("QUOTE:") {
+                let resp: [String: Any] = ["choices": [["message": ["content": "NONE"]]]]
+                return .init(statusCode: 200, body: try! JSONSerialization.data(withJSONObject: resp))
+            }
+            // Any cue call
+            let resp: [String: Any] = ["choices": [["message": ["content": "CONCEPT | Latency | Round-trip budget under 120 ms."]]]]
+            return .init(statusCode: 200, body: try! JSONSerialization.data(withJSONObject: resp))
+        }
+        return .init(statusCode: 200, body: Data("{}".utf8))
+    }
+
+    let tempNotesDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("joat_test_qn_\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: tempNotesDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempNotesDir) }
+
+    let link = RecordingLink()
+    let hud = Hud(link: link)
+    let qn = QuickNotes(link: link, hud: hud, directory: tempNotesDir)
+    let macLink = MacLink(
+        config: MacLink.Config(url: "https://mac-mini.example.ts.net/agent", token: "agent-tok"),
+        session: mockSession
+    )
+    qn.macLink = macLink
+    let panels = PanelPublisher(link: link)
+    let confirm = ConfirmGate(link: link)
+    let reminders = Reminders(link: link, hud: hud, confirm: confirm)
+    let cards = Cards(link: link, defaults: UserDefaults(suiteName: "joat.test.notecards.\(UUID().uuidString)")!)
+    let menu = CapabilityMenu(link: link, panels: panels, reminders: reminders, cards: cards, quickNotes: qn)
+    qn.menu = menu
+
+    // 5a. Open a PageView, edit it, wait past the old 4.0 s idle window:
+    // ZERO summary calls and ZERO store-reload spam while editing, even if retryPendingInsights() runs!
+    var storeReloadsWhileEditing = 0
+    qn.onStoreChange = { storeReloadsWhileEditing += 1 }
+
+    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+    let page = PageView(noteId: nil, typed: "", rich: nil, drawing: PKDrawing(), quickNotes: qn)
+    page.frame = window.bounds
+    window.addSubview(page)
+    page.layoutIfNeeded()
+    storeReloadsWhileEditing = 0
+
+    expect(qn.isEditingPage(page.pageId), "QuickNotes tracks active open page while PageView is mounted")
+    page.textView.text = "Review Q4 launch latency budget and QA sign-off owner."
+    page.textViewDidChange(page.textView)
+
+    // Wait 4.3 s (past both the 1.2 s/2.0 s auto-save debounce AND the old 4.0 s OCR/summary idle timer)
+    try? await Task.sleep(nanoseconds: 4_300_000_000)
+    qn.retryPendingInsights()
+    try? await Task.sleep(nanoseconds: 150_000_000)
+
+    expectEqual(summaryCallCount, 0, "Zero AI summary calls while the page is still open and being edited")
+    expectEqual(storeReloadsWhileEditing, 0, "Quiet mid-edit auto-save does not trigger SwiftUI store reload spam")
+
+    // Now close the modified page: summary runs ONCE on close!
+    _ = page.closeAndSettle(quickNotes: qn)
+    page.removeFromSuperview()
+    expect(!qn.isEditingPage(page.pageId), "Page is no longer marked editing after closeAndSettle")
+
+    for _ in 0..<40 where (qn.savedNotes.first { $0.id == page.pageId }?.summary) == nil {
+        try? await Task.sleep(nanoseconds: 25_000_000)
+    }
+    let settledPage = qn.savedNotes.first { $0.id == page.pageId }
+    expectEqual(summaryCallCount, 1, "Closing a modified page triggers exactly one post-close AI summary")
+    expectEqual(
+        settledPage?.summary,
+        "Summary v1 generated after closing the modified note.",
+        "Closed modified page receives AI summary"
+    )
+
+    // 5b. Quick Text Note: post-save AI summary AND post-update AI summary!
+    summaryVersion = 2
+    _ = qn.handle("take a note confirm the battery calibration results before Friday afternoon")
+    for _ in 0..<40 where qn.textNotes.first?.summary == nil {
+        try? await Task.sleep(nanoseconds: 25_000_000)
+    }
+    expectEqual(
+        qn.textNotes.first?.summary,
+        "Summary v2 generated after closing the modified note.",
+        "Quick Text Note receives AI summary after creation"
+    )
+    if let textId = qn.textNotes.first?.id {
+        summaryVersion = 3
+        qn.updateTextNote(textId, text: "Updated text note: ship the final hardware test report on Monday.")
+        for _ in 0..<40 where qn.textNotes.first?.summary != "Summary v3 generated after closing the modified note." {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        expectEqual(
+            qn.textNotes.first?.summary,
+            "Summary v3 generated after closing the modified note.",
+            "Modified Quick Text Note updates its AI summary once saved"
+        )
+    }
+
+    // 5c. `AI cues during QuickNotes` (`Cues.enabledKey`) OFF applies across Cues, live glasses menu, and reader!
+    let prevCuesPref = UserDefaults.standard.object(forKey: Cues.enabledKey)
+    defer {
+        if let prevCuesPref {
+            UserDefaults.standard.set(prevCuesPref, forKey: Cues.enabledKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Cues.enabledKey)
+        }
+    }
+    UserDefaults.standard.set(false, forKey: Cues.enabledKey)
+
+    let cues = Cues(claude: ClaudeLink())
+    qn.cues = cues
+    MockRelayURLProtocol.clearRequests()
+    link.clear()
+
+    _ = qn.handle("start a voice note called Weekly Sync")
+    let liveOffFrame = link.sent.last { $0.string("kind") == "hud.list" && $0.string("title") == QuickNotes.liveTitle }
+    expectEqual(liveOffFrame?.bool("cuesEnabled"), false, "Live QuickNote carries cuesEnabled=false when AI cues are off")
+
+    qn.heard("What is our target p95 latency for the March release and who owns sign-off?", audioEnd: Date())
+    expectEqual(MockRelayURLProtocol.recordedRequests().count, 0, "Zero cue requests while AI cues are off")
+    expect(cues.given.isEmpty, "Zero cues generated while AI cues are off")
+
+    // Toggling AI cues ON mid-recording updates the live glasses page with cuesEnabled=true;
+    // toggling back OFF updates cuesEnabled=false immediately!
+    link.clear()
+    UserDefaults.standard.set(true, forKey: Cues.enabledKey)
+    NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: nil)
+    for _ in 0..<20 where link.sent.last(where: { $0.string("title") == QuickNotes.liveTitle }) == nil {
+        try? await Task.sleep(nanoseconds: 20_000_000)
+    }
+    expectEqual(
+        link.sent.last { $0.string("title") == QuickNotes.liveTitle }?.bool("cuesEnabled"),
+        true,
+        "Toggling AI cues ON repaints live QuickNote with cuesEnabled=true"
+    )
+
+    link.clear()
+    UserDefaults.standard.set(false, forKey: Cues.enabledKey)
+    NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: nil)
+    for _ in 0..<20 where link.sent.last(where: { $0.string("title") == QuickNotes.liveTitle }) == nil {
+        try? await Task.sleep(nanoseconds: 20_000_000)
+    }
+    expectEqual(
+        link.sent.last { $0.string("title") == QuickNotes.liveTitle }?.bool("cuesEnabled"),
+        false,
+        "Toggling AI cues OFF repaints live QuickNote with cuesEnabled=false"
+    )
+
+    // Stop the voice note and verify it STILL gets its post-session AI summary even with AI cues OFF!
+    summaryVersion = 4
+    _ = qn.handle("stop voice note")
+    for _ in 0..<180 where (qn.savedNotes.first { $0.title == "Weekly Sync" || $0.title == "Design Review v4" }?.summary) == nil {
+        try? await Task.sleep(nanoseconds: 25_000_000)
+    }
+    let savedVoice = qn.savedNotes.first { $0.page != true }
+    expectEqual(
+        savedVoice?.summary,
+        "Summary v4 generated after closing the modified note.",
+        "Voice QuickNote still gets its post-close AI summary when AI cues are off"
+    )
+}
+
 func runEntry() {
     let sema = DispatchSemaphore(value: 0)
     Task { @MainActor in
         await testCardsPersistenceDedupTimestampsAndOrdering()
         await testPromptsMultiClauseFenceAndMessagesSync()
         await testGlassesTerminalThreeLevelsGesturesAndActivity()
+        await testNotesCloseOnlySummaryAllNoteTypesAndCuesOff()
         print("PASS: all \(passedAssertions) phone-brain surfaces, notifications, and multi-clause prompt assertions succeeded.")
         sema.signal()
     }

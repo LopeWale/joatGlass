@@ -16,12 +16,12 @@ def _contacts_db(path: Path) -> Path:
         );
         CREATE TABLE ZABCDPHONENUMBER (ZFULLNUMBER TEXT, ZOWNER INTEGER);
         CREATE TABLE ZABCDEMAILADDRESS (ZADDRESS TEXT, ZOWNER INTEGER);
-        INSERT INTO ZABCDRECORD VALUES (1, 'Adele', 'Vance', '');
-        INSERT INTO ZABCDRECORD VALUES (2, 'Adele', 'Okafor', '');
-        INSERT INTO ZABCDRECORD VALUES (3, 'Dele', 'Akin', '');
-        INSERT INTO ZABCDPHONENUMBER VALUES ('+1 (405) 555-0177', 1);
-        INSERT INTO ZABCDEMAILADDRESS VALUES ('adele.okafor@example.com', 2);
-        INSERT INTO ZABCDPHONENUMBER VALUES ('+1 405 555 0199', 3);
+        INSERT INTO ZABCDRECORD VALUES (1, 'Casey', 'Vance', '');
+        INSERT INTO ZABCDRECORD VALUES (2, 'Casey', 'Rivera', '');
+        INSERT INTO ZABCDRECORD VALUES (3, 'Evan', 'Lee', '');
+        INSERT INTO ZABCDPHONENUMBER VALUES ('+1 (312) 555-0177', 1);
+        INSERT INTO ZABCDEMAILADDRESS VALUES ('casey.rivera@example.com', 2);
+        INSERT INTO ZABCDPHONENUMBER VALUES ('+1 312 555 0199', 3);
     """)
     connection.commit()
     connection.close()
@@ -34,11 +34,11 @@ def test_contact_search_returns_mac_owned_candidates_without_guessing(
     monkeypatch.setattr(contacts, "_SOURCES", (str(_contacts_db(tmp_path / "contacts.db")),))
     resolver = contacts.ContactResolver()
 
-    assert resolver.search("adele") == [
-        ("Adele Okafor", "adele.okafor@example.com"),
-        ("Adele Vance", "+1 (405) 555-0177"),
+    assert resolver.search("casey") == [
+        ("Casey Rivera", "casey.rivera@example.com"),
+        ("Casey Vance", "+1 (312) 555-0177"),
     ]
-    assert resolver.search("Adele Vance") == [
-        ("Adele Vance", "+1 (405) 555-0177"),
+    assert resolver.search("Casey Vance") == [
+        ("Casey Vance", "+1 (312) 555-0177"),
     ]
     assert resolver.search("unknown") == []

@@ -37,7 +37,7 @@ class Confirm:
         return self.accept
 
 
-CONTACTS = {"sam": [("Sam Okafor", "+14155550111")], "alex": [("Alex Rivera", "+1"), ("Alex Chen", "+2")]}
+CONTACTS = {"sam": [("Sam Rivera", "+14155550111")], "alex": [("Alex Rivera", "+1"), ("Alex Chen", "+2")]}
 
 
 ALL = [pair for pairs in CONTACTS.values() for pair in pairs]
@@ -73,7 +73,7 @@ async def m6() -> None:
         print("after remembering  :", status.state, "| recipient:", status.recipient_name, "| prompt:", confirm.prompts[-1:] )
         print("sent               :", sender.sent)
         ok = (first.state == "awaiting_input" and first.needs_input == "recipient"
-              and status.recipient_name == "Sam Okafor" and sender.sent == [("+14155550111", "home at six")])
+              and status.recipient_name == "Sam Rivera" and sender.sent == [("+14155550111", "home at six")])
         print("M6 verdict:", "PASS" if ok else "FAIL")
         await replies.aclose()
 
@@ -97,7 +97,7 @@ async def m7() -> None:
     print("reviewed           :", [(l, len(b)) for l, b in reviews])
     print("confirmation prompt:", prompt, f"({utf16_units(prompt)} units, cap {CONFIRM_PROMPT_MAX_UTF16_UNITS})")
     print("sent               :", [(r, len(t)) for r, t in sender.sent])
-    ok = (reviews == [("Sam Okafor", long_body)] and utf16_units(prompt) <= CONFIRM_PROMPT_MAX_UTF16_UNITS
+    ok = (reviews == [("Sam Rivera", long_body)] and utf16_units(prompt) <= CONFIRM_PROMPT_MAX_UTF16_UNITS
           and "(reviewed)" in prompt and sender.sent == [("+14155550111", long_body)])
     print("M7 verdict:", "PASS" if ok else "FAIL")
     await replies.aclose()

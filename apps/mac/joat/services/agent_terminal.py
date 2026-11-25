@@ -2036,10 +2036,8 @@ _SWITCH = re.compile(
 
 # Cross-surface routing: JOAT is the glue between Brainstorm and this
 # terminal. "Send Claude's last reply to Hermes" takes a collaborator's
-# whole answer out of the discussion and hands it to a work session —
-# the wearer's own words for what they are building: "the JOAT assistant
-# should be able to take anything and do something i ask it to do with
-# it". Matched against the normalized transcript, where "Claude's"
+# whole answer out of the discussion and hands it to a work session.
+# Matched against the normalized transcript, where "Claude's"
 # arrives as "claude s".
 _ROUTE_REPLY = re.compile(
     # "give/pass/hand/push that to hermes" are how people say this out

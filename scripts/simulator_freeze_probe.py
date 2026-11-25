@@ -114,7 +114,7 @@ async def main() -> None:
         with DurableStore(rootp / "joat.sqlite3") as durable:
             notes, voice_notes = NoteStore(durable), VoiceNoteStore(durable)
             cards = CardLog()
-            cards.add(Card(source="Dele", channel="Messages", summary="Call me when you arrive."))
+            cards.add(Card(source="Evan", channel="Messages", summary="Call me when you arrive."))
             gateway = HubGatewayTransport(host="127.0.0.1", port=18791)
             gateway.on_hello(lambda _h: connected.set())
             hud = HudWriter(gateway)

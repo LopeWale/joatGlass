@@ -26,8 +26,8 @@ class TestParseCall:
     def test_clean_call_parses(self) -> None:
         # Verbatim what the live 3B emitted in the probe.
         call = ToolBelt.parse_call(
-            '{"name": "get_weather", "parameters": {"location": "Norman, Oklahoma"}}')
-        assert call == ToolCall("get_weather", {"location": "Norman, Oklahoma"})
+            '{"name": "get_weather", "parameters": {"location": "Chicago, Illinois"}}')
+        assert call == ToolCall("get_weather", {"location": "Chicago, Illinois"})
 
     def test_call_wrapped_in_prose_still_parses(self) -> None:
         call = ToolBelt.parse_call('Sure! {"name": "t", "parameters": {"x": 1}} done')

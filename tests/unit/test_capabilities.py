@@ -229,7 +229,7 @@ class HistoryPermissionDeniedMessages(FakeMessages):
 
 class PagedHistoryMessages(FakeMessages):
     def __init__(self) -> None:
-        super().__init__([("Dele", "Attachment", time.time())])
+        super().__init__([("Evan", "Attachment", time.time())])
         self.page_calls: list[int | None] = []
 
     def thread_messages(
@@ -302,7 +302,7 @@ class OlderHistoryMessages(FakeMessages):
     """A full first thread page with older history waiting in chat.db."""
 
     def __init__(self) -> None:
-        super().__init__([("Dele", "Newest 30", time.time())])
+        super().__init__([("Evan", "Newest 30", time.time())])
         self.page_calls: list[int | None] = []
 
     def thread_message_page(
@@ -331,7 +331,7 @@ class SentReplyMessages(FakeMessages):
     """A long thread; chat.db records the wearer's reply only later."""
 
     def __init__(self, *, records_after: int | None) -> None:
-        super().__init__([("Dele", "Preview", time.time())])
+        super().__init__([("Evan", "Preview", time.time())])
         #: The read count from which chat.db has the sent row; None = never.
         self.records_after = records_after
         self.reads = 0
@@ -682,9 +682,9 @@ NOTE_CONTROL_ROWS = ["+ Create new note"]
 
 
 def _urgent_card() -> Card:
-    """Renders as "!! Adaeze · Messages\\nCall me now" — the prefix and the
+    """Renders as "!! Taylor · Messages\\nCall me now" — the prefix and the
     two-line shape come from the card, not from hand-written text."""
-    return Card(source="Adaeze", channel="Messages", summary="Call me now",
+    return Card(source="Taylor", channel="Messages", summary="Call me now",
                 urgency=Urgency.URGENT, event_class="messages.incoming_text",
                 at=1.0)
 
@@ -845,13 +845,13 @@ class TestCapabilityViews:
     async def test_messages_view_lists_recent_conversations(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         now = time.time()
         router, transport, _ = make_router(
-            tmp_path, rows=[("Dele", "On my way", now), ("Adaeze", "Call me", now)])
+            tmp_path, rows=[("Evan", "On my way", now), ("Taylor", "Call me", now)])
         await router.open("Messages")
         lists = [m for m in transport.sent if isinstance(m, HudList)]
         assert lists and lists[0].to_wire()["items"] == [
             "New message · voice recipient + text",
-            "[now] Dele · On my way",
-            "[now] Adaeze · Call me",
+            "[now] Evan · On my way",
+            "[now] Taylor · Call me",
         ]
         assert lists[0].title == "MESSAGES"
         assert lists[0].items[0] == "New message · voice recipient + text"
@@ -876,7 +876,7 @@ class TestCapabilityViews:
     ) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path)
         router._messages = FakeMessages([  # type: ignore[assignment]
-            ("Dele", "", time.time(), True, True, 1),
+            ("Evan", "", time.time(), True, True, 1),
         ])
 
         await router.open("Messages")
@@ -884,7 +884,7 @@ class TestCapabilityViews:
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.items == [
             "New message · voice recipient + text",
-            "[now] ● Dele · Attachment",
+            "[now] ● Evan · Attachment",
         ]
 
     async def test_selecting_new_message_opens_voice_compose_without_sending(
@@ -893,7 +893,7 @@ class TestCapabilityViews:
         replies = FakeReplies()
         router, transport, _ = make_router(
             tmp_path,
-            rows=[("Dele", "On my way", time.time())],
+            rows=[("Evan", "On my way", time.time())],
             replies=replies,
         )
         await router.open("Messages", request_id="messages-compose")
@@ -964,7 +964,7 @@ class TestCapabilityViews:
 
         saved = [
             SavedPlace(place_id="p1", name="Home", address="12 Oak St"),
-            SavedPlace(place_id="p2", name="Work", latitude=35.2, longitude=-97.4),
+            SavedPlace(place_id="p2", name="Work", latitude=41.88, longitude=-87.63),
         ]
         router, transport, _ = make_router(tmp_path, navigate=navigate, places=lambda: saved)
 
@@ -1132,7 +1132,7 @@ class TestCapabilityViews:
         replies = FakeReplies()
         router, transport, _ = make_router(
             tmp_path,
-            rows=[("Dele", "On my way", now), ("Adaeze", "Call me", now)],
+            rows=[("Evan", "On my way", now), ("Taylor", "Call me", now)],
             replies=replies,
         )
         await router.open("Messages")
@@ -1140,13 +1140,13 @@ class TestCapabilityViews:
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=message_row_index(transport, "] Adaeze ·"),
+            selected_index=message_row_index(transport, "] Taylor ·"),
             trace_id="hud-12",
         ))
         await wait_until(lambda: bool(replies.selected))
 
         assert replies.selected == [(
-            MessageThread("Adaeze", "handle-1", "Call me", now),
+            MessageThread("Taylor", "handle-1", "Call me", now),
             "hud-12",
         )]
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
@@ -1154,7 +1154,7 @@ class TestCapabilityViews:
         # The reader carries the conversation only: no spoken-grammar rows,
         # and no tap-to-reply either, since no message UI can take the tap.
         assert detail.items == []
-        assert detail.body == "Adaeze\n\nAdaeze: Call me"
+        assert detail.body == "Taylor\n\nTaylor: Call me"
         assert detail.hint == "read-only · left x2: back"
         assert detail.selectable is False
         assert detail.page_controls is None
@@ -1164,14 +1164,14 @@ class TestCapabilityViews:
         replies = FakeReplies()
         router, transport, _ = make_router(tmp_path, replies=replies)
         router._messages = HistoryMessages([  # type: ignore[assignment]
-            ("Dele", "Great", time.time()),
+            ("Evan", "Great", time.time()),
         ])
         await router.open("Messages", request_id="messages-context")
 
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=message_row_index(transport, "] Dele ·"),
+            selected_index=message_row_index(transport, "] Evan ·"),
             trace_id="hud-context",
             request_id="messages-context",
         ))
@@ -1183,7 +1183,7 @@ class TestCapabilityViews:
         # The reader template, sent whole for the glasses to scroll: who, a
         # blank line, then newest first, one whole message per line.
         assert detail.items == []
-        assert detail.body == "Dele\n\nDele: Great\nYou: On my way\nDele: Are you coming?"
+        assert detail.body == "Evan\n\nEvan: Great\nYou: On my way\nEvan: Are you coming?"
         assert detail.hint == "read-only · left x2: back"
         assert detail.reader_page == ("hud-context", 0, 1)
 
@@ -1198,14 +1198,14 @@ class TestCapabilityViews:
         message_ui = FakeMessageUI()
         router, transport, _ = make_router(tmp_path, replies=replies, message_ui=message_ui)
         router._messages = HistoryMessages([  # type: ignore[assignment]
-            ("Dele", "Great", time.time()),
+            ("Evan", "Great", time.time()),
         ])
         await router.open("Messages", request_id="messages-reply")
 
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=message_row_index(transport, "] Dele ·"),
+            selected_index=message_row_index(transport, "] Evan ·"),
             trace_id="hud-reply",
             request_id="messages-reply",
         ))
@@ -1215,7 +1215,7 @@ class TestCapabilityViews:
         assert message_ui.calls == ["conversation_ready"]
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.items == []
-        assert detail.body == "Dele\n\nDele: Great\nYou: On my way\nDele: Are you coming?"
+        assert detail.body == "Evan\n\nEvan: Great\nYou: On my way\nEvan: Are you coming?"
         assert detail.hint == "tap: reply · left x2: back"
         assert detail.selectable is True
         assert detail.page_controls is None
@@ -1247,7 +1247,7 @@ class TestCapabilityViews:
     async def test_a_refused_thread_tap_says_why_on_the_glass(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         message_ui = FakeMessageUI(refusal="Finish or cancel the current message first.")
         router, transport, _ = make_router(
-            tmp_path, rows=[("Dele", "Great", time.time())], replies=FakeReplies(),
+            tmp_path, rows=[("Evan", "Great", time.time())], replies=FakeReplies(),
             message_ui=message_ui,
         )
         await router.open("Messages", request_id="messages-refused")
@@ -1263,7 +1263,7 @@ class TestCapabilityViews:
         self, tmp_path,
     ) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(
-            tmp_path, rows=[("Dele", "Great", time.time())], replies=FakeReplies(),
+            tmp_path, rows=[("Evan", "Great", time.time())], replies=FakeReplies(),
         )
         await router.open("Messages", request_id="messages-no-ui")
         await router._select_capability_row("MESSAGES", 1, "hud-no-ui", "messages-no-ui")
@@ -1279,7 +1279,7 @@ class TestCapabilityViews:
     ) -> None:  # type: ignore[no-untyped-def]
         message_ui = FakeMessageUI()
         router, transport, _ = make_router(
-            tmp_path, rows=[("Dele", "Great", time.time())], replies=FakeReplies(),
+            tmp_path, rows=[("Evan", "Great", time.time())], replies=FakeReplies(),
             message_ui=message_ui,
         )
         await router.open("Messages", request_id="messages-picker")
@@ -1297,18 +1297,18 @@ class TestCapabilityViews:
     ) -> None:  # type: ignore[no-untyped-def]
         message_ui = FakeMessageUI()
         router, transport, _ = make_router(
-            tmp_path, rows=[("Dele", "Great", time.time())], message_ui=message_ui,
+            tmp_path, rows=[("Evan", "Great", time.time())], message_ui=message_ui,
         )
         await router.open("Messages", request_id="messages-read-only")
         router.on_input(InputEvent(
             container_name="capdata", selected_name="MESSAGES",
-            selected_index=message_row_index(transport, "] Dele ·"),
+            selected_index=message_row_index(transport, "] Evan ·"),
             trace_id="hud-read-only", request_id="messages-read-only",
         ))
         await wait_until(lambda: bool(conversation_frames(transport)))
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.items == []
-        assert detail.body == "Dele\n\nDele: Great"
+        assert detail.body == "Evan\n\nEvan: Great"
         assert detail.hint == "read-only · left x2: back"
         assert detail.selectable is False
         assert "conversation_ready" not in message_ui.calls
@@ -1319,14 +1319,14 @@ class TestCapabilityViews:
     ) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
         router, transport, _ = make_router(tmp_path, replies=replies)
-        messages = LongHistoryMessages([("Dele", "Preview", time.time())])
+        messages = LongHistoryMessages([("Evan", "Preview", time.time())])
         router._messages = messages  # type: ignore[assignment]
         await router.open("Messages", request_id="messages-full-reader")
 
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=message_row_index(transport, "] Dele ·"),
+            selected_index=message_row_index(transport, "] Evan ·"),
             trace_id="hud-reader-conversation",
             request_id="messages-full-reader",
         ))
@@ -1334,7 +1334,7 @@ class TestCapabilityViews:
         reader = conversation_frames(transport)[-1]
         # The whole thread in one frame: the glasses scroll it a line a swipe.
         assert reader.items == []
-        assert reader.body == "Dele\n\n● Dele: " + messages.body
+        assert reader.body == "Evan\n\n● Evan: " + messages.body
         assert reader.hint == "read-only · left x2: back"
         assert reader.selectable is False
         assert reader.reader_page == ("hud-reader-conversation", 0, 1)
@@ -1377,7 +1377,7 @@ class TestCapabilityViews:
     ) -> None:  # type: ignore[no-untyped-def]
         replies = FakeReplies()
         router, transport, _ = make_router(tmp_path, replies=replies)
-        messages = LongHistoryMessages([("Dele", "Preview", time.time())])
+        messages = LongHistoryMessages([("Evan", "Preview", time.time())])
         messages.body = body
         router._messages = messages  # type: ignore[assignment]
         request_id = "message-exact-reader"
@@ -1390,7 +1390,7 @@ class TestCapabilityViews:
         assert frame.request_id == request_id
         assert wire["items"] == frame.items == []
         assert wire["body"] == frame.body, "body cannot be shortened during serialization"
-        assert wire["body"] == "Dele\n\n● Dele: " + body
+        assert wire["body"] == "Evan\n\n● Evan: " + body
         assert wire["readerPage"] == {"id": "select-thread", "index": 0, "count": 1}
         assert "down more" not in (frame.hint or "")
         assert "up previous" not in (frame.hint or "")
@@ -1441,7 +1441,7 @@ class TestCapabilityViews:
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=message_row_index(transport, "] Dele ·"),
+            selected_index=message_row_index(transport, "] Evan ·"),
             trace_id="hud-history",
             request_id="messages-history",
         ))
@@ -1450,7 +1450,7 @@ class TestCapabilityViews:
         latest = conversation_frames(transport)[-1]
         assert latest.items == []
         assert latest.body == (
-            "Dele\n\n● Dele: [attachment]\nYou: On my way\nDele: Are you coming?"
+            "Evan\n\n● Evan: [attachment]\nYou: On my way\nEvan: Are you coming?"
         )
         # chat.db has older messages: the reader promises one more page, so
         # the swipe past the thread's end asks the Mac for them.
@@ -1474,7 +1474,7 @@ class TestCapabilityViews:
         # resume a line below where the wearer was; no more is promised.
         current = conversation_frames(transport)[-1]
         assert current.items == []
-        assert current.body == latest.body + "\nDele: Earlier"
+        assert current.body == latest.body + "\nEvan: Earlier"
         assert current.hint == "read-only · left x2: back"
         assert current.reader_page == ("hud-history", 0, 1)
         await asyncio.sleep(0)
@@ -1496,8 +1496,8 @@ class TestCapabilityViews:
 
         first = conversation_frames(transport)[-1]
         lines = (first.body or "").split("\n")
-        assert lines[:3] == ["Dele", "", "You: Newest 30 ▶"]  # the newest own row carries its one-glyph state
-        assert lines[-1] == "Dele: Newest 21"
+        assert lines[:3] == ["Evan", "", "You: Newest 30 ▶"]  # the newest own row carries its one-glyph state
+        assert lines[-1] == "Evan: Newest 21"
         assert len(lines) == 12
         assert first.reader_page == ("hud-older", 0, 2)
         assert "down more" not in (first.hint or "")
@@ -1510,7 +1510,7 @@ class TestCapabilityViews:
         assert messages.page_calls == [None, 21]
         second = conversation_frames(transport)[-1]
         assert second.body == (
-            first.body + "\nDele: Older 20\nDele: Older 19\nDele: Older 18"
+            first.body + "\nEvan: Older 20\nEvan: Older 19\nEvan: Older 18"
         )
         assert second.hint == "read-only · left x2: back"
         assert second.reader_page == ("hud-older", 0, 1)
@@ -1533,7 +1533,7 @@ class TestCapabilityViews:
         router._messages = messages  # type: ignore[assignment]
         await router.open("Messages", request_id="messages-sent")
         await router._select_capability_row("MESSAGES", 1, "hud-sent", "messages-sent")
-        assert (conversation_frames(transport)[-1].body or "").startswith("Dele\n\nDele: word word")
+        assert (conversation_frames(transport)[-1].body or "").startswith("Evan\n\nEvan: word word")
 
         await router.show_sent_reply("On my way!")
         # The first post-send read missed the row; the wait found it.
@@ -1541,7 +1541,7 @@ class TestCapabilityViews:
         frame = conversation_frames(transport)[-1]
         assert frame.request_id == "messages-sent"
         # A new document: the glasses open it at its top, on the reply.
-        assert (frame.body or "").startswith("Dele\n\nYou: On my way! ▶\nDele: word word")
+        assert (frame.body or "").startswith("Evan\n\nYou: On my way! ▶\nEvan: word word")
         assert (frame.body or "").endswith("END")
         assert frame.reader_page == ("hud-sent", 0, 1)
         assert frame.hint == "tap: reply · left x2: back"
@@ -1567,7 +1567,7 @@ class TestCapabilityViews:
         frame = conversation_frames(transport)[-1]
         assert frame.request_id == "messages-fallback"
         assert (frame.body or "").startswith(
-            "Dele\n\nYou:   Running late   ▶\nDele: word word"
+            "Evan\n\nYou:   Running late   ▶\nEvan: word word"
         )
         assert frame.reader_page == ("hud-fallback", 0, 1)
         state = router._message_history
@@ -1600,14 +1600,14 @@ class TestCapabilityViews:
         replies = FakeReplies()
         router, transport, _ = make_router(tmp_path, replies=replies)
         router._messages = HistoryPermissionDeniedMessages([  # type: ignore[assignment]
-            ("Dele", "Great", time.time()),
+            ("Evan", "Great", time.time()),
         ])
         await router.open("Messages", request_id="messages-history-denied")
 
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=message_row_index(transport, "] Dele ·"),
+            selected_index=message_row_index(transport, "] Evan ·"),
             trace_id="hud-history-denied",
             request_id="messages-history-denied",
         ))
@@ -1715,14 +1715,14 @@ class TestCapabilityViews:
         replies = FakeReplies()
         router, transport, _ = make_router(
             tmp_path,
-            rows=[("Dele", "On my way", time.time())],
+            rows=[("Evan", "On my way", time.time())],
             replies=replies,
         )
         await router.open("Messages", request_id="messages-home")
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=message_row_index(transport, "] Dele ·"),
+            selected_index=message_row_index(transport, "] Evan ·"),
             trace_id="hud-home",
             request_id="messages-home",
         ))
@@ -1744,14 +1744,14 @@ class TestCapabilityViews:
         replies = FakeReplies()
         router, transport, _ = make_router(
             tmp_path,
-            rows=[("Dele", "On my way", time.time())],
+            rows=[("Evan", "On my way", time.time())],
             replies=replies,
         )
         await router.open("Messages", request_id="messages-first")
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=message_row_index(transport, "] Dele ·"),
+            selected_index=message_row_index(transport, "] Evan ·"),
             trace_id="hud-first-selection",
             request_id="messages-first",
         ))
@@ -1769,14 +1769,14 @@ class TestCapabilityViews:
         replies = FakeReplies()
         router, transport, _ = make_router(
             tmp_path,
-            rows=[("Dele", "On my way", time.time())],
+            rows=[("Evan", "On my way", time.time())],
             replies=replies,
         )
         await router.open("Messages", request_id="messages-disconnect")
         router.on_input(InputEvent(
             container_name="capdata",
             selected_name="MESSAGES",
-            selected_index=message_row_index(transport, "] Dele ·"),
+            selected_index=message_row_index(transport, "] Evan ·"),
             trace_id="hud-disconnect",
             request_id="messages-disconnect",
         ))
@@ -1984,7 +1984,7 @@ class TestCapabilityViews:
         router, transport, _ = make_router(tmp_path, cards=[_urgent_card()])
         await router.open("Notifications")
         lists = [m for m in transport.sent if isinstance(m, HudList)]
-        assert lists and "!! Adaeze · Messages" in lists[0].to_wire()["items"][0]
+        assert lists and "!! Taylor · Messages" in lists[0].to_wire()["items"][0]
         assert lists[0].title == "NOTIFICATIONS"
 
     async def test_notification_selection_opens_the_complete_two_line_card(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -2002,7 +2002,7 @@ class TestCapabilityViews:
 
         detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert detail.title == "NOTIFICATIONS · DETAIL"
-        assert detail.items == ["!! Adaeze · Messages", "Call me now"]
+        assert detail.items == ["!! Taylor · Messages", "Call me now"]
 
     async def test_planning_directs_setup_to_the_explicit_mac_control(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(tmp_path)
@@ -2213,7 +2213,7 @@ class TestCapabilityViews:
         notes.create(
             note_id="note-1",
             idempotency_key="voice-1",
-            text="Ask Adaeze about the design review",
+            text="Ask Taylor about the design review",
             source=NoteSource(kind="voice.command"),
             now_us=10,
         )
@@ -2237,7 +2237,7 @@ class TestCapabilityViews:
         note_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert note_list.title == "QUICKNOTES"
         assert note_list.items[:1] == NOTE_CONTROL_ROWS
-        assert "Ask Adaeze" in note_list.items[1]
+        assert "Ask Taylor" in note_list.items[1]
         assert len(note_list.items) == 2
         router.on_input(InputEvent(
             container_name="capdata",
@@ -2248,7 +2248,7 @@ class TestCapabilityViews:
         note_detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert note_detail.title == "QUICKNOTES · DETAIL"
         assert note_detail.items == []
-        assert note_detail.to_wire()["body"] == "Exact text\n\nAsk Adaeze about the design review"
+        assert note_detail.to_wire()["body"] == "Exact text\n\nAsk Taylor about the design review"
 
         await router.open("Activity")
         action_list = [m for m in transport.sent if isinstance(m, HudList)][-1]
@@ -2387,7 +2387,7 @@ class TestCapabilityViews:
         notes.create(
             note_id="note-1",
             idempotency_key="voice-1",
-            text="Ask Adaeze about the design review",
+            text="Ask Taylor about the design review",
             source=NoteSource(kind="voice.command"),
             now_us=10,
         )
@@ -2412,7 +2412,7 @@ class TestCapabilityViews:
         # glyph), then exact dictated text notes.
         assert note_list.items[:1] == NOTE_CONTROL_ROWS
         assert "● Standup notes" in note_list.items[1]
-        assert "Ask Adaeze" in note_list.items[2]
+        assert "Ask Taylor" in note_list.items[2]
         assert len(note_list.items) == 3
         assert note_list.selectable is True
 
@@ -2445,7 +2445,7 @@ class TestCapabilityViews:
         text_detail = [m for m in transport.sent if isinstance(m, HudList)][-1]
         assert text_detail.title == "QUICKNOTES · DETAIL"
         assert text_detail.items == []
-        assert text_detail.to_wire()["body"] == "Exact text\n\nAsk Adaeze about the design review"
+        assert text_detail.to_wire()["body"] == "Exact text\n\nAsk Taylor about the design review"
 
     async def test_an_open_note_owns_the_quicknotes_page_as_its_live_words(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         """FEAT-002: the open note is Even's "New note" page — plain words (no
@@ -2876,7 +2876,7 @@ class TestCapabilityOpenController:
 
     async def test_voice_open_paints_messages_under_a_voice_generation(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         router, transport, _ = make_router(
-            tmp_path, rows=[("Adele", "Send the mockups?", time.time())],
+            tmp_path, rows=[("Casey", "Send the mockups?", time.time())],
         )
         opener = CapabilityOpenController(lambda: router)
         assert await opener.handle_command("show my messages") == "Opening Messages."
@@ -2909,21 +2909,21 @@ class TestCapabilityOpenController:
 class TestMessageListRow:
     def test_unread_thread_carries_the_attention_marker(self) -> None:
         row = CapabilityRouter._message_list_row(MessageThread(
-            "Adele", "handle-1", "Send the mockups?", time.time(), True, unread=True,
+            "Casey", "handle-1", "Send the mockups?", time.time(), True, unread=True,
         ))
-        assert " ● Adele" in row
+        assert " ● Casey" in row
         assert "(unread)" not in row
 
     def test_read_thread_stays_unmarked(self) -> None:
         row = CapabilityRouter._message_list_row(MessageThread(
-            "Adele", "handle-1", "Send the mockups?", time.time(), True,
+            "Casey", "handle-1", "Send the mockups?", time.time(), True,
         ))
         assert "●" not in row
 
     def test_multi_line_preview_is_one_row_line(self) -> None:
         # A line break in the preview wrapped the firmware row into the next.
         row = CapabilityRouter._message_list_row(MessageThread(
-            "Adele", "handle-1", "Running late\n\nsee you  at 3", time.time(), True,
+            "Casey", "handle-1", "Running late\n\nsee you  at 3", time.time(), True,
         ))
         assert row.endswith("· Running late see you at 3")
 
@@ -2938,7 +2938,7 @@ class TestVoiceOpenChain:
         from joat.services.models import ModelRegistry
 
         router, transport, _ = make_router(
-            tmp_path, rows=[("Adele", "Send the mockups?", time.time())],
+            tmp_path, rows=[("Casey", "Send the mockups?", time.time())],
         )
 
         class _NoReplies:
@@ -2962,7 +2962,7 @@ class TestVoiceOpenChain:
         assert painted.title == "MESSAGES"
         assert painted.request_id is not None
         assert painted.request_id.startswith(VOICE_REQUEST_PREFIX)
-        assert any("Adele" in item for item in painted.items)
+        assert any("Casey" in item for item in painted.items)
 
 
 class TestAgentTerminalThreeLevelNavigation:

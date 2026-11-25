@@ -96,7 +96,7 @@ async def main() -> None:
 
         # 1. A firmware list, then a receipt and an outcome strip over it.
         await step('1-activity-list', lambda: gateway.send(HudList(
-            items=['[2m] Replied to Dele', '[1h] Saved a note'], title='ACTIVITY',
+            items=['[2m] Replied to Evan', '[1h] Saved a note'], title='ACTIVITY',
             hint='tap: read · left x2: back', request_id=rid, selectable=True)))
         await step('2-receipt-over-list', lambda: gateway.send(AssistantOverlay(
             text='Noted.', presentation='receipt', operation='replace')))
@@ -118,7 +118,7 @@ async def main() -> None:
             items=['Say the recipient name first.', 'Then say the message.'], title='MESSAGES · COMPOSE',
             hint='left x2: back', request_id=rid)))
         await step('9-messages-review', lambda: gateway.send(HudList(
-            items=['1/1 · To Dele', 'On my way, see you at the gate in ten minutes.'],
+            items=['1/1 · To Evan', 'On my way, see you at the gate in ten minutes.'],
             title='MESSAGES · REVIEW', hint='tap: confirm · left x2: back', request_id=rid,
             selectable=True, reader_page=('review-1', 0, 1))))
         await step('10-messages-retry', lambda: gateway.send(HudList(

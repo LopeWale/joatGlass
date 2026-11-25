@@ -132,7 +132,7 @@ describe('the header on a firmware text page', () => {
   it('names the reader and keeps its clock moving in place', async () => {
     const r = rig();
     await r.hud.setStatusModel(at941);
-    expect(await r.hud.showList(['1/1 · From Dele', 'Call me when you arrive.'], {
+    expect(await r.hud.showList(['1/1 · From Evan', 'Call me when you arrive.'], {
       title: 'MESSAGES · MESSAGE', hint: '2x tap: back', selectable: false, nativeTextPage: true,
     })).toBe(true);
     expect(status(last(r.rebuilds))).toBe('9:41 · MESSAGES · MESSAGE · ○ · ▇');

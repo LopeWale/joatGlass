@@ -5,11 +5,10 @@ import AVFoundation
 /// the `audio` background mode, held by an active session playing inaudible
 /// silence, mixed with other apps' audio.
 ///
-/// Until 2026-10-29 it held a record session on the phone's own mic (Spike 2,
-/// an hour locked on Joats). On the wearer's own iPhone that broke: switching
-/// to the Even app or locking the screen changed the audio route, the engine
-/// stopped (or restarted with a tap in the old input format, which iOS answers
-/// with an exception), the app was suspended and the glasses could not
+/// Earlier builds held a record session on the phone's own mic. Switching
+/// to the Even app or locking the screen changed the audio route, stopping
+/// the engine (or restarting it with a tap in the old input format, throwing
+/// an exception), which let iOS suspend the app so the glasses could not
 /// reconnect. JOAT never used that mic (the glasses' audio arrives over the
 /// socket), so the keep-alive no longer touches it: playback only, rebuilt
 /// after any interruption, route or configuration change, and checked every

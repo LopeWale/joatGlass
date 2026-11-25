@@ -307,17 +307,17 @@ describe('Terminal surface ownership & 3-level Agent Terminal navigation', () =>
 /** The Mac's thread (2026-10-06): one reader it pages itself, a counter row
  * then "Speaker: words" lines, with `readerPage` naming it. */
 const THREAD_TITLE = 'MESSAGES · CONVERSATION';
-const THREAD_ID = 'thread-trace-dele';
+const THREAD_ID = 'thread-trace-evan';
 const threadPage = (index: number, count = 2) => ({ id: THREAD_ID, index, count });
 const threadRows = (index: number, count = 2) => [
-  `${index + 1}/${count} · Adele`, `Adele: page ${index + 1} words`, 'You: on my way',
+  `${index + 1}/${count} · Casey`, `Casey: page ${index + 1} words`, 'You: on my way',
 ];
 
 async function openThread(r: ReturnType<typeof rig>) {
   await r.menu.openFromContextualMenu(0); // Messages
   await vi.waitFor(() => expect(r.sent).toHaveLength(1));
   const requestId = latestRequestId(r.sent);
-  expect(await r.menu.presentList('MESSAGES', ['New message', 'Adele · Preview'], requestId, true)).toBe(true);
+  expect(await r.menu.presentList('MESSAGES', ['New message', 'Casey · Preview'], requestId, true)).toBe(true);
   expect(r.menu.handleList(click(1))).toBe(true);
   const selectionId = (r.sent[r.sent.length - 1]!.event as { traceId: string }).traceId;
   return { requestId, selectionId };
@@ -330,7 +330,7 @@ function showThread(
 ) {
   return menu.presentList(
     THREAD_TITLE, threadRows(index, count), requestId, selectable, hint,
-    undefined, 'Adele', undefined, undefined, undefined, threadPage(index, count), undefined, pageControls,
+    undefined, 'Casey', undefined, undefined, undefined, threadPage(index, count), undefined, pageControls,
   );
 }
 
@@ -463,7 +463,7 @@ describe('CapabilityMenu', () => {
       expect(menu.handleList(click(1))).toBe(true);
       expect(await menu.presentList(
         'MESSAGES · CONVERSATION',
-        ['Latest messages', 'Dele · Opening words', 'Say reply'],
+        ['Latest messages', 'Evan · Opening words', 'Say reply'],
         requestId,
         true,
         'tap read · say reply · 2x tap: back',
@@ -836,12 +836,12 @@ describe('CapabilityMenu', () => {
     await menu.openNotifications();
     await vi.waitFor(() => expect(latestRequestId(sent)).not.toBe(''));
     expect(await menu.presentList(
-      'NOTIFICATIONS', ['[2m] Dele · Call me', 'Clear JOAT notifications'], latestRequestId(sent), true,
+      'NOTIFICATIONS', ['[2m] Evan · Call me', 'Clear JOAT notifications'], latestRequestId(sent), true,
       'tap: read · 2x tap: back', undefined, undefined, 1,
     )).toBe(true);
     expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'NOTIFICATIONS', nativeFirmwareList: true });
     expect(await menu.presentList(
-      'NOTIFICATIONS · DETAIL', ['Dele · Messages', 'Call me when you arrive.'], latestRequestId(sent), false,
+      'NOTIFICATIONS · DETAIL', ['Evan · Messages', 'Call me when you arrive.'], latestRequestId(sent), false,
     )).toBe(true);
     expect(listOptions[listOptions.length - 1]).toMatchObject({ title: 'NOTIFICATIONS · DETAIL', nativeTextPage: true });
 
@@ -1138,7 +1138,7 @@ describe('CapabilityMenu', () => {
 
     sent.length = 0;
     await menu.toggle();
-    expect(lists[lists.length - 1]).toEqual(['New message', 'Adele · Preview']);
+    expect(lists[lists.length - 1]).toEqual(['New message', 'Casey · Preview']);
     // The picker is a firmware list: Back lands on row one.
     expect(visibleSelection()).toBe(0);
     expect(sent).toEqual([{
@@ -1238,6 +1238,17 @@ describe('CapabilityMenu', () => {
     } });
     expect(menu.sendQuickNotesMenu('prep')).toBe(true);
     expect(sent[sent.length - 1]).toMatchObject({ event: { selectedName: 'quicknotes-prep' } });
+
+    // When AI cues are turned off on the phone, the glasses refuse the cues action while keeping Prep notes.
+    const countBeforeOff = sent.length;
+    await menu.presentList(
+      'QUICKNOTES · NEW NOTE', ['We ship Friday.'], requestId,
+      true, '00:05 · hold: talk', undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, false,
+    );
+    expect(menu.sendQuickNotesMenu('cues')).toBe(false);
+    expect(sent).toHaveLength(countBeforeOff);
+    expect(menu.sendQuickNotesMenu('prep')).toBe(true);
 
     await menu.presentList('QUICKNOTES · AI CUES', ['Prep notes · Q3 review', 'Answer · Delivery date'],
       requestId, true, 'tap: open · left x2: back');
@@ -2017,13 +2028,13 @@ describe('CapabilityMenu', () => {
     await menu.openFromContextualMenu(0); // Messages
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     const requestId = latestRequestId(sent);
-    const conversationRows = ['New message · voice recipient + text', '[now] Adele · Good morning'];
+    const conversationRows = ['New message · voice recipient + text', '[now] Casey · Good morning'];
     expect(await menu.presentList('MESSAGES', conversationRows, requestId, true)).toBe(true);
     menu.handleList(click(1));
     const selectionId = (sent[1]!.event as { traceId: string }).traceId;
     expect(sent).toHaveLength(2);
     expect(await menu.presentList(
-      'MESSAGES · CONVERSATION', ['Adele · Good morning', 'Say reply saying …'], requestId, false,
+      'MESSAGES · CONVERSATION', ['Casey · Good morning', 'Say reply saying …'], requestId, false,
     )).toBe(true);
 
     await menu.toggle();
@@ -2225,14 +2236,14 @@ describe('CapabilityMenu', () => {
     const { menu, lists, listOptions } = rig();
     // Menu fully closed — the Mac answers "JOAT, show my messages".
     const painted = await menu.presentList(
-      'MESSAGES', ['[2m] \u25cf Adele \u00b7 Send the mockups?'], 'voice-abc123', true, 'tap: select',
+      'MESSAGES', ['[2m] \u25cf Casey \u00b7 Send the mockups?'], 'voice-abc123', true, 'tap: select',
     );
     expect(painted).toBe(true);
-    expect(lists[lists.length - 1]).toEqual(['[2m] \u25cf Adele \u00b7 Send the mockups?']);
+    expect(lists[lists.length - 1]).toEqual(['[2m] \u25cf Casey \u00b7 Send the mockups?']);
     expect(listOptions[listOptions.length - 1]?.title).toBe('MESSAGES');
     // The adopted generation answers follow-up pages too (same voice id).
     const detail = await menu.presentList(
-      'MESSAGES \u00b7 CONVERSATION', ['Latest messages \u2014 down for older', 'Adele \u00b7 hi'],
+      'MESSAGES \u00b7 CONVERSATION', ['Latest messages \u2014 down for older', 'Casey \u00b7 hi'],
       'voice-abc123', true,
     );
     expect(detail).toBe(true);
@@ -2484,10 +2495,10 @@ describe('Phone-first capmenu routing & opt-in prepareMacHandoffPage / openOnMac
       requestId,
     });
 
-    expect(await menu.presentList('MESSAGES', ['Adele · Hey'], requestId, true)).toBe(true);
+    expect(await menu.presentList('MESSAGES', ['Casey · Hey'], requestId, true)).toBe(true);
     expect(lists).toEqual([
       ['Opening Messages on your Mac…'],
-      ['Adele · Hey'],
+      ['Casey · Hey'],
     ]);
   });
 

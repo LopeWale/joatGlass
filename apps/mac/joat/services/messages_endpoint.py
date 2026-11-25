@@ -1,10 +1,9 @@
 """Messages relay: this Mac's texts, for JOAT Brain on the wearer's iPhone.
 
-The glasses talk to ONE brain, the iPhone (the wearer's choice: "messaging is
-messaging", no switching between a phone path and a Mac path). When a home
-Mac holds the wearer's Messages, the iPhone asks it, over the tailnet, for
-the few things Messaging needs, and the Mac keeps doing what it already does
-well: read chat.db, send through Messages.app.
+The glasses talk to ONE brain, the iPhone, with no manual switching between
+a phone path and a Mac path. When a home Mac holds Messages, the iPhone asks
+it over the tailnet for the few things Messaging needs, and the Mac keeps
+doing what it already does well: read chat.db, send through Messages.app.
 
     GET  /v1/events?after=<row id>&wait=<s>       new incoming texts (long poll)
     GET  /v1/threads?limit=<n>&q=<search>         recent conversations (with search)

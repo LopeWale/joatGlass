@@ -100,16 +100,14 @@ def shorten(text: str, limit: int = HUD_LINE_CHARS) -> str:
 class Card:
     """One HUD-ready notification."""
 
-    source: str          # who/what: "Dele", "Battery"
+    source: str          # who/what: "Evan", "Battery"
     channel: str         # where from: "Messages", "Calendar"
     summary: str
     # The FULL notification text, untruncated. Glance surfaces (tray row,
     # overlay card) draw from `summary` through their measured budgets; the
-    # NOTIFICATIONS · DETAIL page reads THIS, because "the HUD is glanced
-    # at" was never a licence to cut the wearer's message to 46 chars on a
-    # ten-row page (wearer's report, 2026-09-05: "Our message is cutting
-    # off. Why? Can I not see full messages?"). Empty means summary is all
-    # the source had.
+    # NOTIFICATIONS · DETAIL page reads `detail` so full multi-line messages
+    # are not truncated to 46 characters on a ten-row reader page. Empty
+    # means `summary` is all the source had.
     body: str = ""
     urgency: Urgency = Urgency.NOTIFY
     count: int = 1       # coalesced siblings

@@ -159,7 +159,7 @@ def weather_tool(
             "type": "object",
             "properties": {"location": {
                 "type": "string",
-                "description": "City or place name, e.g. 'Norman, Oklahoma'",
+                "description": "City or place name, e.g. 'Chicago, Illinois'",
             }},
             "required": [],
         },
@@ -264,7 +264,7 @@ def conversation_tool(store: "IMessageStore") -> Tool:
     """Whole messages from one conversation, the way the lens reader shows them.
 
     The audit's M8: the mind saw eighty characters per sender and nothing
-    else, so "read me Dele's message" answered with a snippet and an
+    else, so "read me Evan's message" answered with a snippet and an
     apology. This reads the same Mac-owned thread the Messages feature
     opens, oldest to newest, complete text, bounded by characters rather
     than by cutting a sentence in half.

@@ -193,7 +193,7 @@ other three, so a swipe shipped three tiles.
 | Open MESSAGES, ACTIVITY or the AGENT TERMINAL picker | 4 | **0** — one `rebuildPageContainer` to a firmware list page |
 | Open a Messages conversation thread from the picker | 4 | **0** — one rebuild to a firmware text page: the thread arrives whole (`hud.list` `body`) in the reader template (who, a blank line, then one message a line, newest first, every message whole, its wrapped rows hanging under its words) (2026-10-15) |
 | Scroll the thread, older messages included | 2-4 | **0** — read in the glasses' own scroll box (`ScrollBox`, as an article), a line a swipe; past the thread's end the menu asks the Mac for older messages (its `readerPage` promises a second page while chat.db has more), which arrive as the same thread grown longer, and the box carries on a line below the last screen (`ScrollBox.resume`) |
-| Reply: tap anywhere on the thread | 4 | **0** — the question ("What do you want to say back to Adele?") and then the wearer's words for consent draw in JOAT's conversation card (one rebuild each); tap sends, long-press says it again, double-click cancels to the thread |
+| Reply: tap anywhere on the thread | 4 | **0** — the question ("What do you want to say back to Casey?") and then the wearer's words for consent draw in JOAT's conversation card (one rebuild each); tap sends, long-press says it again, double-click cancels to the thread |
 | After the send | 4 | **0** — no receipt page: the thread is repainted with the reply as its newest message, opened at its top |
 | Any other question page ("What should I note?") | 4 (`paintExact`) | **0** — one rebuild to a firmware text page; dismissal returns the retained page (image, firmware list or terminal) |
 | Open Brainstorm (the idle picker) | 4 | **0** — one rebuild to a firmware list of past sessions plus NEW |
@@ -423,10 +423,9 @@ The levers that remain are design decisions, not code:
   firmware list and records zero image tiles on every step but the map.
   Still pixels by design: the overview, the Planning month grid, the live
   map.
-- ~~The raster duplicates~~ — 2026-10-05, the wearer's question: "are you
-  sure you are deleting any duplicates?" They were not deleted; they were
-  bypassed. The renderer still carried a canvas painter for every page the
-  firmware now draws (the question, the confirmation, Brainstorm and the
+- ~~The raster duplicates~~ — Previously bypassed rather than deleted: the
+  renderer still carried a canvas painter for every page the firmware now
+  draws (the question, the confirmation, Brainstorm and the
   Agent Terminal transcript, the Calendar and Reminders pages, every
   navigation frame but the map, the dense list, the readers, the Messages
   thread, the Pomodoro page, the paged answer card), the presenter kept a
@@ -748,11 +747,11 @@ The engine log fork does most of the work: `rejected unpaired connection` = it r
 | Dial URL not in the app.json whitelist (Hub blocks silently) | Compare `p-url` literally to `apps/hub-plugin/app.json`. Log shows `hub gateway listening` but never `plugin connected`; tcpdump shows zero SYNs | Import app.json at boot and assert every candidate's origin is whitelisted; fail loud on-glass |
 | Built with no `.env` → `wss://mac.local:8787/glasses` fallback (wrong scheme, wrong host, not whitelisted) | `grep -o 'wss\?://[^"]*' apps/hub-plugin/dist/assets/*.js` prints `mac.local` | Commit a `.env.defaults`; make the fallback a loud boot error |
 | Whitelist match semantics unverified — entries carry no `/glasses` path, dials do (**NEEDS-EMPIRICAL**) | Zero SYNs despite a host that looks whitelisted | Add one byte-identical entry including `/glasses`, repack, see if it opens. Keep `.env` and `app.json` in the same commit |
-| Packed from a stale `dist/` (missing the raw-IP fallback) | `grep -c 192.168.12.200 apps/hub-plugin/dist/assets/*.js` → 0 while `.env` → 1 | Always `npm run pack`; never pack a dist you didn't just build |
-| Hardcoded `192.168.12.200` rotted after DHCP move | `ipconfig getifaddr en0` ≠ the literal in `.env` / `app.json` | DHCP reservation. Note Path B bakes URLs at build time — an IP change needs rebuild + repack + reinstall |
+| Packed from a stale `dist/` (missing the raw-IP fallback) | `grep -c 192.0.2.10 apps/hub-plugin/dist/assets/*.js` → 0 while `.env` → 1 | Always `npm run pack`; never pack a dist you didn't just build |
+| Hardcoded `192.0.2.10` rotted after DHCP move | `ipconfig getifaddr en0` ≠ the literal in `.env` / `app.json` | DHCP reservation. Note Path B bakes URLs at build time — an IP change needs rebuild + repack + reinstall |
 | iOS Local Network permission denied | Path B only. Path A rendering the page at all already proves the grant. Mac-side: zero SYNs but `ping <phone ip>` from the Mac succeeds | Settings → Even Realities → Local Network on; put the raw IP first in `.env` for bring-up |
-| `.local` resolves to IPv6, engine binds IPv4 only | `lsof -nP -iTCP:8787 -sTCP:LISTEN` shows IPv4 only; `nc -4 -vz 192.168.12.200 8787` OK while `nc -6 -vz <v6 addr> 8787` refused | Launch with `--host ::` |
-| Off-LAN and Tailscale down on the phone | `tailscale status` — is `iphone182` online? A `100.x` peer in `plugin connected` means the tailnet path is healthy | Keep Tailscale connected. Transport switch needs no re-pair |
+| `.local` resolves to IPv6, engine binds IPv4 only | `lsof -nP -iTCP:8787 -sTCP:LISTEN` shows IPv4 only; `nc -4 -vz 192.0.2.10 8787` OK while `nc -6 -vz <v6 addr> 8787` refused | Launch with `--host ::` |
+| Off-LAN and Tailscale down on the phone | `tailscale status` — is `<phone-tailnet-device>` online? A `100.x` peer in `plugin connected` means the tailnet path is healthy | Keep Tailscale connected. Transport switch needs no re-pair |
 | Two Macs, one stored token | Run the engine on both: paired Mac logs `plugin connected`, the other logs `rejected unpaired` from the same phone IP at the same instant | Key localStorage per host and look up the token for the URL being dialed |
 | AP / client isolation (guest, hotel, corporate Wi-Fi) | Zero SYNs **and** `ping <phone LAN ip>` from the Mac fails while both are on the same SSID. Works on cellular | Use the tailnet candidates (DERP traverses isolation), or a non-isolating SSID |
 

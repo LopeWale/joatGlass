@@ -37,8 +37,6 @@ describe('wearer-facing hints never name a device or a side', () => {
   });
 
   it('formatHint speaks one template: tap, swipe, long tap, 2x tap, in that order', () => {
-    // The wearer's ruling (2026-10-07): "'tap', 'long tap' and '2x tap' as
-    // a template so it can be the same on the pages that need it".
     expect(GesturePolicy.formatHint('down more · left x2: back'))
       .toBe('swipe: more · 2x tap: back');
     expect(GesturePolicy.formatHint('up previous · down more · left x2: back'))

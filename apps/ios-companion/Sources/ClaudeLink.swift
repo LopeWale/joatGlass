@@ -37,7 +37,7 @@ final class ClaudeLink: @unchecked Sendable {
         return fileConfig
     }
 
-    /// Where the wearer is, roughly: "Oklahoma City, United States", the
+    /// Where the wearer is, roughly: "Chicago, United States", the
     /// city and the country code, for the answer and for web search.
     var area: (() async -> (context: String, city: String?, country: String?)?)?
 

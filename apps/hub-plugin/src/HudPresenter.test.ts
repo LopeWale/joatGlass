@@ -517,7 +517,7 @@ describe('HudPresenter modal surfaces', () => {
     const destination = navigationVisualFixture('nav-destination');
 
     await hud.showNavigation(destination);
-    await hud.showConfirmation('Navigate to Cajun Corner, 2301 N Lincoln Ave?', 'nav-place');
+    await hud.showConfirmation('Navigate to Corner Bakery, 2301 N Lincoln Ave?', 'nav-place');
     await hud.dismissConfirmation('nav-place');
 
     expect(frames[frames.length - 1]).toMatchObject({
@@ -783,7 +783,7 @@ describe('HudPresenter modal surfaces', () => {
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
     await hud.showText(
-      'Dele · Messages\nOn my way',
+      'Evan · Messages\nOn my way',
       ContainerId.Main,
       3,
       'notification',
@@ -792,7 +792,7 @@ describe('HudPresenter modal surfaces', () => {
     expect(frames[frames.length - 1]).toMatchObject({
       kind: 'overview',
       mainKind: 'notification',
-      main: 'Dele · Messages\nOn my way',
+      main: 'Evan · Messages\nOn my way',
     });
   });
 
@@ -805,7 +805,7 @@ describe('HudPresenter modal surfaces', () => {
     const hud = new HudPresenter(fakeClient(), new HudPageBuilder(), visual);
 
     await hud.showText('NEXT\nDesign review · 4:30', ContainerId.Main, 4, 'calendar');
-    await hud.showText('Dele · Messages\nOn my way', ContainerId.Main, 3, 'notification');
+    await hud.showText('Evan · Messages\nOn my way', ContainerId.Main, 3, 'notification');
 
     expect(hud.hasVisibleNotification()).toBe(true);
     expect(await hud.dismissVisibleNotification()).toBe(true);

@@ -34,7 +34,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 TITLE = 'Fixture plumber call'
 LINES = (
     '□ Call the plumber about the leak — Oct 19 at 09:00',
-    '□ Send Dele the signed contract — Oct 23 at 09:00',
+    '□ Send Evan the signed contract — Oct 23 at 09:00',
     '□ Pay the tile shop invoice — Oct 18 at 09:00',
     '□ Book the electrician for the kitchen — Oct 18 at 09:00',
 )
@@ -88,7 +88,7 @@ async def main() -> None:
                 text='Fixture note · call the plumber about the leak tomorrow',
                 source=NoteSource(kind='dictation'), now_us=int(time.time() * 1_000_000))
             cards = CardLog()
-            cards.add(Card(source='Dele', channel='Messages', summary='Call me when you arrive.'))
+            cards.add(Card(source='Evan', channel='Messages', summary='Call me when you arrive.'))
             cards.add(Card(source='Calendar', channel='Calendar', summary='Design review in 15 minutes'))
             gateway = HubGatewayTransport(host='127.0.0.1', port=18791)
             gateway.on_hello(lambda _h: connected.set())

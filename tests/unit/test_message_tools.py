@@ -50,7 +50,7 @@ class Confirmation:
 
 class Contacts:
     def __init__(self) -> None:
-        self.matches = [("Sam", "+14055550111")]
+        self.matches = [("Sam", "+13125550111")]
         self.queries: list[str] = []
 
     def search(self, query: str) -> list[tuple[str, str]]:
@@ -82,7 +82,7 @@ async def rig() -> AsyncIterator[Rig]:
         await replies.aclose()
 
 
-THREAD = MessageThread(sender="Dele", handle="+14055550222", text="Coming?", at=123.0)
+THREAD = MessageThread(sender="Evan", handle="+13125550222", text="Coming?", at=123.0)
 
 
 async def completed(rig: Rig, action_id: str) -> dict[str, Any]:
@@ -132,7 +132,7 @@ async def test_new_message_keeps_exact_prompted_body_and_requires_confirmation(r
     assert rig.sender.attempts == []
     rig.confirm.release.set()
     assert (await completed(rig, "new-1"))["state"] == "sent"
-    assert rig.sender.sent == [("+14055550111", body)]
+    assert rig.sender.sent == [("+13125550111", body)]
 
 
 async def test_new_message_retries_keep_one_action_and_stable_trace_across_factory_instances(rig: Rig) -> None:
@@ -149,7 +149,7 @@ async def test_new_message_retries_keep_one_action_and_stable_trace_across_facto
     rig.confirm.release.set()
     assert (await completed(rig, "stable-1"))["state"] == "sent"
     assert json.loads(await second_tools["prepare_message"].run(arguments))["state"] == "sent"
-    assert rig.sender.sent == [("+14055550111", "Hello")]
+    assert rig.sender.sent == [("+13125550111", "Hello")]
     assert len(rig.confirm.calls) == 1
 
 
@@ -168,12 +168,12 @@ async def test_relationship_name_requires_contact_clarification_and_preserves_bo
 
 
 async def test_ambiguous_recipient_uses_action_scoped_reference_not_model_handle(rig: Rig) -> None:
-    rig.contacts.matches = [("Alex", "+14055550111"), ("Alex", "+14055550333")]
+    rig.contacts.matches = [("Alex", "+13125550111"), ("Alex", "+13125550333")]
     status = await rig.call("prepare_message", mode="new", action_id="choice-1", recipient_name="Alex", body="Running late")
     assert status["state"] == "awaiting_input" and len(status["candidates"]) == 2
     assert "+14055550" not in json.dumps(status)
     assert rig.confirm.calls == [] and rig.sender.attempts == []
-    for reference in ("+14055550333", "unknown-reference"):
+    for reference in ("+13125550333", "unknown-reference"):
         result = await rig.tools["provide_message_input"].run({"action_id": "choice-1", "recipient_ref": reference})
         assert result.startswith("error:")
     chosen = status["candidates"][1]["reference"]
@@ -181,11 +181,11 @@ async def test_ambiguous_recipient_uses_action_scoped_reference_not_model_handle
     assert status["state"] == "awaiting_confirmation"
     rig.confirm.release.set()
     assert (await completed(rig, "choice-1"))["state"] == "sent"
-    assert rig.sender.sent == [("+14055550333", "Running late")]
+    assert rig.sender.sent == [("+13125550333", "Running late")]
 
 
 async def test_candidate_reference_from_another_action_is_rejected(rig: Rig) -> None:
-    rig.contacts.matches = [("Alex One", "+14055550111"), ("Alex Two", "+14055550333")]
+    rig.contacts.matches = [("Alex One", "+13125550111"), ("Alex Two", "+13125550333")]
     first = await rig.call("prepare_message", mode="new", action_id="first", recipient_name="Alex")
     old_reference = first["candidates"][0]["reference"]
     await rig.call("cancel_message_action", action_id="first")
@@ -247,7 +247,7 @@ async def test_controller_review_limit_remains_a_truthful_failed_status(rig: Rig
     {"mode": "new", "action_id": "invalid-1", "recipient_name": " "},
     {"mode": "new", "action_id": "invalid-1", "recipient_name": "x" * 201},
     {"mode": "new", "action_id": "invalid-1", "recipient_name": "sam@example.test"},
-    {"mode": "new", "action_id": "invalid-1", "recipient_name": "+14055550111"},
+    {"mode": "new", "action_id": "invalid-1", "recipient_name": "+13125550111"},
     {"mode": "reply", "action_id": "invalid-1", "recipient_name": "Sam"},
     {"mode": "new", "action_id": "invalid-1", "body": True},
     {"mode": "new", "action_id": "invalid-1", "body": None},
@@ -255,7 +255,7 @@ async def test_controller_review_limit_remains_a_truthful_failed_status(rig: Rig
     {"mode": "new", "action_id": "invalid-1", "body": "bad\x00text"},
     {"mode": "new", "action_id": "invalid-1", "body": "bad\ud800text"},
     {"mode": "new", "action_id": "invalid-1", "body": "x" * 2001},
-    {"mode": "new", "action_id": "invalid-1", "recipient_handle": "+14055550111"},
+    {"mode": "new", "action_id": "invalid-1", "recipient_handle": "+13125550111"},
     {"mode": "new", "action_id": "invalid-1", "confirmed": True},
     {"mode": "new", "action_id": "invalid-1", "send": True},
     {"mode": "new", "action_id": "invalid-1", "trace_id": "model-trace"},
@@ -273,7 +273,7 @@ async def test_prepare_validates_application_arguments_before_action_creation(ri
     {"recipient_name": True}, {"recipient_ref": True}, {"recipient_ref": ""},
     {"recipient_ref": "x" * 129}, {"recipient_ref": "user@example.test"},
     {"recipient_name": "Sam", "recipient_ref": "some-reference"},
-    {"recipient_handle": "+14055550111"}, {"confirm": True}, {"send": True},
+    {"recipient_handle": "+13125550111"}, {"confirm": True}, {"send": True},
 ])
 async def test_input_validates_application_arguments_without_advancing_draft(rig: Rig, fields: dict[str, Any]) -> None:
     original = await rig.replies.prepare_new_message(action_id="input-1", trace_id="test")
@@ -307,7 +307,7 @@ async def test_message_tools_do_not_add_local_decision_pass_for_ordinary_chat(ri
 
 @pytest.mark.parametrize("text", [
     "Send a message to my wife", "Could you tell her I'm on my way?",
-    "Reply to Dele", "Choose this contact", "Was my message sent?", "Cancel the message",
+    "Reply to Evan", "Choose this contact", "Was my message sent?", "Cancel the message",
 ])
 async def test_message_hints_leave_tool_choice_to_model_and_publish_all_cli_tools(rig: Rig, text: str) -> None:
     belt = ToolBelt(list(rig.tools.values()))

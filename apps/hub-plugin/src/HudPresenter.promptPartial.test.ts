@@ -44,7 +44,7 @@ function last<T>(items: readonly T[]): T | undefined {
   return items[items.length - 1];
 }
 
-const QUESTION = 'What do you want to say back to Adele?';
+const QUESTION = 'What do you want to say back to Casey?';
 
 function wearerWords(page: RebuildPageContainer | undefined): string | undefined {
   return page?.textObject?.find((text) => text.containerName === 'wearer-turns')?.content;
@@ -77,7 +77,7 @@ describe('HudPresenter reply card words so far', () => {
     // that did not wait for the partial's rebuild was refused and left the
     // cancelled card on the glass.
     const r = rig();
-    await r.hud.showList(['1/1 · Adele', 'Adele: hi'], {
+    await r.hud.showList(['1/1 · Casey', 'Casey: hi'], {
       title: 'MESSAGES · CONVERSATION', hint: 'tap: reply', selectable: true, nativeTextPage: true,
     });
     await r.hud.showPromptQuestion('p1', QUESTION, () => true, 'messages');
@@ -104,7 +104,7 @@ describe('HudPresenter reply card words so far', () => {
     // while that restore ran. The guard refused the consent card, the hub
     // declined, and the Mac cancelled the draft: the card just went away.
     const r = rig();
-    await r.hud.showList(['1/1 · Adele', 'Adele: hi'], {
+    await r.hud.showList(['1/1 · Casey', 'Casey: hi'], {
       title: 'MESSAGES · CONVERSATION', hint: 'tap: reply', selectable: true, nativeTextPage: true,
     });
     await r.hud.showPromptQuestion('p1', QUESTION, () => true, 'messages');
@@ -116,7 +116,7 @@ describe('HudPresenter reply card words so far', () => {
     // the confirmation arrives (the order the simulator showed).
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(r.rebuilds).toHaveLength(rebuildsBefore);
-    const consent = r.hud.showConfirmation('Send to Adele? “On my way.”', 'reply-consent', 'messages');
+    const consent = r.hud.showConfirmation('Send to Casey? “On my way.”', 'reply-consent', 'messages');
     await new Promise((resolve) => setTimeout(resolve, 5));
     release();
     await restored;  // superseded by the consent card: its own result is moot

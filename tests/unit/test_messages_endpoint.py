@@ -22,8 +22,8 @@ from joat.services.messages_endpoint import MAX_PAGE, MAX_THREADS, MessagesEndpo
 
 
 TOKEN = "test-token-not-a-real-secret"
-GUID = "iMessage;-;+14055550101"
-HANDLE = "+14055550101"
+GUID = "iMessage;-;+13125550101"
+HANDLE = "+13125550101"
 
 
 def _incoming_message_db(path: Path, count: int) -> Path:
@@ -34,8 +34,8 @@ def _incoming_message_db(path: Path, count: int) -> Path:
         CREATE TABLE chat (display_name TEXT);
         CREATE TABLE chat_message_join (message_id INTEGER, chat_id INTEGER);
         CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
-        INSERT INTO handle VALUES ('+14055550101');
-        INSERT INTO chat VALUES ('Dele');
+        INSERT INTO handle VALUES ('+13125550101');
+        INSERT INTO chat VALUES ('Evan');
     """)
     for index in range(1, count + 1):
         conn.execute("INSERT INTO message VALUES (1, ?, ?, 0)", (f"Note {index}", index))
@@ -51,7 +51,7 @@ class FakeStore:
     def __init__(self) -> None:
         self.texts: list[IncomingText] = []
         self.thread = MessageThread(
-            sender="Dele", handle=HANDLE, text="hello", at=1.0, chat_id=7,
+            sender="Evan", handle=HANDLE, text="hello", at=1.0, chat_id=7,
             chat_guid=GUID, unread=True,
         )
         self.threads: list[MessageThread] | None = None
@@ -100,7 +100,7 @@ class FakeSender(MessageSender):
 
 def _incoming(row_id: int, text: str = "yo") -> IncomingText:
     return IncomingText(
-        row_id=row_id, label="Dele", person="Dele", text=text, at=3.0,
+        row_id=row_id, label="Evan", person="Evan", text=text, at=3.0,
         is_group=False, handle=HANDLE, chat_id=7, chat_guid=GUID,
     )
 
@@ -147,7 +147,7 @@ async def test_threads_are_opaque_and_never_carry_the_private_identity(relay) ->
     raw = json.dumps(body)
     assert GUID not in raw and HANDLE not in raw
     (thread,) = body["threads"]
-    assert len(thread["id"]) == 20 and thread["label"] == "Dele" and thread["replyable"]
+    assert len(thread["id"]) == 20 and thread["label"] == "Evan" and thread["replyable"]
 
 
 async def test_first_events_call_returns_only_a_watermark(relay) -> None:

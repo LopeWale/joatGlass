@@ -1,9 +1,7 @@
-"""The Planner on the overview's rail (the wearer, 2026-10-15).
+"""The Planner on the overview's rail.
 
-"Remove the notification from the overview … let's put the planner's
-reminder … so I can see the reminders/tasks." The first tab of the rail used
-to be Notifications; it is now the Planner, and Notifications is the first
-row of the menu while the overview is up.
+The Planner sits on the overview rail alongside Notifications, News,
+Pomodoro, and QuickNotes so open reminders and tasks are visible at a glance.
 
 What the tab shows is the wearer's open Reminders: what is overdue, what is
 due today, and what is due in the next six days, earliest first. That is the
