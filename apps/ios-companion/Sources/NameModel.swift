@@ -58,14 +58,40 @@ enum NameModel {
         let started = Date()
         do {
             try await data.export(to: dataURL)
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                SFSpeechLanguageModel.prepareCustomLanguageModel(
-                    for: dataURL, clientIdentifier: "com.joat.brain",
-                    configuration: config, ignoresCache: true
-                ) { error in
-                    if let error { c.resume(throwing: error) } else { c.resume() }
+            let prepared = await withTaskGroup(of: Result<Void, Error>?.self) { group -> Bool in
+                group.addTask {
+                    do {
+                        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                            SFSpeechLanguageModel.prepareCustomLanguageModel(
+                                for: dataURL, clientIdentifier: "com.joat.brain",
+                                configuration: config, ignoresCache: true
+                            ) { error in
+                                if let error { c.resume(throwing: error) } else { c.resume() }
+                            }
+                        }
+                        return .success(())
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 3_500_000_000)
+                    return nil
+                }
+                let first = await group.next() ?? nil
+                group.cancelAll()
+                switch first {
+                case .some(.success):
+                    return true
+                case .some(.failure(let err)):
+                    Log.add("name model failed: \(err)")
+                    return false
+                case .none:
+                    Log.add("name model timed out after 3500 ms; continuing without custom pronunciation")
+                    return false
                 }
             }
+            guard prepared else { return nil }
             Log.add("name model ready in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
             return config
         } catch {

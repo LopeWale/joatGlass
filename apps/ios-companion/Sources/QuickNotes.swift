@@ -609,6 +609,22 @@ final class QuickNotes: VoiceCommand, PanelProvider {
     private var repaintPending = false
 
     private var current: Bool { menu?.activeCapability == "QUICKNOTES" }
+    var isForegroundOnGlass: Bool { current }
+
+    static func isVoiceControlRequest(_ request: String) -> Bool {
+        let normalized = request.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".,!?")).trimmingCharacters(in: .whitespaces)
+            .lowercased()
+        return stopSet.contains(normalized)
+            || pauseSet.contains(normalized)
+            || resumeSet.contains(normalized)
+            || discardSet.contains(normalized)
+            || confirmSet.contains(normalized)
+            || keepSet.contains(normalized)
+            || normalized == "pause"
+            || normalized == "resume"
+            || normalized == "continue"
+    }
 
     /// Leaving the surface (Home, another page): the recording keeps going.
     func departed() {

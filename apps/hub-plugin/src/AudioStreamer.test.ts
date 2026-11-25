@@ -589,6 +589,33 @@ describe('AudioStreamer stream liveness (Even Hub Background & Lifecycle)', () =
     await expect(audio.rearm('foreground')).resolves.toBe(false);
     expect(calls).toEqual([]);
   });
+
+  it('recovers cleanly on foreground after a background host refusal instead of stranding mic off forever', async () => {
+    const { audio, calls } = rig([true, false, true]);
+    const states: boolean[] = [];
+    audio.onState = (open) => states.push(open);
+
+    await audio.start(AudioInputSource.Glasses);
+    expect(audio.isOpen).toBe(true);
+    expect(audio.wantsCapture).toBe(true);
+
+    // Background shadow-timer silent-stream rearm gets false from suspended host:
+    vi.setSystemTime(Date.now() + 5_000);
+    await expect(audio.rearm('silent stream')).resolves.toBe(false);
+    expect(audio.isOpen).toBe(false);
+    expect(audio.wantsCapture).toBe(true);
+
+    // Returning to Even App foreground re-opens the wanted mic source:
+    await expect(audio.resumeIfWanted('foreground')).resolves.toBe(true);
+    expect(audio.isOpen).toBe(true);
+    expect(states).toEqual([true, false, true]);
+    expect(calls[calls.length - 1]).toEqual([true, AudioInputSource.Glasses]);
+
+    // Explicit stop clears wantsCapture so foreground return stays off:
+    await audio.stop();
+    expect(audio.wantsCapture).toBe(false);
+    await expect(audio.resumeIfWanted('foreground')).resolves.toBe(false);
+  });
 });
 
 describe('AudioStreamer bounded mic calls (2026-10-13)', () => {

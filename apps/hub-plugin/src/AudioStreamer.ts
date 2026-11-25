@@ -62,11 +62,16 @@ export class AudioStreamer {
   private open = false;
   private controlEpoch = 0;
   private desiredOpen = false;
+  /** Preserved across host/background refusals so foreground return can reopen. */
+  private wantedCapture = false;
+  private backgroundPaused = false;
   private controlTail: Promise<unknown> = Promise.resolve();
   /** Which mic was last (or is currently) hot — the menu's unmute reuses it. */
   lastSource: AudioInputSource = AudioInputSource.Glasses;
   /** Fired on every real open/close so the Mac's mic pill reflects TRUTH. */
   onState?: (open: boolean, micPromptId?: string) => void;
+  /** Fired when a stale stream attempts a host re-arm (for BLE diagnostics). */
+  onRearm?: (reason: string, ok: boolean) => void;
   /** Synchronous owner revocation; called only after this epoch is inert. */
   onPromptInvalidated?: (promptId: string) => void;
   private promptEpoch?: EpochState;
@@ -97,6 +102,16 @@ export class AudioStreamer {
   /** True while the mic is streaming. DeviceMonitor keys resume logic off this. */
   get isOpen(): boolean {
     return this.open;
+  }
+
+  /** True when the wearer/session wants continuous capture (survives background refusal). */
+  get wantsCapture(): boolean {
+    return this.wantedCapture;
+  }
+
+  /** Suppresses background shadow-timer re-arms until `FOREGROUND_ENTER`. */
+  setBackgroundPaused(paused: boolean): void {
+    this.backgroundPaused = paused;
   }
 
   activatePromptEpoch(epoch: PromptAudioEpoch, acknowledge: () => boolean): boolean {
@@ -162,6 +177,8 @@ export class AudioStreamer {
     if (signal?.aborted || (this.open && this.lastSource !== source)) return false;
     const epoch = ++this.controlEpoch;
     this.desiredOpen = true;
+    this.wantedCapture = true;
+    this.backgroundPaused = false;
     // An existing stream cannot attest to a different requested source.
     if (this.open) return this.lastSource === source;
     return this.control(async () => {
@@ -306,29 +323,59 @@ export class AudioStreamer {
       }
       return false;
     });
-    if (ok === false && epoch === this.controlEpoch && this.open) await this.stop();
-    return ok === true && this.open;
-  }
+      if (ok === false && epoch === this.controlEpoch && this.open) {
+        await this.suspendForHostRefusal();
+      }
+      if (ok !== undefined) this.onRearm?.(reason, ok === true && this.open);
+      return ok === true && this.open;
+    }
 
-  /** A stream that went silent re-arms itself, at most every
-   * REARM_MIN_INTERVAL_MS (a sibling page's audioControl(false), a host
-   * hiccup, a background trip with no foreground event). */
-  private checkLiveness(): void {
-    if (!this.isStale() || this.now() - this.lastRearmAtMs < REARM_MIN_INTERVAL_MS) return;
-    void this.rearm('silent stream');
-  }
+    /** Re-arms an open stream or re-opens a wanted stream suspended while backgrounded. */
+    async resumeIfWanted(reason: string): Promise<boolean> {
+      this.backgroundPaused = false;
+      if (this.open) return this.rearm(reason);
+      if (!this.wantedCapture) return false;
+      return this.start(this.lastSource);
+    }
 
-  // Serialize only native mic control, including late-start compensation.
-  // Display and other SDK calls do not share this lane.
-  private control<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.controlTail.then(operation, operation);
-    this.controlTail = result.catch(() => undefined);
-    return result;
-  }
+    /** A stream that went silent re-arms itself, at most every
+     * REARM_MIN_INTERVAL_MS (a sibling page's audioControl(false), a host
+     * hiccup, a background trip with no foreground event). */
+    private checkLiveness(): void {
+      if (this.backgroundPaused) return;
+      if (!this.isStale() || this.now() - this.lastRearmAtMs < REARM_MIN_INTERVAL_MS) return;
+      void this.rearm('silent stream');
+    }
 
-  async stop(micPromptId?: string): Promise<void> {
-    this.controlEpoch += 1;
-    this.desiredOpen = false;
+    // Serialize only native mic control, including late-start compensation.
+    // Display and other SDK calls do not share this lane.
+    private control<T>(operation: () => Promise<T>): Promise<T> {
+      const result = this.controlTail.then(operation, operation);
+      this.controlTail = result.catch(() => undefined);
+      return result;
+    }
+
+    /** Host refused re-arm (e.g. Even App suspended in background): mark mic
+     * honestly off, but keep `wantedCapture = true` so `resumeIfWanted('foreground')`
+     * restores listening automatically when Even App returns to foreground. */
+    private async suspendForHostRefusal(): Promise<void> {
+      this.controlEpoch += 1;
+      this.desiredOpen = false;
+      if (this.open && this.promptEpoch === undefined) this.seq += 1;
+      this.open = false;
+      this.clearPromptEpoch();
+      this.onState?.(false);
+      if (this.flushTimer) clearInterval(this.flushTimer);
+      this.flushTimer = undefined;
+      this.buffer = [];
+      this.carry = null;
+      await this.control(() => this.closeNative());
+    }
+
+    async stop(micPromptId?: string): Promise<void> {
+      this.controlEpoch += 1;
+      this.desiredOpen = false;
+      this.wantedCapture = false;
     // A pause discards PCM, even when no full batch was sent. Reserve a
     // sequence position so resumed speech cannot join the pre-mute utterance
     // on an otherwise unchanged socket. Repeated cleanup remains idempotent.

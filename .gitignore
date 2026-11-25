@@ -61,7 +61,8 @@ build/
 # TypeScript incremental build artifact
 *.tsbuildinfo
 
-# Personal plugin builds (each build carries its builder's own Mac addresses)
+# Other .ehpk scratch builds stay ignored, except the canonical JOAT package build
 apps/hub-plugin/*.ehpk
+!apps/hub-plugin/joat.ehpk
 apps/ios-companion/*.xcodeproj
 apps/ios-companion/Generated/

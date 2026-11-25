@@ -59,5 +59,36 @@ final class Log: ObservableObject {
         }
     }
 
+    /// Exports a `.txt` snapshot of `brain.log` (and in-memory lines) so iOS Share Sheet,
+    /// AirDrop, and chat file pickers never reject the `.log` extension as "Invalid Media".
+    static func exportShareURL() -> URL {
+        fileQueue.sync {}
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("joat-brain-diagnostics.txt")
+        let diskText = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
+        let body: String
+        if !diskText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            body = diskText
+        } else {
+            body = shared.lines.joined(separator: "\n") + "\n"
+        }
+        try? Data(body.utf8).write(to: outURL, options: .atomic)
+        return outURL
+    }
+
+    /// Full text snapshot for 1-tap clipboard copy in `DiagnosticsView`.
+    func snapshotText() -> String {
+        Self.fileQueue.sync {}
+        if let disk = try? String(contentsOf: Self.fileURL, encoding: .utf8),
+           !disk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Bound clipboard copy to the newest ~256 KB so paste stays instant.
+            if disk.utf8.count > 262_144 {
+                return String(disk.suffix(262_144))
+            }
+            return disk
+        }
+        return lines.joined(separator: "\n")
+    }
+
     func clear() { lines.removeAll() }
 }

@@ -432,7 +432,12 @@ final class Brain {
             if prompts.heard(text, spokeUntil: spokeUntil) { return }
         }
 
-        if quickNotes.wantsSpeech(audioEnd: spokeUntil) {
+        let preAddressed = WakeGate.strip(text)
+        let escapesRecordingNote: Bool = {
+            guard let req = preAddressed, !req.isEmpty else { return false }
+            return QuickNotes.isVoiceControlRequest(req) || !quickNotes.isForegroundOnGlass
+        }()
+        if !escapesRecordingNote, quickNotes.wantsSpeech(audioEnd: spokeUntil) {
             if voice.wasSpeaking(at: spokeUntil) {
                 Log.add("own voice kept out of the note: \(text.prefix(80))")
                 return
@@ -497,8 +502,9 @@ final class Brain {
                 voice.say(reply.text)
                 return
             }
-            navigation.hear(text, addressed: addressed)
-            return
+            if navigation.hear(text, addressed: addressed) {
+                return
+            }
         }
 
         let inNameOnly = (now < nameOnlyUntil || now < nameOnlyLatchedUntil)
@@ -881,10 +887,24 @@ final class Brain {
     /// so we MUST immediately rotate to a fresh `conversationId` while keeping
     /// `modelHistory` for 30 s of conversational context!
     func conversationChoice(_ action: String) {
+        if action == "ptt_start" {
+            nameOnlyUntil = Date().addingTimeInterval(15)
+            nameOnlyLatchedUntil = nameOnlyUntil
+            Log.add("on-demand push-to-talk started")
+            return
+        }
+        if action == "ptt_end" {
+            nameOnlyUntil = Date().addingTimeInterval(4)
+            Log.add("on-demand push-to-talk released")
+            return
+        }
         if action == "exit" {
             conversationUntil = .distantPast
             speechLatchedUntil = .distantPast
             rotateCardConversation()
+            if BleDiagnostics.currentMicModeRaw() == "on_demand" {
+                link.send(["kind": "audio.control", "open": false])
+            }
         } else if action == "continue" {
             let open = scheduleFollowUpTimer()
             if open, conversationVisible, !turns.isEmpty {
@@ -957,6 +977,9 @@ final class Brain {
                   !self.turns.isEmpty,
                   !self.followUpWindowOpen else { return }
             self.sendSnapshot(state: "ready", listening: false)
+            if BleDiagnostics.currentMicModeRaw() == "on_demand" {
+                self.link.send(["kind": "audio.control", "open": false])
+            }
             Log.add("follow-up window closed")
         }
         cueExpiry = expiry

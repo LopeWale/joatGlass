@@ -1,11 +1,16 @@
-import type { ResumePolicy } from './types';
+import type { MicMode, ResumePolicy } from './types';
 
 const STORAGE_KEY = 'joat.settings.v1';
 
 const RESUME_POLICIES: readonly ResumePolicy[] = ['auto', 'mac', 'confirm'];
+const MIC_MODES: readonly MicMode[] = ['glasses', 'phone', 'on_demand'];
 
 function isResumePolicy(v: unknown): v is ResumePolicy {
   return typeof v === 'string' && (RESUME_POLICIES as readonly string[]).includes(v);
+}
+
+function isMicMode(v: unknown): v is MicMode {
+  return typeof v === 'string' && (MIC_MODES as readonly string[]).includes(v);
 }
 
 /** The Even host's storage bridge — the one store that reliably survives app
@@ -30,14 +35,29 @@ export interface SettingsHostStorage {
  */
 export class Settings {
   private resume: ResumePolicy = 'confirm';
+  private mic: MicMode = 'glasses';
   private listener?: (policy: ResumePolicy) => void;
+  private micListener?: (mode: MicMode) => void;
   private host?: SettingsHostStorage;
   /** A policy the wearer (or Mac) chose this session outranks a hosted echo. */
   private chosenThisSession = false;
+  private chosenMicThisSession = false;
 
   /** Status surfaces (webview panel) subscribe to see menu-driven changes. */
   onChange(listener: (policy: ResumePolicy) => void): void {
     this.listener = listener;
+  }
+
+  onMicModeChange(listener: (mode: MicMode) => void): void {
+    this.micListener = listener;
+  }
+
+  private serialized(): string {
+    return JSON.stringify(
+      this.mic === 'glasses'
+        ? { resume: this.resume }
+        : { resume: this.resume, micMode: this.mic },
+    );
   }
 
   load(): void {
@@ -47,6 +67,8 @@ export class Settings {
       const parsed: unknown = JSON.parse(raw);
       const candidate = (parsed as { resume?: unknown }).resume;
       if (isResumePolicy(candidate)) this.resume = candidate;
+      const micCandidate = (parsed as { micMode?: unknown }).micMode;
+      if (isMicMode(micCandidate)) this.mic = micCandidate;
     } catch {
       // Unreadable storage → keep defaults.
     }
@@ -66,30 +88,50 @@ export class Settings {
     } catch {
       return;
     }
-    if (this.chosenThisSession) {
-      // A live choice outranks the hosted echo — and the host must converge
-      // on it now, not at the next change: a choice made before this attach
-      // (or whose write-through failed) would otherwise resurrect the stale
-      // hosted policy at the next boot.
-      void host.set(STORAGE_KEY, JSON.stringify({ resume: this.resume }))
+    if (this.chosenThisSession && this.chosenMicThisSession) {
+      void host.set(STORAGE_KEY, this.serialized())
         .then(() => undefined, () => undefined);
       return;
     }
-    if (!raw) return;
+    if (!raw) {
+      if (this.chosenThisSession || this.chosenMicThisSession) {
+        void host.set(STORAGE_KEY, this.serialized())
+          .then(() => undefined, () => undefined);
+      }
+      return;
+    }
     try {
       const parsed: unknown = JSON.parse(raw);
       const candidate = (parsed as { resume?: unknown }).resume;
-      if (isResumePolicy(candidate) && candidate !== this.resume) {
+      const micCandidate = (parsed as { micMode?: unknown }).micMode;
+      let changed = false;
+      if (!this.chosenThisSession && isResumePolicy(candidate) && candidate !== this.resume) {
         this.resume = candidate;
         this.listener?.(candidate);
+        changed = true;
+      }
+      if (!this.chosenMicThisSession && isMicMode(micCandidate) && micCandidate !== this.mic) {
+        this.mic = micCandidate;
+        this.micListener?.(micCandidate);
+        changed = true;
+      }
+      if (changed) {
         try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify({ resume: candidate }));
+          localStorage.setItem(STORAGE_KEY, this.serialized());
         } catch {
           // The local mirror is best-effort; the hosted copy is authoritative.
         }
       }
+      if (this.chosenThisSession || this.chosenMicThisSession) {
+        void host.set(STORAGE_KEY, this.serialized())
+          .then(() => undefined, () => undefined);
+      }
     } catch {
       // Malformed hosted value — keep the current policy.
+      if (this.chosenThisSession || this.chosenMicThisSession) {
+        void host.set(STORAGE_KEY, this.serialized())
+          .then(() => undefined, () => undefined);
+      }
     }
   }
 
@@ -97,11 +139,28 @@ export class Settings {
     return this.resume;
   }
 
+  get micMode(): MicMode {
+    return this.mic;
+  }
+
   setResumePolicy(policy: ResumePolicy): void {
     this.resume = policy;
     this.chosenThisSession = true;
     this.listener?.(policy);
-    const encoded = JSON.stringify({ resume: this.resume });
+    const encoded = this.serialized();
+    try {
+      localStorage.setItem(STORAGE_KEY, encoded);
+    } catch {
+      // Unwritable storage → setting holds for this session only.
+    }
+    void this.host?.set(STORAGE_KEY, encoded).then(() => undefined, () => undefined);
+  }
+
+  setMicMode(mode: MicMode): void {
+    this.mic = mode;
+    this.chosenMicThisSession = true;
+    this.micListener?.(mode);
+    const encoded = this.serialized();
     try {
       localStorage.setItem(STORAGE_KEY, encoded);
     } catch {

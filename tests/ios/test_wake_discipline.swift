@@ -229,6 +229,24 @@ private func testWakeGate() {
                 "Apple Dictation 'Jolt …' at sentence start wakes JOAT")
     expectEqual(WakeGate.strip("JOAT, what time is it"), "what time is it", "'JOAT' wakes")
     expectEqual(WakeGate.strip("Hey JOAT"), "", "name alone")
+
+    // Calling "JOAT" alone when Apple Dictation transcribes 1-token phonetic variants:
+    expectEqual(WakeGate.strip("Joe."), "", "standalone 'Joe.' wakes JOAT with Yes?")
+    expectEqual(WakeGate.strip("Joe?"), "", "standalone 'Joe?' wakes JOAT with Yes?")
+    expectEqual(WakeGate.strip("Jo."), "", "standalone 'Jo.' wakes JOAT with Yes?")
+    expectEqual(WakeGate.strip("Joats."), "", "standalone 'Joats.' wakes JOAT with Yes?")
+    expectEqual(WakeGate.strip("Jode."), "", "standalone 'Jode.' wakes JOAT with Yes?")
+    expectEqual(WakeGate.strip("Joke?"), "", "standalone 'Joke?' wakes JOAT with Yes?")
+    expect(WakeGate.strip("That's a joke") == nil, "casual 'That's a joke' never wakes JOAT")
+
+    // Expanded openers & polite/hesitation lead-ins:
+    expectEqual(WakeGate.strip("Joe, is it going to rain?"), "is it going to rain?", "'Joe, is…' wakes")
+    expectEqual(WakeGate.strip("Joe, I need a reminder at 5"), "I need a reminder at 5", "'Joe, I…' wakes")
+    expectEqual(WakeGate.strip("Jo, what time is it?"), "what time is it?", "'Jo, what…' wakes")
+    expectEqual(WakeGate.strip("Okay, Hey Joe, what's on my calendar?"), "what's on my calendar?",
+                "hesitation/polite lead-in before anchored wake phrase wakes JOAT")
+    expectEqual(WakeGate.strip("Um, Joe, what time is it?"), "what time is it?",
+                "hesitation lead-in before 'Joe, <request>' wakes JOAT")
 }
 
 // MARK: - 2. Zero volatile conversation spam + clean dismiss revision
@@ -411,6 +429,82 @@ private func testReplyArbitrationAndTools(brain: Brain, link: RecordingPluginLin
     expect(sys.contains("glasses_command"), "system prompt describes glasses_command")
 }
 
+// MARK: - 7. Split Dictation Call ("Joe." -> question), R1 Ring Isolation, & Log Export .txt
+
+@MainActor
+private func testSplitCallAndBleIsolation(brain: Brain, link: RecordingPluginLink) {
+    brain.conversationChoice("exit")
+    link.clear()
+
+    // Progressive dictation splits "JOAT, [pause] what time is it?" into "Joe." then "what time is it?":
+    brain.handle(.final("Joe.", latencyMs: 12))
+    expectEqual(lastTurns(link).last?["text"], "Yes?", "standalone 'Joe.' immediately mounts Yes? card")
+    brain.handle(.final("what time is it?", latencyMs: 15))
+    expect((lastTurns(link).last?["text"] ?? "").hasPrefix("It is "),
+           "second half of split dictation immediately answers the question")
+
+    // R1 Ring device status (deviceRole == "other") records BLE diagnostics without touching G2 wear/mic resume:
+    link.clear()
+    let beforeRingCount = BleDiagnostics.shared.otherDeviceEvents
+    brain.router.route(
+        kind: "device",
+        message: [
+            "kind": "device",
+            "connect": "disconnected",
+            "deviceRole": "other",
+            "snTail": "4412",
+            "wearing": false,
+            "battery": 0,
+        ],
+        raw: #"{"kind":"device","connect":"disconnected","deviceRole":"other","snTail":"4412","wearing":false}"#
+    )
+    settle(0.05)
+    expectEqual(BleDiagnostics.shared.otherDeviceEvents, beforeRingCount + 1,
+                "R1/other device status recorded in BleDiagnostics")
+    expect(!link.sent.contains { ($0["kind"] as? String) == "audio.control" },
+           "R1/other device status does NOT trigger G2 audio.control")
+
+    // Log share export produces a .txt file so chat/AirDrop uploads never fail as 'Invalid Media':
+    Log.add("diagnostic export check")
+    let exportURL = Log.exportShareURL()
+    expectEqual(exportURL.pathExtension, "txt", "exported diagnostics share file uses .txt extension")
+    expect(FileManager.default.fileExists(atPath: exportURL.path), "exported .txt log file exists on disk")
+
+    // MicResume tracks 'mic' field from kind: 'device' and reopens mic on wear under 'auto'/'mac',
+    // while respecting micMode == 'on_demand' (R1-safe zero idle BLE mic):
+    link.clear()
+    brain.router.route(kind: "policy", message: ["kind": "policy", "resume": "auto", "micMode": "glasses"], raw: "{}")
+    brain.router.route(kind: "device", message: ["kind": "device", "connect": "connected", "mic": false], raw: "{}")
+    brain.router.route(kind: "device", message: ["kind": "device", "connect": "connected", "wearing": false], raw: "{}")
+    brain.router.route(kind: "device", message: ["kind": "device", "connect": "connected", "wearing": true], raw: "{}")
+    settle(0.05)
+    expect(link.sent.contains { ($0["kind"] as? String) == "audio.control" && ($0["open"] as? Bool) == true },
+           "MicResume reopens mic on wear when mic was false and micMode is glasses")
+
+    link.clear()
+    brain.router.route(kind: "policy", message: ["kind": "policy", "resume": "auto", "micMode": "on_demand"], raw: "{}")
+    brain.router.route(kind: "device", message: ["kind": "device", "connect": "connected", "mic": false], raw: "{}")
+    brain.router.route(kind: "device", message: ["kind": "device", "connect": "connected", "wearing": false], raw: "{}")
+    brain.router.route(kind: "device", message: ["kind": "device", "connect": "connected", "wearing": true], raw: "{}")
+    settle(0.05)
+    expect(!link.sent.contains { ($0["kind"] as? String) == "audio.control" && ($0["open"] as? Bool) == true },
+           "MicResume keeps idle BLE mic OFF in on_demand (R1-safe) mode")
+
+    // Voice QuickNote control command works even while wantsSpeech is active (never swallowed into note body):
+    brain.conversationChoice("exit")
+    _ = brain.quickNotes.handle("start a voice note called Standup")
+    expect(brain.quickNotes.wantsSpeech(audioEnd: Date()), "voice note is actively recording")
+    brain.handle(.final("First line of the note", latencyMs: 10))
+    brain.handle(.final("Hey JOAT, pause voice note", latencyMs: 10))
+    expect(!brain.quickNotes.wantsSpeech(audioEnd: Date().addingTimeInterval(2)),
+           "'Hey JOAT, pause voice note' pauses recording instead of appending to note")
+    let latestBody = (brain.quickNotes.openVoiceNoteSnapshot?.paragraphs ?? []).joined(separator: " ")
+    expect(!latestBody.lowercased().contains("pause voice note"), "control command was NOT transcribed into note body")
+    _ = brain.quickNotes.handle("discard voice note")
+    _ = brain.quickNotes.handle("confirm discard")
+    brain.capabilities.openHome()
+}
+
 func runEntry() {
     let sema = DispatchSemaphore(value: 0)
     Task { @MainActor in
@@ -421,6 +515,7 @@ func runEntry() {
         testSpeechLatchAndFillerResistance(brain: brain, link: link)
         testFastLocalCapabilities(brain: brain, link: link)
         await testReplyArbitrationAndTools(brain: brain, link: link)
+        testSplitCallAndBleIsolation(brain: brain, link: link)
         brain.pomodoro.reset()
         print("PASS: all \(passedAssertions) wake & multi-turn reliability assertions succeeded.")
         sema.signal()

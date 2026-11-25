@@ -99,6 +99,15 @@ export const MESSAGE_REVIEW_PROMPT_MAX_UNITS = 280;
  */
 export type ResumePolicy = 'auto' | 'mac' | 'confirm';
 
+/**
+ * How JOAT uses the microphone on the glasses/phone:
+ * - `glasses`: 24/7 continuous G2 BLE microphone (hands-free "JOAT" / "Hey JOAT").
+ * - `phone`: 24/7 phone microphone via Even App (hands-free wake with zero G2 BLE audio traffic).
+ * - `on_demand`: G2 BLE microphone stays OFF at rest (0 BLE pkt/s, matching native Even AI for
+ *   zero R1 ring / AirPods / Tesla contention) and opens only during hold-to-talk or prompts.
+ */
+export type MicMode = 'glasses' | 'phone' | 'on_demand';
+
 /** A saved place on the wire (core/protocol.py `SavedPlace`): a name and an
  * address to search for, coordinates to route to, or both. */
 export interface SavedPlaceWire {
@@ -329,9 +338,23 @@ export type UplinkMessage =
   | { kind: 'audio'; source: 'glasses' | 'phone'; seq: number; pcm: number[]; speaker?: string; audioEpoch?: string }
   | { kind: 'imu'; x: number; y: number; z: number; at: number }
   | { kind: 'input'; event: InputEventPayload }
-  | { kind: 'device'; battery?: number; wearing?: boolean; charging?: boolean; connect: string; mic?: boolean; micSource?: 'glasses' | 'phone'; micPromptId?: string }
+  | {
+    kind: 'device';
+    battery?: number;
+    wearing?: boolean;
+    charging?: boolean;
+    inCase?: boolean;
+    connect: string;
+    mic?: boolean;
+    micSource?: 'glasses' | 'phone';
+    micPromptId?: string;
+    deviceRole?: 'glasses' | 'other';
+    snTail?: string;
+    rearmReason?: string;
+    ringTouches?: number;
+  }
   | { kind: 'confirm'; actionId: string; accepted: boolean; challengeId?: string; sessionId?: string; payloadDigest?: string; previewDigest?: string }
-  | { kind: 'policy'; resume: ResumePolicy }
+  | { kind: 'policy'; resume: ResumePolicy; micMode?: MicMode }
   /** The wearer's saved places, whole, whenever the phone page changes them
    * and on every connect (core/protocol.py `Places`). */
   | { kind: 'places'; places: SavedPlaceWire[] }
@@ -539,7 +562,7 @@ export type DownlinkMessage =
   | { kind: 'imu.trace'; enabled: boolean }
   | { kind: 'confirm.request'; actionId: string; prompt: string; challengeId: string; sessionId: string; payloadDigest: string; previewDigest: string; expiresAtMs: number; diagnosticKind?: 'messages'; messageUIActionId?: string; purpose?: ConfirmationPurpose }
   | { kind: 'confirm.cancel'; actionId: string }
-  | { kind: 'policy.set'; resume: ResumePolicy }
+  | { kind: 'policy.set'; resume: ResumePolicy; micMode?: MicMode }
   /** Explicit-window pairing: issued only after an auth frame with a null token. */
   | { kind: 'pairing.set'; token: string }
   /** The Mac shell enables this only for an explicit support capture. */

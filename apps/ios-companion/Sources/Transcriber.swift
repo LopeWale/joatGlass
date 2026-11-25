@@ -39,7 +39,11 @@ final class Transcriber: ObservableObject {
     /// end back to when that audio reached the phone.
     private var arrivals: [(samples: Int64, at: Date)] = []
     private var samplesFed: Int64 = 0
+    private var lastSpeechAudioAt: Date?
+    private var lastResultAt: Date = Date()
+    private var startedAt: Date = Date()
     private var lastVolatileLogged = ""
+    private var mediaResetObserver: NSObjectProtocol?
     private let lock = NSLock()
     private(set) var running = false
     /// Restarts since the last sentence came through (the backoff), and the
@@ -53,6 +57,27 @@ final class Transcriber: ObservableObject {
     init(kind: Kind, label: String) {
         self.kind = kind
         self.label = label
+        mediaResetObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.running else { return }
+            self.restart("media services reset", generation: self.generation)
+        }
+    }
+
+    deinit {
+        if let mediaResetObserver {
+            NotificationCenter.default.removeObserver(mediaResetObserver)
+        }
+    }
+
+    /// Ensures speech recognition is running when `JOAT Brain` comes forward.
+    func check() {
+        if !running {
+            start()
+        }
     }
 
     func start() {
@@ -189,6 +214,11 @@ final class Transcriber: ObservableObject {
                 Log.add("[\(label)] custom words set")
             }
             try await analyzer.start(inputSequence: stream)
+            lock.lock()
+            startedAt = Date()
+            lastResultAt = Date()
+            lastSpeechAudioAt = nil
+            lock.unlock()
             Log.add("analyzer started")
             await MainActor.run { self.engine = name + " — listening" }
         } catch {
@@ -221,15 +251,44 @@ final class Transcriber: ObservableObject {
             if let err { Log.add("convert error: \(err)"); return }
             out = converted
         }
+        var peak: Int32 = 0
+        for s in samples.lazy.prefix(640) {
+            let mag = abs(Int32(s))
+            if mag > peak { peak = mag }
+        }
+        let now = Date()
+        var shouldRestartStalled = false
+        var stalledGen = 0
         lock.lock()
         samplesFed += Int64(samples.count)
-        arrivals.append((samplesFed, Date()))
+        arrivals.append((samplesFed, now))
         if arrivals.count > 3_000 { arrivals.removeFirst(arrivals.count - 3_000) }
+        if peak >= 1_400 {
+            if lastSpeechAudioAt == nil { lastSpeechAudioAt = now }
+            if let speechStart = lastSpeechAudioAt,
+               now.timeIntervalSince(speechStart) > 25,
+               now.timeIntervalSince(lastResultAt) > 25,
+               now.timeIntervalSince(startedAt) > 25 {
+                lastSpeechAudioAt = nil
+                shouldRestartStalled = true
+                stalledGen = generation
+            }
+        } else if let speechStart = lastSpeechAudioAt, now.timeIntervalSince(speechStart) > 4,
+                  now.timeIntervalSince(lastResultAt) <= 4 {
+            lastSpeechAudioAt = nil
+        }
         lock.unlock()
         builder.yield(AnalyzerInput(buffer: out))
+        if shouldRestartStalled {
+            restart("analyzer produced no results across 25s of speech audio", generation: stalledGen)
+        }
     }
 
     private func handle(text: String, isFinal: Bool, range: CMTimeRange) {
+        lock.lock()
+        lastResultAt = Date()
+        lastSpeechAudioAt = nil
+        lock.unlock()
         // Progressive dictation finalises a sentence's closing "?" or "." as
         // its own result, or at the head of the next one ("? Let's grab...").
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -115,9 +115,11 @@ class EventType(IntEnum):
 
 
 ResumePolicy = Literal["auto", "mac", "confirm"]
+MicMode = Literal["glasses", "phone", "on_demand"]
 AudioSource = Literal["glasses", "phone"]
 
 RESUME_POLICIES: tuple[str, ...] = ("auto", "mac", "confirm")
+MIC_MODES: tuple[str, ...] = ("glasses", "phone", "on_demand")
 NAVIGATION_ACTIONS: tuple[str, ...] = (
     "confirm_destination",
     "retry_destination",
@@ -253,6 +255,7 @@ class Device:
     battery: int | None = None
     wearing: bool | None = None
     charging: bool | None = None
+    in_case: bool | None = None
     mic: bool | None = None
     """The plugin's ACTUAL mic state. The status pill used to latch
     'streaming' at hello and never verify — a mic that failed to start was
@@ -262,6 +265,10 @@ class Device:
     """Selected microphone, including while muted; not PCM source evidence."""
     mic_prompt_id: str | None = None
     """Only an automatic prompt-owned stop names its retired microphone owner."""
+    device_role: Literal["glasses", "other"] | None = None
+    sn_tail: str | None = None
+    rearm_reason: str | None = None
+    ring_touches: int | None = None
 
     def __post_init__(self) -> None:
         if self.mic_source is not None and self.mic_source not in ("glasses", "phone"):
@@ -285,6 +292,7 @@ class Confirm:
 @dataclass(frozen=True, slots=True)
 class Policy:
     resume: ResumePolicy
+    mic_mode: MicMode | None = None
 
 
 #: Bounds for a saved place as the phone page sends it. A place is a name
@@ -1788,9 +1796,13 @@ class ConfirmCancel:
 @dataclass(frozen=True, slots=True)
 class PolicySet:
     resume: ResumePolicy
+    mic_mode: MicMode | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        return {"kind": "policy.set", "resume": self.resume}
+        wire: dict[str, Any] = {"kind": "policy.set", "resume": self.resume}
+        if self.mic_mode is not None:
+            wire["micMode"] = self.mic_mode
+        return wire
 
 
 @dataclass(frozen=True, slots=True)
@@ -2939,14 +2951,31 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
                 time_zone=(_optional_time_zone(payload.get("timeZone")) or None),
             )
         case "device":
+            role_raw = payload.get("deviceRole")
+            if role_raw is not None and role_raw not in ("glasses", "other"):
+                raise ProtocolError("device deviceRole is invalid")
+            sn_tail_raw = payload.get("snTail")
+            if sn_tail_raw is not None and (not isinstance(sn_tail_raw, str) or len(sn_tail_raw) > 16):
+                raise ProtocolError("device snTail is invalid")
+            rearm_raw = payload.get("rearmReason")
+            if rearm_raw is not None and (not isinstance(rearm_raw, str) or len(rearm_raw) > 64):
+                raise ProtocolError("device rearmReason is invalid")
+            ring_raw = payload.get("ringTouches")
+            if ring_raw is not None and (isinstance(ring_raw, bool) or not isinstance(ring_raw, int) or ring_raw < 0):
+                raise ProtocolError("device ringTouches is invalid")
             return Device(
                 connect=payload.get("connect", "none"),
                 battery=payload.get("battery"),
                 wearing=payload.get("wearing"),
                 charging=payload.get("charging"),
+                in_case=payload.get("inCase") if isinstance(payload.get("inCase"), bool) else None,
                 mic=payload.get("mic"),
                 mic_source=(_prompt_source(payload["micSource"]) if "micSource" in payload else None),
                 mic_prompt_id=(_prompt_token(payload["micPromptId"]) if "micPromptId" in payload else None),
+                device_role=role_raw,
+                sn_tail=sn_tail_raw,
+                rearm_reason=rearm_raw,
+                ring_touches=ring_raw,
             )
         case "confirm":
             action_id = _require(payload, "actionId", kind)
@@ -2978,7 +3007,10 @@ def parse_uplink(payload: dict[str, Any]) -> UplinkMessage:
             resume = payload.get("resume")
             if resume not in RESUME_POLICIES:
                 raise ProtocolError(f"unknown resume policy {resume!r}")
-            return Policy(resume=resume)
+            mic_mode = payload.get("micMode")
+            if mic_mode is not None and mic_mode not in MIC_MODES:
+                raise ProtocolError(f"unknown mic mode {mic_mode!r}")
+            return Policy(resume=resume, mic_mode=mic_mode)
         case "places":
             if set(payload) != {"kind", "places"}:
                 raise ProtocolError("places update has unsupported fields")

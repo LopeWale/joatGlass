@@ -1758,10 +1758,21 @@ async def main() -> None:
             active.cancel()
         capabilities.on_disconnect()
 
-    worn_before: dict[str, bool | None] = {"wearing": None}
+    device_state: dict[str, bool | None] = {"wearing": None, "mic": None}
 
     def on_device(device: Device) -> None:
+        if device.device_role == "other":
+            log.info(
+                "ble accessory status (sn=%s, connect=%s, bat=%s)",
+                device.sn_tail or "other",
+                device.connect,
+                device.battery,
+            )
+            return
         prompted_speech.handle_device(device)
+        if device.mic is not None:
+            device_state["mic"] = device.mic
+        effective_mic = device.mic if device.mic is not None else device_state["mic"]
         # Resume policy "mac": the plugin leaves the mic off when the glasses
         # go back on and waits for this process to want ears. It always
         # does, so a don with the mic off is answered with one open request.
@@ -1769,13 +1780,14 @@ async def main() -> None:
         # under "auto" (it resumes itself) or "confirm" (it asks the wearer).
         if (
             device.wearing is True
-            and worn_before["wearing"] is not True
-            and device.mic is False
+            and device_state["wearing"] is not True
+            and effective_mic is not True
             and transport.resume_policy == "mac"
         ):
             log.info("glasses worn again under resume policy mac — asking for ears")
             asyncio.get_running_loop().create_task(transport.send(AudioControl(open=True)))
-        worn_before["wearing"] = device.wearing
+        if device.wearing is not None:
+            device_state["wearing"] = device.wearing
         # Battery reaches the dashboard, not just the model.
         hello = transport.hello
         who = f"{hello.model} / {hello.sn}" if hello else "glasses"

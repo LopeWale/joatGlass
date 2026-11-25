@@ -111,8 +111,10 @@ final class KeepAlive: ObservableObject {
                 break
             }
         })
-        observers.append(nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.describeRoute()
+        observers.append(nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
+            let reasonCode = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
+                .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+            self?.describeRoute(reason: reasonCode)
             self?.check()
         })
         observers.append(nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] note in
@@ -126,11 +128,33 @@ final class KeepAlive: ObservableObject {
         })
     }
 
-    private func describeRoute() {
+    private func describeRoute(reason: AVAudioSession.RouteChangeReason? = nil) {
         let r = AVAudioSession.sharedInstance().currentRoute
         let ins = r.inputs.map { "\($0.portType.rawValue)" }.joined(separator: ",")
         let outs = r.outputs.map { "\($0.portType.rawValue)" }.joined(separator: ",")
+        let btPorts: Set<AVAudioSession.Port> = [.bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .carAudio]
+        let hasBT = r.outputs.contains { btPorts.contains($0.portType) }
+        let reasonLabel: String? = reason.map {
+            switch $0 {
+            case .newDeviceAvailable: return "newDevice"
+            case .oldDeviceUnavailable: return "deviceLeft"
+            case .categoryChange: return "category"
+            case .override: return "override"
+            case .wakeFromSleep: return "wake"
+            case .noSuitableRouteForCategory: return "noRoute"
+            case .routeConfigurationChange: return "config"
+            case .unknown: return "unknown"
+            @unknown default: return "other"
+            }
+        }
         route = "in[\(ins)] out[\(outs)]"
-        Log.add("route \(route)")
+        if let reasonLabel {
+            Log.add("route \(route) (reason=\(reasonLabel), btOut=\(hasBT))")
+        } else {
+            Log.add("route \(route)")
+        }
+        Task { @MainActor in
+            BleDiagnostics.shared.recordAudioRoute(route: self.route, reason: reasonLabel, bluetoothActive: hasBT)
+        }
     }
 }

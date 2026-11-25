@@ -125,4 +125,24 @@ describe('Settings', () => {
     });
     expect(t.resumePolicy).toBe('confirm');
   });
+
+  it('persists micMode alongside resumePolicy with backwards-compatible defaults', async () => {
+    const data = stubStorage({ 'joat.settings.v1': JSON.stringify({ resume: 'auto' }) });
+    const s = new Settings();
+    s.load();
+    expect(s.resumePolicy).toBe('auto');
+    expect(s.micMode).toBe('glasses');
+
+    s.setMicMode('on_demand');
+    expect(s.micMode).toBe('on_demand');
+    expect(JSON.parse(data['joat.settings.v1'] ?? '{}')).toEqual({
+      resume: 'auto',
+      micMode: 'on_demand',
+    });
+
+    const reloaded = new Settings();
+    reloaded.load();
+    expect(reloaded.resumePolicy).toBe('auto');
+    expect(reloaded.micMode).toBe('on_demand');
+  });
 });

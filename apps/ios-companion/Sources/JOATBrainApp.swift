@@ -48,13 +48,16 @@ final class JOATRuntime: NSObject, UNUserNotificationCenterDelegate {
 
     func start(reason: String) {
         guard brain == nil else {
-            // Already running: ensure background audio and loopback listener are healthy.
+            // Already running: ensure background audio, STT, and loopback listener are healthy.
             keepAlive.check()
+            stt.check()
             server.ensureListening(reason: reason, rebuildIfIdle: true)
             return
         }
         Log.add("app launched (\(reason), \(UIApplication.shared.applicationState == .background ? "background" : "foreground"))")
         UNUserNotificationCenter.current().delegate = self
+        BleDiagnostics.shared.activeLink = server
+        BleDiagnostics.shared.isActiveLinkConnected = { [server] in server.authenticated && server.clients > 0 }
         server.start()
         keepAlive.start()
         let b = Brain(server: server, stt: stt, shadow: nil, voice: voice, macTerminal: macTerminal)
@@ -215,6 +218,7 @@ struct ContentView: View {
             Log.add("scene \(new)")
             if new == .active {
                 keepAlive.check()
+                JOATRuntime.shared.stt.check()
                 server.ensureListening(reason: "app opened", rebuildIfIdle: true)
                 notes.reload()
                 Task { await permissions.refresh() }

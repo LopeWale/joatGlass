@@ -130,6 +130,7 @@ struct HomeView: View {
     @ObservedObject private var stt = JOATRuntime.shared.stt
     @ObservedObject private var voice = JOATRuntime.shared.voice
     @ObservedObject private var onPhoneAI = OnPhoneAI.shared
+    @ObservedObject private var bleDiag = BleDiagnostics.shared
     @ObservedObject private var gmailStore = GmailAccountStore.shared
     @ObservedObject private var macTerminal = JOATRuntime.shared.macTerminal
     @ObservedObject var permissions: Permissions
@@ -468,6 +469,21 @@ struct HomeView: View {
                 Toggle(isOn: $cuesOn) {
                     Label("AI cues during QuickNotes", systemImage: "sparkles")
                         .font(.subheadline)
+                }
+                .padding(.vertical, 10)
+
+                Divider()
+
+                HStack {
+                    Label("Glasses Mic Mode", systemImage: "antenna.radiowaves.left.and.right")
+                        .font(.subheadline)
+                    Spacer()
+                    Picker("Glasses Mic Mode", selection: $bleDiag.micMode) {
+                        ForEach(MicModeChoice.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
                 }
                 .padding(.vertical, 10)
 
@@ -2323,9 +2339,12 @@ struct DiagnosticsView: View {
     @ObservedObject private var stt = JOATRuntime.shared.stt
     @ObservedObject private var endurance = JOATRuntime.shared.endurance
     @ObservedObject private var voice = JOATRuntime.shared.voice
+    @ObservedObject private var bleDiag = BleDiagnostics.shared
     @StateObject private var selfTest = SelfTest()
     @AppStorage(AudioCheck.keepKey) private var keepNoteAudio = false
     @State private var noteAudio: [URL] = []
+    @State private var shareLogURL: URL = Log.exportShareURL()
+    @State private var copiedLogToast = false
 
     var body: some View {
         if embedded {
@@ -2350,11 +2369,63 @@ struct DiagnosticsView: View {
                     rows.map { noteAudio[$0] }.forEach { try? FileManager.default.removeItem(at: $0) }
                     noteAudio = AudioCheck.saved()
                 }
-                ShareLink(item: Log.fileURL) { Label("Share the log", systemImage: "doc.text") }
+                ShareLink(item: shareLogURL) {
+                    Label("Share the log (.txt)", systemImage: "doc.text")
+                }
+                Button {
+                    UIPasteboard.general.string = log.snapshotText()
+                    shareLogURL = Log.exportShareURL()
+                    copiedLogToast = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        copiedLogToast = false
+                    }
+                } label: {
+                    HStack {
+                        Label(copiedLogToast ? "Copied log to clipboard" : "Copy log to clipboard", systemImage: copiedLogToast ? "checkmark.circle.fill" : "doc.on.doc")
+                        Spacer()
+                    }
+                }
             } header: {
-                Text("The glasses' mic")
+                Text("The glasses' mic & log export")
             } footer: {
-                Text("While a note records, the log gets the glasses' sound level every second. With Save note audio on, each note's audio is kept on this phone too, as a file to share. Swipe a file to delete it.")
+                Text("Share exports a plain .txt file so chat and file uploaders never reject it. Copy puts the newest log lines straight onto your clipboard.")
+            }
+
+            Section {
+                Picker("Mic mode (A/B isolation)", selection: $bleDiag.micMode) {
+                    ForEach(MicModeChoice.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                Picker("After glasses off/on", selection: $bleDiag.resumeChoice) {
+                    ForEach(MicResumeChoice.allCases) { choice in
+                        Text(choice.title).tag(choice)
+                    }
+                }
+                LabeledContent("G2 glasses", value: "\(bleDiag.glassesSnTail) · \(bleDiag.glassesConnectState)")
+                LabeledContent(
+                    "R1 / accessory events",
+                    value: "\(bleDiag.otherDeviceEvents) (\(bleDiag.lastOtherDeviceSummary))"
+                )
+                LabeledContent("R1 ring gestures", value: "\(bleDiag.ringTouches)")
+                LabeledContent(
+                    "G2 mic re-arms",
+                    value: "\(bleDiag.micRearms) (\(bleDiag.lastRearmReason))"
+                )
+                LabeledContent(
+                    "AirPods / Car BT audio",
+                    value: bleDiag.bluetoothAudioActive ? "Active (A2DP / CarAudio)" : "Idle"
+                )
+                LabeledContent(
+                    "Audio route switches",
+                    value: "\(bleDiag.routeChanges) (\(bleDiag.lastRouteSummary))"
+                )
+                Button("Reset BLE counters") { bleDiag.resetCounters() }
+                    .buttonStyle(.borderless)
+            } header: {
+                Text("Bluetooth & R1 Ring Coexistence")
+            } footer: {
+                Text("To isolate R1 ring interference near AirPods or car Bluetooth: switch Mic mode to “Hold to Talk (R1-Safe)” or “Phone Mic (R1-Safe)” to drop continuous G2 BLE audio to 0 pkt/s, or tap Stop under Keep-alive to release Classic BT A2DP.")
             }
             Section("Glasses link") {
                 LabeledContent("Listener", value: server.state)
@@ -2398,8 +2469,14 @@ struct DiagnosticsView: View {
         .scrollContentBackground(.hidden)
         .background(JoatTheme.surface.ignoresSafeArea())
         .navigationTitle("Diagnostics")
-        .onAppear { noteAudio = AudioCheck.saved() }
-        .refreshable { noteAudio = AudioCheck.saved() }
+        .onAppear {
+            noteAudio = AudioCheck.saved()
+            shareLogURL = Log.exportShareURL()
+        }
+        .refreshable {
+            noteAudio = AudioCheck.saved()
+            shareLogURL = Log.exportShareURL()
+        }
     }
 }
 

@@ -654,25 +654,28 @@ final class Navigation: ObservableObject, BrainFeature, VoiceCommand {
         return CommandReply(text: "", activated: true)
     }
 
-    func hear(_ text: String, addressed: String?) {
-        guard let s = session else { return }
+    @discardableResult
+    func hear(_ text: String, addressed: String?) -> Bool {
+        guard let s = session else { return false }
         if Self.isCancel(text) || addressed.map(Self.isCancel) == true {
             Log.add("navigation cancelled by voice")
             session = nil
             s.end()
             activeSummary = nil
             onMenuChanged?()
-            return
+            return true
         }
         if let a = addressed, !a.isEmpty {
-            if !s.consume(a) { Log.add("navigation active — not routed to the assistant (\(a.count) chars)") }
-            return
+            if s.consume(a) { return true }
+            Log.add("navigation active — forwarding addressed query to assistant (\(a.count) chars)")
+            return false
         }
         if addressed == nil, s.awaitingDestinationNow {
             _ = s.consume(text)
-            return
+            return true
         }
         Log.add("navigation active — unaddressed speech ignored (\(text.count) chars)")
+        return true
     }
 
     static let sessionCancel: Set<String> = [

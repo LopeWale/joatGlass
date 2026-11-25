@@ -1,6 +1,5 @@
 import type { LinkState, MacLink } from './MacLink';
-import type { Settings } from './Settings';
-import type { ResumePolicy } from './types';
+import type { MicMode, ResumePolicy } from './types';
 
 export interface PhoneControlHandoffView {
   readonly active: boolean;
@@ -12,9 +11,10 @@ export interface PhoneControlHandoffView {
 export interface PhoneControlOptions {
   link: Pick<MacLink, 'activeUrl' | 'linkState' | 'wasReplaced'>;
   urls: readonly string[];
-  settings: Pick<Settings, 'resumePolicy'>;
+  settings: { readonly resumePolicy: ResumePolicy; readonly micMode?: MicMode };
   handoff?: PhoneControlHandoffView;
   changePolicy: (policy: ResumePolicy) => void;
+  changeMicMode?: (mode: MicMode) => void;
   checkLocation: () => Promise<{ accuracy?: number } | null>;
   canReconnect: () => boolean;
   selectBrain: (url: string) => Promise<boolean>;
@@ -26,6 +26,7 @@ export class PhoneControlPanel {
   private userEditedBrain = false;
   private readonly brain = document.querySelector<HTMLSelectElement>('#p-brain');
   private readonly policy = document.querySelector<HTMLSelectElement>('#p-resume');
+  private readonly micMode = document.querySelector<HTMLSelectElement>('#p-mic-mode');
   private readonly connect = document.querySelector<HTMLButtonElement>('#p-connect');
 
   constructor(private readonly options: PhoneControlOptions) {
@@ -44,9 +45,11 @@ export class PhoneControlPanel {
       });
     }
     if (this.policy) this.policy.disabled = false;
+    if (this.micMode) this.micMode.disabled = false;
     const locationButton = document.querySelector<HTMLButtonElement>('#p-location-check');
     if (locationButton) locationButton.disabled = false;
     this.updatePolicy(options.settings.resumePolicy);
+    if (options.settings.micMode) this.updateMicMode(options.settings.micMode);
     this.connect?.addEventListener('click', () => {
       if (!options.canReconnect() || !this.brain) return;
       void this.selectBrain(this.brain.value);
@@ -54,6 +57,12 @@ export class PhoneControlPanel {
     this.policy?.addEventListener('change', () => {
       const value = this.policy?.value;
       if (value === 'auto' || value === 'mac' || value === 'confirm') options.changePolicy(value);
+    });
+    this.micMode?.addEventListener('change', () => {
+      const value = this.micMode?.value;
+      if (value === 'glasses' || value === 'phone' || value === 'on_demand') {
+        options.changeMicMode?.(value);
+      }
     });
     document.querySelector<HTMLButtonElement>('#p-location-check')?.addEventListener('click', () => {
       void this.checkLocation();
@@ -63,6 +72,10 @@ export class PhoneControlPanel {
 
   updatePolicy(policy: ResumePolicy): void {
     if (this.policy) this.policy.value = policy;
+  }
+
+  updateMicMode(mode: MicMode): void {
+    if (this.micMode) this.micMode.value = mode;
   }
 
   updateLink(state: LinkState): void {

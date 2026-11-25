@@ -69,11 +69,14 @@
         <p id="brain-help" class="support">Connect retries the brain you choose. Messages &amp; Agent Terminal always use your Mac when configured.</p>
         <p id="p-action" class="feedback" role="status"></p>
         <h2 id="voice-title">Listening</h2>
-        <div class="group"><div class="row"><label for="p-resume">After an interruption</label><select id="p-resume" disabled><option value="confirm">Ask first</option><option value="auto">Resume automatically</option><option value="mac">Let Mac decide</option></select></div></div>
-        <p class="support">Controls when the microphone resumes after a pause.</p>
+        <div class="group">
+          <div class="row"><label for="p-mic-mode">Mic mode</label><select id="p-mic-mode" disabled><option value="glasses">Always on (glasses mic)</option><option value="on_demand">Hold to talk (R1-safe)</option><option value="phone">Always on (phone mic, R1-safe)</option></select></div>
+          <div class="row"><label for="p-resume">After an interruption</label><select id="p-resume" disabled><option value="confirm">Ask first</option><option value="auto">Resume automatically</option><option value="mac">Let Mac decide</option></select></div>
+        </div>
+        <p class="support">Hold to talk or phone mic eliminates continuous G2 BLE audio when using Even R1 near AirPods or car Bluetooth.</p>
         <details class="group">
           <summary>Troubleshooting</summary>
-          <dl><dt>Active brain</dt><dd id="p-active-brain">—</dd><dt>Address</dt><dd id="p-url">—</dd><dt>Plugin</dt><dd id="p-status">Starting…</dd><dt>Microphone</dt><dd id="p-mic">Off</dd><dt>Resume policy</dt><dd id="p-policy">—</dd></dl>
+          <dl><dt>Active brain</dt><dd id="p-active-brain">—</dd><dt>Address</dt><dd id="p-url">—</dd><dt>Plugin</dt><dd id="p-status">Starting…</dd><dt>Microphone</dt><dd id="p-mic">Off</dd><dt>Resume policy</dt><dd id="p-policy">—</dd><dt>R1 / BLE events</dt><dd id="p-ble-events">0</dd></dl>
           <p id="p-recovery" class="support">Open this page in Even Hub to connect.</p>
           <button id="p-location-check" class="action" disabled type="button">Check phone location</button>
           <p id="p-location-result" class="support" role="status"></p>

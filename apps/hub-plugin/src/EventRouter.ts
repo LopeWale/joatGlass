@@ -134,11 +134,17 @@ export class EventRouter {
   private pendingMicLongPress = false;
   /** A long press is talking into an open QuickNote (FEAT-002). */
   private pendingNoteHold = false;
+  /** A long press on the resting overview (hold-to-talk in on_demand mode, or unmute recovery). */
+  private pendingOverviewHold = false;
   private contextualMenuOverlayOpen = false;
   /** When the overlay flag was raised, and when the current long press
    * began: both bound how long either can stand in for the OS menu. */
   private contextualMenuOpenedAt = 0;
   private longPressStartedAt = 0;
+  /** Optional R1 ring gesture telemetry hook (EventSourceType.TOUCH_EVENT_FROM_RING). */
+  onRingTouch?: (eventType: number) => void;
+  /** Optional resting-overview hold hook for R1-safe push-to-talk & mic recovery. */
+  onOverviewHold?: (phase: 'start' | 'end' | 'cancel') => boolean;
 
   constructor(
     private readonly client: BridgeClient,
@@ -191,6 +197,12 @@ export class EventRouter {
       this.endNoteHold(via);
       return true;
     }
+    if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT && this.pendingOverviewHold) {
+      this.pendingOverviewHold = false;
+      this.pendingMicLongPress = false;
+      this.onOverviewHold?.('end');
+      return true;
+    }
     if (type === OsEventTypeList.LONG_PRESS_RELEASE_EVENT) {
       const toggleMic = this.pendingMicLongPress && !this.contextualMenuOverlayOpen;
       this.pendingMicLongPress = false;
@@ -232,6 +244,17 @@ export class EventRouter {
       this.longPressStartedAt = Date.now();
       console.info('[EventRouter] long-press on a live note — listening');
       this.menu.sendQuickNotesHold?.('start');
+      return true;
+    }
+    if (!this.contextualMenuOverlayOpen
+      && !this.promptedInput?.isActive()
+      && !this.imu.isPending()
+      && !this.terminal?.isActive()
+      && !this.menu.isPanelRefreshable()
+      && this.onOverviewHold?.('start') === true) {
+      this.pendingOverviewHold = true;
+      this.pendingMicLongPress = true;
+      this.longPressStartedAt = Date.now();
       return true;
     }
     this.pendingMicLongPress = !this.contextualMenuOverlayOpen;
@@ -280,6 +303,10 @@ export class EventRouter {
   private endPress(via: string): void {
     this.pendingMicLongPress = false;
     this.endNoteHold(via);
+    if (this.pendingOverviewHold) {
+      this.pendingOverviewHold = false;
+      this.onOverviewHold?.('cancel');
+    }
   }
 
   /** End a held note paragraph exactly once: kept on release, dropped when
@@ -650,6 +677,9 @@ export class EventRouter {
       this.imu.ingest(sys.imuData);
       return;
     }
+    if (source === EventSourceType.TOUCH_EVENT_FROM_RING) {
+      this.onRingTouch?.(type);
+    }
 
     // Lifecycle first: these are not wearer gestures and must never be
     // mistaken for confirms.
@@ -663,6 +693,10 @@ export class EventRouter {
           // wearer talking: the hold it started is cancelled, its audio not
           // kept, and the release belongs to the menu now.
           this.endNoteHold('contextual-menu', 'cancel');
+          if (this.pendingOverviewHold) {
+            this.pendingOverviewHold = false;
+            this.onOverviewHold?.('cancel');
+          }
           this.pendingMicLongPress = false;
           this.openContextualMenuOverlay();
           return;

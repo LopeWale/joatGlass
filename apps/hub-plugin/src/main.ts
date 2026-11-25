@@ -530,9 +530,40 @@ async function boot(): Promise<void> {
   const settings = new Settings();
   settings.load();
   setPanel('p-policy', settings.resumePolicy);
+  let onDemandReleaseTimer: ReturnType<typeof setTimeout> | undefined;
+  let ringTouchCount = 0;
+  const clearOnDemandTimer = (): void => {
+    if (onDemandReleaseTimer !== undefined) {
+      clearTimeout(onDemandReleaseTimer);
+      onDemandReleaseTimer = undefined;
+    }
+  };
+  const applyLiveMicMode = (mode: Settings['micMode']): void => {
+    clearOnDemandTimer();
+    if (exiting || displayYielded) return;
+    if (mode === 'on_demand') {
+      void audio.stop().then(() => {
+        setPanel('p-mic', 'on-demand (R1-safe)');
+        if (!exiting) void hud.setStatus('JOAT · hold to talk');
+      });
+      return;
+    }
+    const targetSource = mode === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses;
+    const label = targetSource === AudioInputSource.Phone
+      ? 'JOAT · listening (phone mic)'
+      : 'JOAT · listening';
+    void audio.stop().then(() => audio.start(targetSource)).then((ok) => {
+      setPanel('p-mic', ok ? 'streaming' : 'unavailable');
+      if (!exiting) void hud.setStatus(ok ? label : 'JOAT · mic unavailable');
+    });
+  };
   settings.onChange((policy) => {
     setPanel('p-policy', policy);
     phonePanel?.updatePolicy(policy);
+  });
+  settings.onMicModeChange((mode) => {
+    phonePanel?.updateMicMode(mode);
+    applyLiveMicMode(mode);
   });
   // Legacy WebView saved places: migrated once to JOAT Brain when non-empty.
   const places = new Places();
@@ -626,7 +657,11 @@ async function boot(): Promise<void> {
     checkLocation: () => location.requestNavigationOrigin(),
     changePolicy: (policy) => {
       settings.setResumePolicy(policy);
-      link.send({ kind: 'policy', resume: policy });
+      link.send({ kind: 'policy', resume: policy, micMode: settings.micMode });
+    },
+    changeMicMode: (mode) => {
+      settings.setMicMode(mode);
+      link.send({ kind: 'policy', resume: settings.resumePolicy, micMode: mode });
     },
   });
   // Durable resume policy: the Even host's storage survives Android WebView
@@ -638,11 +673,20 @@ async function boot(): Promise<void> {
   // latch "streaming" at hello and never verify.
   audio.onState = (open, micPromptId) => {
     if (!open && micPromptId === undefined) promptedInput.cancel('microphone');
-    setPanel('p-mic', open ? 'streaming' : 'off');
+    setPanel('p-mic', open ? 'streaming' : (settings.micMode === 'on_demand' ? 'on-demand (R1-safe)' : 'off'));
     chromeRef?.setMic(open);
     link.send({ kind: 'device', connect: 'connected', mic: open,
       micSource: audio.lastSource === AudioInputSource.Phone ? 'phone' : 'glasses',
       ...(micPromptId === undefined ? {} : { micPromptId }) });
+  };
+  audio.onRearm = (reason, ok) => {
+    link.send({
+      kind: 'device',
+      connect: 'connected',
+      mic: audio.isOpen,
+      micSource: audio.lastSource === AudioInputSource.Phone ? 'phone' : 'glasses',
+      rearmReason: `${reason}:${ok ? 'ok' : 'refused'}`,
+    });
   };
 
   const lifecycle: LifecycleHandler = {
@@ -662,18 +706,28 @@ async function boot(): Promise<void> {
       // status line repainted. Repaint the whole restored surface, then status.
       void hud.repaintRestoredSurface();
       // Even Hub's Background & Lifecycle page: capture stops while the app
-      // is backgrounded; re-enable it on foreground with the same source and
-      // never assume the stream is still live.
-      void (audio.isOpen ? audio.rearm('foreground') : Promise.resolve(false)).then(() => {
-        if (!exiting) void hud.setStatus(audio.isOpen ? 'JOAT · listening' : 'JOAT · mic off');
+      // is backgrounded; re-enable it on foreground (or recover from a
+      // background host refusal) with the same source.
+      const recovery = settings.micMode === 'on_demand'
+        ? Promise.resolve(false)
+        : audio.resumeIfWanted('foreground');
+      void recovery.then(() => {
+        if (exiting) return;
+        if (settings.micMode === 'on_demand' && !audio.isOpen) {
+          void hud.setStatus('JOAT · hold to talk');
+        } else {
+          const activeLabel = audio.lastSource === AudioInputSource.Phone
+            ? 'JOAT · listening (phone mic)'
+            : 'JOAT · listening';
+          void hud.setStatus(audio.isOpen ? activeLabel : 'JOAT · mic off');
+        }
       });
     },
     onForegroundExit: () => {
+      clearOnDemandTimer();
+      audio.setBackgroundPaused(true);
       promptedInput.cancel('background');
       location.setForeground(false);
-      // Nothing to flush: Settings writes through on every change, so there is
-      // no dirty state to lose. Deliberately a no-op rather than invented work.
-      // If buffered state ever lands here, this is where it gets persisted.
     },
     onExit: (reason) => {
       // Terminal. Stop the hardware: a mic still streaming after the wearer
@@ -683,7 +737,7 @@ async function boot(): Promise<void> {
     },
   };
 
-  new EventRouter(
+  const router = new EventRouter(
     client,
     link,
     audio,
@@ -703,7 +757,61 @@ async function boot(): Promise<void> {
     promptedInput,
     () => confirmationRetry?.run,
     pendingNotificationDismissals,
-  ).attach();
+  );
+  router.onRingTouch = () => {
+    ringTouchCount += 1;
+    link.send({ kind: 'device', connect: 'connected', ringTouches: ringTouchCount });
+  };
+  router.onOverviewHold = (phase) => {
+    if (exiting || displayYielded) return false;
+    if (settings.micMode === 'on_demand') {
+      if (phase === 'start') {
+        clearOnDemandTimer();
+        link.send({
+          kind: 'input',
+          event: { containerName: 'assistant-conversation', selectedName: 'ptt_start' },
+        });
+        void audio.start(AudioInputSource.Glasses).then((ok) => {
+          if (!exiting) void hud.setStatus(ok ? 'JOAT · listening…' : 'JOAT · mic unavailable');
+        });
+        return true;
+      }
+      if (phase === 'end') {
+        link.send({
+          kind: 'input',
+          event: { containerName: 'assistant-conversation', selectedName: 'ptt_end' },
+        });
+        clearOnDemandTimer();
+        onDemandReleaseTimer = setTimeout(() => {
+          onDemandReleaseTimer = undefined;
+          if (settings.micMode === 'on_demand' && !promptedInput.isActive()) {
+            void audio.stop().then(() => {
+              if (!exiting) void hud.setStatus('JOAT · hold to talk');
+            });
+          }
+        }, 4_500);
+        return true;
+      }
+      clearOnDemandTimer();
+      void audio.stop().then(() => {
+        if (!exiting) void hud.setStatus('JOAT · hold to talk');
+      });
+      return true;
+    }
+    // In continuous modes, a long-press on Home while muted recovers the mic.
+    if (phase === 'start' && !audio.isOpen) {
+      const targetSource = settings.micMode === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses;
+      const label = targetSource === AudioInputSource.Phone
+        ? 'JOAT · listening (phone mic)'
+        : 'JOAT · listening';
+      void audio.start(targetSource).then((ok) => {
+        if (!exiting) void hud.setStatus(ok ? label : 'JOAT · mic unavailable');
+      });
+      return true;
+    }
+    return false;
+  };
+  router.attach();
 
   // Official-simulator visual gate. This is DEV-only and drives the same
   // production presenter/menu/event methods as the real gesture and Mac paths;
@@ -716,6 +824,9 @@ async function boot(): Promise<void> {
 
   const devices = new DeviceMonitor(client, link, audio, imu, hud, settings);
   devices.onBattery = (level, charging) => chromeRef?.setBattery(level, charging);
+  devices.onAccessoryStatus = (count, connect, snTail) => {
+    setPanel('p-ble-events', `${count} (${snTail ?? 'ring'}: ${connect})`);
+  };
   devices.attach();
 
   const terminalPreludeGuards = new WeakMap<DownlinkMessage, () => boolean>();
@@ -1028,16 +1139,19 @@ async function boot(): Promise<void> {
         break;
       case 'audio.control':
         if (msg.open) {
-          const ok = await awaitCurrent(
-            audio.start(
-              msg.source === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses,
-              context.signal,
-            ),
-          );
+          if (settings.micMode === 'on_demand') {
+            setPanel('p-mic', 'on-demand (R1-safe)');
+            break;
+          }
+          const targetSource = settings.micMode === 'phone'
+            ? AudioInputSource.Phone
+            : (msg.source === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses);
+          const ok = await awaitCurrent(audio.start(targetSource, context.signal));
           setPanel('p-mic', ok ? 'streaming' : 'unavailable');
         } else {
+          clearOnDemandTimer();
           await awaitCurrent(audio.stop());
-          setPanel('p-mic', 'off');
+          setPanel('p-mic', settings.micMode === 'on_demand' ? 'on-demand (R1-safe)' : 'off');
         }
         break;
       case 'imu.control':
@@ -1138,9 +1252,10 @@ async function boot(): Promise<void> {
         });
         break;
       case 'policy.set':
-        // Mac-side config path; the wearer's on-glasses menu is the other.
+        // Mac / JOAT Brain config path; the wearer's phone panel is the other.
         settings.setResumePolicy(msg.resume);
-        link.send({ kind: 'policy', resume: settings.resumePolicy });
+        if (msg.micMode) settings.setMicMode(msg.micMode);
+        link.send({ kind: 'policy', resume: settings.resumePolicy, micMode: settings.micMode });
         break;
       case 'shutdown':
         await teardown();
@@ -1172,7 +1287,7 @@ async function boot(): Promise<void> {
     sendHello();
     // Announce the persisted policy so the Mac's session logic starts in sync,
     // and any legacy WebView saved places so JOAT Brain / Mac can migrate them.
-    link.send({ kind: 'policy', resume: settings.resumePolicy });
+    link.send({ kind: 'policy', resume: settings.resumePolicy, micMode: settings.micMode });
     const saved = places.list();
     if (saved.length > 0) {
       link.send({ kind: 'places', places: placesToWire(saved) });
@@ -1202,6 +1317,7 @@ async function boot(): Promise<void> {
   ]).catch(() => null);
   resolvedDevice = device;
   resolvedUser = user;
+  devices.setGlassesSn(device?.sn);
   if (link.linkState === 'connected' && (Boolean(device?.sn) || Boolean(user?.name))) {
     sendHello();
   }
@@ -1218,6 +1334,12 @@ async function boot(): Promise<void> {
   } else if (worn === false) {
     micStatus = 'JOAT · mic off (glasses not worn)';
     setPanel('p-mic', 'off (not worn)');
+  } else if (settings.micMode === 'on_demand') {
+    micStatus = 'JOAT · hold to talk';
+    setPanel('p-mic', 'on-demand (R1-safe)');
+  } else if (settings.micMode === 'phone') {
+    const micOk = await audio.start(AudioInputSource.Phone);
+    micStatus = micOk ? 'JOAT · listening (phone mic)' : 'JOAT · mic unavailable';
   } else {
     let micOk = await audio.start(AudioInputSource.Glasses);
     let label = 'JOAT · listening';
