@@ -398,6 +398,21 @@ struct HomeView: View {
 
                 Divider()
 
+                HStack {
+                    Label("Gemini Model", systemImage: "sparkles")
+                        .font(.subheadline)
+                    Spacer()
+                    Picker("Gemini Model", selection: $onPhoneAI.geminiModel) {
+                        ForEach(onPhoneAI.geminiModels) { option in
+                            Text(option.title).tag(option.id)
+                        }
+                    }
+                    .labelsHidden()
+                }
+                .padding(.vertical, 10)
+
+                Divider()
+
                 Button {
                     keySheetTarget = .gemini
                 } label: {
@@ -869,6 +884,7 @@ private struct OnPhoneAPIKeySheet: View {
 private struct OnPhoneAISettingsSheet: View {
     @ObservedObject var onPhoneAI: OnPhoneAI
     @State private var keyTarget: OnPhoneKeyKind?
+    @State private var customModelDraft = ""
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -884,7 +900,59 @@ private struct OnPhoneAISettingsSheet: View {
                 } header: {
                     Text("Assistant Routing")
                 } footer: {
-                    Text("Auto prefers an on-phone key for ~600 ms streaming replies, falling back to your Mac over Tailscale when needed.")
+                    Text("Auto prefers an on-phone key for sub-second streaming replies, falling back to your Mac over Tailscale when needed.")
+                }
+
+                Section {
+                    Picker("Model", selection: $onPhoneAI.geminiModel) {
+                        ForEach(onPhoneAI.geminiModels) { option in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(option.title)
+                                Text(option.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .tag(option.id)
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        TextField("Custom model ID (e.g. gemini-4-hydrogen)", text: $customModelDraft)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.subheadline.monospaced())
+                        Button("Use") {
+                            if onPhoneAI.setCustomGeminiModel(customModelDraft) {
+                                customModelDraft = ""
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(GeminiLink.normalizeModelId(customModelDraft) == nil)
+                    }
+
+                    if onPhoneAI.geminiConfigured {
+                        Button {
+                            Task { await onPhoneAI.refreshGeminiModels() }
+                        } label: {
+                            HStack {
+                                Label(
+                                    onPhoneAI.refreshingGeminiModels ? "Refreshing Gemini Models…" : "Refresh Models from Google AI",
+                                    systemImage: "arrow.clockwise"
+                                )
+                                Spacer()
+                                if onPhoneAI.refreshingGeminiModels {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                            }
+                        }
+                        .disabled(onPhoneAI.refreshingGeminiModels)
+                    }
+                } header: {
+                    Text("Gemini Model")
+                } footer: {
+                    Text("Used for JOAT voice turns, tool calling, post-close note summaries, and handwriting OCR. Gemini 3.5 Flash Lite uses minimal thinking for lowest latency; Gemini 4 models use low-thinking 1M-context reasoning.")
                 }
 
                 Section("On-Phone Keychain Keys") {

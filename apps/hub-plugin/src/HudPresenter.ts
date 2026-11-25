@@ -46,7 +46,17 @@ import {
 import { isRouteProgressView, navigationChip, pomodoroChip } from './ActivityChips';
 import { NativeTerminalSurface, terminalHeadTitle } from './NativeTerminalSurface';
 import { productivityActionHint, productivityPhaseLabel, usesActionPillLayout } from './HudCanvasRenderer';
-import { navigationNativeBody, type NavigationHudModel } from './NavigationHud';
+import {
+  hasNavigationSchematic,
+  quantizeNavigationSchematicView,
+  withNavigationSchematic,
+  type NavigationSchematicView,
+} from './NavigationCard';
+import {
+  navigationNativeBody,
+  type NavigationHudModel,
+  type NavigationNativePage,
+} from './NavigationHud';
 import {
   PanelRail,
   pomodoroTickDelayMs,
@@ -737,6 +747,7 @@ export class HudPresenter {
         this.paintReaderUnderBox(page);
         this.paintHomeColumnUnderBox(page);
         this.paintReminderCardOn(page, owner);
+        this.paintNavigationSchematicOn(page, owner);
       }
       return replaced && displayCurrent();
     } catch {
@@ -808,7 +819,7 @@ export class HudPresenter {
       return this.renderNativeProductivityPage(this.surface);
     }
     if (this.surface.kind === 'navigation') {
-      const native = navigationNativeBody(this.surface.navigation);
+      const native = this.nativeNavigationFor(this.surface.navigation);
       if (native !== undefined) return this.renderNativeNavigationPage(this.surface, native);
     }
     return this.restoreVisualPage();
@@ -906,8 +917,11 @@ export class HudPresenter {
       );
     }
     if (surface.kind === 'navigation') {
-      const native = navigationNativeBody(surface.navigation);
-      if (native !== undefined) return this.layouts.textPageLayout(native.body, { status: '', hint: native.hint });
+      const native = this.nativeNavigationFor(surface.navigation);
+      if (native !== undefined) {
+        const base = this.layouts.textPageLayout(native.body, { status: '', hint: native.hint }, { inset: true });
+        return native.schematic ? withNavigationSchematic(base) : base;
+      }
     }
     return undefined;
   }
@@ -978,6 +992,45 @@ export class HudPresenter {
     const visual = this.visual;
     if (!visual?.paintReminderCard) return Promise.resolve(false);
     return visual.paintReminderCard(view, current).catch(() => false);
+  }
+
+  private canPaintNavigationSchematic(): boolean {
+    return Boolean(this.visual?.paintNavigationSchematic && this.visual.canPaintNavigationSchematic?.());
+  }
+
+  private nativeNavigationFor(navigation: NavigationHudModel): NavigationNativePage | undefined {
+    if (navigation.view === 'guidance' && !nativeOverviewEnabled && !this.canPaintNavigationSchematic()) {
+      return undefined;
+    }
+    return navigationNativeBody(navigation, { schematic: this.canPaintNavigationSchematic() });
+  }
+
+  private navigationSchematicNow(): NavigationSchematicView | undefined {
+    if (this.surface.kind !== 'navigation' || this.surface.navigation.view !== 'guidance') return undefined;
+    return quantizeNavigationSchematicView(
+      this.surface.navigation.map,
+      this.surface.navigation.mode ?? 'walking',
+    );
+  }
+
+  private paintNavigationSchematicOn(page: RebuildPageContainer, owner: DisplayPageOwner): void {
+    if (!hasNavigationSchematic(page) || owner === 'notification-native') return;
+    const top = cardTop(page);
+    const current = this.captureDisplayGuard();
+    setTimeout(() => {
+      const view = this.navigationSchematicNow();
+      if (!view || !current()) return;
+      void this.paintNavigationSchematic(
+        top === undefined ? view : { ...view, clipBottom: top - OVERLAY_GAP },
+        current,
+      );
+    }, 0);
+  }
+
+  private paintNavigationSchematic(view: NavigationSchematicView, current: () => boolean): Promise<boolean> {
+    const visual = this.visual;
+    if (!visual?.paintNavigationSchematic) return Promise.resolve(false);
+    return visual.paintNavigationSchematic(view, current).catch(() => false);
   }
 
 
@@ -2120,6 +2173,12 @@ export class HudPresenter {
               { ...reminders, clipTop: bottom + NOTIFICATION_CARD.gap, dim: true }, this.captureDisplayGuard(),
             );
           }
+          const navSchematic = this.navigationSchematicNow();
+          if (bottom !== undefined && hasNavigationSchematic(page) && navSchematic) {
+            void this.paintNavigationSchematic(
+              { ...navSchematic, clipTop: bottom + NOTIFICATION_CARD.gap, dim: true }, this.captureDisplayGuard(),
+            );
+          }
           if (bottom !== undefined && hasHomeImages(page) && this.surface.kind === 'default') {
             const frame = this.visualFrame();
             if (frame.kind === 'overview') {
@@ -2856,9 +2915,7 @@ export class HudPresenter {
     // the preview, the warnings, arrival, an error) is a text card: Even's
     // own text page, one rebuild in and an in-place upgrade for a cursor
     // move. Only the guidance frame with its map is pixels.
-    const native = navigationNativeBody(navigation);
-    // The map rebuilds the image page; a text page replaces whatever page is
-    // on the glass directly, unless the terminal must hand over first.
+    const native = this.nativeNavigationFor(navigation);
     if ((native === undefined || this.nativeTerminal.isActive())
       && !await this.prepareNativeTerminalHandoff()) return false;
     const prior = this.capturePresenterSnapshot();
@@ -2887,12 +2944,12 @@ export class HudPresenter {
   }
 
   /** The text page on the glass for a navigation frame, so the next frame
-   * of the same step can move its cursor marker in place. */
-  private nativeNavigation?: { body: string; hint: string };
+   * of the same step or route progress updates in place without rebuilding. */
+  private nativeNavigation?: NavigationNativePage;
 
   private async renderNativeNavigationPage(
     surface: Extract<HudSurface, { kind: 'navigation' }>,
-    native: { body: string; hint: string },
+    native: NavigationNativePage,
     statusOverride?: string,
   ): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
@@ -2902,11 +2959,15 @@ export class HudPresenter {
       ? this.captureLiveStatus()
       : { text: statusOverride, brightness: 2 };
     const previous = this.pageOwner === 'navigation-native' ? this.nativeNavigation : undefined;
-    if (previous === undefined) {
-      const ok = await this.replaceNativePage(
-        this.layouts.textPageLayout(native.body, { status: this.nativeHeader('NAVIGATION'), hint: native.hint }),
-        'navigation-native',
+    const needsRebuild = previous === undefined || Boolean(previous.schematic) !== Boolean(native.schematic);
+    if (needsRebuild) {
+      const baseLayout = this.layouts.textPageLayout(
+        native.body,
+        { status: this.nativeHeader('NAVIGATION'), hint: native.hint },
+        { inset: true },
       );
+      const pageLayout = native.schematic ? withNavigationSchematic(baseLayout) : baseLayout;
+      const ok = await this.replaceNativePage(pageLayout, 'navigation-native');
       if (!ok || !displayCurrent()) {
         this.recordPageTransition(from, 'navigation', 'show_navigation', 'failed');
         return false;
@@ -2934,6 +2995,10 @@ export class HudPresenter {
       if (liveStatus.brightness !== undefined) this.brightness.set(ContainerId.StatusBar, liveStatus.brightness);
     }
     this.nativeNavigation = native;
+    if (!needsRebuild && native.schematic) {
+      const schematicView = this.navigationSchematicNow();
+      if (schematicView) void this.paintNavigationSchematic(schematicView, displayCurrent);
+    }
     this.recordPageTransition(from, 'navigation', 'show_navigation', 'success');
     return true;
   }

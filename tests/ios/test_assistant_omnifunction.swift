@@ -1573,6 +1573,50 @@ private func testAlwaysOnMacHandoffMessagesAndTerminal(brain: Brain, link: Recor
     )
 }
 
+@MainActor
+func testSelectableGeminiModelsAndGenerationConfig() {
+    let ids = GeminiLink.builtInModels.map(\.id)
+    for expected in [
+        "gemini-3.5-flash-lite",
+        "gemini-4-hydrogen",
+        "gemini-4-argon",
+        "gemini-4-neon",
+        "gemini-4-carbon",
+        "gemini-3.8-flash",
+    ] {
+        expect(ids.contains(expected), "Built-in Gemini picker includes \(expected)")
+    }
+
+    expectEqual(GeminiLink.normalizeModelId("models/gemini-4-hydrogen"), "gemini-4-hydrogen",
+                "Strips leading models/ prefix from Gemini model ID")
+    expectEqual(GeminiLink.displayName(for: "gemini-4-hydrogen"), "Gemini 4 Hydrogen",
+                "Displays human-readable title for Gemini 4 Hydrogen")
+
+    let flashLiteCfg = GeminiLink.chatGenerationConfig(for: "gemini-3.5-flash-lite")
+    expectEqual((flashLiteCfg["thinkingConfig"] as? [String: Any])?["thinkingLevel"] as? String, "MINIMAL",
+                "Gemini 3.5 Flash Lite uses MINIMAL thinkingLevel")
+
+    let hydrogenCfg = GeminiLink.chatGenerationConfig(for: "gemini-4-hydrogen")
+    expectEqual((hydrogenCfg["thinkingConfig"] as? [String: Any])?["thinkingLevel"] as? String, "LOW",
+                "Gemini 4 Hydrogen uses LOW thinkingLevel (never MINIMAL)")
+    expect(hydrogenCfg["temperature"] == nil, "Gemini 4 Hydrogen omits deprecated temperature parameter")
+    expectEqual(hydrogenCfg["maxOutputTokens"] as? Int, 8192, "Gemini 4 Hydrogen raises maxOutputTokens to 8192")
+
+    let prevModel = OnPhoneAI.shared.geminiModel
+    let prevEngine = OnPhoneAI.shared.engineChoice
+    defer {
+        OnPhoneAI.shared.geminiModel = prevModel
+        OnPhoneAI.shared.engineChoice = prevEngine
+    }
+    OnPhoneAI.shared.engineChoice = .gemini
+    expect(OnPhoneAI.shared.setCustomGeminiModel("models/gemini-4-carbon"), "Accepts Gemini 4 Carbon selection")
+    expectEqual(OnPhoneAI.shared.geminiModel, "gemini-4-carbon", "Persists normalized Gemini model ID")
+    if OnPhoneAI.shared.geminiConfigured {
+        expectEqual(OnPhoneAI.shared.activeProviderSummary, "Gemini 4 Carbon",
+                    "activeProviderSummary reflects selected Gemini model")
+    }
+}
+
 func runEntry() {
     let sema = DispatchSemaphore(value: 0)
     Task { @MainActor in
@@ -1582,6 +1626,7 @@ func runEntry() {
         await testDirectToolExecutionAndHandoff(brain: brain, link: link)
         await testGeminiThoughtSignatureAndToolStreaming(brain: brain, link: link)
         await testAlwaysOnMacHandoffMessagesAndTerminal(brain: brain, link: link)
+        testSelectableGeminiModelsAndGenerationConfig()
         print("PASS: all \(passedAssertions) assistant omnifunction assertions succeeded.")
         sema.signal()
     }

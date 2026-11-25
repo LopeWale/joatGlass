@@ -7,6 +7,7 @@ import type { G2DiagnosticTrace, TraceTileContainer } from './G2DiagnosticTrace'
 import type { HudStatusModel } from './HudStatus';
 import type { EvenReaderLine } from './EvenFont';
 import type { HomeColumnView } from './HomeImages';
+import type { NavigationSchematicView } from './NavigationCard';
 import type { ReminderCardView } from './ReminderCard';
 import { isNavigationSetupStatus, type NavigationHudModel } from './NavigationHud';
 import type { PanelRailVisual } from './PanelRail';
@@ -124,6 +125,8 @@ export interface HudFrameRenderer {
   renderHomeColumn?(view: HomeColumnView, model?: HudStatusModel): Promise<readonly HudImageTile[]>;
   /** The Reminders page's next-up card as its one image (ReminderCard.ts). */
   renderReminderCard?(view: ReminderCardView): Promise<readonly HudImageTile[]>;
+  /** Active Navigation's right-pane vector schematic as its one image (NavigationCard.ts). */
+  renderNavigationSchematic?(view: NavigationSchematicView): Promise<readonly HudImageTile[]>;
 }
 
 /** A header repaint queued on the same single image lane as frames. */
@@ -163,6 +166,9 @@ export interface HudFramePainter {
   /** Paint the Reminders page's card; sent only when its pixels changed. */
   paintReminderCard?(view: ReminderCardView, isCurrent: () => boolean): Promise<boolean>;
   canPaintReminderCard?(): boolean;
+  /** Paint active Navigation's right-pane vector schematic; sent only when its pixels changed. */
+  paintNavigationSchematic?(view: NavigationSchematicView, isCurrent: () => boolean): Promise<boolean>;
+  canPaintNavigationSchematic?(): boolean;
   /** Whether this painter draws a reader page in Even's font. A
    * painter without it keeps readers as firmware text pages. */
   canPaintReader?(): boolean;
@@ -490,6 +496,20 @@ export class HudVisualSurface implements HudFramePainter {
 
   paintReminderCard(view: ReminderCardView, isCurrent: () => boolean): Promise<boolean> {
     const render = this.renderer.renderReminderCard;
+    if (!render || this.pagePartsDisabled) return Promise.resolve(false);
+    const pageRevision = this.pageRevision;
+    return this.enqueue(
+      { kind: 'strip', render: () => render.call(this.renderer, view) },
+      () => pageRevision === this.pageRevision && isCurrent(),
+    );
+  }
+
+  canPaintNavigationSchematic(): boolean {
+    return !this.pagePartsDisabled && this.renderer.renderNavigationSchematic !== undefined;
+  }
+
+  paintNavigationSchematic(view: NavigationSchematicView, isCurrent: () => boolean): Promise<boolean> {
+    const render = this.renderer.renderNavigationSchematic;
     if (!render || this.pagePartsDisabled) return Promise.resolve(false);
     const pageRevision = this.pageRevision;
     return this.enqueue(

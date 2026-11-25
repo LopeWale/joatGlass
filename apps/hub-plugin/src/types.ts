@@ -64,6 +64,7 @@ export const VisualContainerName: Readonly<Record<number, string>> = {
   19: 'home-bot',
   17: 'hdr-right',
   21: 'rem-card',
+  22: 'nav-map',
 };
 
 /** The one header every firmware page carries: the image spine's two
@@ -76,6 +77,8 @@ export const HomeColumnId = { Top: 18, Bottom: 19 } as const;
 export const HomePaneLabelId = 20;
 /** The Reminders page's next-up card image (ReminderCard.ts). Page-local. */
 export const ReminderCardId = 21;
+/** Active Navigation's right-pane vector route schematic image (NavigationCard.ts). Page-local. */
+export const NavigationMapId = 22;
 
 /** Canvas constants from the SDK. Never hardcode these elsewhere. */
 export const CANVAS = { width: 576, height: 288, greyLevels: 16 } as const;

@@ -70,9 +70,12 @@ _CLAUDE_MODEL_OPTIONS = ("default", "sonnet", "opus", "fable")
 _CODEX_MODEL_OPTIONS = ("default", "gpt-5.6-terra", "gpt-5.3-codex-spark")
 _ANTIGRAVITY_MODEL_OPTIONS = (
     "default",
+    "gemini-4-hydrogen",
+    "gemini-4-neon",
+    "gemini-4-carbon",
+    "gemini-4-argon",
     "gemini-3.8-flash",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
 )
 
 _REASONS = {

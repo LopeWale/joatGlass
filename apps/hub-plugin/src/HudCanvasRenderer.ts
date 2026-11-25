@@ -42,6 +42,7 @@ import {
   CANVAS,
   HeaderImageId,
   HomeColumnId,
+  NavigationMapId,
   PANEL_TABS,
   ReminderCardId,
   SPINE_LABEL_BOX,
@@ -50,6 +51,10 @@ import {
   type PanelTab,
   type ProductivityHudModel,
 } from './types';
+import {
+  NAVIGATION_SCHEMATIC_CARD,
+  type NavigationSchematicView,
+} from './NavigationCard';
 import {
   splitGrayscaleTiles,
   type AssistantOverlayVisual,
@@ -62,7 +67,7 @@ import {
   type NavigationHudModel,
   type NavigationManeuver,
 } from './NavigationHud';
-import { buildRouteSchematic, type RouteSchematic, type ScreenPoint } from './NavigationSchematic';
+import { buildRouteSchematic, type RouteSchematic, type SchematicBounds, type ScreenPoint } from './NavigationSchematic';
 
 import {
   TYPE,
@@ -270,10 +275,9 @@ export function batteryIconFor(
   return 'batteryEmpty';
 }
 
-/** The raster lists draw flat: every pixel the rounded frame occupied was
- * a pixel of content. The dashboard and the live map keep the shell. */
+/** All feature pages draw flat without an outer rounded lens border. */
 export function usesFlatHudShell(kind: HudVisualFrame['kind']): boolean {
-  return kind === 'list' || kind === 'reader';
+  return kind === 'list' || kind === 'reader' || kind === 'navigation';
 }
 
 /** One run of text on a reader page, where it lands and how bright. */
@@ -991,6 +995,49 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     return [{ containerId: ReminderCardId, pixels, width, height }];
   }
 
+  /** Active Navigation's right-side vector route schematic card (`NavigationCard.ts`). */
+  async renderNavigationSchematic(view: NavigationSchematicView): Promise<readonly HudImageTile[]> {
+    const width = NAVIGATION_SCHEMATIC_CARD.width;
+    const height = NAVIGATION_SCHEMATIC_CARD.height;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) throw new Error('2D canvas is unavailable');
+    context.fillStyle = '#000000';
+    context.fillRect(0, 0, width, height);
+    context.imageSmoothingEnabled = true;
+
+    const localBounds: SchematicBounds = { x: 0, y: 0, width, height };
+    const clipTopLocal = view.clipTop !== undefined
+      ? Math.max(0, view.clipTop - NAVIGATION_SCHEMATIC_CARD.y)
+      : 0;
+    const clipBottomLocal = view.clipBottom !== undefined
+      ? Math.min(height, view.clipBottom - NAVIGATION_SCHEMATIC_CARD.y)
+      : height;
+
+    if (clipBottomLocal > clipTopLocal) {
+      const schematic = buildRouteSchematic(view.map, localBounds, view.mode);
+      if (schematic) {
+        context.save();
+        context.beginPath();
+        context.rect(0, clipTopLocal, width, clipBottomLocal - clipTopLocal);
+        context.clip();
+        this.drawNavigationMap(context, schematic, localBounds);
+        context.restore();
+      }
+    }
+
+    const rgba = context.getImageData(0, 0, width, height).data;
+    const pixels = new Uint8Array(width * height);
+    const scale = view.dim ? UNDER_CARD_ALPHA : 1;
+    for (let source = 0, target = 0; source < rgba.length; source += 4, target += 1) {
+      const level = Math.max(rgba[source] ?? 0, rgba[source + 1] ?? 0, rgba[source + 2] ?? 0);
+      pixels[target] = Math.round(level * scale);
+    }
+    return [{ containerId: NavigationMapId, pixels, width, height }];
+  }
+
   /** The spine alone, as the two 288x24 halves of a firmware page's image
    * header (HeaderImage.ts): the same drawing as the image pages' spine. */
   async renderHeader(model: HudStatusModel, label: string): Promise<readonly HudImageTile[]> {
@@ -1664,8 +1711,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
   private drawNavigationMap(
     context: CanvasRenderingContext2D,
     schematic: RouteSchematic,
+    pane: SchematicBounds = NAVIGATION_MAP_PANEL,
   ): void {
-    const pane = NAVIGATION_MAP_PANEL;
     context.save();
     context.beginPath();
     context.rect(pane.x, pane.y, pane.width, pane.height);
@@ -1734,7 +1781,7 @@ export class HudCanvasRenderer implements HudFrameRenderer {
       context.beginPath();
       context.arc(x, y, 3, 0, Math.PI * 2);
       context.fill();
-      if (maneuver.label) this.drawSchematicLabel(context, maneuver.label, maneuver.point, maneuver.exitSide);
+      if (maneuver.label) this.drawSchematicLabel(context, maneuver.label, maneuver.point, maneuver.exitSide, pane);
     }
 
     this.drawYouChevron(context, schematic.you);
@@ -1748,8 +1795,8 @@ export class HudCanvasRenderer implements HudFrameRenderer {
     label: string,
     point: ScreenPoint,
     exitSide: 'left' | 'right' | 'ahead',
+    pane: SchematicBounds = NAVIGATION_MAP_PANEL,
   ): void {
-    const pane = NAVIGATION_MAP_PANEL;
     context.font = TYPE.meta;
     context.textBaseline = 'middle';
     context.textAlign = 'left';

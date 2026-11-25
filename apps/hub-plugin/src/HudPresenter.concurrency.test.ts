@@ -103,14 +103,15 @@ describe('a route keeps running behind a conversation', () => {
     expect(r.hud.hasAssistantConversation()).toBe(true);
     expect(last(r.statusWrites())).toBe('9:41 · JOAT · Focus 12m · → 80 m · ● · ▆');
 
-    // Leaving the conversation shows the map at the newest frame, not the
+    // Leaving the conversation shows the route at the newest frame, not the
     // one that was on the glass when the conversation began.
     expect(await r.hud.requestAssistantConversationExit()).toBe('prompted');
     expect(await r.hud.requestAssistantConversationExit()).toBe('exited');
-    const map = r.frames[r.frames.length - 1];
-    expect(map).toMatchObject({ kind: 'navigation', navigation: { maneuverDistanceM: 80 } });
-    // On the map the turn is the page; the spine carries the timer.
-    expect(map?.statusModel?.activities).toEqual(['Focus 12m']);
+    const navPage = last(r.rebuilds);
+    const navBody = navPage?.textObject?.find((container) => container.containerName === 'main')?.content ?? '';
+    expect(navBody).toContain('→ 80 m');
+    // On the route page the turn is in main; the spine carries the timer.
+    expect(r.headerOf(navPage)).toBe('9:41 · NAVIGATION · Focus 12m · ● · ▆');
     expect(r.hud.isNavigationVisible()).toBe(true);
   });
 });
@@ -139,12 +140,15 @@ describe('a route keeps running behind a feature page', () => {
     expect(last(r.statusWrites())).toBe('9:41 · NEWS · ● · ▆');
   });
 
-  it('still owns Home: from the dashboard a frame repaints the map', async () => {
+  it('still owns Home: from the dashboard a frame repaints the route page', async () => {
     const r = rig();
     await r.hud.setStatusModel(LIVE);
     await r.hud.showDefault();
     expect(await r.hud.updateNavigation(guidance(120))).toBe(true);
-    expect(r.frames[r.frames.length - 1]).toMatchObject({ kind: 'navigation', navigation: { maneuverDistanceM: 120 } });
+    const navPage = last(r.rebuilds);
+    const navBody = navPage?.textObject?.find((container) => container.containerName === 'main')?.content ?? '';
+    expect(navBody).toContain('→ 100 m');
+    expect(r.headerOf(navPage)).toBe('9:41 · NAVIGATION · ● · ▆');
   });
 });
 

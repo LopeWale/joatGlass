@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { getTextWidth, measureTextWrap } from '@evenrealities/pretext';
 
-import { ASSISTANT_ANSWER_PAGE } from './HudPageBuilder';
+import { HudPageBuilder, ASSISTANT_ANSWER_PAGE, READER_TEXT_PAGE } from './HudPageBuilder';
 import {
+  NAVIGATION_GUIDANCE_TEXT_WIDTH,
   NAVIGATION_NATIVE_DEFAULT_HINTS,
   NAVIGATION_NATIVE_LINE_BUDGET,
   NAVIGATION_NATIVE_OPTION_ROWS,
@@ -16,6 +17,14 @@ import {
   type NavigationHudModel,
   type NavigationView,
 } from './NavigationHud';
+import {
+  hasNavigationSchematic,
+  NAVIGATION_GUIDANCE_MAIN,
+  NAVIGATION_SCHEMATIC_CARD,
+  quantizeNavigationSchematicView,
+  withNavigationSchematic,
+} from './NavigationCard';
+import { ContainerId, NavigationMapId } from './types';
 
 /**
  * Every navigation frame but live guidance is a text card Even's firmware
@@ -50,39 +59,69 @@ function lines(body: string): string[] {
   return body.split('\n');
 }
 
-function expectWithinBudget(body: string): void {
+function expectWithinBudget(body: string, maxWidth: number = READER_TEXT_PAGE.textWidth): void {
   const rows = lines(body);
   expect(rows.length).toBeLessThanOrEqual(FIRMWARE_LINE_BUDGET);
   expect(rows.length).toBeGreaterThan(0);
   for (const row of rows) {
     expect(row).not.toBe('');
-    expect(getTextWidth(row)).toBeLessThanOrEqual(ASSISTANT_ANSWER_PAGE.textWidth);
+    expect(getTextWidth(row)).toBeLessThanOrEqual(maxWidth);
   }
   // And as the firmware itself wraps the page: no row breaks into two.
-  expect(measureTextWrap(body, ASSISTANT_ANSWER_PAGE.textWidth).lineCount).toBe(rows.length);
+  expect(measureTextWrap(body, maxWidth).lineCount).toBe(rows.length);
 }
 
 describe('navigationNativeBody', () => {
-  it('restates the text page geometry it is budgeted against', () => {
+  it('restates the uniform inset text page geometry it is budgeted against', () => {
     expect(NAVIGATION_NATIVE_LINE_BUDGET).toBe(FIRMWARE_LINE_BUDGET);
     expect(NAVIGATION_NATIVE_LINE_BUDGET).toBe(7);
-    expect(NAVIGATION_NATIVE_TEXT_WIDTH).toBe(ASSISTANT_ANSWER_PAGE.textWidth);
+    expect(NAVIGATION_NATIVE_TEXT_WIDTH).toBe(READER_TEXT_PAGE.textWidth);
+    expect(NAVIGATION_GUIDANCE_TEXT_WIDTH).toBe(NAVIGATION_GUIDANCE_MAIN.textWidth);
     expect(NAVIGATION_NATIVE_OPTION_ROWS).toBe(4);
   });
 
-  it('keeps live guidance raster: it is the only view that draws the map', () => {
-    expect(navigationNativeBody(fixture('guidance'))).toBeUndefined();
-    const withoutMap = { ...fixture('guidance'), map: undefined };
-    expect(navigationNativeBody(withoutMap)).toBeUndefined();
+  it('builds a hybrid firmware + schematic guidance page when route geometry is present', () => {
+    const withMap = navigationNativeBody(fixture('guidance'), { schematic: true });
+    expect(withMap.schematic).toBe(true);
+    expectWithinBudget(withMap.body, NAVIGATION_GUIDANCE_TEXT_WIDTH);
+    expect(withMap.body).toContain('WALKING · ACTIVE');
+    expect(withMap.body).toContain('→ 50 m');
+    expect(withMap.body).toContain('onto W Fullerton Ave');
+    expect(withMap.body).toContain('Then continue 350 m');
+    expect(withMap.body).toContain('900 m left · 13 min');
+    expect(withMap.hint).toBe('2x tap: menu');
+
+    const withoutMap = navigationNativeBody({ ...fixture('guidance'), map: undefined }, { schematic: true });
+    expect(withoutMap.schematic).toBeUndefined();
+    expectWithinBudget(withoutMap.body, NAVIGATION_NATIVE_TEXT_WIDTH);
+
+    const builder = new HudPageBuilder();
+    const basePage = builder.textPageLayout(withMap.body, { status: '', hint: withMap.hint }, { inset: true });
+    const hybridPage = withNavigationSchematic(basePage);
+    expect(hasNavigationSchematic(hybridPage)).toBe(true);
+    const main = hybridPage.textObject?.find((item) => item.containerID === ContainerId.Main);
+    expect(main?.xPosition).toBe(NAVIGATION_GUIDANCE_MAIN.x);
+    expect(main?.width).toBe(NAVIGATION_GUIDANCE_MAIN.width);
+    const mapContainer = hybridPage.imageObject?.find((item) => item.containerID === NavigationMapId);
+    expect(mapContainer?.width).toBe(NAVIGATION_SCHEMATIC_CARD.width);
+    expect(mapContainer?.height).toBe(NAVIGATION_SCHEMATIC_CARD.height);
   });
 
-  it('gives every other view a text page within the firmware line budget', () => {
+  it('quantizes minor walking GPS steps so schematic pixels remain identical across sub-12m ticks', () => {
+    const baseMap = fixture('guidance').map!;
+    const a = quantizeNavigationSchematicView({ ...baseMap, progressM: 49 }, 'walking')!;
+    const b = quantizeNavigationSchematicView({ ...baseMap, progressM: 52 }, 'walking')!;
+    expect(a.map.progressM).toBe(b.map.progressM);
+    expect(a.map.position).toEqual(b.map.position);
+  });
+
+  it('gives every view a firmware text page within the firmware line budget', () => {
     for (const view of VIEWS) {
-      if (view === 'guidance') continue;
-      const page = navigationNativeBody(fixture(view));
+      const page = navigationNativeBody(fixture(view), { schematic: true });
       expect(page, view).toBeDefined();
-      expectWithinBudget(page!.body);
-      expect(page!.hint).not.toMatch(/\bsay\b/iu);
+      const width = page.schematic ? NAVIGATION_GUIDANCE_TEXT_WIDTH : NAVIGATION_NATIVE_TEXT_WIDTH;
+      expectWithinBudget(page.body, width);
+      expect(page.hint).not.toMatch(/\bsay\b/iu);
     }
   });
 

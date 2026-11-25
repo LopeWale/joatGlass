@@ -90,12 +90,21 @@ enum AIKeychain {
     }
 }
 
-/// Direct Google AI Studio Gemini client (`gemini-3.5-flash-lite`) for sub-second
-/// SSE streaming chat, background note/cue/contact tasks, and multimodal handwriting OCR.
+/// Selectable Google AI Studio Gemini model descriptor.
+struct GeminiModelOption: Identifiable, Equatable, Codable {
+    let id: String
+    let title: String
+    let subtitle: String
+}
+
+/// Direct Google AI Studio Gemini client for sub-second SSE streaming chat,
+/// background note/cue/contact tasks, and multimodal handwriting OCR across
+/// user-selectable Gemini 3.5 and Gemini 4 models.
 ///
-/// Free Tier invariants:
+/// Free Tier & Gemini 4 invariants:
 /// - NEVER sends `tools: [{"googleSearch": {}}]` (which triggers 0-quota `429`s on Free Tier).
 /// - NEVER sends `thinkingBudget: 0` (which triggers HTTP `400`).
+/// - Adapts `thinkingLevel` (`"MINIMAL"` on `gemini-3.5-*`, `"LOW"` without `temperature` on `gemini-4-*` / `3.8-*`).
 /// - Filters out any candidate part where `thought == true`.
 final class GeminiLink: @unchecked Sendable {
     struct Config: Decodable {
@@ -104,8 +113,107 @@ final class GeminiLink: @unchecked Sendable {
     }
 
     static let defaultModel = "gemini-3.5-flash-lite"
+    static let selectedModelDefaultsKey = "joat.ai.geminiModel"
+    static let cachedModelsDefaultsKey = "joat.ai.geminiModelsCache.v1"
     static let baseURL = "https://generativelanguage.googleapis.com/v1beta/models"
     static let deltaThrottleSeconds: TimeInterval = 0.12
+
+    static let builtInModels: [GeminiModelOption] = [
+        GeminiModelOption(
+            id: "gemini-3.5-flash-lite",
+            title: "Gemini 3.5 Flash Lite",
+            subtitle: "Fastest · Minimal-thinking streaming"
+        ),
+        GeminiModelOption(
+            id: "gemini-4-hydrogen",
+            title: "Gemini 4 Hydrogen",
+            subtitle: "Gemini 4 daily driver · 1M context"
+        ),
+        GeminiModelOption(
+            id: "gemini-4-argon",
+            title: "Gemini 4 Argon",
+            subtitle: "Fast interactive reasoning · 1M context"
+        ),
+        GeminiModelOption(
+            id: "gemini-4-neon",
+            title: "Gemini 4 Neon",
+            subtitle: "Fast frontier reasoning · 1M context"
+        ),
+        GeminiModelOption(
+            id: "gemini-4-carbon",
+            title: "Gemini 4 Carbon",
+            subtitle: "Maximum reasoning depth · 1M context"
+        ),
+        GeminiModelOption(
+            id: "gemini-3.8-flash",
+            title: "Gemini 3.8 Flash",
+            subtitle: "Balanced speed & reasoning"
+        ),
+    ]
+
+    private static let modelIdPattern = try! NSRegularExpression(pattern: #"^[A-Za-z0-9._-]{1,80}$"#)
+
+    static func normalizeModelId(_ raw: String?) -> String? {
+        guard var trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        trimmed = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix("models/") {
+            trimmed = String(trimmed.dropFirst("models/".count))
+        }
+        let range = NSRange(trimmed.startIndex..., in: trimmed)
+        guard modelIdPattern.firstMatch(in: trimmed, range: range) != nil else { return nil }
+        return trimmed
+    }
+
+    static func displayName(for modelId: String) -> String {
+        let clean = normalizeModelId(modelId) ?? defaultModel
+        if let preset = builtInModels.first(where: { $0.id.caseInsensitiveCompare(clean) == .orderedSame }) {
+            return preset.title
+        }
+        return clean
+            .split(separator: "-")
+            .map { part -> String in
+                let lower = part.lowercased()
+                if lower == "tts" || lower == "ai" { return lower.uppercased() }
+                return part.prefix(1).uppercased() + part.dropFirst()
+            }
+            .joined(separator: " ")
+    }
+
+    static func usesLowThinkingWithoutTemperature(_ modelId: String) -> Bool {
+        let lower = modelId.lowercased()
+        if lower.hasPrefix("gemini-3.5") { return false }
+        return lower.hasPrefix("gemini-4") || lower.hasPrefix("gemini-3.8") || lower.hasPrefix("gemini-3.6") || !lower.hasPrefix("gemini-3.")
+    }
+
+    static func chatGenerationConfig(for modelId: String) -> [String: Any] {
+        if usesLowThinkingWithoutTemperature(modelId) {
+            return [
+                "maxOutputTokens": 8192,
+                "thinkingConfig": ["thinkingLevel": "LOW"],
+            ]
+        }
+        return [
+            "maxOutputTokens": 2048,
+            "temperature": 0.3,
+            "thinkingConfig": ["thinkingLevel": "MINIMAL"],
+        ]
+    }
+
+    static func completionGenerationConfig(for modelId: String, maxTokens: Int) -> [String: Any] {
+        if usesLowThinkingWithoutTemperature(modelId) {
+            return [
+                "maxOutputTokens": max(maxTokens, 8192),
+                "thinkingConfig": ["thinkingLevel": "LOW"],
+            ]
+        }
+        return [
+            "maxOutputTokens": maxTokens,
+            "temperature": 0.2,
+        ]
+    }
 
     private let explicitConfig: Config?
     private let fileConfig: Config?
@@ -149,11 +257,18 @@ final class GeminiLink: @unchecked Sendable {
     }
 
     private static func resolve(explicit: Config?, file: Config?) -> Config? {
-        if let explicit { return explicit }
-        if let keychainKey = AIKeychain.load(account: "gemini") {
-            return Config(key: keychainKey, model: file?.model)
+        if let explicit {
+            return Config(key: explicit.key, model: normalizeModelId(explicit.model) ?? Self.defaultModel)
         }
-        return file
+        let userSelected = normalizeModelId(UserDefaults.standard.string(forKey: selectedModelDefaultsKey))
+        let effectiveModel = userSelected ?? normalizeModelId(file?.model) ?? Self.defaultModel
+        if let keychainKey = AIKeychain.load(account: "gemini") {
+            return Config(key: keychainKey, model: effectiveModel)
+        }
+        if let file, !file.key.isEmpty {
+            return Config(key: file.key, model: effectiveModel)
+        }
+        return nil
     }
 
     var activeConfig: Config? {
@@ -214,11 +329,7 @@ final class GeminiLink: @unchecked Sendable {
         let body: [String: Any] = [
             "systemInstruction": ["parts": [["text": system]]],
             "contents": contents,
-            "generationConfig": [
-                "maxOutputTokens": 2048,
-                "temperature": 0.3,
-                "thinkingConfig": ["thinkingLevel": "MINIMAL"],
-            ],
+            "generationConfig": Self.chatGenerationConfig(for: model),
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
@@ -417,11 +528,7 @@ final class GeminiLink: @unchecked Sendable {
             var body: [String: Any] = [
                 "systemInstruction": ["parts": [["text": system]]],
                 "contents": runningContents,
-                "generationConfig": [
-                    "maxOutputTokens": 2048,
-                    "temperature": 0.3,
-                    "thinkingConfig": ["thinkingLevel": "MINIMAL"],
-                ],
+                "generationConfig": Self.chatGenerationConfig(for: model),
             ]
             if !declarations.isEmpty {
                 body["tools"] = [["functionDeclarations": declarations]]
@@ -582,10 +689,7 @@ final class GeminiLink: @unchecked Sendable {
         let body: [String: Any] = [
             "systemInstruction": ["parts": [["text": system]]],
             "contents": [["role": "user", "parts": parts]],
-            "generationConfig": [
-                "maxOutputTokens": maxTokens,
-                "temperature": 0.2,
-            ],
+            "generationConfig": Self.completionGenerationConfig(for: model, maxTokens: maxTokens),
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         let started = Date()
@@ -651,10 +755,51 @@ final class GeminiLink: @unchecked Sendable {
         }
         return .claude("Gemini could not answer (error \(status)).")
     }
+
+    func fetchAvailableModels() async -> [GeminiModelOption] {
+        guard let cfg = activeConfig,
+              let url = URL(string: "\(Self.baseURL)?pageSize=100") else {
+            return Self.builtInModels
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(cfg.key, forHTTPHeaderField: "x-goog-api-key")
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let doc = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let models = doc["models"] as? [[String: Any]] else {
+                return Self.builtInModels
+            }
+            let excludedSubstrings = [
+                "tts", "live", "transcribe", "embedding", "image", "omni",
+                "imagen", "veo", "aqa", "1.5", "2.0", "2.5", "robotics", "computer-use",
+            ]
+            var merged = Self.builtInModels
+            var seen = Set(merged.map { $0.id.lowercased() })
+            for item in models {
+                guard let rawName = item["name"] as? String,
+                      let id = Self.normalizeModelId(rawName) else { continue }
+                let lower = id.lowercased()
+                guard lower.hasPrefix("gemini-"),
+                      !seen.contains(lower),
+                      !excludedSubstrings.contains(where: { lower.contains($0) }) else { continue }
+                let methods = (item["supportedGenerationMethods"] as? [String]) ?? []
+                guard methods.contains("generateContent") else { continue }
+                let display = (item["displayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let title = (display?.isEmpty == false) ? display! : Self.displayName(for: id)
+                merged.append(GeminiModelOption(id: id, title: title, subtitle: id))
+                seen.insert(lower)
+            }
+            return merged
+        } catch {
+            return Self.builtInModels
+        }
+    }
 }
 
 /// Unified streaming assistant & background AI router across on-phone `ClaudeLink`,
-/// on-phone `GeminiLink` (`gemini-3.5-flash-lite`), and Tailscale `MacLink` (`/agent`).
+/// on-phone `GeminiLink` (user-selectable Gemini model), and Tailscale `MacLink` (`/agent`).
 @MainActor
 final class OnPhoneAI: ObservableObject {
     nonisolated static let shared = OnPhoneAI()
@@ -692,6 +837,35 @@ final class OnPhoneAI: ObservableObject {
             .flatMap(AssistantEngineChoice.init(rawValue:)) ?? .auto
     }
 
+    private nonisolated static func loadStoredGeminiModel() -> String {
+        GeminiLink.normalizeModelId(
+            UserDefaults.standard.string(forKey: GeminiLink.selectedModelDefaultsKey)
+        ) ?? GeminiLink.defaultModel
+    }
+
+    private nonisolated static func loadCachedGeminiModels(ensuring selected: String) -> [GeminiModelOption] {
+        var list = GeminiLink.builtInModels
+        if let data = UserDefaults.standard.data(forKey: GeminiLink.cachedModelsDefaultsKey),
+           let decoded = try? JSONDecoder().decode([GeminiModelOption].self, from: data),
+           !decoded.isEmpty {
+            var seen = Set(list.map { $0.id.lowercased() })
+            for item in decoded where !seen.contains(item.id.lowercased()) {
+                list.append(item)
+                seen.insert(item.id.lowercased())
+            }
+        }
+        if !list.contains(where: { $0.id.caseInsensitiveCompare(selected) == .orderedSame }) {
+            list.append(
+                GeminiModelOption(
+                    id: selected,
+                    title: GeminiLink.displayName(for: selected),
+                    subtitle: "Custom model ID"
+                )
+            )
+        }
+        return list
+    }
+
     private nonisolated let gemini: GeminiLink
     private nonisolated let claude: ClaudeLink
     private nonisolated let box: SnapshotBox
@@ -702,21 +876,74 @@ final class OnPhoneAI: ObservableObject {
             box.update(choice: engineChoice)
         }
     }
+    @Published var geminiModel: String = OnPhoneAI.loadStoredGeminiModel() {
+        didSet {
+            let clean = GeminiLink.normalizeModelId(geminiModel) ?? GeminiLink.defaultModel
+            if clean != geminiModel {
+                geminiModel = clean
+                return
+            }
+            UserDefaults.standard.set(clean, forKey: GeminiLink.selectedModelDefaultsKey)
+            if !geminiModels.contains(where: { $0.id.caseInsensitiveCompare(clean) == .orderedSame }) {
+                geminiModels.append(
+                    GeminiModelOption(
+                        id: clean,
+                        title: GeminiLink.displayName(for: clean),
+                        subtitle: "Custom model ID"
+                    )
+                )
+            }
+            Log.add("on-phone ai: Gemini model set to \(clean)")
+        }
+    }
+    @Published private(set) var geminiModels: [GeminiModelOption] = OnPhoneAI.loadCachedGeminiModels(
+        ensuring: OnPhoneAI.loadStoredGeminiModel()
+    )
+    @Published private(set) var refreshingGeminiModels = false
     @Published private(set) var geminiConfigured: Bool = GeminiLink.isCurrentlyConfigured
     @Published private(set) var claudeConfigured: Bool = ClaudeLink.isCurrentlyConfigured
 
     var activeProviderSummary: String {
+        let geminiLabel = GeminiLink.displayName(for: geminiModel)
         switch engineChoice {
         case .auto:
             if claudeConfigured { return "Claude (On-Phone)" }
-            if geminiConfigured { return "Gemini 3.5 Flash Lite" }
+            if geminiConfigured { return geminiLabel }
             return "Mac (/agent)"
         case .gemini:
-            return geminiConfigured ? "Gemini 3.5 Flash Lite" : "Gemini (No API Key)"
+            return geminiConfigured ? geminiLabel : "Gemini (No API Key)"
         case .claude:
             return claudeConfigured ? "Claude (On-Phone)" : "Claude (No API Key)"
         case .mac:
             return "Mac (/agent)"
+        }
+    }
+
+    @discardableResult
+    func setCustomGeminiModel(_ raw: String) -> Bool {
+        guard let clean = GeminiLink.normalizeModelId(raw) else { return false }
+        geminiModel = clean
+        return true
+    }
+
+    func refreshGeminiModels() async {
+        guard !refreshingGeminiModels else { return }
+        refreshingGeminiModels = true
+        defer { refreshingGeminiModels = false }
+        let fetched = await gemini.fetchAvailableModels()
+        var updated = fetched
+        if !updated.contains(where: { $0.id.caseInsensitiveCompare(geminiModel) == .orderedSame }) {
+            updated.append(
+                GeminiModelOption(
+                    id: geminiModel,
+                    title: GeminiLink.displayName(for: geminiModel),
+                    subtitle: "Custom model ID"
+                )
+            )
+        }
+        geminiModels = updated
+        if let encoded = try? JSONEncoder().encode(fetched) {
+            UserDefaults.standard.set(encoded, forKey: GeminiLink.cachedModelsDefaultsKey)
         }
     }
 

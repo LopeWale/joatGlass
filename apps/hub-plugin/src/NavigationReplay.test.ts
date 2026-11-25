@@ -12,7 +12,7 @@ import {
 import { NavigationController } from './NavigationController';
 import type { NavigationMode, NavigationView } from './NavigationHud';
 import type { NavigationProgressPolicy, NavigationRoutePlan } from './NavigationProgress';
-import { ContainerId, type UplinkMessage } from './types';
+import { ContainerId, NavigationMapId, type UplinkMessage } from './types';
 
 const METERS_PER_DEGREE = 111_195;
 
@@ -82,14 +82,10 @@ function replayHarness(mode: NavigationMode) {
       },
     }),
   } as unknown as BridgeClient;
+  const schematics: number[] = [];
   const renderer: HudFrameRenderer = {
     render: async (frame: HudVisualFrame) => {
       if (frame.kind === 'navigation') views.push(frame.navigation.view);
-      // Every view draws different pixels in every region, as the real
-      // renderer does for a changing state word, header and footer. The
-      // visual surface skips a region whose delivered pixels are unchanged
-      // on the same page, so identical tiles would hide the ordering this
-      // replay exists to prove: a state is reported only after its frame.
       const revision = views.length;
       return [
         { containerId: ContainerId.Image, pixels: Uint8Array.of(revision, 1, 0, 0) },
@@ -98,11 +94,22 @@ function replayHarness(mode: NavigationMode) {
         { containerId: ContainerId.VisualBottomRight, pixels: Uint8Array.of(revision, 4, 0, 0) },
       ];
     },
+    renderNavigationSchematic: async (view) => {
+      const progress = Math.round(view.map.progressM ?? 0);
+      schematics.push(progress);
+      return [
+        {
+          containerId: NavigationMapId,
+          pixels: Uint8Array.of(progress & 0xff, (progress >> 8) & 0xff, 1, 0),
+        },
+      ];
+    },
   };
+  const visual = new HudVisualSurface(client, renderer);
   const hud = new HudPresenter(
     client,
     new HudPageBuilder(),
-    new HudVisualSurface(client, renderer),
+    visual,
   );
   const controller = new NavigationController(
     hud,
@@ -137,8 +144,10 @@ function replayHarness(mode: NavigationMode) {
   };
   return {
     controller,
+    visual,
     events,
     views,
+    schematics,
     sent,
     install,
     emit,
@@ -146,27 +155,23 @@ function replayHarness(mode: NavigationMode) {
   };
 }
 
-/** The live map is the one navigation frame drawn as pixels: a guidance
- * state follows its four tiles. Every other frame (uncertain, off-route,
- * arrival) is Even's own text page, so its state follows no tile at all. */
-function expectEveryStateAfterFourTiles(events: readonly string[]): void {
+/** Hybrid navigation updates firmware text before reporting every semantic
+ * `state:*` (`page:image` when opening the hybrid guidance page, `upgrade:main`
+ * on consecutive guidance steps, `page:text` / `upgrade:main` on warnings and
+ * arrival), never blocking `state:guidance` on four full-screen raster tiles. */
+function expectEveryStateAfterFirmwareWrite(events: readonly string[]): void {
   events.forEach((event, index) => {
     if (!event.startsWith('state:')) return;
-    if (event === 'state:guidance') {
-      expect(events.slice(index - 4, index)).toEqual([
-        `tile:${ContainerId.Image}`,
-        `tile:${ContainerId.VisualTopRight}`,
-        `tile:${ContainerId.VisualBottomLeft}`,
-        `tile:${ContainerId.VisualBottomRight}`,
-      ]);
-      return;
-    }
     let previousState = -1;
     for (let at = index - 1; at >= 0; at -= 1) {
       if (events[at]?.startsWith('state:')) { previousState = at; break; }
     }
     const sinceLastState = events.slice(previousState + 1, index);
-    expect(sinceLastState.filter((entry) => entry.startsWith('tile:'))).toEqual([]);
+    expect(sinceLastState.filter((entry) => entry.startsWith('tile:4') || entry.startsWith('tile:8'))).toEqual([]);
+    if (event === 'state:guidance') {
+      expect(sinceLastState.some((entry) => entry === 'page:image' || entry === 'upgrade:main')).toBe(true);
+      return;
+    }
     expect(sinceLastState.some((entry) => entry === 'page:text' || entry === 'upgrade:main')).toBe(true);
   });
 }
@@ -181,6 +186,8 @@ describe('navigation production-path replay', () => {
     replay.emit(120, 100, 12_000);
     replay.emit(130, 100, 13_000);
     await replay.controller.whenIdle();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await replay.visual.whenIdle();
 
     expect(replay.sent.filter((message) => message.kind === 'navigation.state')
       .map((message) => message.state)).toEqual([
@@ -188,9 +195,9 @@ describe('navigation production-path replay', () => {
     ]);
     expect(replay.sent.filter((message) => message.kind === 'navigation.reroute.request'))
       .toHaveLength(1);
-    // The renderer draws only the live map; the warnings are text pages.
-    expect(replay.views).toEqual(['guidance']);
-    expectEveryStateAfterFourTiles(replay.events);
+    // Zero full-screen 4-tile renders; guidance uses the hybrid page + single schematic card.
+    expect(replay.views).toEqual([]);
+    expectEveryStateAfterFirmwareWrite(replay.events);
   });
 
   it('replays cycling reversal, recovery, and stable arrival before releasing location', async () => {
@@ -207,16 +214,17 @@ describe('navigation production-path replay', () => {
     replay.emit(990, 0, 25_000);
     replay.emit(997, 0, 26_000);
     await replay.controller.whenIdle();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await replay.visual.whenIdle();
 
     const states = replay.sent.filter((message) => message.kind === 'navigation.state')
       .map((message) => message.state);
     expect(states).toContain('wrong_way');
     expect(states.slice(states.indexOf('wrong_way') + 1)).toContain('guidance');
     expect(states[states.length - 1]).toBe('arrived');
-    expect(replay.views).not.toContain('wrong_way');
-    expect(replay.views.every((view) => view === 'guidance')).toBe(true);
+    expect(replay.views).toEqual([]);
     expect(replay.events[replay.events.length - 1]).toBe('state:arrived');
     expect(replay.locationActive()).toBe(false);
-    expectEveryStateAfterFourTiles(replay.events);
+    expectEveryStateAfterFirmwareWrite(replay.events);
   });
 });

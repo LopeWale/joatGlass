@@ -1,4 +1,5 @@
 import { pxTruncate } from '@evenrealities/pretext';
+import { layoutLines } from './FirmwareText';
 
 export const NAVIGATION_VISUAL_STATES = [
   'nav-destination',
@@ -321,29 +322,41 @@ export function navigationVisualFixture(state: NavigationVisualState): Navigatio
 }
 
 // ---------------------------------------------------------------------------
-// Native text-page rendering
+// Native text-page & hybrid schematic rendering
 //
-// Every navigation frame except live guidance is a text card: a step name,
-// the Mac's primary and secondary, and for repair/mode a short option list
-// with a cursor. Even's firmware text page draws all of that with ONE
-// `rebuildPageContainer` and updates it in place with `textContainerUpgrade`,
-// where the raster path uploads four image tiles at 0.2–2 s each over BLE.
-// Guidance keeps the raster path: it is the only view whose renderer draws
-// the map panel (HudCanvasRenderer.drawActiveNavigation); the warning views
-// draw a glyph beside their words, and the words alone carry the meaning.
+// Every navigation frame uses Even's uniform borderless firmware page:
+// - Pre-route, warning, arrival, and error views use the full-width 16 px-inset
+//   firmware text region (`NAVIGATION_NATIVE_TEXT_WIDTH = 544`, matching
+//   `READER_TEXT_PAGE.textWidth` across Mail, Messages, QuickNotes, and News).
+// - Active `guidance` pairs a left-half native firmware text column
+//   (`NAVIGATION_GUIDANCE_TEXT_WIDTH = 268`) — updated in place via
+//   `textContainerUpgrade` (~83 ms, zero image tiles on distance/ETA ticks) —
+//   with a single right-half `264x144` vector route schematic image container
+//   (`NavigationCard.ts`) that repaints only when quantized route geometry moves.
 // ---------------------------------------------------------------------------
 
 /**
- * Firmware lines the text page's main container holds. This is
- * `ASSISTANT_ANSWER_PAGE.lineCapacity` in HudPageBuilder — floor((214 −
- * 2·4) / 27) with the firmware's fixed 27 px line height — restated here so
- * this module stays free of the page builder; NavigationHud.native.test.ts
- * pins the two equal.
+ * Firmware lines the text page's main container holds (`ASSISTANT_ANSWER_PAGE.lineCapacity`).
  */
 export const NAVIGATION_NATIVE_LINE_BUDGET = 7;
 
-/** Inner text width of a full-width region: 576 − 2·REGION_PAD (HudPageBuilder). */
-export const NAVIGATION_NATIVE_TEXT_WIDTH = 568;
+/** Inner text width of an inset full-width region: 576 − 2·16 (`READER_TEXT_PAGE.textWidth`). */
+export const NAVIGATION_NATIVE_TEXT_WIDTH = 544;
+
+/** Inner text width of the left guidance column beside the schematic (`276 − 2·4`). */
+export const NAVIGATION_GUIDANCE_TEXT_WIDTH = 268;
+
+/** Firmware-font-verified maneuver arrows (matches `ActivityChips.ts`). */
+const GUIDANCE_MANEUVER_ARROW: Readonly<Record<NavigationManeuver, string>> = {
+  depart: '↑',
+  continue: '↑',
+  turn_left: '←',
+  turn_right: '→',
+  slight_left: '↖',
+  slight_right: '↗',
+  u_turn: '↓',
+  arrive: '◆',
+};
 
 /** Rows of options a repair/mode card shows. The step name, primary and
  * secondary take three lines; the cursor window takes the remaining four. */
@@ -375,14 +388,19 @@ export const NAVIGATION_NATIVE_DEFAULT_HINTS: Readonly<Record<NavigationView, st
 };
 
 const SAY_WORD = /\bsay\b/iu;
+const CONTROL_HINT_WORD = /\b(?:tap|swipe|2x\s*tap|double-left|up:|down:)\b/iu;
 
 /** Keep a Mac hint's control segments ("tap retry · swipe cancel"), drop its
- * voice ones ("say first/second"), and reduce "tap/say" to "tap". */
+ * voice ones ("say first/second"), and reduce "tap/say" to "tap". On active
+ * guidance, non-control lookahead prose ("Then continue 350 m") belongs in
+ * the maneuver body, while the bottom hint bar stays uniform gesture chrome. */
 export function navigationNativeHint(model: NavigationHudModel): string {
   const control = model.hint
     .split('·')
     .map((segment) => segment.replace(/\s*\/\s*say\b/giu, '').trim())
+    .map((segment) => segment.replace(/\bdouble-left\s+stops\b/giu, '2x tap: stop'))
     .filter((segment) => segment.length > 0 && !SAY_WORD.test(segment))
+    .filter((segment) => model.view !== 'guidance' || CONTROL_HINT_WORD.test(segment))
     .join(' · ');
   const hint = control || NAVIGATION_NATIVE_DEFAULT_HINTS[model.view];
   return pxTruncate(hint.slice(0, 96), NAVIGATION_NATIVE_TEXT_WIDTH);
@@ -453,21 +471,90 @@ function navigationNativeOptionRows(model: NavigationHudModel): string[] {
   ));
 }
 
+function wrapFittedLines(text: string, width: number, maxLines: number): string[] {
+  const clean = foldWhitespace(text);
+  if (!clean || maxLines <= 0) return [];
+  const wrapped = layoutLines(clean, width)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (wrapped.length <= maxLines) {
+    return wrapped.map((line) => pxTruncate(line, width));
+  }
+  const head = wrapped.slice(0, maxLines - 1).map((line) => pxTruncate(line, width));
+  const tail = pxTruncate(wrapped.slice(maxLines - 1).join(' '), width);
+  return [...head, tail];
+}
+
+function navigationGuidanceBody(model: NavigationHudModel, width: number): string {
+  const rows: string[] = [pxTruncate(navigationNativeHeading(model), width)];
+  const arrow = GUIDANCE_MANEUVER_ARROW[model.maneuver ?? 'continue'];
+  const dist = model.maneuverDistanceM !== undefined && Number.isFinite(model.maneuverDistanceM)
+    ? formatNavigationDistance(model.maneuverDistanceM)
+    : '';
+  const primary = foldWhitespace(model.primary);
+  const lead = [dist ? `${arrow} ${dist}` : arrow, primary].filter(Boolean).join(' · ');
+  const leadWrapped = wrapFittedLines(lead, width, 2);
+  rows.push(...leadWrapped);
+
+  let secondary = foldWhitespace(model.secondary);
+  if (primary && secondary.toLowerCase().startsWith(`${primary.toLowerCase()} `)) {
+    secondary = secondary.slice(primary.length).trim();
+  }
+  const thenSegments = model.hint
+    .split('·')
+    .map((segment) => foldWhitespace(segment))
+    .filter((segment) => segment.length > 0 && !SAY_WORD.test(segment) && !CONTROL_HINT_WORD.test(segment));
+  const thenLine = thenSegments.join(' · ');
+
+  const factsParts: string[] = [];
+  if (model.remainingDistanceM !== undefined && Number.isFinite(model.remainingDistanceM)) {
+    factsParts.push(`${formatNavigationDistance(model.remainingDistanceM)} left`);
+  }
+  if (model.etaMinutes !== undefined && Number.isFinite(model.etaMinutes)) {
+    factsParts.push(`${Math.max(0, Math.round(model.etaMinutes))} min`);
+  }
+  const factsLine = factsParts.length > 0 ? pxTruncate(factsParts.join(' · '), width) : undefined;
+
+  const reservedBottom = (thenLine ? 1 : 0) + (factsLine ? 1 : 0);
+  const secondaryBudget = Math.max(0, NAVIGATION_NATIVE_LINE_BUDGET - rows.length - reservedBottom);
+  if (secondary && secondaryBudget > 0) {
+    rows.push(...wrapFittedLines(secondary, width, Math.min(2, secondaryBudget)));
+  }
+  if (thenLine && rows.length < NAVIGATION_NATIVE_LINE_BUDGET - (factsLine ? 1 : 0)) {
+    rows.push(pxTruncate(thenLine, width));
+  }
+  if (factsLine && rows.length < NAVIGATION_NATIVE_LINE_BUDGET) {
+    rows.push(factsLine);
+  }
+  return rows.slice(0, NAVIGATION_NATIVE_LINE_BUDGET).join('\n');
+}
+
+export interface NavigationNativePage {
+  body: string;
+  hint: string;
+  schematic?: boolean;
+}
+
 /**
- * The firmware text page for one navigation frame, or `undefined` when the
- * frame must stay raster (live guidance: the map). Pure — the same model
- * always gives the same page, and nothing here measures against a canvas;
- * `pxTruncate` is the installed glyph table.
- *
- * `body` is at most NAVIGATION_NATIVE_LINE_BUDGET lines, each fitted to the
- * region width: the step name, the primary, the secondary, then the fact
- * line (warnings) or the option rows (repair/mode). `hint` is a control
- * hint only; see `navigationNativeHint`.
+ * The firmware text page for every navigation frame. Pre-route, warning,
+ * arrival, and error views span the full 544 px inset width; active `guidance`
+ * narrows its text column to `NAVIGATION_GUIDANCE_TEXT_WIDTH` (268 px) whenever
+ * `options.schematic` is true and the model carries a usable route polyline.
  */
 export function navigationNativeBody(
   model: NavigationHudModel,
-): { body: string; hint: string } | undefined {
-  if (model.view === 'guidance') return undefined;
+  options: { schematic?: boolean } = {},
+): NavigationNativePage {
+  if (model.view === 'guidance') {
+    const hasGeometry = Boolean(model.map && model.map.geometry.length >= 2);
+    const schematic = Boolean(options.schematic && hasGeometry);
+    const width = schematic ? NAVIGATION_GUIDANCE_TEXT_WIDTH : NAVIGATION_NATIVE_TEXT_WIDTH;
+    return {
+      body: navigationGuidanceBody(model, width),
+      hint: navigationNativeHint(model),
+      ...(schematic ? { schematic: true } : {}),
+    };
+  }
   const lines: string[] = [navigationNativeHeading(model)];
   const primary = foldWhitespace(model.primary);
   if (primary) lines.push(primary);

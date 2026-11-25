@@ -197,22 +197,43 @@ describe('navigation frames before the live map', () => {
     expect(r.frames).toEqual([]);
   });
 
-  it('the live map still paints as pixels after recreating the image page', async () => {
+  it('pairs left firmware guidance upgrades with a single right-pane schematic image when supported', async () => {
     const r = rig();
-    const destination = {
-      view: 'destination' as const, primary: 'Central Library', secondary: '',
-      hint: 'tap confirm', interaction: 'stationary' as const, options: [], selectedIndex: 0,
+    const schematicPaints: unknown[] = [];
+    Object.assign(r.visual, {
+      canPaintNavigationSchematic: () => true,
+      paintNavigationSchematic: vi.fn(async (view: unknown) => {
+        schematicPaints.push(view);
+        return true;
+      }),
+    });
+    const routeMap = {
+      geometry: [
+        { latitude: 41.88435, longitude: -87.62955 },
+        { latitude: 41.88435, longitude: -87.62436 },
+      ],
+      position: { latitude: 41.88435, longitude: -87.62800 },
+      progressM: 100,
+      maneuverAlongM: 420,
+      maneuverLabel: 'N Michigan Ave',
     };
-    expect(await r.hud.showNavigation(destination)).toBe(true);
-    r.reset();
-    const guidance = {
-      view: 'guidance' as const, primary: 'Turn left', secondary: 'onto Main St',
+    const guidance1 = {
+      view: 'guidance' as const, primary: 'Turn right', secondary: 'onto N Michigan Ave',
       hint: '2x tap: menu', interaction: 'none' as const, options: [], selectedIndex: 0,
-      mode: 'walking' as const, maneuver: 'turn_left' as const, maneuverDistanceM: 80,
+      mode: 'walking' as const, maneuver: 'turn_right' as const, maneuverDistanceM: 90,
+      remainingDistanceM: 350, etaMinutes: 5, map: routeMap,
     };
-    expect(await r.hud.showNavigation(guidance)).toBe(true);
-    expect(r.writes()[0]).toBe('rebuild:4:1:0');
-    expect(r.frames.map((frame) => frame.kind)).toEqual(['navigation']);
+    expect(await r.hud.showNavigation(guidance1)).toBe(true);
+    // Rebuilds once with 1 right-side schematic image + 3 text regions; zero 4-tile visual frames!
+    expect(r.writes()).toEqual(['rebuild:1:3:0']);
+    expect(r.frames).toEqual([]);
+
+    r.reset();
+    // Next GPS tick: distance updates in-place via firmware textContainerUpgrade (zero page rebuilds!)
+    const guidance2 = { ...guidance1, maneuverDistanceM: 80, remainingDistanceM: 340 };
+    expect(await r.hud.updateNavigation(guidance2)).toBe(true);
+    expect(r.writes()).toEqual(['upgrade:main']);
+    expect(r.frames).toEqual([]);
   });
 });
 
