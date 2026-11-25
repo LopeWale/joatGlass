@@ -2,7 +2,9 @@
 
 A phone-first AI assistant, coding terminal, route-schematic navigator, and Apple Pencil notebook for the **Even Realities G2** smart glasses (`576×288` monochrome green waveguide), powered by **JOAT Brain** on the iPhone paired with an optional home **Mac** (`JOAT.app`) over private Tailscale relays.
 
-Voice in, waveguide HUD out: when paired to **This iPhone · JOAT Brain** (`ws://127.0.0.1:8787/glasses`), the Even Hub plugin keeps its WebSocket pinned locally on the iPhone (`0` mid-session brain switches) so on-device speech recognition (`SpeechAnalyzer`) and the 30-tool **JOAT Assistant** (`Gemini 3.5 Flash Lite` / `Claude` + `<50 ms` local fast handlers) respond with minimal latency — while reaching your home Mac in the background over Tailscale HTTPS for full iMessage history (`/messages`), **Claude Code / Codex / Antigravity** coding sessions (`/terminal`), and cited multi-agent **Brainstorm** debates gated by a live-web **Verifier Gate**. At a desk or without `JOAT Brain`, the glasses can also connect directly to `JOAT.app` on the Mac over Tailscale (`wss://`) or direct BLE.
+Voice in, waveguide HUD out: when paired to **This iPhone · JOAT Brain** (`ws://127.0.0.1:8787/glasses`), the Even Hub plugin keeps its WebSocket pinned locally on the iPhone (`0` mid-session brain switches) so on-device speech recognition (`SpeechAnalyzer`) and the 30-tool **JOAT Assistant** (`Gemini 3.5 Flash Lite` / `Claude` + `<50 ms` local fast handlers) respond with minimal latency — while reaching your home Mac in the background over Tailscale HTTPS for full iMessage history (`/messages`), **Claude Code / Codex / Antigravity** coding sessions (`/terminal`), and optional subscription CLI reasoning (`/agent`). At a desk or without `JOAT Brain`, the glasses can also connect directly to `JOAT.app` on the Mac over Tailscale (`wss://`) or direct BLE.
+
+> **Demo Video (`1080p`):** [docs/demo/joat-hackathon-demo.mp4](docs/demo/joat-hackathon-demo.mp4) — end-to-end walkthrough of `evenhub-simulator` + `JOAT Brain` iPhone Simulator (`Gemini 3.5 Flash Lite` voice assistant, R1-safe BLE coexistence, heading-up vector navigation schematic, Apple Pencil post-close note insights, standalone Gmail, and `Agent Terminal`), narrated with `gemini-3.8-flash-tts`, scored with `lyria-3.5`, and framed with `gemini-omni-1.2-flash`.
 
 ---
 
@@ -16,13 +18,14 @@ Captured in `evenhub-simulator` (`576×288` monochrome green waveguide) with syn
 | ![Navigation](docs/images/hud-navigation-schematic.png)<br>**Navigation**: heading-up route schematic, Walk / Cycle / Drive, next-turn street callout | ![Agent Terminal](docs/images/hud-agent-terminal.png)<br>**Agent Terminal**: framed dual-brightness session for Claude, Codex & Antigravity |
 | ![Mail](docs/images/hud-mail.png)<br>**Mail**: multi-account Gmail inbox, thread reader & voice reply | ![Notifications](docs/images/hud-notification-card.png)<br>**Notifications**: true arrival age (`15m ago · 1/3`), persistent `tap` / `2x tap` dismissal sync |
 | ![Messages](docs/images/hud-messages.png)<br>**Messages**: Mac `/messages` relay threads, multi-clause voice dictation | ![Planning](docs/images/hud-planning.png)<br>**Planning**: calendar & EventKit reminders on one month |
-| ![QuickNotes](docs/images/hud-quicknotes.png)<br>**QuickNotes**: voice & Apple Pencil notes, AI cues from Prep folders | ![Brainstorm](docs/images/hud-brainstorm.png)<br>**Brainstorm**: Codex proposes, Claude critiques, Verifier Gate checks live sources |
+| ![QuickNotes](docs/images/hud-quicknotes.png)<br>**QuickNotes**: voice & Apple Pencil notes, optional AI cues from Prep folders | ![QuickNote Summary](docs/images/hud-quicknote-summary.png)<br>**QuickNote Summary**: post-close AI overview, key points & one-tap reminders |
 
 ### Glasses HUD highlights
 
 - **Heading-up route schematic (`NavigationSchematic.ts`)** — Replaces noisy 4-bit street bitmaps with a crisp vector route diagram projected from live route geometry and GPS fixes: fixed wearer chevron at lower-centre, bright remaining route, dim travelled route, ringed next-maneuver node with street name, cross-street stubs, dashed off-route connector, 1-tap **Saved Places**, live `"Where to?"` speech-in-text, and **Walk / Cycle / Drive** modes.
-- **Multi-turn JOAT Assistant (`AssistantConversationSurface.ts` + `Brain.swift`)** — Floating conversation card with `JOAT · LISTENING` spine indicator, 1st-try phonetic wake + polite lead-in normalization, speech-start follow-up latching across countdown boundaries, automatic `conversationId` rotation on close/handoff, Turn-2 viewport scroll reset, `<50 ms` local fast handlers (time, date, calendar, reminders, notes), `thinkingLevel: "MINIMAL"` SSE tool calling, and hardware **`ConfirmGate`** touchpad consent before sending any email/text or mutating reminders.
+- **Multi-turn JOAT Assistant (`AssistantConversationSurface.ts` + `Brain.swift`)** — Floating conversation card with `JOAT · LISTENING` spine indicator, 1st-try standalone & split phonetic wake + polite lead-in normalization, speech-start follow-up latching across countdown boundaries, automatic `conversationId` rotation on close/handoff, Turn-2 viewport scroll reset, `<50 ms` local fast handlers (time, date, calendar, reminders, notes), `thinkingLevel: "MINIMAL"` SSE tool calling, and hardware **`ConfirmGate`** touchpad consent before sending any email/text or mutating reminders.
 - **3-level Framed `Agent Terminal` (`NativeTerminalSurface.ts` + `GlassesTerminal.swift`)** — Pick **Claude**, **Codex**, or **Antigravity** → resume a past session or `+ New session` → speak instructions into a 5-container dual-brightness card (dim `> ` user / `>> ` tool rows, full-width bright assistant prose, boxed touchpad approvals, and `0 ms` tap-to-commit dictation).
+- **Even R1 Ring & Bluetooth Coexistence (`DeviceMonitor.ts`, `AudioStreamer.ts`, `BleDiagnostics`)** — Filters `onDeviceStatusChanged` by G2 serial number so Even R1 ring flaps never mute the G2 mic, automatically recovers listening across app switches, and offers **Always On (Glasses Mic)**, **Hold to Talk (R1-Safe — `0 pkt/s` idle BLE audio)**, and **Phone Mic (R1-Safe)** modes alongside live Bluetooth route diagnostics.
 - **Multi-clause dictation & persistent notifications (`Prompts.swift`, `Cards.swift`, `NotificationCard.ts`)** — Spoken message/email/terminal bodies accumulate across mid-sentence pauses (`1.5 s` settle window + sliding volatile extensions), while incoming `Messages` and `Mail` cards preserve true arrival timestamps and sync 200-ID FIFO dismissal tombstones across reconnects.
 
 ---
@@ -34,12 +37,12 @@ Captured in `evenhub-simulator` (`576×288` monochrome green waveguide) with syn
 | | | |
 |:-:|:-:|:-:|
 | ![Home](docs/images/ios/home.png)<br>**Home**: Even G2 hero card, 2×2 subsystem tiles & live route card | ![Navigation & Places](docs/images/ios/navigation.png)<br>**Navigation & Places**: Apple Maps search, Saved Places & `Walk \| Cycle \| Drive` | ![Mail](docs/images/ios/mail.png)<br>**Mail**: standalone multi-account Gmail over TLS IMAP/SMTP |
-| ![Notes](docs/images/ios/notes.png)<br>**Notes**: `All \| Pages \| Voice \| Prep` with inline AI summaries & reminder badges | ![Notebook Page](docs/images/ios/notebook-page.png)<br>**Apple Pencil Page**: inline collapsible AI summary/insights, 4 s OCR & `0.5×–4×+` zoom | ![Agents](docs/images/ios/agents.png)<br>**Agents**: Tailscale `/terminal` models, workspaces & sessions |
+| ![Notes](docs/images/ios/notes.png)<br>**Notes**: `All \| Pages \| Voice \| Prep` with inline AI summaries & reminder badges | ![Notebook Page](docs/images/ios/notebook-page.png)<br>**Apple Pencil Page**: post-close AI summary/insights, handwriting OCR & `0.5×–4×+` zoom | ![Agents](docs/images/ios/agents.png)<br>**Agents**: Tailscale `/terminal` models, workspaces & sessions |
 
 ### `JOAT Brain` highlights
 
-- **Home & Navigation Hub** — Live Even G2 connection status, 2×2 subsystem tiles (**On-Phone AI**, **Gmail**, **Mac Messages**, **Agent Terminal**), **Navigation & Places** with Apple Maps autocomplete, custom emerald `Home` / `Work` pins, side-by-side MapKit route preview on unfolded Duo, route-only `CLBackgroundActivitySession` lock-screen GPS, and optional spoken turn-by-turn cues in headphones.
-- **Apple Pencil Notebook & Inline AI Insights (`Notebook.swift`, `NotesInsights.swift`)** — Warm `#FAF8F4` US Letter stationery (`Ruled`, `Dot Grid`, `Grid`, `Blank`) with continuous auto-save, `Write | Type` toggle, **pinch zoom out to `0.5×` width-fit (centred) and in to `4×+`**, **4-second pause handwriting OCR** (Claude-first, Gemini fallback), and an **inline collapsible AI summary, key points, and next steps** card directly on every page and under each Notes row.
+- **Home, R1-Safe Voice & Navigation Hub** — Live Even G2 connection status, 2×2 subsystem tiles (**On-Phone AI**, **Gmail**, **Mac Messages**, **Agent Terminal**), **Glasses Mic Mode** (**Always On**, **Hold to Talk · R1-Safe**, **Phone Mic · R1-Safe**), **Navigation & Places** with Apple Maps autocomplete, custom emerald `Home` / `Work` pins, side-by-side MapKit route preview on unfolded Duo, route-only `CLBackgroundActivitySession` lock-screen GPS, and optional spoken turn-by-turn cues in headphones.
+- **Apple Pencil Notebook & Post-Close AI Insights (`Notebook.swift`, `NotesInsights.swift`)** — Warm `#FAF8F4` US Letter stationery (`Ruled`, `Dot Grid`, `Grid`, `Blank`) with lag-free background auto-save, `Write | Type` toggle, **pinch zoom out to `0.5×` width-fit (centred) and in to `4×+`**, **post-close handwriting OCR & AI summarization** (`Gemini 3.5 Flash Lite` / `Claude`) across handwritten pages, Voice QuickNotes, and Quick Text Notes, and full `AI cues during QuickNotes` toggle parity across glasses and app.
 - **Standalone Multi-Account Gmail (`MailView.swift`, `GmailTransport.swift`)** — Direct TLS IMAP (`imap.gmail.com:993`) and SMTP (`smtp.gmail.com:465`) with Keychain App Passwords, `All | Work | Personal` filtering, threaded conversations, and full glasses parity.
 - **Agents Control Plane (`MacTerminal.swift`)** — Configure models, workspaces, accounts, and new sessions for **Claude**, **Codex**, and **Antigravity** on the phone so raw model IDs never clutter the glasses HUD.
 
@@ -61,7 +64,7 @@ Even Realities G2 (576×288 green waveguide, dual-BLE lenses, LC3 mic, temple to
    │      ├── Native iOS features:
    │      │     ├── Navigation (MapKit Directions + PhoneLocation GPS + headphone Voice cues)
    │      │     ├── Mail (direct TLS IMAP/SMTP Gmail + MIMEParser + Keychain)
-   │      │     ├── Notes (PencilKit Notebook + 4 s OCR + inline NotesInsights + Prep cues)
+   │      │     ├── Notes (PencilKit Notebook + post-close OCR & NotesInsights + optional Prep cues)
    │      │     └── EventKit Calendar & Reminders + persistent Cards (200-ID FIFO tombstones)
    │      └── Private Tailscale HTTPS relays to Home Mac (optional, background):
    │            ├── /messages ──► MessagesEndpoint (macOS chat.db threads, ?q= search, send)
@@ -72,10 +75,9 @@ Even Realities G2 (576×288 green waveguide, dual-BLE lenses, LC3 mic, temple to
           ▼
        JOAT.app on Mac mini / Mac Studio (apps/mac/joat, Python + Swift menu-bar shell)
           ├── Audio pipeline: WhisperKit / Parakeet-MLX STT + adaptive RMS VAD + wake gate
-          ├── Reasoning: Claude CLI (`claude -p`) / Codex CLI (`codex exec`) over MCP + offline MLX seat
-          ├── Brainstorm loop: Codex (Proposer) ⇄ Claude (Critic) ⇄ MLX (Judge) ⇄ Verifier Gate
+          ├── Reasoning & coding: Claude CLI (`claude -p`), Codex CLI (`codex exec`), Antigravity + MCP tools
           ├── Relay services: /messages, /terminal, /agent, /mcp (guarded by per-service bearer tokens)
-          └── Channels & computer use: iMessage, Mail, Calendar, cua + Lume sandbox
+          └── Channels & computer use: iMessage, Mail, Calendar, Verifier Gate, cua + Lume sandbox
 ```
 
 ---
@@ -85,7 +87,8 @@ Even Realities G2 (576×288 green waveguide, dual-BLE lenses, LC3 mic, temple to
 ```text
 joatGlass/
 ├── apps/
-│   ├── hub-plugin/               # Even Hub SDK plugin (TypeScript + Vite)
+│   ├── hub-plugin/               # Even Hub SDK plugin (TypeScript + Vite + joat.ehpk package)
+│   │   ├── joat.ehpk             # Packaged Even Hub plugin build
 │   │   └── src/                  # HUD surfaces, NavigationSchematic, AssistantConversationSurface,
 │   │                             # NativeTerminalSurface, NotificationCard, EventRouter, HudPresenter
 │   ├── ios-companion/            # JOAT Brain iPhone & Duo app (SwiftUI + XcodeGen)
@@ -98,12 +101,13 @@ joatGlass/
 │       ├── ble/                  # Direct-BLE & Hub gateway transports
 │       ├── audio/                # LC3 decode, WhisperKit / Parakeet-MLX STT, adaptive VAD
 │       ├── display/              # 576×288 canvas renderer & page builders
-│       ├── agents/               # Claude / Codex / Antigravity CLI adapters + Brainstorm debate loop
+│       ├── agents/               # Claude / Codex / Antigravity CLI & A2A/OpenClaw terminal adapters
 │       ├── verifier/             # Live-web Verifier Gate (fetch, Wayback, quote-match, NLI)
 │       ├── channels/             # macOS iMessage (`chat.db`), Mail, Notification triage
 │       ├── computeruse/          # Sandboxed cua + Lume & iPhone Mirroring drivers
 │       └── services/             # VoiceOrchestrator, MessagesEndpoint, TerminalEndpoint, AgentEndpoint
-├── docs/                         # Architecture, iOS app, Mac app, Hub plugin, testing & rules
+├── docs/                         # Architecture, iOS app, Mac app, Hub plugin, testing, rules & demo video
+│   └── demo/joat-hackathon-demo.mp4
 ├── scripts/                      # Build/deploy scripts (`build_ios.sh`, `build_app.sh`) & simulator E2Es
 └── tests/                        # `tests/ios/` Swift suites + `tests/unit/` & `tests/integration/` pytest
 ```
@@ -114,7 +118,7 @@ joatGlass/
 
 | Doc | Contents |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layered architecture, interfaces, data flow, Brainstorm loop + Verifier Gate |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layered architecture, interfaces, data flow, Mac CLI adapters + Verifier Gate |
 | [docs/IOS_APP.md](docs/IOS_APP.md) | `JOAT Brain` on iPhone & Duo — screens, Apple Pencil notebook, 30-tool assistant, Navigation, setup |
 | [docs/MAC_APP.md](docs/MAC_APP.md) | `JOAT.app` on Mac — direct brain, Tailscale `/messages` & `/terminal` relays, pairing |
 | [docs/HUB_PLUGIN.md](docs/HUB_PLUGIN.md) | Even Hub SDK plugin — container geometry, BLE budget, audio/IMU/location & native surfaces |

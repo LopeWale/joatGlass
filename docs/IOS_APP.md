@@ -48,17 +48,18 @@ As in Even's Conversate, a prep note holds everything for one conversation: type
 - **Tap** the open note: record, or pause. **Long press:** talk one paragraph, as in Even's QuickNote. **2x tap:** Save, Discard or Cancel.
 - **AI cues and Prep notes** are in the note's menu (tap, then long press), with Undo last input. The tap that opens the menu doesn't change the recording.
 
-## The glasses' mic
+## The glasses' mic & Bluetooth coexistence
 
-Diagnostics › The glasses' mic checks what the glasses actually send:
+Diagnostics › **The glasses' mic & log export** and **Bluetooth & R1 Ring Coexistence** inspect live audio and BLE activity:
 
-- While a note records, the log gets the glasses' sound level once a second (frames, RMS and peak in dBFS). If the level falls while someone is still talking, the glasses cut the sound before JOAT Brain got it.
-- **Save note audio** (off by default) also keeps each note's audio on the phone as a WAV, to share and listen to. Swipe one to delete it.
-- **Share the log** sends `brain.log` from the phone.
+- While a note records, the log gets the glasses' sound level once a second (frames, RMS and peak in dBFS).
+- **Save note audio** (off by default) keeps each note's audio on the phone as a WAV, to share and listen to. Swipe one to delete it.
+- **Share the log (.txt)** exports `joat-brain-diagnostics.txt` and **Copy log to clipboard** copies the newest log lines directly.
+- **Glasses Mic Mode (`joat.mic.mode`):** switch live between **Always On (Glasses Mic)**, **Hold to Talk (R1-Safe)** (`0` idle BLE audio packets/sec near Even R1, AirPods, or car Bluetooth), and **Phone Mic (R1-Safe)** while tracking G2 vs. R1/accessory status events and Classic BT `AVAudioSession` route switches.
 
 ## JOAT Assistant on the phone
 
-Addressing `"JOAT, …"` (or speaking inside the follow-up window) runs polite lead-in normalization (`"can you please …"`, `"could you …"`, `"I'd like you to …"`) through deterministic voice commands first, and streams everything else on-phone through `OnPhoneAI` (`Gemini 3.5 Flash Lite` or `Claude`, with `MacLink` `/agent` fallback) wired to the 28-tool `PhoneToolBelt`:
+Addressing `"JOAT, …"` (or speaking inside the follow-up window) runs polite lead-in normalization (`"can you please …"`, `"could you …"`, `"I'd like you to …"`) through deterministic voice commands first, and streams everything else on-phone through `OnPhoneAI` (`Gemini 3.5 Flash Lite` or `Claude`, with `MacLink` `/agent` fallback) wired to the 30-tool `PhoneToolBelt`:
 
 - **Personal data & actions:** reads iPhone Calendar events (`NSCalendarsFullAccessUsageDescription`, managed in Home › Permissions) and Reminders, multi-account Gmail threads, Messages conversations, iPhone Contacts (plus remembered relationships like `"Mom"` or `"my wife"`), Saved Places, QuickNotes, Voice Notes, Apple Pencil Notebook pages (typed text + handwriting OCR + summaries), and Prep folders; controls countdown/Pomodoro timers, live Open-Meteo weather, RSS news, DuckDuckGo web search, glasses surfaces (`Home`, `Mail`, `Messages`, `Reminders`, `Navigation`, `QuickNotes`, `Agent Terminal` for Claude/Codex/Antigravity), Mac Agent Terminal status, notifications, and headphone spoken-reply settings.
 - **Hardware confirmation safety:** preparing an email or text message, or creating or completing a reminder, dismisses the streaming `assistant.conversation` card first and opens `ConfirmGate` on the glasses—nothing is sent or written to EventKit until you tap the touchpad to confirm.
@@ -77,10 +78,6 @@ With a home Mac running `JOAT.app` (Private Tailnet on), `Messages`, `Agent Term
 
 - **`/messages` (`MacMessages.swift`):** reads full macOS `chat.db` thread history, searches threads (`?q=`), and sends iMessages without Shortcuts automations. Without a home Mac, two optional iOS Shortcuts automations ([apps/ios-companion/Shortcuts](../apps/ios-companion/Shortcuts/README.md)) relay incoming and outgoing texts on the phone alone.
 - **`/terminal` (`MacTerminal.swift` + `GlassesTerminal.swift`):** drives the 3-level G2 `Agent Terminal` (`AGENT TERMINAL` → session picker → 5-container framed session card with `[!] Approval needed` touchpad gates and iPhone-transcribed spoken instructions), while the **Agents** tab on the phone manages models, workspaces, accounts, and new sessions.
-
-## Brainstorm on the Mac
-
-Cited multi-agent **Brainstorm** (`Codex` Proposer ⇄ `Claude` Critic ⇄ `VerifierGate`) runs on your Mac. Pick `Brainstorm` when connected directly to a Mac brain (`wss://<your-mac>.<your-tailnet>.ts.net/glasses`), or hand off to the first reachable Mac in your plugin allowlist and return to `This iPhone · JOAT Brain` on `2x tap` Home.
 
 ## Build your own
 
