@@ -133,7 +133,21 @@ final class Prompts: BrainFeature {
             return true
         }
 
-        let rawWords = WakeGate.strip(text).flatMap { $0.isEmpty ? nil : $0 } ?? text
+        let stripped = WakeGate.strip(text)
+        if let stripped {
+            if stripped.isEmpty {
+                Log.add("prompt yielded to standalone JOAT wake call")
+                cancel("addressed JOAT")
+                return false
+            }
+            if Navigation.isCancel(stripped) {
+                Log.add("prompt cancelled by addressed voice command")
+                cancel("voice cancel")
+                return true
+            }
+        }
+
+        let rawWords = stripped.flatMap { $0.isEmpty ? nil : $0 } ?? text
         let words = rawWords.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !words.isEmpty else { return true }
 

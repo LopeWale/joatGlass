@@ -764,6 +764,9 @@ async function boot(): Promise<void> {
   };
   router.onOverviewHold = (phase) => {
     if (exiting || displayYielded) return false;
+    if (settings.micMode !== 'on_demand' && (menu.isPanelRefreshable() || terminal.isActive())) {
+      return false;
+    }
     if (settings.micMode === 'on_demand') {
       if (phase === 'start') {
         clearOnDemandTimer();

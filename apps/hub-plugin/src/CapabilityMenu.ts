@@ -625,11 +625,12 @@ export class CapabilityMenu {
       || !isCurrent()
     ) return false;
 
+    const retainConversation = this.terminalOwnsSurface;
     this.retireTerminalSurface();
     const revision = ++this.terminalPaintRevision;
     const stillCurrent = () => this.terminalOpening === opening
       && this.terminalPaintRevision === revision && isCurrent();
-    const shown = await this.hud.showTerminal(model, undefined, stillCurrent);
+    const shown = await this.hud.showTerminal(model, undefined, stillCurrent, retainConversation);
     if (!shown || !stillCurrent()) return false;
     // Stash Session Picker + Agent Picker snapshots before releasing menu
     // state so `2x tap` from the live terminal returns to `AGENT TERMINAL · <AGENT>`.
@@ -792,6 +793,7 @@ export class CapabilityMenu {
     // A voice-prefixed generation is the Mac acting on the wearer's spoken
     // request ("show my messages", "start a quicknote"). Adopt it instead of
     // dropping it as stale — voice must not require a preceding menu tap.
+    let adoptedVoiceGeneration = false;
     if (
       title
       && requestId !== undefined
@@ -799,6 +801,7 @@ export class CapabilityMenu {
       && requestId !== this.pendingRequestId
     ) {
       this.adoptVoiceGeneration(title, requestId);
+      adoptedVoiceGeneration = true;
     }
     if (this.view !== 'data' || !this.pendingTitle || !title) return false;
     if (!this.pendingRequestId || requestId !== this.pendingRequestId) return false;
@@ -942,12 +945,14 @@ export class CapabilityMenu {
       : archiveSelection ?? restoredPlanningIndex ?? authoritativePlanningIndex
         ?? (refreshSelection === undefined ? 0 : Math.max(0, Math.min(refreshSelection, items.length - 1)));
     if (refreshSelection !== undefined) this.notificationRefreshSelection = undefined;
+    const retainConversation = !adoptedVoiceGeneration && !this.dataSelectionPending;
     const shown = await this.hud.showList(items, {
       title,
       contextLabel,
       controlStartIndex,
       planningEntries,
       retainProductivityReceipt: receiptRefresh !== undefined,
+      ...(retainConversation ? { retainConversation: true } : {}),
       hint: effectiveHint,
       selectable: effectiveSelectable,
       ...(reminderCard ? { reminderCard } : {}),
@@ -1617,7 +1622,7 @@ export class CapabilityMenu {
    * `capdata` carrying the cached revision, and the Mac answers an opened
    * row with a `hud.list` titled "<TAB> · …" that presentList matches.
    */
-  async openPanelTab(tab: PanelPageTab, keepSelection = 0, notifyMac = true): Promise<void> {
+  async openPanelTab(tab: PanelPageTab, keepSelection = 0, notifyMac = true, retainConversation = false): Promise<void> {
     if (notifyMac) this.departSurface(tab);
     else this.retireTerminalSurface();
     this.leaveMessages();
@@ -1645,6 +1650,7 @@ export class CapabilityMenu {
     const shownItems = [...countdown, ...items];
     const shown = await this.hud.showList(shownItems, {
       title, hint, selectable, railTab: tab, nativeFirmwareList: true,
+      ...(retainConversation ? { retainConversation: true } : {}),
     });
     if (!this.isCurrentTransition(transition)) return;
     if (!shown) {
@@ -1654,7 +1660,7 @@ export class CapabilityMenu {
     if (this.hud.rail.requestId(tab) !== requestId) {
       // The cache moved on while the page painted; what is on the glass is
       // already stale. Paint once more from the new cache.
-      return this.openPanelTab(tab, keepSelection, false);
+      return this.openPanelTab(tab, keepSelection, false, retainConversation);
     }
     // The firmware has no cursor-setting API: a rebuilt list starts on row
     // zero.
@@ -1695,7 +1701,7 @@ export class CapabilityMenu {
     const shown = panelTabForTitle(this.pendingTitle);
     if (!this.isPanelExpanded() || shown === undefined || shown !== tab) return false;
     const keep = this.selectedIndex;
-    await this.openPanelTab(shown, keep, false);
+    await this.openPanelTab(shown, keep, false, true);
     return true;
   }
 

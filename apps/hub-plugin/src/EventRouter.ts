@@ -43,6 +43,7 @@ export interface NavigationInputOwner {
 /** The live Agent Terminal surface gets first claim on its explicit gestures. */
 export interface TerminalInputOwner {
   isActive(): boolean;
+  isRunning?(): boolean;
   handleClick(): boolean;
   /** Optional double-press cancellation hook (false on Agent Terminal, which uses Back). */
   handleCancel?(): boolean;
@@ -249,8 +250,7 @@ export class EventRouter {
     if (!this.contextualMenuOverlayOpen
       && !this.promptedInput?.isActive()
       && !this.imu.isPending()
-      && !this.terminal?.isActive()
-      && !this.menu.isPanelRefreshable()
+      && !(this.terminal?.isRunning?.() ?? false)
       && this.onOverviewHold?.('start') === true) {
       this.pendingOverviewHold = true;
       this.pendingMicLongPress = true;

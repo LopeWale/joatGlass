@@ -153,6 +153,9 @@ export interface ListSurfaceOptions {
   reminderCard?: ReminderCard;
   /** This list is an expanded panel tab: keep its rail lit on the left. */
   railTab?: PanelContentTab;
+  /** A background refresh of the ALREADY-open capability/panel keeps an active
+   * JOAT conversation modal in front and updates the retained surface behind it. */
+  retainConversation?: boolean;
   /** Opt into the firmware-owned list and its native gesture cursor. */
   nativeFirmwareList?: boolean;
   /** Show these rows as one firmware text page (a reader), paged in place. */
@@ -700,13 +703,17 @@ export class HudPresenter {
     }
   }
 
-  /** Replace the whole page with a native one, recorded as the page change
-   * in flight. */
+  /** Replace the whole page with a native one, serialized after any in-flight
+   * page replacement so rapid BLE rebuilds never collide on `replacingPage`. */
   private replaceNativePage(
     page: RebuildPageContainer,
     owner: Exclude<DisplayPageOwner, 'visual'>,
   ): Promise<boolean> {
-    return this.trackPageReplacement(this.replaceNativePageNow(page, owner));
+    const prior = this.pageReplacement;
+    const run = prior
+      ? prior.catch(() => false).then(() => this.replaceNativePageNow(page, owner))
+      : this.replaceNativePageNow(page, owner);
+    return this.trackPageReplacement(run);
   }
 
   private async replaceNativePageNow(
@@ -922,6 +929,23 @@ export class HudPresenter {
         const base = this.layouts.textPageLayout(native.body, { status: '', hint: native.hint }, { inset: true });
         return native.schematic ? withNavigationSchematic(base) : base;
       }
+    }
+    if (surface.kind === 'terminal') {
+      const terminal = surface.terminal;
+      const lines: string[] = [];
+      if (terminal.focus.trim()) lines.push(terminal.focus.trim().toUpperCase());
+      const messages = terminal.messages ?? [];
+      if (messages.length > 0) {
+        for (const msg of messages.slice(-4)) {
+          const clean = msg.text.replace(/\s+/gu, ' ').trim();
+          if (!clean) continue;
+          lines.push(msg.role === 'user' ? `> ${clean}` : clean);
+        }
+      } else if (terminal.activity.trim()) {
+        lines.push(...terminal.activity.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 4));
+      }
+      const body = lines.length > 0 ? lines.join('\n') : 'AGENT TERMINAL';
+      return this.layouts.textPageLayout(body, { status: '', hint: '' }, { inset: true });
     }
     return undefined;
   }
@@ -1615,7 +1639,8 @@ export class HudPresenter {
   async showAssistantConversation(snapshot: AssistantConversationSnapshot): Promise<boolean> {
     if (!this.displayActive || this.confirmation || this.promptQuestion
       || !validAssistantConversationSnapshot(snapshot)) return false;
-    if (!await this.prepareNativeTerminalHandoff()) return false;
+    const terminalWasActive = this.nativeTerminal.isActive();
+    if (terminalWasActive && !await this.nativeTerminal.pauseForHandoff()) return false;
     const entering = !this.assistantConversation.isActive();
     if (entering) {
       const displayCurrent = this.captureDisplayGuard();
@@ -1627,12 +1652,19 @@ export class HudPresenter {
       }
       this.assistantOverlay = undefined;
       this.clearPanelTicker();
-      if (!displayCurrent()) return false;
+      if (!displayCurrent()) {
+        if (terminalWasActive) await this.nativeTerminal.resumeAfterFailedHandoff();
+        return false;
+      }
     }
     const wasListening = this.assistantConversation.isListening();
     const presented = await this.assistantConversation.present(snapshot);
+    if (terminalWasActive) {
+      if (presented) this.nativeTerminal.completeHandoff();
+      else await this.nativeTerminal.resumeAfterFailedHandoff();
+    }
     if (!presented && entering) {
-      if (this.assistantConversation.abortFailedEnter()) {
+      if (this.assistantConversation.abortFailedEnter() && !terminalWasActive) {
         await this.restoreAfterAssistantConversation();
       }
     } else if (presented && !entering && this.imageHeaderShown
@@ -2474,6 +2506,37 @@ export class HudPresenter {
   async showList(
     items: string[], options: ListSurfaceOptions = {}, isCurrent?: () => boolean,
   ): Promise<boolean> {
+    if (options.retainConversation && this.conversationInFront()) {
+      if (!this.displayActive) return false;
+      if (isCurrent) {
+        try { if (!isCurrent()) return false; } catch { return false; }
+      }
+      const resolved = this.resolveListOptions(options);
+      this.surface = {
+        kind: 'list',
+        items: [...items],
+        options: resolved,
+        selectedIndex: this.initialListSelection(items, options),
+      };
+      if (this.usesNativeTextPage(resolved)) {
+        const text = readerParagraphs(items).join('\n');
+        const pages = isQuickNotesNote(resolved.title)
+          ? paginateFromEnd(text, READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity)
+          : paginateMeasured(text, READER_TEXT_PAGE.textWidth, READER_TEXT_PAGE.lineCapacity);
+        const pageIdx = options.nativeTextPageFromEnd ? Math.max(0, pages.length - 1) : 0;
+        this.nativeTextPage = {
+          source: items.join('\n'),
+          pages,
+          page: pageIdx,
+          body: pages[pageIdx] ?? ' ',
+          hint: resolved.hint,
+        };
+      } else {
+        this.nativeTextPage = undefined;
+      }
+      this.refreshActivities();
+      return true;
+    }
     if (!await this.prepareAssistantConversationHandoff()) return false;
     if (!isFirmwareList(options, this.visual !== undefined) && !await this.prepareNativeTerminalHandoff()) return false;
     if (isCurrent && this.usesNativeTextPage(options)) {
@@ -3010,11 +3073,19 @@ export class HudPresenter {
   }
 
   async showTerminal(
-    terminal: AgentTerminalHudModel, statusOverride?: string, isCurrent?: () => boolean,
+    terminal: AgentTerminalHudModel,
+    statusOverride?: string,
+    isCurrent?: () => boolean,
+    retainConversation = false,
   ): Promise<boolean> {
     const displayCurrent = this.captureDisplayGuard();
     if (!displayCurrent()) return false;
     if (this.confirmation || (isCurrent && !isCurrent())) return false;
+    if (retainConversation && this.conversationInFront() && this.surface.kind === 'terminal') {
+      this.surface = { kind: 'terminal', terminal: this.cloneTerminal(terminal) };
+      this.refreshActivities();
+      return true;
+    }
     if (!await this.prepareAssistantConversationHandoff()) return false;
     const shown = await this.showNativeTerminal(terminal, statusOverride, isCurrent);
     if (shown) this.armThinkingTicker();

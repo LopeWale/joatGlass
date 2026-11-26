@@ -392,18 +392,27 @@ final class Brain {
         let text: String, latency: Int?
         switch event {
         case .volatile(let words):
-            if prompts.active { prompts.hearing(words); return }
+            if prompts.active {
+                if WakeGate.strip(words) == nil { prompts.hearing(words) }
+                return
+            }
             let now = Date()
-            if quickNotes.wantsSpeech(audioEnd: now) {
+            let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
+            let inJoatWindow = now < conversationUntil || now < speechLatchedUntil
+                || now < nameOnlyUntil || now < nameOnlyLatchedUntil
+                || (now < followUpUntil && followUp != nil)
+            let addressedVolatile = !trimmed.isEmpty && WakeGate.strip(trimmed) != nil
+            if !inJoatWindow && !addressedVolatile && quickNotes.wantsSpeech(audioEnd: now) {
                 quickNotes.hearing(words)
                 return
             }
-            quickNotes.hearing(words)
+            if !inJoatWindow && !addressedVolatile {
+                quickNotes.hearing(words)
+            }
             // Latch active listening windows as soon as non-filler speech begins so
             // sentences that finish after the countdown still complete cleanly,
             // without ever mounting premature volatile `assistant.conversation` cards.
-            guard !confirm.hasPending, !navigation.active, !voice.wasSpeaking(at: now) else { return }
-            let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !confirm.hasPending, !voice.wasSpeaking(at: now) else { return }
             guard !trimmed.isEmpty, !Self.isFiller(trimmed) else { return }
             if now < conversationUntil || now < speechLatchedUntil {
                 speechLatchedUntil = max(speechLatchedUntil, now.addingTimeInterval(12))
@@ -432,11 +441,12 @@ final class Brain {
             if prompts.heard(text, spokeUntil: spokeUntil) { return }
         }
 
+        let inNameOnly = (now < nameOnlyUntil || now < nameOnlyLatchedUntil)
+        let inFollowUp = (now < conversationUntil || now < speechLatchedUntil)
+        let inAskedFollowUp = (now < followUpUntil && followUp != nil)
+
         let preAddressed = WakeGate.strip(text)
-        let escapesRecordingNote: Bool = {
-            guard let req = preAddressed, !req.isEmpty else { return false }
-            return QuickNotes.isVoiceControlRequest(req) || !quickNotes.isForegroundOnGlass
-        }()
+        let escapesRecordingNote = (preAddressed != nil) || inNameOnly || inFollowUp || inAskedFollowUp
         if !escapesRecordingNote, quickNotes.wantsSpeech(audioEnd: spokeUntil) {
             if voice.wasSpeaking(at: spokeUntil) {
                 Log.add("own voice kept out of the note: \(text.prefix(80))")
@@ -502,13 +512,11 @@ final class Brain {
                 voice.say(reply.text)
                 return
             }
-            if navigation.hear(text, addressed: addressed) {
+            let joatListening = (inNameOnly || inFollowUp) && !Navigation.isCancel(text)
+            if !joatListening, navigation.hear(text, addressed: addressed) {
                 return
             }
         }
-
-        let inNameOnly = (now < nameOnlyUntil || now < nameOnlyLatchedUntil)
-        let inFollowUp = (now < conversationUntil || now < speechLatchedUntil)
 
         var query = WakeGate.strip(text)
         if query != nil, voice.wasSpeaking(at: spokeUntil) {

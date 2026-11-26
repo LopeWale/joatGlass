@@ -505,6 +505,96 @@ private func testSplitCallAndBleIsolation(brain: Brain, link: RecordingPluginLin
     brain.capabilities.openHome()
 }
 
+// MARK: - 8. JOAT modal & voice response over active Navigation, foreground QuickNotes, and Prompts
+
+@MainActor
+private func testJoatModalOverActiveFeatures(brain: Brain, link: RecordingPluginLink) {
+    UserDefaults.standard.set(8.0, forKey: Brain.followUpKey)
+    brain.conversationChoice("exit")
+    link.clear()
+
+    // (a) Active Navigation: standalone "JOAT" -> "Yes?", answer after "Yes?", AND follow-up window!
+    _ = brain.navigation.handle("walk to 233 S Wacker Dr Chicago")
+    settle(0.15)
+    expect(brain.navigation.active, "navigation session is active")
+    link.clear()
+
+    brain.handle(.final("JOAT", latencyMs: 10))
+    expectEqual(lastTurns(link).last?["text"], "Yes?",
+                "calling 'JOAT' during active Navigation MUST mount the 'Yes?' modal")
+
+    link.clear()
+    brain.handle(.final("what time is it?", latencyMs: 10))
+    expect((lastTurns(link).last?["text"] ?? "").hasPrefix("It is "),
+           "question after 'JOAT -> Yes?' during active Navigation MUST answer in-place on JOAT modal")
+
+    link.clear()
+    brain.handle(.final("what's today's date?", latencyMs: 10))
+    expect((lastTurns(link).last?["text"] ?? "").hasPrefix("Today is "),
+           "follow-up inside JOAT window during active Navigation MUST answer on JOAT modal")
+
+    // Once the wearer closes JOAT's modal, unaddressed speech during Navigation stays ignored:
+    brain.conversationChoice("exit")
+    link.clear()
+    brain.handle(.final("nice day for a walk", latencyMs: 10))
+    expectEqual(link.conversations.count, 0,
+                "unaddressed bystander speech during active Navigation (outside JOAT window) stays ignored")
+    _ = brain.navigation.hear("JOAT, stop", addressed: "stop")
+    expect(!brain.navigation.active, "navigation stopped cleanly")
+
+    // (b) Active FOREGROUND QuickNote on glasses (`isForegroundOnGlass == true` + `wantsSpeech == true`):
+    brain.capabilities.claim("QUICKNOTES")
+    _ = brain.quickNotes.handle("start a voice note called Architecture")
+    expect(brain.quickNotes.isForegroundOnGlass, "QuickNotes is foreground on the glasses")
+    expect(brain.quickNotes.wantsSpeech(audioEnd: Date()), "QuickNote is actively recording")
+    brain.handle(.final("Initial note line", latencyMs: 10))
+    link.clear()
+
+    brain.handle(.final("JOAT", latencyMs: 10))
+    expectEqual(lastTurns(link).last?["text"], "Yes?",
+                "calling 'JOAT' over a foreground recording QuickNote MUST mount JOAT's 'Yes?' modal")
+
+    link.clear()
+    brain.handle(.final("what time is it?", latencyMs: 10))
+    expect((lastTurns(link).last?["text"] ?? "").hasPrefix("It is "),
+           "question after 'Yes?' over foreground QuickNote MUST be answered by JOAT")
+
+    link.clear()
+    brain.handle(.final("Hey JOAT, what's today's date?", latencyMs: 10))
+    expect((lastTurns(link).last?["text"] ?? "").hasPrefix("Today is "),
+           "addressed JOAT query over foreground QuickNote MUST be answered on JOAT modal")
+
+    let noteAfterJoat = (brain.quickNotes.openVoiceNoteSnapshot?.paragraphs ?? []).joined(separator: " ")
+    expectEqual(noteAfterJoat, "Initial note line",
+                "JOAT wake calls and queries MUST NOT leak into the open QuickNote transcript (got: \(noteAfterJoat))")
+
+    // Closing JOAT's modal returns speech capture immediately to the still-recording QuickNote:
+    brain.conversationChoice("exit")
+    brain.handle(.final("Second note line", latencyMs: 10))
+    let noteResumed = (brain.quickNotes.openVoiceNoteSnapshot?.paragraphs ?? []).joined(separator: " ")
+    expect(noteResumed.contains("Second note line"),
+           "after dismissing JOAT modal, unaddressed speech resumes recording into the QuickNote")
+
+    _ = brain.quickNotes.handle("discard voice note")
+    _ = brain.quickNotes.handle("confirm discard")
+    brain.capabilities.openHome()
+
+    // (c) Active feature Prompt (`Where to?` / `What should I say?`):
+    var promptResult: String? = "UNSET"
+    brain.prompts.ask("Where to?", ownerKind: "navigation", ownerId: "nav-1", field: "destination") { ans in
+        promptResult = ans
+    }
+    expect(brain.prompts.active, "feature prompt is active")
+    link.clear()
+    brain.handle(.final("JOAT", latencyMs: 10))
+    expect(!brain.prompts.active, "calling 'JOAT' cancels the open prompt instead of submitting 'JOAT' as destination")
+    expect(promptResult == nil, "cancelled prompt receives nil, never literal 'JOAT'")
+    expectEqual(lastTurns(link).last?["text"], "Yes?",
+                "calling 'JOAT' over an open prompt mounts JOAT's 'Yes?' modal")
+    brain.conversationChoice("exit")
+    link.clear()
+}
+
 func runEntry() {
     let sema = DispatchSemaphore(value: 0)
     Task { @MainActor in
@@ -516,6 +606,7 @@ func runEntry() {
         testFastLocalCapabilities(brain: brain, link: link)
         await testReplyArbitrationAndTools(brain: brain, link: link)
         testSplitCallAndBleIsolation(brain: brain, link: link)
+        testJoatModalOverActiveFeatures(brain: brain, link: link)
         brain.pomodoro.reset()
         print("PASS: all \(passedAssertions) wake & multi-turn reliability assertions succeeded.")
         sema.signal()

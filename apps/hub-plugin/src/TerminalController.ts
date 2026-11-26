@@ -36,6 +36,11 @@ export class TerminalController {
     return this.model !== undefined && !this.suspended;
   }
 
+  /** True only while a terminal turn is actively executing (where hold cancels the job). */
+  isRunning(): boolean {
+    return this.isActive() && this.model?.state === 'running';
+  }
+
   /** The OS contextual menu temporarily owns input; retain the underlying model
    * only until a real surface departure clears it. */
   setSuspended(suspended: boolean): void {

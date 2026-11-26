@@ -665,12 +665,16 @@ final class Navigation: ObservableObject, BrainFeature, VoiceCommand {
             onMenuChanged?()
             return true
         }
-        if let a = addressed, !a.isEmpty {
+        if let a = addressed {
+            if a.isEmpty {
+                Log.add("navigation active — forwarding standalone wake call to assistant")
+                return false
+            }
             if s.consume(a) { return true }
             Log.add("navigation active — forwarding addressed query to assistant (\(a.count) chars)")
             return false
         }
-        if addressed == nil, s.awaitingDestinationNow {
+        if s.awaitingDestinationNow {
             _ = s.consume(text)
             return true
         }

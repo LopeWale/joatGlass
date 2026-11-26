@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import type { BridgeClient } from './BridgeClient';
+import { CapabilityMenu } from './CapabilityMenu';
 import { HudPageBuilder } from './HudPageBuilder';
 import { HudPresenter } from './HudPresenter';
 import type { HudStatusModel } from './HudStatus';
 import type { HudVisualFrame } from './HudVisualSurface';
+import type { MacLink } from './MacLink';
 import { navigationVisualFixture, type NavigationHudModel } from './NavigationHud';
-import type { AssistantConversationSnapshot } from './types';
+import { Settings } from './Settings';
+import type { AgentTerminalHudModel, AssistantConversationSnapshot } from './types';
 
 /**
  * Even's own features hold the lens one at a time. JOAT's do not: a route
@@ -49,9 +52,9 @@ function guidance(maneuverDistanceM: number, maneuver: NavigationHudModel['maneu
   return { ...navigationVisualFixture('nav-guidance'), maneuver, maneuverDistanceM };
 }
 
-function conversation(revision = 1): AssistantConversationSnapshot {
+function conversation(revision = 1, conversationId = 'walk-and-talk'): AssistantConversationSnapshot {
   return {
-    conversationId: 'walk-and-talk',
+    conversationId,
     revision,
     state: 'ready',
     turns: [
@@ -168,5 +171,109 @@ describe('the Pomodoro rides along on every page', () => {
     // 11:30 left: at the minute boundary the chip reads 11, written in place.
     await vi.advanceTimersByTimeAsync(31_000);
     expect(last(r.statusWrites())).toBe('9:41 · MESSAGES · Focus 11m · ● · ▆');
+  });
+});
+
+function terminalModel(summary: string, state: AgentTerminalHudModel['state'] = 'ready'): AgentTerminalHudModel {
+  return {
+    openingRequestId: 'voice-term-1',
+    openingSelectionId: 'voice-term-1',
+    state,
+    focus: 'Claude Code',
+    lanes: ['Claude Code'],
+    activity: summary,
+    terminalReason: '',
+    approvals: 0,
+    conversationId: 'claude-session',
+    messages: [
+      { id: 'm1', role: 'user', text: 'Run unit suite' },
+      { id: 'm2', role: 'assistant', text: summary },
+    ],
+    historyTruncated: false,
+    inputRequired: false,
+    taskRecovery: false,
+  };
+}
+
+describe('JOAT modal floats and persists over every active feature', () => {
+  it('mounts over active firmware features in a single rebuild (zero blank 4-tile visual flash)', async () => {
+    const r = rig();
+    await r.hud.setStatusModel(LIVE);
+    expect(await r.hud.showNavigation(guidance(240))).toBe(true);
+
+    const before = r.rebuilds.length;
+    expect(await r.hud.showAssistantConversation(conversation(1))).toBe(true);
+    // Must mount directly from navigation-native -> assistant-native in ONE rebuild,
+    // never flashing an intermediate 4-image visualLayout rebuild in between.
+    expect(r.rebuilds.length - before).toBe(1);
+    const overlay = last(r.rebuilds);
+    expect(overlay?.textObject?.some((t) => t.containerName === 'conversation')).toBe(true);
+    expect(overlay?.textObject?.some((t) => t.containerName === 'main')).toBe(true);
+  });
+
+  it('floats over Agent Terminal with visible terminal context above the modal and survives background terminal polls', async () => {
+    const r = rig();
+    const link = { send: vi.fn(), sendTerminal: vi.fn(() => true) } as unknown as MacLink;
+    const menu = new CapabilityMenu(r.hud, new Settings(), link);
+    await r.hud.setStatusModel(LIVE);
+
+    // Voice opens Agent Terminal session:
+    expect(await menu.presentList('AGENT TERMINAL', ['Connecting…'], 'voice-term-1', false)).toBe(true);
+    expect(await menu.presentTerminalOpening(
+      terminalModel('Initial terminal output'),
+      { requestId: 'voice-term-1', selectionId: 'voice-term-1' },
+      () => true,
+    )).toBe(true);
+
+    const beforeModal = r.rebuilds.length;
+    expect(await r.hud.showAssistantConversation(conversation(1))).toBe(true);
+    expect(r.rebuilds.length - beforeModal).toBe(1);
+    expect(r.hud.hasAssistantConversation()).toBe(true);
+    const modalPage = last(r.rebuilds);
+    expect(modalPage?.textObject?.some((t) => t.containerName === 'main')).toBe(true);
+
+    // Background 1.5s terminal poll arrives while JOAT modal is up: modal MUST stay visible!
+    expect(await menu.presentTerminalOpening(
+      terminalModel('Updated terminal output from poll', 'running'),
+      { requestId: 'voice-term-1', selectionId: 'voice-term-1' },
+      () => true,
+    )).toBe(true);
+    expect(r.hud.hasAssistantConversation()).toBe(true);
+
+    // Dismissing JOAT's modal restores the updated terminal session!
+    expect(await r.hud.dismissAssistantConversation('walk-and-talk', 1)).toBe(true);
+    expect(r.hud.hasAssistantConversation()).toBe(false);
+    const restored = last(r.rebuilds);
+    expect(restored?.textObject?.some((t) => t.containerName === 'terminal-bright'
+      && (t.content ?? '').includes('Updated terminal output from poll'))).toBe(true);
+  });
+
+  it('survives background Mail/Messages refreshes and Pomodoro ticks without tearing down JOAT modal', async () => {
+    const r = rig();
+    const link = { send: vi.fn() } as unknown as MacLink;
+    const menu = new CapabilityMenu(r.hud, new Settings(), link);
+    await r.hud.setStatusModel(LIVE);
+
+    // Open Mail via voice, then invoke JOAT modal:
+    expect(await menu.presentList('MAIL', ['[2m] Old email'], 'voice-mail-1', true)).toBe(true);
+    expect(await r.hud.showAssistantConversation(conversation(1))).toBe(true);
+    expect(r.hud.hasAssistantConversation()).toBe(true);
+
+    // Background IMAP sync pushes refreshed rows for the SAME requestId:
+    expect(await menu.presentList('MAIL', ['[now] Brand new email', '[2m] Old email'], 'voice-mail-1', true)).toBe(true);
+    expect(r.hud.hasAssistantConversation()).toBe(true);
+
+    // Dismissing JOAT modal reveals the refreshed Mail list!
+    expect(await r.hud.dismissAssistantConversation('walk-and-talk', 1)).toBe(true);
+    const restoredList = last(r.rebuilds)?.listObject?.[0];
+    expect(restoredList?.itemContainer?.itemName?.[0]).toContain('Brand new email');
+
+    // Open Pomodoro tab, invoke JOAT modal, then push a background Pomodoro tick:
+    await startPomodoro(r.hud);
+    await menu.openPanelTab('pomodoro', 0, false);
+    expect(await r.hud.showAssistantConversation(conversation(1, 'walk-and-talk-2'))).toBe(true);
+    expect(r.hud.hasAssistantConversation()).toBe(true);
+    expect(await menu.presentPanelContent('pomodoro')).toBe(true);
+    expect(r.hud.hasAssistantConversation()).toBe(true);
   });
 });
