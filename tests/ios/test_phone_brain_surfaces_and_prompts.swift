@@ -457,7 +457,7 @@ private func testPromptsMultiClauseFenceAndMessagesSync() async {
     let link = RecordingLink()
     let prompts = Prompts(link: link)
     prompts.multiClauseSettleSeconds = 0.22 // fast deterministic test window (default verified separately)
-    expectEqual(Prompts(link: link).multiClauseSettleSeconds, 1.5, "Default multiClauseSettleSeconds is 1.5s")
+    expectEqual(Prompts(link: link).multiClauseSettleSeconds, 2.4, "Default multiClauseSettleSeconds is 2.4s")
 
     // 2a. Pre-prompt fence (`spokeUntil < listeningSince ?? askedAt`)
     var committedAnswer: String? = "UNSET"
@@ -1360,6 +1360,120 @@ private func testNotesCloseOnlySummaryAllNoteTypesAndCuesOff() async {
     )
 }
 
+@MainActor
+private func testReplyListeningSettleEarlyTapRetryAndThinkingState() async {
+    let link = RecordingLink()
+    let prompts = Prompts(link: link)
+    prompts.multiClauseSettleSeconds = 0.18
+
+    // 1. Volatile-only dictation (when ambient noise keeps VAD open so `.final` never fires)
+    // settles cleanly to review instead of hanging on listening for 30s!
+    var volatileAnswered: String? = "UNSET"
+    prompts.ask("What should I say to Edward?", ownerKind: "messages", ownerId: "draft-vol-1", field: "body") { said in
+        volatileAnswered = said
+    }
+    prompts.hearing("I know you got this bro")
+    prompts.hearing("I know you got this bro let me know how I can help")
+    for _ in 0..<25 where volatileAnswered == "UNSET" {
+        try? await Task.sleep(nanoseconds: 25_000_000)
+    }
+    expectEqual(
+        volatileAnswered,
+        "I know you got this bro let me know how I can help",
+        "Volatile-only speech settles automatically to review without hanging on listening"
+    )
+    expectEqual(prompts.active, false, "Prompt inactive after volatile-only settle")
+
+    // 2. Early touchpad tap (`prompt-commit` before in-flight audio finishes transcribing)
+    // latches commit so as soon as the words arrive, it transitions immediately to review!
+    prompts.multiClauseSettleSeconds = 5.0
+    var latchedTapAnswered: String? = "UNSET"
+    link.clear()
+    prompts.ask("What should I say to Edward?", ownerKind: "messages", ownerId: "draft-tap-latch", field: "body") { said in
+        latchedTapAnswered = said
+    }
+    let latchPromptId = link.sent.last { $0.string("kind") == "prompt.present" }?.string("promptId") ?? ""
+    // User taps `Tap: review` 150ms before STT delivers the final words:
+    prompts.handle(
+        kind: "input",
+        message: [
+            "kind": "input",
+            "event": ["containerName": "prompt-commit", "selectedName": latchPromptId],
+        ]
+    )
+    expectEqual(latchedTapAnswered, "UNSET", "Still waiting for in-flight STT right after early tap")
+    expectEqual(prompts.active, true, "Early tap does not cancel prompt")
+    _ = prompts.heard("Sounds good see you soon", spokeUntil: Date())
+    expectEqual(
+        latchedTapAnswered,
+        "Sounds good see you soon",
+        "Latched prompt-commit commits immediately in 0ms once in-flight STT arrives"
+    )
+    expectEqual(prompts.active, false, "Prompt closed immediately via latched tap")
+
+    // 3. `Messages.retryUI` immediately cancels the pending `ConfirmGate` challenge
+    // (`confirm.hasPending == false`, `tx confirm.cancel` emitted BEFORE new `prompt.present`)!
+    let cardSuite = "joat.test.retry.\(UUID().uuidString)"
+    let cardDefaults = UserDefaults(suiteName: cardSuite)!
+    defer { cardDefaults.removePersistentDomain(forName: cardSuite) }
+    let msgLink = RecordingLink()
+    let hud = Hud(link: msgLink)
+    let confirm = ConfirmGate(link: msgLink)
+    let msgCards = Cards(link: msgLink, defaults: cardDefaults)
+    let messages = Messages(hud: hud, confirm: confirm, cards: msgCards)
+    let msgPrompts = Prompts(link: msgLink)
+    messages.link = msgLink
+    messages.prompts = msgPrompts
+    messages.arrived(from: "+13125550199", body: "Hey man", fromMac: true, quiet: true)
+    _ = messages.thread("+13125550199", requestId: "req-retry-1", traceId: "trace-retry-1")
+    msgLink.clear()
+    messages.beginReply()
+    let firstActionId = msgLink.sent.last { $0.string("kind") == "message.ui" }?.string("actionId") ?? ""
+    _ = msgPrompts.heard("Cut off mid sentence and")
+    expectEqual(confirm.hasPending, true, "ConfirmGate pending on review card")
+
+    msgLink.clear()
+    messages.retryUI(actionId: firstActionId)
+    expectEqual(confirm.hasPending, false, "Messages.retryUI immediately clears pending ConfirmGate challenge")
+    let cancelConfirmIdx = msgLink.sent.firstIndex { $0.string("kind") == "confirm.cancel" }
+    let retryPresentIdx = msgLink.sent.firstIndex { $0.string("kind") == "prompt.present" }
+    expect(cancelConfirmIdx != nil && retryPresentIdx != nil, "Emitted both confirm.cancel and new prompt.present on retry")
+    if let cIdx = cancelConfirmIdx, let pIdx = retryPresentIdx {
+        expect(cIdx < pIdx, "confirm.cancel emitted BEFORE new prompt.present so glasses dismiss confirmation first")
+    }
+
+    // 4. Post-restart bogus `latencyMs` (e.g. 300_000 ms after Bluetooth HFP restart) is clamped in `Brain`,
+    // AND `Brain` emits `state == "thinking"` when starting a conversation turn before first token!
+    let server = LoopbackServer(port: 0)
+    let stt = Transcriber(kind: .dictation(words: ["JOAT"]), label: "test-clamp")
+    let voice = Voice()
+    voice.spokenReplies = false
+    let brainLink = RecordingLink()
+    let brain = Brain(server: server, stt: stt, shadow: nil, voice: voice, cardDefaults: cardDefaults, linkOverride: brainLink)
+    // Verify a post-restart 300_000 ms latency on `.final` does NOT discard fresh prompt speech:
+    var clampedPromptAnswer: String? = "UNSET"
+    brain.prompts.multiClauseSettleSeconds = 0.08
+    brain.prompts.ask("What should I say?", ownerKind: "messages", ownerId: "draft-clamp-1", field: "recipient") { said in
+        clampedPromptAnswer = said
+    }
+    brain.handle(.volatile("Alex Rivera"))
+    brain.handle(.final("Alex Rivera", latencyMs: 300_000))
+    expectEqual(
+        clampedPromptAnswer,
+        "Alex Rivera",
+        "Brain clamps bogus post-restart latencyMs so fresh prompt speech is never dropped as pre-prompt"
+    )
+
+    brainLink.clear()
+    brain.beginStreamingConversationForTesting(user: "Long question for JOAT")
+    let initialConv = brainLink.sent.last { $0.string("kind") == "assistant.conversation" }
+    expectEqual(
+        initialConv?.string("state"),
+        "thinking",
+        "Initial assistant.conversation before first token uses state=thinking for 450ms working indicator"
+    )
+}
+
 func runEntry() {
     let sema = DispatchSemaphore(value: 0)
     Task { @MainActor in
@@ -1367,6 +1481,7 @@ func runEntry() {
         await testPromptsMultiClauseFenceAndMessagesSync()
         await testGlassesTerminalThreeLevelsGesturesAndActivity()
         await testNotesCloseOnlySummaryAllNoteTypesAndCuesOff()
+        await testReplyListeningSettleEarlyTapRetryAndThinkingState()
         print("PASS: all \(passedAssertions) phone-brain surfaces, notifications, and multi-clause prompt assertions succeeded.")
         sema.signal()
     }

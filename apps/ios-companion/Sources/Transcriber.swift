@@ -215,6 +215,8 @@ final class Transcriber: ObservableObject {
             }
             try await analyzer.start(inputSequence: stream)
             lock.lock()
+            samplesFed = 0
+            arrivals.removeAll()
             startedAt = Date()
             lastResultAt = Date()
             lastSpeechAudioAt = nil
@@ -299,7 +301,10 @@ final class Transcriber: ObservableObject {
             let endSample = Int64((range.end.seconds.isFinite ? range.end.seconds : 0) * 16_000)
             lock.lock()
             if endSample > 0, let hit = arrivals.first(where: { $0.samples >= endSample }) {
-                latency = Int(Date().timeIntervalSince(hit.at) * 1000)
+                let rawLatency = Int(Date().timeIntervalSince(hit.at) * 1000)
+                if rawLatency >= 0 && rawLatency <= 5_000 {
+                    latency = rawLatency
+                }
             }
             lock.unlock()
             if retries > 0 { DispatchQueue.main.async { self.retries = 0 } }

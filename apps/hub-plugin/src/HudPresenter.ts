@@ -373,7 +373,7 @@ interface NativeTextPageState {
  * consent: tap sends them, long-press says them again, and Back cancels to
  * the thread. Both fit the card's 458 px footer (pretext). */
 /** The working glyph's cadence on the wearer's row of a reply card. */
-const REPLY_LISTENING_TICK_MS = 450;
+const REPLY_LISTENING_TICK_MS = 900;
 
 /** The reply/compose consent (`Send to Ada? “words”`, `Reply (Work) to …? “words”`,
  * or `Email (Personal) to …? “words”`, optionally `(reviewed)`), split back into
@@ -623,6 +623,7 @@ export class HudPresenter {
   private notificationCardPaintDirty = false;
   private displayActive = true;
   private displayRevision = 0;
+  private readonly dismissingConfirmationIds = new Set<string>();
   private readonly assistantConversation: AssistantConversationSurface;
   /** The page on the glass carries the two header images. */
   private imageHeaderShown = false;
@@ -856,6 +857,7 @@ export class HudPresenter {
     this.promptQuestion = undefined;
     this.promptQuestionPaint = undefined;
     this.confirmation = undefined;
+    this.dismissingConfirmationIds.clear();
     this.confirmationQueue = Promise.resolve();
     this.healing = false;
     this.notificationReturn = undefined;
@@ -1336,10 +1338,16 @@ export class HudPresenter {
     content.notificationId = undefined;
   }
 
+  private hasBlockingConfirmation(): boolean {
+    const current = this.confirmation;
+    if (!current || this.dismissingConfirmationIds.has(current.id)) return false;
+    return !current.isCurrent || this.isConfirmationCurrent(current);
+  }
+
   /** Present one complete question without replacing the feature beneath it.
    * Only this prompt's current, completed frame may acknowledge publication. */
   showPromptQuestion(promptId: string, question: string, isCurrent: () => boolean, ownerKind?: PromptOwnerKind): Promise<boolean> {
-    if (this.confirmation || !promptId || !question.trim() || question.length > 1000) {
+    if (this.hasBlockingConfirmation() || !promptId || !question.trim() || question.length > 1000) {
       return Promise.resolve(false);
     }
     if (ownerKind === 'terminal') {
@@ -1415,6 +1423,10 @@ export class HudPresenter {
     try {
       await previous?.catch(() => false);
       await this.assistantOverlayPaint?.catch(() => false);
+      if (this.confirmation && !this.hasBlockingConfirmation()) {
+        await this.confirmationQueue.catch(() => undefined);
+      }
+      await this.settlePageReplacement();
       if (!this.isPromptCurrent(prompt)) return false;
       const pages = paginateAnswer(prompt.question);
       if (pages.length !== 1) return false;
@@ -1584,7 +1596,7 @@ export class HudPresenter {
 
   private isPromptCurrent(prompt: PromptQuestionState): boolean {
     try {
-      return this.promptQuestion === prompt && !this.confirmation && prompt.isCurrent()
+      return this.promptQuestion === prompt && !this.hasBlockingConfirmation() && prompt.isCurrent()
         && (!prompt.inlineTerminal || (this.nativeTerminal.isActive()
           && this.surface.kind === 'terminal'
           && this.surface.terminal.conversationId === prompt.terminalConversationId));
@@ -3823,7 +3835,13 @@ export class HudPresenter {
   }
 
   dismissConfirmation(id?: string): Promise<boolean> {
-    return this.enqueueConfirmation(() => this.performDismissConfirmation(id));
+    const activeId = this.confirmation && (id === undefined || this.confirmation.id === id)
+      ? this.confirmation.id
+      : undefined;
+    if (activeId !== undefined) this.dismissingConfirmationIds.add(activeId);
+    return this.enqueueConfirmation(() => this.performDismissConfirmation(id)).finally(() => {
+      if (activeId !== undefined) this.dismissingConfirmationIds.delete(activeId);
+    });
   }
 
   private async performDismissConfirmation(id?: string): Promise<boolean> {

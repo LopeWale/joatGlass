@@ -855,6 +855,7 @@ async function boot(): Promise<void> {
       }
       if (confirmationRetry?.actionId === msg.actionId) confirmationRetry = undefined;
       imu.disarm(msg.actionId);
+      void hud.dismissConfirmation(msg.actionId);
     }
     if (msg.kind === 'prompt.present' && msg.ownerKind === 'capability') {
       activeCapabilityPromptId = msg.promptId;

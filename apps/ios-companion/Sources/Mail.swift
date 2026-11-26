@@ -739,6 +739,7 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
     func cancelUI(actionId: String) {
         guard let d = draftUI, d.id == actionId else { return }
         prompts?.cancel("mail draft cancelled on the glasses")
+        confirm.cancelPending(forMessageActionId: d.id, reason: "mail draft cancelled")
         ui(d, "cancelled", "Email cancelled.")
     }
 
@@ -751,6 +752,7 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
         let reqId = d.requestId
         let selId = d.selectionId
         prompts?.cancel("mail draft retried")
+        confirm.cancelPending(forMessageActionId: d.id, reason: "mail draft retried")
         ui(d, "cancelled", "Say it again.")
 
         if wasReply, threadIdOnGlass != nil {
@@ -773,6 +775,7 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
     func returnedToList() {
         if let d = draftUI {
             prompts?.cancel("returned to Mail list")
+            confirm.cancelPending(forMessageActionId: d.id, reason: "returned to Mail list")
             ui(d, "cancelled", "Email cancelled.")
         }
         threadIdOnGlass = nil
@@ -781,6 +784,7 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
     func leaveUI() {
         if let d = draftUI {
             prompts?.cancel("left Mail")
+            confirm.cancelPending(forMessageActionId: d.id, reason: "left Mail")
             ui(d, "cancelled", "Email cancelled.")
         }
         visit = nil

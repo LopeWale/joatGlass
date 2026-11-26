@@ -969,13 +969,15 @@ final class Messages: VoiceCommand, HoldableChannel {
     func cancelUI(actionId: String) {
         guard let d = draftUI, d.id == actionId else { return }
         prompts?.cancel("draft cancelled on the glasses")
+        confirm.cancelPending(forMessageActionId: d.id, reason: "draft cancelled")
         ui(d, "cancelled", "Message cancelled.")
     }
 
-    /// Long press on a draft: say it again.
+    /// Long press / 2x tap on a draft review: say it again.
     func retryUI(actionId: String) {
         guard let d = draftUI, d.id == actionId else { return }
         prompts?.cancel("draft retried")
+        confirm.cancelPending(forMessageActionId: d.id, reason: "draft retried")
         ui(d, "cancelled", "Say it again.")
         if threadSender != nil { beginReply() }
     }
@@ -984,6 +986,7 @@ final class Messages: VoiceCommand, HoldableChannel {
     func returnedToList() {
         if let d = draftUI {
             prompts?.cancel("returned to Messages list")
+            confirm.cancelPending(forMessageActionId: d.id, reason: "returned to Messages list")
             ui(d, "cancelled", "Message cancelled.")
         }
         threadSender = nil
@@ -993,6 +996,7 @@ final class Messages: VoiceCommand, HoldableChannel {
     func leaveUI() {
         if let d = draftUI {
             prompts?.cancel("left Messages")
+            confirm.cancelPending(forMessageActionId: d.id, reason: "left Messages")
             ui(d, "cancelled", "Message cancelled.")
         }
         visit = nil

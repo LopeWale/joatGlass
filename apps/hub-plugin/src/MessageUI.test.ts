@@ -507,3 +507,56 @@ describe('Mail capability parity over the shared comms state machine', () => {
     expect(menuEvents[1]!.requestId).not.toBe(firstRequestId);
   });
 });
+
+describe('HudPresenter message-retry confirmation dismissal to prompt question handoff', () => {
+  it('accepts showPromptQuestion immediately after unawaited dismissConfirmation on 2x-tap retry', async () => {
+    const { HudPresenter } = await import('./HudPresenter');
+    const { HudPageBuilder } = await import('./HudPageBuilder');
+    const rebuilds: string[] = [];
+    let holdDismissRestore = false;
+    let releaseDismissRestore: (() => void) | undefined;
+    const client = {
+      require: () => ({
+        rebuildPageContainer: vi.fn(async (page: { textObject?: Array<{ containerName?: string; content?: string }> }) => {
+          if (holdDismissRestore) {
+            holdDismissRestore = false;
+            await new Promise<void>((resolve) => { releaseDismissRestore = resolve; });
+          }
+          rebuilds.push((page.textObject ?? []).map((t) => `${t.containerName}:${t.content}`).join('|'));
+          return true;
+        }),
+        textContainerUpgrade: vi.fn(async () => true),
+      }),
+    };
+    const hud = new HudPresenter(client as never, new HudPageBuilder());
+    await hud.showList(['Alex', 'You: hey'], {
+      title: 'MESSAGES · CONVERSATION',
+      selectable: true,
+      nativeTextPage: true,
+    });
+
+    const shown = await hud.showConfirmation(
+      'Send to Alex? “did they give you like a pay?”',
+      'phone-confirm-1',
+      'messages',
+      () => true,
+    );
+    expect(shown).toBe(true);
+
+    // Wearer double-taps to retry: dismissConfirmation starts asynchronously (not awaited yet),
+    // and immediately the phone's new `prompt.present` arrives via showPromptQuestion!
+    holdDismissRestore = true;
+    const dismissal = hud.dismissConfirmation('phone-confirm-1');
+    const retryPaint = hud.showPromptQuestion(
+      'prompt-retry-2',
+      'What should I say to Alex?',
+      () => true,
+      'messages',
+    );
+    await Promise.resolve();
+    releaseDismissRestore?.();
+    await dismissal;
+    await expect(retryPaint).resolves.toBe(true);
+    expect(rebuilds[rebuilds.length - 1]).toContain('What should I say to Alex?');
+  });
+});

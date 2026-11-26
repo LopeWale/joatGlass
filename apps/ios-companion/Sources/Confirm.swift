@@ -22,6 +22,7 @@ final class ConfirmGate: BrainFeature {
         let challengeId: String
         let payloadDigest: String
         let previewDigest: String
+        let messageUIActionId: String?
         let expires: Date
         let completion: (Outcome) -> Void
         let timeout: DispatchWorkItem
@@ -47,6 +48,22 @@ final class ConfirmGate: BrainFeature {
             link.send(["kind": "confirm.cancel", "actionId": actionId])
             Log.add("tx confirm.cancel \(actionId) (\(reason))")
             resolve(actionId, .declined, reason: reason)
+        }
+        return true
+    }
+
+    /// Cancels any pending confirmation bound to `messageUIActionId` (e.g. on
+    /// `2x tap: retry` or explicit draft departure) without firing a duplicate
+    /// `.declined` completion after the caller already retired the draft.
+    @discardableResult
+    func cancelPending(forMessageActionId messageUIActionId: String, reason: String) -> Bool {
+        let matching = pending.filter { $0.value.messageUIActionId == messageUIActionId }.map(\.key)
+        guard !matching.isEmpty else { return false }
+        for actionId in matching {
+            guard let p = pending.removeValue(forKey: actionId) else { continue }
+            p.timeout.cancel()
+            link.send(["kind": "confirm.cancel", "actionId": actionId])
+            Log.add("tx confirm.cancel \(actionId) (\(reason))")
         }
         return true
     }
@@ -128,8 +145,8 @@ final class ConfirmGate: BrainFeature {
         let expires = Date().addingTimeInterval(Self.windowSeconds)
         let timeout = DispatchWorkItem { [weak self] in self?.resolve(actionId, .unverified, reason: "no answer in time") }
         pending[actionId] = Pending(challengeId: challengeId, payloadDigest: payloadDigest,
-                                    previewDigest: previewDigest, expires: expires,
-                                    completion: completion, timeout: timeout)
+                                    previewDigest: previewDigest, messageUIActionId: messageUIActionId,
+                                    expires: expires, completion: completion, timeout: timeout)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.windowSeconds + 1, execute: timeout)
         var request: [String: Any] = [
             "kind": "confirm.request", "actionId": actionId, "prompt": prompt,

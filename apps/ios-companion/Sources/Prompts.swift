@@ -9,9 +9,12 @@ import Foundation
 /// cancel.
 final class Prompts: BrainFeature {
     let name = "prompts"
-    let uplinkKinds: Set<String> = ["prompt.ack", "prompt.cancel", "input", "device"]
+    let uplinkKinds: Set<String> = ["prompt.ack", "prompt.cancel", "input", "device", "policy"]
 
     static let multiClauseFields: Set<String> = ["body", "instruction"]
+    private static let trailingConnectorWords: Set<String> = [
+        "and", "or", "but", "so", "because", "if", "like", "to", "for", "with", "a", "an", "the", "that",
+    ]
 
     private struct Open {
         let id: String
@@ -21,6 +24,8 @@ final class Prompts: BrainFeature {
         let answer: (String?) -> Void
         var segments: [String] = []
         var partial = ""
+        var heardAfterAck = false
+        var commitRequested = false
         let timeout: DispatchWorkItem
         var settleWorkItem: DispatchWorkItem?
         /// Answered, the card stays until the next question replaces it.
@@ -28,9 +33,9 @@ final class Prompts: BrainFeature {
     }
 
     private let link: PluginLink
-    /// Quiet window after a finalized clause on `body` / `instruction` before
-    /// auto-committing, pushed forward whenever volatile speech arrives.
-    var multiClauseSettleSeconds: TimeInterval = 1.5
+    /// Quiet window after a finalized or volatile clause on `body` / `instruction`
+    /// before auto-committing, pushed forward whenever volatile speech arrives.
+    var multiClauseSettleSeconds: TimeInterval = 2.4
     /// The plugin echoes it: one value per plugin connection.
     private var generation = "phone-" + ConfirmGate.hex(8)
     private var open: Open?
@@ -125,7 +130,7 @@ final class Prompts: BrainFeature {
         guard var o = open else { return false }
         let fence = o.listeningSince ?? o.askedAt
         if let spokeUntil, spokeUntil < fence {
-            if o.segments.isEmpty {
+            if o.segments.isEmpty && !o.heardAfterAck {
                 o.partial = ""
                 open = o
             }
@@ -151,11 +156,18 @@ final class Prompts: BrainFeature {
         let words = rawWords.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !words.isEmpty else { return true }
 
+        if o.commitRequested {
+            let full = Self.combine(segments: o.segments + [words], partial: "")
+            Log.add("prompt answered via latched tap (\(full.count) chars)")
+            finish(full, notify: true, why: "tapped")
+            return true
+        }
+
         if spokeUntil != nil, Self.multiClauseFields.contains(o.field) {
             o.segments.append(words)
             o.partial = ""
             let combined = Self.combine(segments: o.segments, partial: "")
-            armSettleTimer(&o)
+            armSettleTimer(&o, trailingText: combined)
             open = o
             sendPartial(promptId: o.id, text: combined)
             Log.add("prompt clause \(o.segments.count) (\(combined.count) chars)")
@@ -168,15 +180,25 @@ final class Prompts: BrainFeature {
         return true
     }
 
-    /// Words so far, under the question. When clauses have already finalized,
-    /// publishes the full accumulated text + volatile clause and slides the
-    /// `1.5s` settle timer forward so active speech is never cut off.
+    /// Words so far, under the question. Publishes the accumulated text + volatile
+    /// clause and slides the settle timer forward so active speech is never cut off
+    /// AND volatile-only speech (when ambient noise keeps VAD from emitting `.final`)
+    /// still settles cleanly to review instead of hanging on listening.
     func hearing(_ text: String) {
         guard var o = open else { return }
         o.partial = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !o.partial.isEmpty, o.listeningSince != nil {
+            o.heardAfterAck = true
+        }
         let combined = Self.combine(segments: o.segments, partial: o.partial)
-        if !o.segments.isEmpty {
-            armSettleTimer(&o)
+        if !combined.isEmpty {
+            if o.commitRequested {
+                armSettleTimer(&o, trailingText: combined, overrideDelay: min(0.5, max(0.05, multiClauseSettleSeconds)))
+            } else if !o.segments.isEmpty || Self.multiClauseFields.contains(o.field) {
+                armSettleTimer(&o, trailingText: combined)
+            } else {
+                armSettleTimer(&o, trailingText: combined, overrideDelay: max(multiClauseSettleSeconds, 2.6))
+            }
         }
         open = o
         guard !combined.isEmpty else { return }
@@ -186,6 +208,14 @@ final class Prompts: BrainFeature {
     func handle(kind: String, message: [String: Any]) {
         if kind == "device" {
             if let source = message.string("micSource"), source == "glasses" || source == "phone" { micSource = source }
+            return
+        }
+        if kind == "policy" {
+            if message.string("micMode") == "phone" {
+                micSource = "phone"
+            } else if let mode = message.string("micMode"), mode == "always" || mode == "on_demand" {
+                if micSource != "glasses" && micSource != "phone" { micSource = "glasses" }
+            }
             return
         }
         if kind == "prompt.cancel", let id = held, message.string("promptId") == id {
@@ -217,21 +247,36 @@ final class Prompts: BrainFeature {
             #endif
             finish(nil, notify: false, why: "cancelled on the glasses")
         case "input":
-            // A tap on the listening card: cancel any settle timer and commit immediately (0 ms).
+            // A tap on the listening card: cancel any settle timer and commit immediately (0 ms),
+            // or latch commit if the final audio batch is still finishing STT.
             guard let event = message.object("event"), event.string("containerName") == "prompt-commit",
                   event.string("selectedName") == o.id else { return }
             let said = Self.combine(segments: o.segments, partial: o.partial)
-            if said.isEmpty { Log.add("prompt commit with nothing heard yet"); return }
+            if said.isEmpty {
+                o.commitRequested = true
+                open = o
+                Log.add("prompt commit latched awaiting in-flight speech")
+                return
+            }
             finish(said, notify: true, why: "tapped")
         default:
             break
         }
     }
 
-    private func armSettleTimer(_ o: inout Open) {
+    private func armSettleTimer(_ o: inout Open, trailingText: String = "", overrideDelay: TimeInterval? = nil) {
         o.settleWorkItem?.cancel()
         let promptId = o.id
-        let delay = max(0.05, multiClauseSettleSeconds)
+        var delay = max(0.05, overrideDelay ?? multiClauseSettleSeconds)
+        if overrideDelay == nil, delay >= 1.0 {
+            let lastWord = trailingText
+                .split(whereSeparator: { !$0.isLetter && $0 != "'" && $0 != "’" })
+                .last
+                .map { $0.lowercased() } ?? ""
+            if Self.trailingConnectorWords.contains(lastWord) {
+                delay += 0.8
+            }
+        }
         let work = DispatchWorkItem { [weak self] in
             guard let self, let current = self.open, current.id == promptId else { return }
             let full = Self.combine(segments: current.segments, partial: current.partial)

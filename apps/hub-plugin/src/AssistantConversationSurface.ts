@@ -4,6 +4,8 @@ import {
 } from '@evenrealities/even_hub_sdk';
 import { getTextWidth } from '@evenrealities/pretext';
 import type { BridgeClient } from './BridgeClient';
+import { TEXT_CONTAINER_MAX_BYTES, fitUtf8 } from './FirmwareLimits';
+import { firmwareLineCount } from './FirmwareText';
 import { GesturePolicy } from './GesturePolicy';
 import {
   ASSISTANT_CONVERSATION_GEOMETRY,
@@ -48,6 +50,11 @@ function labelPad(label: string, measure: TextMeasure): string {
   let count = Math.round(measure(`${label} `) / space);
   while (count * space < name + 2) count += 1;
   return ' '.repeat(count);
+}
+
+function labelGapSpaces(label: string, measure: TextMeasure): number {
+  const space = Math.max(1, measure(' '));
+  return Math.max(1, Math.round((measure(labelPad(label, measure)) - measure(label)) / space));
 }
 
 export interface ConversationViewport extends AssistantConversationPage {
@@ -98,6 +105,8 @@ const INDICATOR_FRAMES = [
   '■ □', '□ ■', '■', '■ ■', '□ □', '■', '□', '■',
 ] as const;
 const ANSWERING_INDICATOR_MIN_MS = 2_000;
+const REBUILD_RETRY_MS = 250;
+const MAX_REBUILD_RETRIES = 6;
 // No gestures in the box: the wearer knows them, and the row is worth more
 // than a reminder (the wearer's ruling, 2026-10-06 and 2026-10-07).
 const CONTINUE_COPY = 'Continue?';
@@ -181,23 +190,84 @@ export function wrapConversationText(
   return lines.length > 0 ? lines : [' '];
 }
 
+function breakLongWordWithFit(
+  word: string,
+  fits: (candidate: string, firstRow: boolean) => boolean,
+  startOnFirstRow: boolean,
+): string[] {
+  const points = codePoints(word);
+  const lines: string[] = [];
+  let line = '';
+  let firstRow = startOnFirstRow;
+  for (const point of points) {
+    const candidate = `${line}${point}`;
+    if (line && !fits(candidate, firstRow)) {
+      lines.push(line);
+      firstRow = false;
+      line = point;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.length > 0 ? lines : [' '];
+}
+
 /** One turn's rows: the speaker's name, then their words on the same row,
- * wrapping full width beneath. */
+ * wrapping full width beneath while guaranteeing every rendered row fits on
+ * a single physical LVGL line inside `transcriptWidth`. */
 function turnLines(
   role: AssistantConversationTurn['role'],
   text: string,
   options: ConversationViewportOptions,
 ): ConversationLine[] {
   const measure = options.measureTextWidth ?? getTextWidth;
+  const fullWidth = options.textWidth ?? ASSISTANT_CONVERSATION_GEOMETRY.transcriptWidth;
   const label = SPEAKER_LABEL[role];
   const pad = labelPad(label, measure);
-  // Every row's words stand under the first row's, after the name.
-  const rows = wrapConversationText(
-    text,
-    (options.textWidth ?? ASSISTANT_CONVERSATION_GEOMETRY.transcriptWidth) - measure(pad),
-    measure,
-  );
-  return rows.map((row, index) => index === 0 ? { role, text: row, label } : { role, text: row, pad });
+  const firstPrefix = role === 'user'
+    ? `${label}${' '.repeat(labelGapSpaces(label, measure))}`
+    : pad;
+  const fits = (candidate: string, firstRow: boolean): boolean => {
+    const rendered = `${firstRow ? firstPrefix : pad}${candidate}`;
+    if (measure(rendered) > fullWidth) return false;
+    if (measure === getTextWidth && firmwareLineCount(rendered, fullWidth) > 1) return false;
+    return true;
+  };
+
+  const paragraphs = text.replace(/\r\n?/g, '\n').split('\n');
+  const rows: string[] = [];
+  for (const paragraph of paragraphs) {
+    const words = paragraph.trim().split(/\s+/u).filter(Boolean);
+    if (words.length === 0) {
+      rows.push(' ');
+      continue;
+    }
+    let line = '';
+    for (const word of words) {
+      const firstRow = rows.length === 0;
+      const candidate = line ? `${line} ${word}` : word;
+      if (fits(candidate, firstRow)) {
+        line = candidate;
+        continue;
+      }
+      if (line) {
+        rows.push(line);
+        line = '';
+      }
+      const nextFirstRow = rows.length === 0;
+      if (fits(word, nextFirstRow)) {
+        line = word;
+        continue;
+      }
+      const pieces = breakLongWordWithFit(word, fits, nextFirstRow);
+      rows.push(...pieces.slice(0, -1));
+      line = pieces[pieces.length - 1] ?? '';
+    }
+    if (line) rows.push(line);
+  }
+  const finalRows = rows.length > 0 ? rows : [' '];
+  return finalRows.map((row, index) => index === 0 ? { role, text: row, label } : { role, text: row, pad });
 }
 
 /** A turn's row as its layer draws it: the name and the words on the first
@@ -205,9 +275,7 @@ function turnLines(
 function rowText(line: ConversationLine, measure: TextMeasure): string {
   if (line.pad) return `${line.pad}${line.text}`;
   if (!line.label) return line.text;
-  const space = Math.max(1, measure(' '));
-  const gap = Math.max(1, Math.round((measure(labelPad(line.label, measure)) - measure(line.label)) / space));
-  return `${line.label}${' '.repeat(gap)}${line.text}`;
+  return `${line.label}${' '.repeat(labelGapSpaces(line.label, measure))}${line.text}`;
 }
 
 /** All logical rows. Each turn opens with its speaker's name on its first
@@ -384,6 +452,8 @@ export class AssistantConversationSurface {
   private indicatorFrame = 0;
   private indicatorTimer?: ReturnType<typeof setTimeout>;
   private continuationTimer?: ReturnType<typeof setTimeout>;
+  private rebuildRetryTimer?: ReturnType<typeof setTimeout>;
+  private rebuildRetries = 0;
   private snapshotDirty = false;
   private footerDirty = false;
   private draining?: Promise<void>;
@@ -429,6 +499,7 @@ export class AssistantConversationSurface {
     this.paused = false;
     this.continuePrompt = false;
     this.snapshot = copySnapshot(value);
+    this.rebuildRetries = 0;
     if (entering) {
       // The previous page now belongs to some other surface. A resumed
       // conversation must rebuild its containers even when the Mac revision
@@ -436,16 +507,16 @@ export class AssistantConversationSurface {
       this.pageLineCapacity = 0;
       this.lastView = undefined;
     }
-    const newTurnStarted = !current
-      || value.turns.length > current.turns.length
+    const prevLast = current?.turns[current.turns.length - 1];
+    const nextLast = value.turns[value.turns.length - 1];
+    const transcriptProgressed = !current
+      || value.turns.length !== current.turns.length
+      || prevLast?.role !== nextLast?.role
+      || prevLast?.text !== nextLast?.text
       || (current.state === 'ready' && value.state !== 'ready');
-    if (entering || this.committedScroll === 0 || newTurnStarted) {
+    if (entering || this.committedScroll === 0 || value.state !== 'ready' || transcriptProgressed) {
       this.desiredScroll = 0;
       this.committedScroll = 0;
-    } else if (current) {
-      const oldLines = conversationLines(current, this.viewportOptions).length;
-      const newLines = conversationLines(value, this.viewportOptions).length;
-      this.desiredScroll = Math.max(0, this.committedScroll + newLines - oldLines);
     }
     if (this.statusText && !this.imageHeader?.() && current?.listening !== value.listening) {
       const nextStatus = this.statusText();
@@ -731,9 +802,26 @@ export class AssistantConversationSurface {
       painted = await this.rebuild(view);
     }
     if (!painted) {
+      if (needsRebuild && this.pageLineCapacity > 0 && view.lineCapacity !== this.pageLineCapacity
+        && current.revision > this.renderedRevision && this.canWrite()) {
+        if (this.lastView !== undefined && this.lastView.footerTop === view.footerTop) {
+          const fallbackView = conversationViewport(
+            current, requestedScroll, this.indicatorFrame, this.continuePrompt,
+            { ...this.viewportOptions, lineStages: [this.pageLineCapacity] },
+          );
+          if (await this.upgradeView(fallbackView)) {
+            this.lastView = fallbackView;
+            if (this.snapshot === current && this.desiredScroll === requestedScroll) {
+              this.committedScroll = fallbackView.scrollFromTail;
+            }
+          }
+        }
+        this.armRebuildRetry();
+      }
       this.desiredScroll = this.committedScroll;
       return false;
     }
+    if (needsRebuild) this.rebuildRetries = 0;
     this.pageLineCapacity = view.lineCapacity;
     this.lastView = view;
     if (this.snapshot === current && this.desiredScroll === requestedScroll) {
@@ -834,7 +922,7 @@ export class AssistantConversationSurface {
     content: string,
     previous = '',
   ): Promise<boolean> {
-    const replacement = content || ' ';
+    const replacement = fitUtf8(content || ' ', TEXT_CONTAINER_MAX_BYTES);
     return this.client.require().textContainerUpgrade(new TextContainerUpgrade({
       containerID,
       containerName,
@@ -847,8 +935,21 @@ export class AssistantConversationSurface {
   private clearTimers(): void {
     if (this.indicatorTimer !== undefined) clearTimeout(this.indicatorTimer);
     if (this.continuationTimer !== undefined) clearTimeout(this.continuationTimer);
+    if (this.rebuildRetryTimer !== undefined) clearTimeout(this.rebuildRetryTimer);
     this.indicatorTimer = undefined;
     this.continuationTimer = undefined;
+    this.rebuildRetryTimer = undefined;
+  }
+
+  private armRebuildRetry(): void {
+    if (this.rebuildRetryTimer !== undefined || this.rebuildRetries >= MAX_REBUILD_RETRIES) return;
+    this.rebuildRetries += 1;
+    this.rebuildRetryTimer = setTimeout(() => {
+      this.rebuildRetryTimer = undefined;
+      if (!this.canWrite()) return;
+      this.snapshotDirty = true;
+      void this.ensureDrain();
+    }, REBUILD_RETRY_MS);
   }
 
   private armStateTimers(): void {

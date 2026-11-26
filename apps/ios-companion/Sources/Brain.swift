@@ -225,7 +225,7 @@ final class Brain {
         mail.askFollowUp = { [weak self] question, answer in self?.ask(question, answer: answer) }
         router.register(ConversationInput { [weak self] action in self?.conversationChoice(action) })
         macLink.claude.area = { [navigation] in await navigation.area() }
-        navigation.onAsked = { [weak self] question in self?.publish(user: question, assistant: nil, state: "answering") }
+        navigation.onAsked = { [weak self] question in self?.publish(user: question, assistant: nil, state: "thinking") }
         navigation.onAnswer = { [weak self] answer in
             self?.publish(user: nil, assistant: answer, state: "ready")
             self?.voice.say(answer)
@@ -259,6 +259,8 @@ final class Brain {
     /// Mints a fresh `conversationId` for the next glasses card while preserving
     /// `modelHistory` (within 30 s) so follow-ups keep conversational context
     /// without ever colliding with `AssistantConversationSurface.retired`.
+    private var earlierTurnsOmitted = false
+
     private func rotateCardConversation() {
         cueExpiry?.cancel()
         cueExpiry = nil
@@ -266,8 +268,19 @@ final class Brain {
         conversationId = "phone-\(UUID().uuidString.prefix(8).lowercased())"
         revision = 0
         turns = []
+        earlierTurnsOmitted = false
         streamingTurnIndex = nil
         conversationVisible = false
+    }
+
+    private func trimConversationTurnsIfNeeded() {
+        while turns.count > 16 || (turns.count > 2 && turns.reduce(0) { $0 + ($1["text"]?.utf16.count ?? 0) } > 12_000) {
+            turns.removeFirst()
+            earlierTurnsOmitted = true
+            if let idx = streamingTurnIndex {
+                streamingTurnIndex = idx > 0 ? idx - 1 : nil
+            }
+        }
     }
 
     private func prepareConversationSession(now: Date) {
@@ -431,7 +444,8 @@ final class Brain {
         }
 
         let now = Date()
-        let spokeUntil = now.addingTimeInterval(-Double(latency ?? 0) / 1000)
+        let saneLatencyMs = (latency != nil && latency! >= 0 && latency! <= 5_000) ? latency! : 0
+        let spokeUntil = now.addingTimeInterval(-Double(saneLatencyMs) / 1000)
 
         if prompts.active {
             if voice.wasSpeaking(at: spokeUntil) {
@@ -491,7 +505,7 @@ final class Brain {
             prepareConversationSession(now: now)
             lastAddressedAt = now
             appendModelHistory(role: "user", text: reply)
-            publish(user: reply, assistant: nil, state: "answering")
+            publish(user: reply, assistant: nil, state: "thinking")
             Log.add("follow-up answered: \(reply.prefix(100))")
             answer(reply)
             return
@@ -619,7 +633,7 @@ final class Brain {
 
         // 3. Streamed assistant turn via OnPhoneAI (Gemini / Claude / Mac SSE).
         appendModelHistory(role: "user", text: request)
-        publish(user: request, assistant: nil, state: "answering")
+        publish(user: request, assistant: nil, state: "thinking")
         streamEpoch += 1
         let myEpoch = streamEpoch
         preDismissedEpoch = nil
@@ -638,9 +652,7 @@ final class Brain {
                 if self.preDismissedEpoch == myEpoch {
                     self.preDismissedEpoch = nil
                     self.turns.append(["role": "user", "text": String(request.prefix(3900))])
-                    if self.turns.count > 16 {
-                        self.turns.removeFirst(self.turns.count - 16)
-                    }
+                    self.trimConversationTurnsIfNeeded()
                 }
                 self.publishStreamingDelta(partial)
             },
@@ -660,9 +672,7 @@ final class Brain {
                 case .success(.answer(let text)):
                     if wasPreDismissed {
                         self.turns.append(["role": "user", "text": String(request.prefix(3900))])
-                        if self.turns.count > 16 {
-                            self.turns.removeFirst(self.turns.count - 16)
-                        }
+                        self.trimConversationTurnsIfNeeded()
                     }
                     self.appendModelHistory(role: "assistant", text: text)
                     self.finishStreamingTurn(text, armFollowUp: true)
@@ -671,9 +681,7 @@ final class Brain {
                 case .failure(let failure):
                     if wasPreDismissed {
                         self.turns.append(["role": "user", "text": String(request.prefix(3900))])
-                        if self.turns.count > 16 {
-                            self.turns.removeFirst(self.turns.count - 16)
-                        }
+                        self.trimConversationTurnsIfNeeded()
                     }
                     let finalAnswer = MacLink.explain(failure)
                     self.appendModelHistory(role: "assistant", text: finalAnswer)
@@ -973,7 +981,7 @@ final class Brain {
         lastAddressedAt = Date()
         streamEpoch += 1
         preDismissedEpoch = nil
-        publish(user: user, assistant: nil, state: "answering")
+        publish(user: user, assistant: nil, state: "thinking")
         streamingTurnIndex = nil
         if let partialAssistant {
             publishStreamingDelta(partialAssistant)
@@ -1054,7 +1062,7 @@ final class Brain {
             "state": state,
             "turns": turns,
             "continueAfterMs": 30_000,
-            "earlierTurnsOmitted": false,
+            "earlierTurnsOmitted": earlierTurnsOmitted,
             "listening": listening,
         ]
         if !listening && state != "ready" {
@@ -1072,12 +1080,11 @@ final class Brain {
            turns[idx]["role"] == "assistant" {
             if turns[idx]["text"] == clipped { return }
             turns[idx]["text"] = clipped
+            trimConversationTurnsIfNeeded()
         } else {
             turns.append(["role": "assistant", "text": clipped])
-            if turns.count > 16 {
-                turns.removeFirst(turns.count - 16)
-            }
             streamingTurnIndex = turns.count - 1
+            trimConversationTurnsIfNeeded()
         }
         revision += 1
         conversationVisible = true
@@ -1089,7 +1096,7 @@ final class Brain {
             "state": "answering",
             "turns": turns,
             "continueAfterMs": 30_000,
-            "earlierTurnsOmitted": false,
+            "earlierTurnsOmitted": earlierTurnsOmitted,
         ])
     }
 
@@ -1101,10 +1108,8 @@ final class Brain {
             turns[idx]["text"] = clipped
         } else {
             turns.append(["role": "assistant", "text": clipped])
-            if turns.count > 16 {
-                turns.removeFirst(turns.count - 16)
-            }
         }
+        trimConversationTurnsIfNeeded()
         streamingTurnIndex = nil
         let shouldListen = armFollowUp ? scheduleFollowUpTimer() : false
         sendSnapshot(state: "ready", listening: shouldListen)
@@ -1114,7 +1119,7 @@ final class Brain {
         streamingTurnIndex = nil
         if let user, !user.isEmpty { turns.append(["role": "user", "text": String(user.prefix(3900))]) }
         if let assistant, !assistant.isEmpty { turns.append(["role": "assistant", "text": String(assistant.prefix(3900))]) }
-        if turns.count > 16 { turns.removeFirst(turns.count - 16) }
+        trimConversationTurnsIfNeeded()
         guard !turns.isEmpty else { return }
         sendSnapshot(state: state, listening: listening)
     }

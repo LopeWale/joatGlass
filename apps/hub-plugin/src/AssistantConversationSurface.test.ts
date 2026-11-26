@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { RebuildPageContainer, TextContainerUpgrade } from '@evenrealities/even_hub_sdk';
 import { getTextWidth } from '@evenrealities/pretext';
-import { HudPageBuilder } from './HudPageBuilder';
+import { firmwareLineCount } from './FirmwareText';
+import { ASSISTANT_CONVERSATION_GEOMETRY, HudPageBuilder } from './HudPageBuilder';
 import {
   AssistantConversationSurface,
   conversationLines,
@@ -536,5 +537,122 @@ describe('AssistantConversationSurface delivery', () => {
       { role: 'assistant', text: 'Hi there!' },
     ], 'ready'))).resolves.toBe(true);
     expect(surface.isActive()).toBe(true);
+  });
+
+  it('never exceeds transcriptWidth or wraps onto 2 firmware lines on long user + long JOAT turns', () => {
+    const view = conversationViewport(snapshot(4, [
+      {
+        role: 'user',
+        text: 'Can you look through my recent messages from today and tell me everything important that came in while I was driving and suggest what I should say back?',
+      },
+      {
+        role: 'assistant',
+        text: 'Here is a detailed summary of your messages il and two suggested replies you can send right away once you pick the option you prefer.',
+      },
+    ], 'answering'));
+
+    const width = ASSISTANT_CONVERSATION_GEOMETRY.transcriptWidth;
+    for (const row of view.dimText.split('\n')) {
+      expect(getTextWidth(row)).toBeLessThanOrEqual(width);
+      expect(firmwareLineCount(row, width)).toBeLessThanOrEqual(1);
+    }
+    for (const row of view.brightText.split('\n')) {
+      expect(getTextWidth(row)).toBeLessThanOrEqual(width);
+      expect(firmwareLineCount(row, width)).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('auto-scrolls to the live bottom whenever JOAT is responding even if the wearer scrolled up while thinking or mid-stream', async () => {
+    const { client, textContainerUpgrade, rebuildPageContainer } = fakeClient();
+    const surface = new AssistantConversationSurface(
+      client as never,
+      new HudPageBuilder(),
+      async () => true,
+      { indicatorIntervalMs: 0, continuationPromptEnabled: false },
+    );
+
+    const longQuestion = Array.from({ length: 45 }, (_, i) => `userword${i}`).join(' ');
+    await surface.present(snapshot(1, [{ role: 'user', text: longQuestion }], 'thinking'));
+    expect(surface.scroll('up')).toBe(true);
+    await surface.whenIdle();
+    expect(surface.scrollFromTail()).toBe(1);
+
+    // Streamed response arrives: must auto-scroll back to 0 so JOAT's words are visible!
+    const chunk1 = Array.from({ length: 25 }, (_, i) => `joatpart${i}`).join(' ');
+    await surface.present(snapshot(2, [
+      { role: 'user', text: longQuestion },
+      { role: 'assistant', text: chunk1 },
+    ], 'answering'));
+    await surface.whenIdle();
+    expect(surface.scrollFromTail()).toBe(0);
+
+    // Wearer brushes scroll mid-stream, then chunk 2 + final arrive: must still auto-scroll to 0!
+    expect(surface.scroll('up')).toBe(true);
+    await surface.whenIdle();
+    expect(surface.scrollFromTail()).toBe(1);
+
+    const fullAnswer = `${chunk1} ${Array.from({ length: 30 }, (_, i) => `joatend${i}`).join(' ')}`;
+    await surface.present(snapshot(3, [
+      { role: 'user', text: longQuestion },
+      { role: 'assistant', text: fullAnswer },
+    ], 'ready'));
+    await surface.whenIdle();
+    expect(surface.scrollFromTail()).toBe(0);
+
+    const latestBright = [...textContainerUpgrade.mock.calls]
+      .reverse()
+      .map(([u]) => u)
+      .find((u) => u.containerName === 'joat-turns')?.content
+      ?? rebuildPageContainer.mock.calls[rebuildPageContainer.mock.calls.length - 1]?.[0].textObject?.find(
+        (t: { containerName?: string }) => t.containerName === 'joat-turns',
+      )?.content
+      ?? '';
+    expect(latestBright).toContain('joatend29');
+  });
+
+  it('upgrades visible rows immediately and retries stage-growth rebuild when replacePage is transiently busy on BLE', async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, textContainerUpgrade } = fakeClient();
+      const replacePage = vi.fn<(page: RebuildPageContainer) => Promise<boolean>>()
+        .mockResolvedValueOnce(true)   // initial 5-row card succeeds
+        .mockResolvedValueOnce(false)  // stage growth 5 -> 7 transiently refused while BLE header/column PNG drains
+        .mockResolvedValueOnce(true);  // retry 250ms later succeeds!
+      const surface = new AssistantConversationSurface(
+        client as never,
+        new HudPageBuilder(),
+        async () => true,
+        { indicatorIntervalMs: 0, continuationPromptEnabled: false, replacePage },
+      );
+
+      // 3-line user message + 1 working glyph row -> stage 5
+      const threeLineUser = Array.from({ length: 22 }, (_, i) => `ask${i}`).join(' ');
+      await expect(surface.present(snapshot(1, [
+        { role: 'user', text: threeLineUser },
+      ], 'thinking'))).resolves.toBe(true);
+      expect(replacePage).toHaveBeenCalledTimes(1);
+
+      // Long streaming answer pushes total rows > 5 -> stage 7, while replacePage transiently returns false!
+      const fiveLineAnswer = Array.from({ length: 42 }, (_, i) => `reply${i}`).join(' ');
+      await surface.present(snapshot(2, [
+        { role: 'user', text: threeLineUser },
+        { role: 'assistant', text: fiveLineAnswer },
+      ], 'ready'));
+      await surface.whenIdle();
+
+      // Immediate fallback upgrade into existing 5-row container shows newest words right away:
+      const immediateBright = textContainerUpgrade.mock.calls
+        .map(([u]) => u)
+        .find((u) => u.containerName === 'joat-turns')?.content ?? '';
+      expect(immediateBright).toContain('reply41');
+
+      // And automatic retry expands the card to full 7-row capacity once BLE clears:
+      await vi.advanceTimersByTimeAsync(300);
+      await surface.whenIdle();
+      expect(replacePage).toHaveBeenCalledTimes(3);
+      expect(surface.currentRevision()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
