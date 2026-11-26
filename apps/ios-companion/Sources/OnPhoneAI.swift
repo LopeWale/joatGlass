@@ -1036,6 +1036,7 @@ final class OnPhoneAI: ObservableObject {
         now: Date,
         area: String?,
         snippets: String?,
+        lensContext: String? = nil,
         hasTools: Bool = true
     ) -> String {
         let f = DateFormatter()
@@ -1051,6 +1052,9 @@ final class OnPhoneAI: ObservableObject {
         } else {
             s += " The phone has no position for the wearer right now."
         }
+        if let lensContext, !lensContext.isEmpty {
+            s += " \(lensContext)"
+        }
         if hasTools {
             s += "\n\nYou have tools for all wearer functions on this iPhone and glasses: "
                 + "Calendar agenda, Reminders (list, create, complete), Gmail (recent emails, read thread, prepare reply or new email), "
@@ -1062,6 +1066,8 @@ final class OnPhoneAI: ObservableObject {
                 + "Mac Agent Terminal status and actions, and Notifications/voice settings. "
                 + "The glasses always stay connected to this iPhone: every page you open is drawn by the phone. "
                 + "Messages and Agent Terminal reach the wearer's Mac mini through background relays over Tailscale: use get_recent_messages, read_message_thread, and prepare_message for Mac iMessage/SMS, and use terminal_status and agent_terminal_action to check or instruct Claude Code, Codex, and Antigravity on the Mac. "
+                + "When the wearer asks to summarize their messages or emails, call get_recent_messages (with unread_only: true if they asked about unread) or get_recent_emails; when they refer to 'this conversation', 'this message', or 'this email' (or have a thread open on the glasses), call read_message_thread or read_email_thread (you may omit sender/query to read the thread open on the glasses). "
+                + "When the wearer asks to suggest replies or what they should say, read the thread first, then give 2 or 3 short numbered reply options inline (1) ... 2) ...) in plain text WITHOUT calling prepare_message or prepare_email yet; if they then pick an option (such as 'reply with option 2' or 'send the first one') or ask you to send a reply, call prepare_message or prepare_email with that exact body to open the touchpad confirmation card. "
                 + "Use open_surface for messages or agent_terminal whenever the wearer wants to view Messages or Agent Terminal on the glasses; the phone shows them, relaying to the Mac in the background. "
                 + "Use glasses_command to run any deterministic glasses command exactly as if the wearer said it after the wake word (timer and Pomodoro control, opening capability pages, reading a numbered news story or search result, voice-note and QuickNotes commands, replying to the thread on the lens, spoken replies on or off, navigation phrases) whenever no more specific tool fits or the request is itself a command. "
                 + "Whenever the wearer asks to check personal data, current facts, weather, news, schedule, messages, emails, notes, contacts, or asks to perform any action, "
@@ -1092,6 +1098,7 @@ final class OnPhoneAI: ObservableObject {
         streamChat(
             turns: turns,
             area: area,
+            lensContext: nil,
             macLink: macLink,
             search: search,
             toolBelt: nil,
@@ -1114,6 +1121,7 @@ final class OnPhoneAI: ObservableObject {
     nonisolated func streamChat(
         turns: [[String: String]],
         area: (context: String, city: String?, country: String?)?,
+        lensContext: String? = nil,
         macLink: MacLink,
         search: Search?,
         toolBelt: PhoneToolBelt?,
@@ -1162,6 +1170,7 @@ final class OnPhoneAI: ObservableObject {
                 now: Date(),
                 area: area?.context,
                 snippets: snippets,
+                lensContext: lensContext,
                 hasTools: toolBelt != nil
             )
 

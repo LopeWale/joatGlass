@@ -276,4 +276,89 @@ describe('JOAT modal floats and persists over every active feature', () => {
     expect(await menu.presentPanelContent('pomodoro')).toBe(true);
     expect(r.hud.hasAssistantConversation()).toBe(true);
   });
+
+  it('floats over MESSAGES list and MESSAGES · CONVERSATION reader, survives live message refreshes, and hands off to reply confirmation', async () => {
+    const r = rig();
+    const link = { send: vi.fn() } as unknown as MacLink;
+    const menu = new CapabilityMenu(r.hud, new Settings(), link);
+    await r.hud.setStatusModel(LIVE);
+
+    // 1. Open MESSAGES thread list, invoke JOAT modal ("summarize my messages"):
+    expect(await menu.presentList(
+      'MESSAGES',
+      ['New message · voice recipient + text', '[2m] Alex Rivera • · Does 12:30 work for lunch?'],
+      'voice-msg-1',
+      true,
+      'tap: select · left x2: back',
+    )).toBe(true);
+    expect(await r.hud.showAssistantConversation(conversation(1, 'msg-summary-1'))).toBe(true);
+    expect(r.hud.hasAssistantConversation()).toBe(true);
+
+    // Background MacMessages poll refreshes MESSAGES list while JOAT modal is up:
+    expect(await menu.presentList(
+      'MESSAGES',
+      ['New message · voice recipient + text', '[now] Alex Rivera • · Or 1:00 PM?', '[2m] Sam Lee · See you next week.'],
+      'voice-msg-1',
+      true,
+      'tap: select · left x2: back',
+    )).toBe(true);
+    expect(r.hud.hasAssistantConversation()).toBe(true);
+    expect(await r.hud.dismissAssistantConversation('msg-summary-1', 1)).toBe(true);
+    expect(last(r.rebuilds)?.listObject?.[0]?.itemContainer?.itemName?.[1]).toContain('Or 1:00 PM?');
+
+    // 2. Open MESSAGES · CONVERSATION reader, invoke JOAT ("suggest replies"), receive background thread refresh:
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION',
+      ['Alex Rivera', 'Alex Rivera: Does 12:30 work for lunch?'],
+      'voice-msg-1',
+      true,
+      'tap: reply · left x2: back',
+      undefined,
+      'Alex Rivera',
+      undefined,
+      undefined,
+      undefined,
+      { id: 'thread-alex-1', index: 0, count: 1 },
+    )).toBe(true);
+    expect(await r.hud.showAssistantConversation({
+      conversationId: 'msg-suggest-1',
+      revision: 1,
+      state: 'ready',
+      listening: true,
+      continueAfterMs: 120_000,
+      earlierTurnsOmitted: false,
+      turns: [
+        { role: 'user', text: 'suggest replies' },
+        { role: 'assistant', text: '1) 12:30 works great! 2) Can we do 1:00 instead?' },
+      ],
+    })).toBe(true);
+    expect(r.hud.hasAssistantConversation()).toBe(true);
+
+    // Incoming text refreshes MESSAGES · CONVERSATION underneath without tearing down JOAT modal:
+    expect(await menu.presentList(
+      'MESSAGES · CONVERSATION',
+      ['Alex Rivera', 'Alex Rivera: Or 1:00 PM?', 'Alex Rivera: Does 12:30 work for lunch?'],
+      'voice-msg-1',
+      true,
+      'tap: reply · left x2: back',
+      undefined,
+      'Alex Rivera',
+      undefined,
+      undefined,
+      undefined,
+      { id: 'thread-alex-1', index: 0, count: 1 },
+    )).toBe(true);
+    expect(r.hud.hasAssistantConversation()).toBe(true);
+
+    // Wearer picks option 2 -> ConfirmGate opens over MESSAGES · CONVERSATION, then dismisses back to updated thread!
+    expect(await r.hud.showConfirmation(
+      'Send to Alex Rivera: Can we do 1:00 instead?',
+      'confirm-msg-1',
+      'messages',
+    )).toBe(true);
+    expect(r.hud.hasAssistantConversation()).toBe(false);
+    expect(await r.hud.dismissConfirmation('confirm-msg-1')).toBe(true);
+    const restoredReader = last(r.rebuilds)?.textObject?.find((t) => t.containerName === 'main');
+    expect(restoredReader?.content).toContain('Or 1:00 PM?');
+  });
 });

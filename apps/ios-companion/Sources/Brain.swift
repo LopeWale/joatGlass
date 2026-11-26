@@ -629,6 +629,7 @@ final class Brain {
         OnPhoneAI.shared.streamChat(
             turns: promptTurns,
             area: navigation.cachedArea(),
+            lensContext: activeGlassesContextSummary(),
             macLink: macLink,
             search: search,
             toolBelt: toolBelt,
@@ -843,10 +844,48 @@ final class Brain {
 
     private static func isGenericReplyUtterance(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if Messages.isAIReplyRequest(trimmed) { return false }
         let norm = Grammar.normalize(trimmed)
         if norm.contains("email") || norm.contains("mail") { return false }
         return Grammar.match(Messages.replyRe, trimmed) != nil
             || Grammar.match(Messages.bareReplyRe, norm) != nil
+    }
+
+    func activeGlassesContextSummary() -> String? {
+        switch capabilities.activeCapability {
+        case "MESSAGES":
+            if let sender = messages.threadOnGlass, !sender.isEmpty {
+                return "The wearer currently has the Messages conversation with \(sender) open on the glasses."
+            }
+            return "The wearer currently has the Messages thread list open on the glasses."
+        case "MAIL":
+            if let summary = mail.activeGlassThreadSummary() {
+                return "The wearer currently has the Mail thread '\(summary.subject)' with \(summary.participantLabel) open on the glasses."
+            }
+            return "The wearer currently has the Mail inbox list open on the glasses."
+        case "QUICKNOTES":
+            return quickNotes.active
+                ? "The wearer currently has an open QuickNote on the glasses."
+                : "The wearer currently has QuickNotes open on the glasses."
+        case "AGENT TERMINAL":
+            return "The wearer currently has Mac Agent Terminal open on the glasses."
+        case "TASKS", "PLANNING", "CALENDAR":
+            return "The wearer currently has Reminders open on the glasses."
+        case "NOTIFICATIONS":
+            return "The wearer currently has Notifications open on the glasses."
+        case "ACTIVITY":
+            return "The wearer currently has Activity open on the glasses."
+        case "NAVIGATION":
+            return "The wearer currently has Navigation open on the glasses."
+        default:
+            if navigation.active {
+                return "The wearer currently has active turn-by-turn Navigation on the glasses."
+            }
+            if quickNotes.active {
+                return "The wearer currently has an active QuickNote recording."
+            }
+            return nil
+        }
     }
 
     func arbitrateUnaddressedReply(_ text: String, now: Date) -> VoiceCommand? {

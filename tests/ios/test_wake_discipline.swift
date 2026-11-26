@@ -586,7 +586,7 @@ private func testJoatModalOverActiveFeatures(brain: Brain, link: RecordingPlugin
     }
     expect(brain.prompts.active, "feature prompt is active")
     link.clear()
-    brain.handle(.final("JOAT", latencyMs: 10))
+    brain.handle(.final("JOAT", latencyMs: 0))
     expect(!brain.prompts.active, "calling 'JOAT' cancels the open prompt instead of submitting 'JOAT' as destination")
     expect(promptResult == nil, "cancelled prompt receives nil, never literal 'JOAT'")
     expectEqual(lastTurns(link).last?["text"], "Yes?",

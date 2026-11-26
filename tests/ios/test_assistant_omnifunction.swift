@@ -1617,6 +1617,348 @@ func testSelectableGeminiModelsAndGenerationConfig() {
     }
 }
 
+@MainActor
+private func testMessagesSummarySuggestRepliesAndLensContext(brain: Brain, link: RecordingPluginLink) async {
+    let belt = brain.toolBelt!
+    let sessionCfg = URLSessionConfiguration.ephemeral
+    sessionCfg.protocolClasses = [MockSSEURLProtocol.self]
+    let mockSession = URLSession(configuration: sessionCfg)
+
+    let originalMacMessages = brain.messages.mac
+    let testMacMessages = MacMessages(
+        config: MacMessages.Config(url: "https://mac-mini.example.ts.net/messages", token: "test-msg-token"),
+        session: mockSession
+    )
+    brain.messages.mac = testMacMessages
+    defer {
+        brain.messages.mac = originalMacMessages
+        brain.confirm.declineActive(reason: "messages AI test cleanup")
+        brain.capabilities.openHome()
+    }
+
+    let nowEpoch = Date().timeIntervalSince1970
+    let threadsPayload: [String: Any] = [
+        "threads": [
+            [
+                "id": "thr_alex_01",
+                "label": "Alex Rivera",
+                "group": false,
+                "preview": "Does 12:30 work for lunch?",
+                "at": nowEpoch - 120,
+                "unread": true,
+            ],
+            [
+                "id": "thr_sam_02",
+                "label": "Sam Lee",
+                "group": false,
+                "preview": "See you next week.",
+                "at": nowEpoch - 3600,
+                "unread": false,
+            ],
+        ]
+    ]
+    let alexHistoryPayload: [String: Any] = [
+        "messages": [
+            ["person": "Alex Rivera", "from_me": false, "text": "Hey! Are you free today?", "at": nowEpoch - 180],
+            ["person": "Alex Rivera", "from_me": false, "text": "Does 12:30 work for lunch?", "at": nowEpoch - 120],
+        ]
+    ]
+
+    // 1) `get_recent_messages(unread_only: true)` returns only unread threads + unread summary
+    MockSSEURLProtocol.reset([
+        { _ in
+            .init(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: try! JSONSerialization.data(withJSONObject: threadsPayload)
+            )
+        },
+    ])
+    let unreadOutcome = await belt.execute(name: "get_recent_messages", arguments: ["unread_only": true])
+    expect(unreadOutcome.output.contains("Alex Rivera") && unreadOutcome.output.contains("Does 12:30 work for lunch?"),
+           "get_recent_messages(unread_only:true) includes unread Alex Rivera thread")
+    expect(!unreadOutcome.output.contains("Sam Lee"),
+           "get_recent_messages(unread_only:true) excludes already-read Sam Lee thread")
+
+    // 2) Open `MESSAGES` then `MESSAGES · CONVERSATION` ("Alex Rivera") on the glasses
+    MockSSEURLProtocol.reset([
+        { _ in
+            .init(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: try! JSONSerialization.data(withJSONObject: threadsPayload)
+            )
+        },
+        { _ in
+            .init(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: try! JSONSerialization.data(withJSONObject: alexHistoryPayload)
+            )
+        },
+    ])
+    brain.capabilities.open("Messages", requestId: "msg-ai-1", anchorMs: nil)
+    for _ in 0..<20 where !link.sent.contains(where: { ($0["items"] as? [String])?.contains(where: { $0.contains("Alex Rivera") }) == true }) {
+        try? await Task.sleep(nanoseconds: 25_000_000)
+    }
+    expect(brain.activeGlassesContextSummary()?.contains("Messages") == true,
+           "activeGlassesContextSummary reports Messages list when open")
+
+    // Select row 1 ("Alex Rivera") to open `MESSAGES · CONVERSATION`
+    brain.capabilities.handle(
+        kind: "input",
+        message: [
+            "kind": "input",
+            "event": [
+                "containerName": "capdata",
+                "selectedName": "MESSAGES",
+                "selectedIndex": 1,
+                "requestId": "msg-ai-1",
+                "traceId": "sel-alex-1",
+            ],
+        ]
+    )
+    for _ in 0..<8 { try? await Task.sleep(nanoseconds: 20_000_000) }
+    expectEqual(brain.messages.threadOnGlass, "Alex Rivera", "Alex Rivera thread is now on glass")
+    let lensCtx = brain.activeGlassesContextSummary() ?? ""
+    expect(lensCtx.contains("Alex Rivera") && lensCtx.contains("Messages"),
+           "activeGlassesContextSummary names the open Messages conversation (\(lensCtx))")
+
+    let sysWithLens = OnPhoneAI.assistantSystem(now: Date(), area: nil, snippets: nil, lensContext: lensCtx)
+    expect(sysWithLens.contains("Alex Rivera"),
+           "OnPhoneAI.assistantSystem injects live glasses lensContext")
+    expect(sysWithLens.lowercased().contains("suggest") && sysWithLens.contains("prepare_message"),
+           "OnPhoneAI.assistantSystem documents reply suggestion -> prepare_message workflow")
+
+    // 3) `read_message_thread` with NO `sender` (and with deictic `"this conversation"`) reads `threadOnGlass`!
+    for args: [String: Any] in [[:], ["sender": "this conversation"]] {
+        MockSSEURLProtocol.reset([
+            { _ in
+                .init(
+                    statusCode: 200,
+                    headers: ["Content-Type": "application/json"],
+                    body: try! JSONSerialization.data(withJSONObject: alexHistoryPayload)
+                )
+            },
+        ])
+        let threadOut = await belt.execute(name: "read_message_thread", arguments: args)
+        expect(
+            threadOut.output.contains("Alex Rivera") && threadOut.output.contains("Does 12:30 work for lunch?"),
+            "read_message_thread(\(args)) defaults to open glasses thread Alex Rivera (got: \(threadOut.output))"
+        )
+    }
+
+    // 4) Natural AI queries about Messages & Mail MUST NOT be hijacked by deterministic VoiceCommand regexes!
+    for aiPhrase in [
+        "summarize my messages",
+        "message summary",
+        "text summary",
+        "text Alex that I'm running 5 minutes late",
+        "message Mom asking when dinner is",
+        "suggest replies",
+        "reply suggestions",
+        "reply options",
+        "reply with option 2",
+        "reply with the first one",
+        "reply to Alex asking if 1pm works",
+        "email summary",
+        "email Sarah that I reviewed the deck",
+    ] {
+        expect(
+            brain.routeCommand(aiPhrase) == nil,
+            "AI phrase '\(aiPhrase)' must return nil from routeCommand so OnPhoneAI handles it"
+        )
+    }
+    // While literal dictation commands still match deterministically in 0ms:
+    expect(brain.routeCommand("reply saying sounds good") != nil,
+           "Literal 'reply saying sounds good' still routes deterministically")
+    brain.confirm.declineActive(reason: "literal reply check cleanup")
+
+    // 5) Open `MAIL · CONVERSATION` and verify `read_email_thread` with NO `query` reads `mail.threadOnGlass`!
+    brain.mail.debugSeedSampleInbox()
+    brain.capabilities.open("Mail", requestId: "mail-ai-1", anchorMs: nil)
+    brain.capabilities.handle(
+        kind: "input",
+        message: [
+            "kind": "input",
+            "event": [
+                "containerName": "capdata",
+                "selectedName": "MAIL",
+                "selectedIndex": 1,
+                "requestId": "mail-ai-1",
+                "traceId": "sel-mail-1",
+            ],
+        ]
+    )
+    expect(brain.mail.threadOnGlass != nil, "Mail thread is now on glass")
+    let mailLensCtx = brain.activeGlassesContextSummary() ?? ""
+    expect(mailLensCtx.contains("Mail"), "activeGlassesContextSummary reports open Mail thread (\(mailLensCtx))")
+    let openMailThreadOut = await belt.execute(name: "read_email_thread", arguments: [:])
+    expect(!openMailThreadOut.output.hasPrefix("error:"),
+           "read_email_thread([:]) defaults cleanly to open Mail thread on glass (\(openMailThreadOut.output.prefix(80)))")
+
+    // 6) Full 2-turn Gemini tool E2E: summarize + suggest replies -> "reply with option 2" -> ConfirmGate!
+    MockSSEURLProtocol.reset([
+        { _ in
+            .init(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: try! JSONSerialization.data(withJSONObject: threadsPayload)
+            )
+        },
+        { _ in
+            .init(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: try! JSONSerialization.data(withJSONObject: alexHistoryPayload)
+            )
+        },
+    ])
+    brain.capabilities.open("Messages", requestId: "msg-ai-2", anchorMs: nil)
+    for _ in 0..<10 { try? await Task.sleep(nanoseconds: 20_000_000) }
+    brain.capabilities.handle(
+        kind: "input",
+        message: [
+            "kind": "input",
+            "event": [
+                "containerName": "capdata",
+                "selectedName": "MESSAGES",
+                "selectedIndex": 1,
+                "requestId": "msg-ai-2",
+                "traceId": "sel-alex-2",
+            ],
+        ]
+    )
+    // Wait for `refreshHistory("Alex Rivera")` to settle before queuing Turn 1 responses.
+    for _ in 0..<10 { try? await Task.sleep(nanoseconds: 20_000_000) }
+
+    let gemini = GeminiLink(
+        config: .init(key: "test-gemini-key", model: "gemini-3.5-flash-lite"),
+        session: mockSession
+    )
+    func sseChunk(_ obj: [String: Any]) -> Data {
+        let line = "data: " + String(data: try! JSONSerialization.data(withJSONObject: obj), encoding: .utf8)! + "\n\n"
+        return Data(line.utf8)
+    }
+
+    // Turn 1: Gemini calls `read_message_thread({})` -> reads Alex's messages -> suggests 2 replies
+    MockSSEURLProtocol.reset([
+        { _ in
+            .init(
+                statusCode: 200,
+                headers: ["Content-Type": "text/event-stream"],
+                body: sseChunk([
+                    "candidates": [[
+                        "content": [
+                            "role": "model",
+                            "parts": [[
+                                "functionCall": ["name": "read_message_thread", "args": [:] as [String: Any]],
+                                "thoughtSignature": "sig-msg-1",
+                            ]],
+                        ],
+                    ]],
+                ])
+            )
+        },
+        { _ in
+            .init(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: try! JSONSerialization.data(withJSONObject: alexHistoryPayload)
+            )
+        },
+        { _ in
+            .init(
+                statusCode: 200,
+                headers: ["Content-Type": "text/event-stream"],
+                body: sseChunk([
+                    "candidates": [[
+                        "content": [
+                            "role": "model",
+                            "parts": [[
+                                "text": "Alex asked if 12:30 works for lunch. Replies: 1) 12:30 works great! 2) Can we do 1:00 instead?"
+                            ]],
+                        ],
+                    ]],
+                ])
+            )
+        },
+    ])
+
+    let turn1Res = await gemini.streamWithTools(
+        turns: [["role": "user", "text": "Summarize this conversation and suggest two replies"]],
+        system: OnPhoneAI.assistantSystem(
+            now: Date(),
+            area: nil,
+            snippets: nil,
+            lensContext: brain.activeGlassesContextSummary()
+        ),
+        toolBelt: belt,
+        onDelta: { _ in }
+    )
+    expectTurnResult(
+        turn1Res,
+        .answer("Alex asked if 12:30 works for lunch. Replies: 1) 12:30 works great! 2) Can we do 1:00 instead?"),
+        "Turn 1 summarized open Messages thread and suggested 2 numbered replies"
+    )
+
+    // Turn 2: Wearer says "Reply with option 2" -> Gemini calls `prepare_message` -> arms ConfirmGate!
+    brain.beginStreamingConversationForTesting(user: "Reply with option 2")
+    link.clear()
+    MockSSEURLProtocol.reset([
+        { _ in
+            .init(
+                statusCode: 200,
+                headers: ["Content-Type": "text/event-stream"],
+                body: sseChunk([
+                    "candidates": [[
+                        "content": [
+                            "role": "model",
+                            "parts": [[
+                                "functionCall": [
+                                    "name": "prepare_message",
+                                    "args": [
+                                        "mode": "reply",
+                                        "recipient": "Alex Rivera",
+                                        "body": "Can we do 1:00 instead?",
+                                    ] as [String: Any],
+                                ],
+                                "thoughtSignature": "sig-msg-2",
+                            ]],
+                        ],
+                    ]],
+                ])
+            )
+        },
+    ])
+    let turn2Res = await gemini.streamWithTools(
+        turns: [
+            ["role": "user", "text": "Summarize this conversation and suggest two replies"],
+            ["role": "assistant", "text": "Alex asked if 12:30 works for lunch. Replies: 1) 12:30 works great! 2) Can we do 1:00 instead?"],
+            ["role": "user", "text": "Reply with option 2"],
+        ],
+        system: OnPhoneAI.assistantSystem(
+            now: Date(),
+            area: nil,
+            snippets: nil,
+            lensContext: brain.activeGlassesContextSummary()
+        ),
+        toolBelt: belt,
+        onDelta: { _ in }
+    )
+    if case .success(.claimedLens) = turn2Res {
+        expect(true, "Turn 2 prepare_message claimed lens cleanly")
+    } else {
+        expect(false, "Expected Turn 2 prepare_message to claim lens, got \(turn2Res)")
+    }
+    expect(brain.confirm.hasPending, "Turn 2 armed touchpad confirmation for chosen suggested reply")
+    expect(
+        link.sent.contains { $0.string("kind") == "confirm.request" && ($0.string("prompt") ?? "").contains("Can we do 1:00 instead?") },
+        "ConfirmGate prompt carries exact suggested reply option 2"
+    )
+    brain.confirm.declineActive(reason: "test done")
+}
+
 func runEntry() {
     let sema = DispatchSemaphore(value: 0)
     Task { @MainActor in
@@ -1627,6 +1969,7 @@ func runEntry() {
         await testGeminiThoughtSignatureAndToolStreaming(brain: brain, link: link)
         await testAlwaysOnMacHandoffMessagesAndTerminal(brain: brain, link: link)
         testSelectableGeminiModelsAndGenerationConfig()
+        await testMessagesSummarySuggestRepliesAndLensContext(brain: brain, link: link)
         print("PASS: all \(passedAssertions) assistant omnifunction assertions succeeded.")
         sema.signal()
     }

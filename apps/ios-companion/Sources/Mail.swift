@@ -815,6 +815,7 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
     func takesUnaddressed(_ text: String, now: Date = Date()) -> Bool {
         guard threadIdOnGlass != nil else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if Messages.isAIReplyRequest(trimmed) { return false }
         return Grammar.match(Messages.replyRe, trimmed) != nil
             || Grammar.match(Messages.bareReplyRe, Grammar.normalize(trimmed)) != nil
     }
@@ -850,7 +851,8 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
             return CommandReply(text: "", activated: false)
         }
 
-        if let g = Grammar.match(Messages.replyRe, said, groups: ["body"]),
+        if !Messages.isAIReplyRequest(said),
+           let g = Grammar.match(Messages.replyRe, said, groups: ["body"]),
            let body = g["body"] {
             guard let target = replyTarget() else {
                 return threadIdOnGlass != nil ? CommandReply(text: Self.noTarget, activated: false) : nil
@@ -880,7 +882,8 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
 
         // 5. Recipient-only: "email <person>" -> follow-up for body
         if let g = Grammar.match(Self.newEmailRecipientOnlyRe, said, groups: ["recipient"]),
-           let who = g["recipient"] {
+           let who = g["recipient"],
+           Messages.isLikelyRecipientOnlyTarget(who) {
             guard accountStore.defaultAccount != nil else {
                 return CommandReply(text: "No Gmail account is connected yet. Add one in JOAT Brain › Mail.", activated: false)
             }
@@ -1061,6 +1064,21 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
     }
 
     // MARK: - Assistant Tool Belt Hooks
+
+    func activeGlassThreadSummary() -> ThreadSummary? {
+        guard let tid = threadIdOnGlass else { return nil }
+        return threads.first(where: { $0.id == tid })
+    }
+
+    func defaultThreadSummaryForTool(now: Date = Date()) -> ThreadSummary? {
+        if let open = activeGlassThreadSummary() { return open }
+        if let s = selectedThread,
+           now.timeIntervalSince(s.at) < Self.selectionSeconds,
+           let chosen = threads.first(where: { $0.id == s.id }) {
+            return chosen
+        }
+        return threads.first
+    }
 
     func selectThreadForTool(_ threadId: String) {
         selectedThread = (threadId, Date())
