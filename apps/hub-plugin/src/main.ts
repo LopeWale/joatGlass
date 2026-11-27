@@ -1,7 +1,7 @@
 import { AudioInputSource } from '@evenrealities/even_hub_sdk';
 import { BRIDGE_CALL_TIMEOUT_MS, BridgeClient, settleWithin } from './BridgeClient';
 import { HudPageBuilder } from './HudPageBuilder';
-import { HudPresenter } from './HudPresenter';
+import { HudPresenter, NOTIFICATIONS_READ_STORAGE_KEY } from './HudPresenter';
 import { MinimalHudPresenter } from './MinimalHudPresenter';
 import { phoneTimeZone } from './PhoneTimeZone';
 import { HudCanvasRenderer, usesActionPillLayout } from './HudCanvasRenderer';
@@ -40,7 +40,10 @@ import { EventRouter, type LifecycleHandler } from './EventRouter';
 import { DeviceMonitor } from './DeviceMonitor';
 import { Settings } from './Settings';
 import { PhoneControlPanel } from './PhoneControlPanel';
-import { PendingNotificationDismissals } from './NotificationCard';
+import {
+  PENDING_NOTIFICATION_DISMISS_STORAGE_KEY,
+  PendingNotificationDismissals,
+} from './NotificationCard';
 import { Places, placesToWire } from './Places';
 import { CapabilityMenu, usesFirmwareList } from './CapabilityMenu';
 import {
@@ -268,11 +271,21 @@ async function boot(): Promise<void> {
   await client.init();
   let tokens = loadPairingTokens();
   let preferredUrl = loadRememberedBrain();
+  let hostedReadNotificationsRaw: string | undefined;
+  let hostedPendingDismissRaw: string | undefined;
   try {
-    const [hostedTokensRaw, hostedPreferredRaw, hostedLegacy] = await Promise.all([
+    const [
+      hostedTokensRaw,
+      hostedPreferredRaw,
+      hostedLegacy,
+      readNotifsRaw,
+      pendingDismissRaw,
+    ] = await Promise.all([
       client.storage.get(PAIRING_TOKENS_KEY),
       client.storage.get(PREFERRED_BRAIN_KEY),
       client.storage.get(TOKEN_KEY),
+      client.storage.get(NOTIFICATIONS_READ_STORAGE_KEY),
+      client.storage.get(PENDING_NOTIFICATION_DISMISS_STORAGE_KEY),
     ]);
     // The Even host is the common persistence layer between an installed
     // package and its development webview, so let its valid per-origin map
@@ -280,6 +293,8 @@ async function boot(): Promise<void> {
     tokens = mergePairingTokens(decodePairingTokens(hostedTokensRaw), tokens);
     tokens = migrateLegacyToken(tokens, hostedLegacy, MAC_WS_URLS[0]);
     preferredUrl = preferredUrl ?? rememberedBrain(hostedPreferredRaw);
+    hostedReadNotificationsRaw = readNotifsRaw;
+    hostedPendingDismissRaw = pendingDismissRaw;
   } catch {
     // Older host: WebView storage remains the fallback.
   }
@@ -349,6 +364,19 @@ async function boot(): Promise<void> {
   let handoffRef: BrainHandoff | undefined;
   let handoffDepartingGeneration = -1;
   const pendingNotificationDismissals = new PendingNotificationDismissals();
+  pendingNotificationDismissals.hydrate(hostedPendingDismissRaw);
+  let pendingDismissHostTimer: ReturnType<typeof setTimeout> | undefined;
+  let latestPendingDismissEncoded: string | undefined;
+  pendingNotificationDismissals.onPersist = (encoded) => {
+    latestPendingDismissEncoded = encoded;
+    if (pendingDismissHostTimer !== undefined) clearTimeout(pendingDismissHostTimer);
+    pendingDismissHostTimer = setTimeout(() => {
+      pendingDismissHostTimer = undefined;
+      if (latestPendingDismissEncoded !== undefined) {
+        void client.storage.set(PENDING_NOTIFICATION_DISMISS_STORAGE_KEY, latestPendingDismissEncoded);
+      }
+    }, 300);
+  };
   const reconciledReadNotifications = new Set<string>();
   const deliverNotificationDismiss = (traceId: string): void => {
     if (!/^[a-f0-9]{32}$/i.test(traceId)) return;
@@ -495,6 +523,22 @@ async function boot(): Promise<void> {
   });
   const hud = firstLight.hud;
   hudRef = hud;
+  let readNotifsHostTimer: ReturnType<typeof setTimeout> | undefined;
+  let latestReadNotifsEncoded: string | undefined;
+  if (hud instanceof HudPresenter) {
+    hud.hydrateReadNotifications(hostedReadNotificationsRaw);
+    hud.onNotificationRead = (traceId) => deliverNotificationDismiss(traceId);
+    hud.onPersistReadNotifications = (encoded) => {
+      latestReadNotifsEncoded = encoded;
+      if (readNotifsHostTimer !== undefined) clearTimeout(readNotifsHostTimer);
+      readNotifsHostTimer = setTimeout(() => {
+        readNotifsHostTimer = undefined;
+        if (latestReadNotifsEncoded !== undefined) {
+          void client.storage.set(NOTIFICATIONS_READ_STORAGE_KEY, latestReadNotifsEncoded);
+        }
+      }, 400);
+    };
+  }
   if (firstLight.surface === 'text') {
     console.warn('[joat] visual HUD unavailable; using text compatibility surface');
   } else if (firstLight.surface === 'minimal') {
@@ -1437,6 +1481,20 @@ async function boot(): Promise<void> {
   async function teardown(): Promise<void> {
     if (exiting) return;
     exiting = true;
+    if (readNotifsHostTimer !== undefined) {
+      clearTimeout(readNotifsHostTimer);
+      readNotifsHostTimer = undefined;
+      if (latestReadNotifsEncoded !== undefined) {
+        void client.storage.set(NOTIFICATIONS_READ_STORAGE_KEY, latestReadNotifsEncoded);
+      }
+    }
+    if (pendingDismissHostTimer !== undefined) {
+      clearTimeout(pendingDismissHostTimer);
+      pendingDismissHostTimer = undefined;
+      if (latestPendingDismissEncoded !== undefined) {
+        void client.storage.set(PENDING_NOTIFICATION_DISMISS_STORAGE_KEY, latestPendingDismissEncoded);
+      }
+    }
     chromeRef?.stop();
     promptedInput.cancel('exit');
     imu.dispose();

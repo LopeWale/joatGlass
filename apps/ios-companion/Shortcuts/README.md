@@ -6,6 +6,7 @@ Two Shortcuts automations let JOAT read and send your texts from the glasses, fr
 |---|---|---|
 | `Show Texts on Glasses.shortcut` (built via `make_shortcuts.py`) | A text arrives (any text with a space in it) | Three actions: Find Conversations (the newest), JOAT Brain's Show Text on Glasses (the sender, the text, the group's name), Mark as Unread. JOAT Brain finds the sender's name in Contacts, shows a group text as "Group (Person)", and keeps spam from unsaved numbers off the glasses. |
 | `Send Message from JOAT Brain.shortcut` (built via `make_shortcuts.py`) | JOAT Brain posts "JOAT • text to send" | Sends the text you confirmed on the glasses, to the group when you replied in a group, then tells the glasses it was sent. |
+| `Mark Message Read from JOAT.shortcut` (built via `make_shortcuts.py`, optional on Mac Mini) | Invoked silently by `JOAT.app` `/messages/v1/read` when you read or dismiss a text on the glasses | Uses Apple's native Messages `MarkConversationAsUnreadIntent` (`unreadState = false`, `OpenWhenRun = false`) to clear the unread badge in `Messages.app` on your Mac Mini and sync read status to your iPhone over iCloud Messages without opening windows or stealing focus. |
 
 Since iOS 27 a shortcut carries its automation, so adding one adds its automation too.
 

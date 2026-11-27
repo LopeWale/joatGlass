@@ -133,6 +133,10 @@ final class Brain {
         capabilities.pomodoro = pomodoro
         messages.onChange = { [capabilities] in capabilities.refreshMessages() }
         messages.onThreadChange = { [capabilities] in capabilities.refreshThread() }
+        messages.isThreadOpenOnGlass = { [capabilities, messages] sender in
+            capabilities.isMessagesConversationOnGlass
+                && messages.threadOnGlass?.caseInsensitiveCompare(sender) == .orderedSame
+        }
         messages.link = activeLink
         messages.prompts = prompts
         messages.mac = macMessages
@@ -141,6 +145,18 @@ final class Brain {
         mail.say = { [voice] text in voice.say(text) }
         mail.onChange = { [capabilities] in capabilities.refreshMail() }
         mail.onThreadChange = { [capabilities] in capabilities.refreshMailThread() }
+        mail.isThreadOpenOnGlass = { [capabilities, mail] threadId in
+            capabilities.isMailConversationOnGlass && mail.threadOnGlass == threadId
+        }
+        cards.onAcknowledgeCards = { [weak messages, weak mail] acked in
+            for card in acked {
+                if card.channel.caseInsensitiveCompare("Messages") == .orderedSame {
+                    messages?.markCardRead(source: card.source, originId: card.originId)
+                } else if card.channel.caseInsensitiveCompare("Mail") == .orderedSame {
+                    mail?.markCardRead(originId: card.originId)
+                }
+            }
+        }
         router.register(prompts)
         server.onUplink = { [router] kind, obj, raw in router.route(kind: kind, message: obj, raw: raw) }
         panels.register(pomodoro)

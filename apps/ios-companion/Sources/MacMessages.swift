@@ -202,6 +202,37 @@ final class MacMessages: ObservableObject {
 
     // MARK: - Out
 
+    /// Mark an opaque conversation read on the Mac Mini (`/v1/read`), re-listing
+    /// recent threads once if the Mac restarted since issuing `threadId`.
+    func markRead(_ threadId: String, completion: ((Bool) -> Void)? = nil) {
+        Task {
+            let ok = await markReadAsync(threadId)
+            if let completion {
+                await MainActor.run { completion(ok) }
+            }
+        }
+    }
+
+    @discardableResult
+    func markReadAsync(_ threadId: String) async -> Bool {
+        await attemptMarkRead(threadId, retry: true)
+    }
+
+    private func attemptMarkRead(_ threadId: String, retry: Bool) async -> Bool {
+        do {
+            _ = try await post("/v1/read", ["thread": threadId])
+            return true
+        } catch let error as HTTPError {
+            if error.status == 404, error.type == "unknown_thread", retry {
+                _ = try? await get("/v1/threads?limit=30")
+                return await attemptMarkRead(threadId, retry: false)
+            }
+            return false
+        } catch {
+            return false
+        }
+    }
+
     /// Text a conversation (by its thread id) or a number or email. A thread
     /// the Mac no longer holds (it restarted) is re-announced by asking for
     /// its recent threads, then tried once more.

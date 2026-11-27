@@ -77,6 +77,9 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
     var onChange: (() -> Void)?
     var onThreadChange: (() -> Void)?
     var glassesReady: (() -> Bool)?
+    var isThreadOpenOnGlass: ((String) -> Bool)?
+    /// Optional test override for upstream Gmail IMAP `\Seen` flag writes.
+    var markSeenRemote: ((GmailAccount, String, [UInt32]) async throws -> Void)?
     private(set) var lastArrival: Date = .distantPast
     var threadOnGlass: String? { threadIdOnGlass }
 
@@ -87,6 +90,7 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
     private let cacheURL: URL
 
     private var messagesByAccount: [String: [MessageItem]] = [:]
+    private var testSeededAccounts: [GmailAccount] = []
     private var heldIds: [String] = []
     private var selectedThread: (id: String, at: Date)?
     private var visit: (requestId: String, selectionId: String)?
@@ -288,6 +292,13 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
 
     @MainActor
     private func handleIncomingArrival(_ item: MessageItem, account: GmailAccount) async {
+        let threadId = "\(account.id)|\(item.threadKey)"
+        if isThreadOpenOnGlass?(threadId) == true {
+            cards.recordReadOrigin("mail:\(item.id)")
+            markThreadRead(threadId)
+            onThreadChange?()
+            return
+        }
         if directOnlyOnGlasses && item.isBulk {
             Log.add("mail in (\(account.label)): skipped glasses card for bulk/automated email")
             return
@@ -454,7 +465,7 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
         if let requestId, let traceId { visit = (requestId, traceId) }
         if let traceId { threadReaderId = traceId }
 
-        markThreadReadLocally(threadId)
+        markThreadRead(threadId)
 
         guard let summary = threads.first(where: { $0.id == threadId }) else {
             return [
@@ -487,21 +498,122 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
         ]
     }
 
-    private func markThreadReadLocally(_ threadId: String) {
-        guard let summary = threads.first(where: { $0.id == threadId }),
-              summary.unread,
-              var list = messagesByAccount[summary.accountId] else { return }
+    func markThreadRead(_ threadId: String, acknowledgeCards: Bool = true) {
+        guard let summary = threads.first(where: { $0.id == threadId }) else { return }
         let targetIds = Set(summary.messages.map(\.id))
-        var changed = false
+        if acknowledgeCards {
+            let expectedOrigins = Set(targetIds.map { "mail:\($0)" })
+            cards.acknowledgeMatching(notifyDelegate: false) { card in
+                guard card.channel.caseInsensitiveCompare("Mail") == .orderedSame else { return false }
+                if let origin = card.originId, expectedOrigins.contains(origin) { return true }
+                return false
+            }
+        }
+        guard summary.unread, var list = messagesByAccount[summary.accountId] else { return }
+        var changedUIDs: [UInt32] = []
         for i in list.indices where targetIds.contains(list[i].id) && list[i].unread {
             list[i].unread = false
-            changed = true
+            if list[i].uid > 0 && list[i].uid < UInt32.max - 200_000 {
+                changedUIDs.append(list[i].uid)
+            }
         }
-        if changed {
+        if !changedUIDs.isEmpty || list.contains(where: { targetIds.contains($0.id) }) {
             messagesByAccount[summary.accountId] = list
             persistCache()
-            rebuildThreads(notify: false)
+            rebuildThreads(notify: true)
         }
+        if !changedUIDs.isEmpty {
+            syncSeenToGmail(accountId: summary.accountId, fallbackEmail: summary.accountEmail, fallbackLabel: summary.accountLabel, uids: changedUIDs)
+        }
+    }
+
+    func markCardRead(originId: String?) {
+        guard let origin = originId, origin.hasPrefix("mail:") else { return }
+        let itemId = String(origin.dropFirst("mail:".count))
+        guard let item = findMessage(byId: itemId) else { return }
+        let threadId = "\(item.accountId)|\(item.threadKey)"
+        if threads.contains(where: { $0.id == threadId }) {
+            markThreadRead(threadId, acknowledgeCards: false)
+        } else if item.unread, var list = messagesByAccount[item.accountId] {
+            var uids: [UInt32] = []
+            for i in list.indices where list[i].id == itemId && list[i].unread {
+                list[i].unread = false
+                if list[i].uid > 0 && list[i].uid < UInt32.max - 200_000 {
+                    uids.append(list[i].uid)
+                }
+            }
+            messagesByAccount[item.accountId] = list
+            persistCache()
+            rebuildThreads(notify: true)
+            if !uids.isEmpty {
+                syncSeenToGmail(accountId: item.accountId, fallbackEmail: item.accountEmail, fallbackLabel: item.accountLabel, uids: uids)
+            }
+        }
+    }
+
+    private func syncSeenToGmail(accountId: String, fallbackEmail: String, fallbackLabel: String, uids: [UInt32]) {
+        guard GmailIMAP.markSeenCommand(for: uids) != nil else { return }
+        let account = accountStore.accounts.first(where: { $0.id == accountId })
+            ?? GmailAccount(id: accountId, label: fallbackLabel, email: fallbackEmail, displayName: "", enabled: true, isDefault: false, addedAt: Date())
+        let customHook = markSeenRemote
+        let appPassword = accountStore.appPassword(for: accountId) ?? ""
+        Task {
+            do {
+                if let customHook {
+                    try await customHook(account, appPassword, uids)
+                } else if !appPassword.isEmpty {
+                    try await GmailIMAP.markSeen(email: account.email, appPassword: appPassword, uids: uids)
+                    await MainActor.run {
+                        Log.add("mail synced \\Seen (\(account.label)): \(uids.count) message(s)")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    Log.add("mail \\Seen sync failed (\(account.label)): \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    func seedUnreadMessageForTesting(
+        account: GmailAccount,
+        uid: UInt32,
+        fromName: String,
+        fromEmail: String,
+        subject: String,
+        body: String
+    ) {
+        let itemId = "\(account.id):\(uid)"
+        let item = MessageItem(
+            id: itemId,
+            uid: uid,
+            accountId: account.id,
+            accountLabel: account.label,
+            accountEmail: account.email,
+            threadKey: "<seed-\(uid)@example.com>",
+            messageIdHeader: "<seed-\(uid)@example.com>",
+            inReplyTo: nil,
+            references: [],
+            fromName: fromName,
+            fromEmail: fromEmail,
+            replyToEmail: fromEmail,
+            toEmails: [account.email],
+            subject: subject,
+            snippet: body,
+            body: body,
+            at: Date(),
+            unread: true,
+            outgoing: false,
+            isBulk: false
+        )
+        if !testSeededAccounts.contains(where: { $0.id == account.id }) {
+            testSeededAccounts.append(account)
+        }
+        var list = messagesByAccount[account.id] ?? []
+        list.append(item)
+        messagesByAccount[account.id] = list
+        rebuildThreads(notify: false)
+        showCard(for: itemId, speak: false)
     }
 
     // MARK: - Glasses Draft UI (`message.ui` + `Prompts` + `ConfirmGate`)
@@ -1086,7 +1198,7 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
 
     func selectThreadForTool(_ threadId: String) {
         selectedThread = (threadId, Date())
-        markThreadReadLocally(threadId)
+        markThreadRead(threadId)
     }
 
     func correspondentCandidatesForTool() -> [(label: String, phone: String?, email: String?)] {
@@ -1374,6 +1486,9 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
                     inReplyTo: inReplyTo,
                     references: references
                 )
+                if let tid = uiDraft?.threadId {
+                    self.markThreadRead(tid)
+                }
                 Log.add("mail sent (\(account.label)) to \(recipientEmail)")
                 if let d = uiDraft {
                     self.ui(d, "sent", "Sent to \(recipientLabel).")
@@ -1896,7 +2011,9 @@ final class Mail: ObservableObject, VoiceCommand, HoldableChannel {
     }
 
     private func rebuildThreads(notify: Bool) {
-        let enabled = accountStore.enabledAccounts
+        let enabled = accountStore.enabledAccounts + testSeededAccounts.filter { seeded in
+            seeded.enabled && !accountStore.enabledAccounts.contains(where: { $0.id == seeded.id })
+        }
         var built: [ThreadSummary] = []
 
         for account in enabled {

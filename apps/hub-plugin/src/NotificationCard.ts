@@ -280,9 +280,15 @@ const NOTIFICATION_TRACE_ID_RE = /^[a-f0-9]{32}$/i;
  */
 export class PendingNotificationDismissals {
   private readonly queue: string[] = [];
+  onPersist?: (encoded: string) => void;
 
   constructor() {
     this.load();
+  }
+
+  hydrate(raw: string | undefined): void {
+    if (!this.mergeJson(raw)) return;
+    this.persist(false);
   }
 
   list(): string[] {
@@ -317,31 +323,46 @@ export class PendingNotificationDismissals {
     try {
       if (typeof localStorage === 'undefined' || typeof localStorage.getItem !== 'function') return;
       const raw = localStorage.getItem(PENDING_NOTIFICATION_DISMISS_STORAGE_KEY);
-      if (!raw || raw.length > 16_384) return;
-      const parsed: unknown = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return;
-      const seen = new Set<string>();
-      for (const item of parsed) {
-        if (typeof item !== 'string' || !NOTIFICATION_TRACE_ID_RE.test(item)) continue;
-        const lower = item.toLowerCase();
-        if (seen.has(lower)) continue;
-        seen.add(lower);
-        this.queue.push(item);
-      }
-      if (this.queue.length > MAX_PENDING_NOTIFICATION_DISMISSALS) {
-        this.queue.splice(0, this.queue.length - MAX_PENDING_NOTIFICATION_DISMISSALS);
-      }
+      this.mergeJson(raw);
     } catch {
       // Unreadable storage: keep in-memory queue only.
     }
   }
 
-  private persist(): void {
+  private mergeJson(raw: string | null | undefined): boolean {
+    if (!raw || raw.length > 16_384) return false;
     try {
-      if (typeof localStorage === 'undefined' || typeof localStorage.setItem !== 'function') return;
-      localStorage.setItem(PENDING_NOTIFICATION_DISMISS_STORAGE_KEY, JSON.stringify(this.queue));
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return false;
+      const existing = new Set(this.queue.map((item) => item.toLowerCase()));
+      let changed = false;
+      for (const item of parsed) {
+        if (typeof item !== 'string' || !NOTIFICATION_TRACE_ID_RE.test(item)) continue;
+        const lower = item.toLowerCase();
+        if (existing.has(lower)) continue;
+        existing.add(lower);
+        this.queue.push(item);
+        changed = true;
+      }
+      if (this.queue.length > MAX_PENDING_NOTIFICATION_DISMISSALS) {
+        this.queue.splice(0, this.queue.length - MAX_PENDING_NOTIFICATION_DISMISSALS);
+        changed = true;
+      }
+      return changed;
+    } catch {
+      return false;
+    }
+  }
+
+  private persist(notifyHost = true): void {
+    const encoded = JSON.stringify(this.queue);
+    try {
+      if (typeof localStorage !== 'undefined' && typeof localStorage.setItem === 'function') {
+        localStorage.setItem(PENDING_NOTIFICATION_DISMISS_STORAGE_KEY, encoded);
+      }
     } catch {
       // Unwritable storage: session queue remains accurate.
     }
+    if (notifyHost) this.onPersist?.(encoded);
   }
 }

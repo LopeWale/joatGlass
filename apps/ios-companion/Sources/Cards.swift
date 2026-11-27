@@ -59,6 +59,9 @@ final class Cards: BrainFeature {
     private(set) var dismissedOriginIds: [String] = []
     /// The card Main is showing; the tray lists the ones before it.
     private var mainCardId: String?
+    /// Invoked whenever active notification card(s) are acknowledged by the wearer
+    /// so upstream channels (`Messages`, `Mail`) can sync their read state too.
+    var onAcknowledgeCards: (([Card]) -> Void)?
 
     init(link: PluginLink, defaults: UserDefaults = .standard) {
         self.link = link
@@ -159,6 +162,16 @@ final class Cards: BrainFeature {
 
     var active: [Card] { entries.filter { !acknowledged.contains($0.id) } }
 
+    /// Record an `originId` directly in `dismissedOriginIds` (e.g. when a message
+    /// or email arrives while its conversation is already open on the glasses) so
+    /// reconnecting or restarting never raises an unread card for it.
+    func recordReadOrigin(_ originId: String?) {
+        guard let clean = originId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !clean.isEmpty else { return }
+        recordDismissedOrigin(clean)
+        persist()
+    }
+
     @discardableResult
     func acknowledge(_ id: String) -> Bool {
         guard let card = entries.first(where: { $0.id == id }) else { return false }
@@ -170,17 +183,51 @@ final class Cards: BrainFeature {
         return inserted
     }
 
+    /// Acknowledge, retire, and publish all active cards matching `predicate`.
+    @discardableResult
+    func acknowledgeMatching(notifyDelegate: Bool = true, where predicate: (Card) -> Bool) -> [Card] {
+        var matchedActive: [Card] = []
+        var mutated = false
+        for card in entries where predicate(card) {
+            let wasInserted = acknowledged.insert(card.id).inserted
+            recordDismissedOrigin(card.originId)
+            if wasInserted {
+                matchedActive.append(card)
+                mutated = true
+            } else if card.originId != nil {
+                mutated = true
+            }
+        }
+        if mutated {
+            persist()
+        }
+        if !matchedActive.isEmpty {
+            matchedActive.map(\.id).forEach(retire)
+            publish()
+            if notifyDelegate {
+                onAcknowledgeCards?(matchedActive)
+            }
+        }
+        return matchedActive
+    }
+
     /// Clear what the page showed, never a card that arrived after it.
     func dismiss(_ ids: [String]) {
         let idSet = Set(ids)
-        let wasActive = Set(active.map(\.id))
+        var newlyDismissed: [Card] = []
         for card in entries where idSet.contains(card.id) {
-            acknowledged.insert(card.id)
+            let wasInserted = acknowledged.insert(card.id).inserted
             recordDismissedOrigin(card.originId)
+            if wasInserted {
+                newlyDismissed.append(card)
+            }
         }
         persist()
-        ids.filter(wasActive.contains).forEach(retire)
+        newlyDismissed.map(\.id).forEach(retire)
         publish()
+        if !newlyDismissed.isEmpty {
+            onAcknowledgeCards?(newlyDismissed)
+        }
     }
 
     /// Retire only this card's Main presentation (capabilities._retire_notification).
@@ -217,9 +264,10 @@ final class Cards: BrainFeature {
         case "input":
             guard let event = message.object("event"), event.string("containerName") == "notification-dismiss",
                   let id = event.string("traceId") else { return }
-            if acknowledge(id) {
+            if let card = entries.first(where: { $0.id == id }), acknowledge(id) {
                 retire(id)
                 publish()
+                onAcknowledgeCards?([card])
             }
         case "location":
             if let lat = (message["latitude"] as? NSNumber)?.doubleValue,

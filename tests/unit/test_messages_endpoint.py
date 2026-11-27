@@ -387,3 +387,90 @@ async def test_sqlite_imessage_store_supports_fifty_threads_query_and_fifty_page
         assert history["messages"][0]["text"] == "Flight landed safely at gate B12"
     finally:
         await endpoint.stop()
+
+
+async def test_mark_thread_read_clears_unread_across_restarts_until_newer_message_and_runs_marker(
+    tmp_path: Path,
+) -> None:
+    store, sender = FakeStore(), FakeSender()
+    store.entries = (
+        MessageEntry(text="new incoming", at=10.0, from_me=False, row_id=12, unread=True, sender="Evan"),
+        MessageEntry(text="older", at=5.0, from_me=False, row_id=11, unread=True, sender="Evan"),
+    )
+    store.thread = MessageThread(
+        sender="Evan", handle=HANDLE, text="new incoming", at=10.0, chat_id=7,
+        chat_guid=GUID, unread=True,
+    )
+    read_state_path = tmp_path / "messages-read.json"
+    marked_upstream: list[tuple[str, str | None]] = []
+
+    async def fake_read_marker(thread: MessageThread) -> bool:
+        marked_upstream.append((thread.sender, thread.chat_guid))
+        return True
+
+    endpoint = MessagesEndpoint(
+        store,
+        sender,
+        TOKEN,
+        port=0,
+        poll_s=0.01,
+        read_state_path=read_state_path,
+        read_marker=fake_read_marker,
+    )
+    await endpoint.start()
+    try:
+        # Auth & parameter validation on /v1/read
+        assert (await _call(endpoint, "POST", "/v1/read", {"thread": "a" * 20}, token=None))[0] == 401
+        assert (await _call(endpoint, "POST", "/v1/read", {"thread": "bad"}))[0] == 400
+        assert (await _call(endpoint, "POST", "/v1/read", {"thread": "f" * 20}))[0] == 404
+
+        status, initial = await _call(endpoint, "GET", "/v1/threads")
+        assert status == 200 and initial["threads"][0]["unread"] is True
+        thread_id = initial["threads"][0]["id"]
+
+        status, read_res = await _call(endpoint, "POST", "/v1/read", {"thread": thread_id})
+        assert status == 200 and read_res["ok"] is True
+
+        # Wait briefly for background upstream marker task to settle
+        await asyncio.sleep(0.05)
+        assert marked_upstream == [("Evan", GUID)]
+
+        # Persisted file is 0600 and contains zero private handles or chat GUIDs
+        assert read_state_path.is_file()
+        assert (read_state_path.stat().st_mode & 0o777) == 0o600
+        raw_state = read_state_path.read_text()
+        assert GUID not in raw_state and HANDLE not in raw_state and "new incoming" not in raw_state
+
+        # Both /v1/threads and /v1/threads/<id>/messages immediately report unread=False!
+        _, after_threads = await _call(endpoint, "GET", "/v1/threads")
+        assert after_threads["threads"][0]["unread"] is False
+        _, after_hist = await _call(endpoint, "GET", f"/v1/threads/{thread_id}/messages")
+        assert [m["unread"] for m in after_hist["messages"]] == [False, False]
+    finally:
+        await endpoint.stop()
+
+    # Restart endpoint reading the same read_state_path -> still read!
+    restarted = MessagesEndpoint(
+        store, sender, TOKEN, port=0, poll_s=0.01,
+        read_state_path=read_state_path, read_marker=fake_read_marker,
+    )
+    await restarted.start()
+    try:
+        _, persisted_threads = await _call(restarted, "GET", "/v1/threads")
+        assert persisted_threads["threads"][0]["unread"] is False
+
+        # A newer incoming message arrives (at=25.0 > 10.0, row_id=15 > 12) -> unread becomes True again!
+        store.thread = MessageThread(
+            sender="Evan", handle=HANDLE, text="follow up", at=25.0, chat_id=7,
+            chat_guid=GUID, unread=True,
+        )
+        store.entries = (
+            MessageEntry(text="follow up", at=25.0, from_me=False, row_id=15, unread=True, sender="Evan"),
+            *store.entries,
+        )
+        _, newer_threads = await _call(restarted, "GET", "/v1/threads")
+        assert newer_threads["threads"][0]["unread"] is True
+        _, newer_hist = await _call(restarted, "GET", f"/v1/threads/{thread_id}/messages")
+        assert [m["unread"] for m in newer_hist["messages"]] == [True, False, False]
+    finally:
+        await restarted.stop()

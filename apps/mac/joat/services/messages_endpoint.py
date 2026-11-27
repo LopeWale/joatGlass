@@ -40,7 +40,7 @@ import re
 import secrets
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
@@ -54,6 +54,8 @@ log = logging.getLogger(__name__)
 
 DEFAULT_PORT = 8789
 TOKEN_PATH = Path.home() / "Library/Application Support/JOAT/messages-token"
+READ_STATE_PATH = Path.home() / "Library/Application Support/JOAT/messages-read.json"
+SHORTCUT_MARK_READ_NAME = "Mark Message Read from JOAT"
 MAX_BODY_BYTES = 16 * 1024
 MAX_TEXT_CHARS = 2_000
 MAX_WAIT_S = 25.0
@@ -64,6 +66,7 @@ MAX_PAGE = 50
 MAX_QUERY_CHARS = 120
 _PREVIEW_CHARS = 140
 _REGISTRY_SIZE = 256
+_READ_KEEP = 256
 _SEEN_SENDS = 128
 
 _REASONS = {
@@ -145,6 +148,95 @@ def _entry_json(entry: MessageEntry) -> dict[str, Any]:
     }
 
 
+class ShortcutsMessagesReadMarker:
+    """Best-effort native Messages.app read sync via Apple's Shortcuts CLI.
+
+    When the user installs ``Mark Message Read from JOAT.shortcut`` in macOS
+    Shortcuts, running ``shortcuts run`` invokes Apple's native ChatKit
+    ``MarkConversationAsUnreadIntent`` (``OpenWhenRun=false``,
+    ``unreadState=false``) in the background—clearing the unread badge in
+    Messages.app on this Mac and syncing read state to iPhone via iCloud
+    Messages without opening windows or stealing focus.
+    """
+
+    def __init__(
+        self,
+        *,
+        shortcut_name: str = SHORTCUT_MARK_READ_NAME,
+        shortcuts_bin: str = "/usr/bin/shortcuts",
+        timeout_s: float = 10.0,
+        cache_ttl_s: float = 60.0,
+    ) -> None:
+        self._shortcut_name = shortcut_name
+        self._bin = shortcuts_bin
+        self._timeout_s = timeout_s
+        self._cache_ttl_s = cache_ttl_s
+        self._installed: bool | None = None
+        self._checked_at = 0.0
+
+    async def _is_installed(self) -> bool:
+        now = time.monotonic()
+        if self._installed is not None and (now - self._checked_at) < self._cache_ttl_s:
+            return self._installed
+        self._checked_at = now
+        if not Path(self._bin).is_file():
+            self._installed = False
+            return False
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._bin, "list",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            names = {line.strip() for line in stdout.decode("utf-8", errors="replace").splitlines()}
+            self._installed = self._shortcut_name in names
+        except Exception:
+            self._installed = False
+        return bool(self._installed)
+
+    async def mark_read(self, thread: MessageThread) -> bool:
+        display_name = (thread.sender or "").strip()
+        if not display_name or "\0" in display_name:
+            return False
+        if not await self._is_installed():
+            return False
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._bin,
+                "run",
+                self._shortcut_name,
+                "--input-path",
+                "-",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception:
+            return False
+        comm = asyncio.create_task(proc.communicate(display_name.encode("utf-8")))
+        try:
+            await asyncio.wait_for(asyncio.shield(comm), timeout=self._timeout_s)
+            return proc.returncode == 0
+        except Exception:
+            if proc.returncode is None:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+            if not comm.done():
+                comm.cancel()
+            await asyncio.gather(comm, return_exceptions=True)
+            return False
+
+
 class MessagesEndpoint:
     """Serve the Mac's Messages to the wearer's own phone."""
 
@@ -159,6 +251,8 @@ class MessagesEndpoint:
         poll_s: float = 1.0,
         max_wait_s: float = MAX_WAIT_S,
         clock: Callable[[], float] = time.monotonic,
+        read_state_path: Path | None = None,
+        read_marker: Callable[[MessageThread], Awaitable[bool]] | None = None,
     ) -> None:
         if not token:
             raise ValueError("messages token must be non-empty")
@@ -171,10 +265,15 @@ class MessagesEndpoint:
         self._poll_s = poll_s
         self._max_wait_s = max_wait_s
         self._clock = clock
+        self._read_state_path = read_state_path
+        self._read_marker = read_marker
         self._server: asyncio.AbstractServer | None = None
         self._threads: OrderedDict[str, MessageThread] = OrderedDict()
+        self._read_state: OrderedDict[str, dict[str, float | int]] = OrderedDict()
+        self._marker_tasks: set[asyncio.Task[Any]] = set()
         self._sends: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._send_lock = asyncio.Lock()
+        self._load_read_state()
 
     @property
     def port(self) -> int:
@@ -193,10 +292,68 @@ class MessagesEndpoint:
 
     async def stop(self) -> None:
         server, self._server = self._server, None
-        if server is None:
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+        if self._marker_tasks:
+            pending = list(self._marker_tasks)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            self._marker_tasks.clear()
+
+    def _load_read_state(self) -> None:
+        path = self._read_state_path
+        if path is None or not path.is_file():
             return
-        server.close()
-        await server.wait_closed()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+        for key, val in raw.items():
+            if not isinstance(key, str) or not _THREAD_ID.fullmatch(key) or not isinstance(val, dict):
+                continue
+            at_val = val.get("at", 0.0)
+            row_val = val.get("row_id", 0)
+            if isinstance(at_val, (int, float)) and isinstance(row_val, int):
+                self._read_state[key] = {"at": float(at_val), "row_id": int(row_val)}
+        while len(self._read_state) > _READ_KEEP:
+            self._read_state.popitem(last=False)
+
+    def _persist_read_state(self) -> None:
+        path = self._read_state_path
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._read_state) + "\n", encoding="utf-8")
+            tmp.chmod(0o600)
+            tmp.replace(path)
+            path.chmod(0o600)
+        except OSError:
+            log.warning("messages read state could not be persisted")
+
+    def _is_thread_unread(self, thread_id: str, thread: MessageThread) -> bool:
+        if not thread.unread:
+            return False
+        mark = self._read_state.get(thread_id)
+        if mark is None:
+            return True
+        return float(thread.at) > float(mark.get("at", 0.0)) + 0.5
+
+    def _is_entry_unread(self, thread_id: str, entry: MessageEntry) -> bool:
+        if not entry.unread:
+            return False
+        mark = self._read_state.get(thread_id)
+        if mark is None:
+            return True
+        mark_row = int(mark.get("row_id", 0))
+        if entry.row_id > 0 and mark_row > 0:
+            return entry.row_id > mark_row
+        return float(entry.at) > float(mark.get("at", 0.0)) + 0.5
 
     # -- identity ------------------------------------------------------------
 
@@ -288,9 +445,11 @@ class MessagesEndpoint:
                 return await self._history(match.group(1), query)
             if path == "/v1/send" and request.method == "POST":
                 return await self._send(request.body)
+            if path == "/v1/read" and request.method == "POST":
+                return await self._read_thread(request.body)
         except _BadParameter as exc:
             return 400, _error("bad_request", str(exc))
-        if path in {"/v1/events", "/v1/threads", "/v1/send"} or _THREAD_MESSAGES.match(path):
+        if path in {"/v1/events", "/v1/threads", "/v1/send", "/v1/read"} or _THREAD_MESSAGES.match(path):
             return 405, _error("method_not_allowed", "wrong method for this route")
         return 404, _error("not_found", "not found")
 
@@ -358,15 +517,19 @@ class MessagesEndpoint:
                         break
         else:
             threads = await asyncio.to_thread(self._store.recent_threads, limit)
-        return 200, {"threads": [{
-            "id": self._register(thread),
-            "label": thread.sender,
-            "group": thread.is_group,
-            "replyable": thread.reply_target is not None,
-            "preview": thread.text[:_PREVIEW_CHARS],
-            "at": thread.at,
-            "unread": thread.unread,
-        } for thread in threads]}
+        out_threads = []
+        for thread in threads:
+            tid = self._register(thread)
+            out_threads.append({
+                "id": tid,
+                "label": thread.sender,
+                "group": thread.is_group,
+                "replyable": thread.reply_target is not None,
+                "preview": thread.text[:_PREVIEW_CHARS],
+                "at": thread.at,
+                "unread": self._is_thread_unread(tid, thread),
+            })
+        return 200, {"threads": out_threads}
 
     async def _history(
         self, thread_id: str, query: dict[str, list[str]],
@@ -382,9 +545,72 @@ class MessagesEndpoint:
             ),
         )
         return 200, {
-            "messages": [_entry_json(entry) for entry in page.entries],
+            "messages": [
+                {**_entry_json(entry), "unread": self._is_entry_unread(thread_id, entry)}
+                for entry in page.entries
+            ],
             "older": page.has_older,
         }
+
+    async def _read_thread(self, raw: bytes) -> tuple[int, dict[str, Any]]:
+        try:
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            return 400, _error("bad_request", "body is not JSON")
+        if not isinstance(body, dict):
+            return 400, _error("bad_request", "body must be an object")
+        thread_id = body.get("thread")
+        if not isinstance(thread_id, str) or not _THREAD_ID.fullmatch(thread_id):
+            return 400, _error("bad_request", "thread must be a 20-char hex id")
+        thread = self._threads.get(thread_id)
+        if thread is None:
+            return 404, _error("unknown_thread", "list the threads again")
+
+        latest_at = float(thread.at)
+        latest_row = 0
+        try:
+            latest_threads = await asyncio.to_thread(self._store.recent_threads, 30)
+            for candidate in latest_threads:
+                cid = self._register(candidate)
+                if cid == thread_id:
+                    thread = candidate
+                    latest_at = max(latest_at, float(candidate.at))
+                    break
+            page = await asyncio.to_thread(
+                lambda: self._store.thread_message_page(thread, limit=1),
+            )
+            if page.entries:
+                latest_at = max(latest_at, float(page.entries[0].at))
+                latest_row = max(0, int(page.entries[0].row_id))
+        except Exception:
+            pass
+
+        prev = self._read_state.get(thread_id, {})
+        self._read_state[thread_id] = {
+            "at": max(latest_at, float(prev.get("at", 0.0))),
+            "row_id": max(latest_row, int(prev.get("row_id", 0))),
+        }
+        self._read_state.move_to_end(thread_id)
+        while len(self._read_state) > _READ_KEEP:
+            self._read_state.popitem(last=False)
+        self._persist_read_state()
+
+        if self._read_marker is not None:
+            task = asyncio.create_task(self._run_read_marker(thread))
+            self._marker_tasks.add(task)
+            task.add_done_callback(self._marker_tasks.discard)
+
+        return 200, {"ok": True}
+
+    async def _run_read_marker(self, thread: MessageThread) -> None:
+        if self._read_marker is None:
+            return
+        try:
+            await self._read_marker(thread)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.debug("messages upstream read marker failed", exc_info=True)
 
     async def _send(self, raw: bytes) -> tuple[int, dict[str, Any]]:
         try:
@@ -469,6 +695,9 @@ __all__ = [
     "MAX_PAGE",
     "MAX_THREADS",
     "MessagesEndpoint",
+    "READ_STATE_PATH",
+    "SHORTCUT_MARK_READ_NAME",
+    "ShortcutsMessagesReadMarker",
     "TOKEN_PATH",
     "messages_token",
 ]

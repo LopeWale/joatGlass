@@ -104,16 +104,54 @@ describe('notification card', () => {
     expect(words(last(r.rebuilds), 'pane')).toContain('tap: open notifications');
   });
 
-  it('a card that popped up on its own closes after its display time', async () => {
+  it('a card that popped up on its own marks itself read and notifies the brain after completing its full display window', async () => {
     vi.useFakeTimers();
     const r = rig();
+    const readIds: string[] = [];
+    r.hud.onNotificationRead = (cardId) => readIds.push(cardId);
     await r.hud.showDefault();
-    r.hud.acceptNotifications([card(1, 'Hello')]);
-    await r.hud.showText('Sender 1 · Messages\nHello', ContainerId.Main, 3, 'notification', id(1));
+    await r.hud.setAmbient({ temperature: '72f', condition: 'clear', unread: 2 });
+    r.hud.acceptNotifications([card(2, 'Hello'), card(1, 'Earlier')]);
+    await r.hud.showText('Sender 2 · Messages\nHello', ContainerId.Main, 3, 'notification', id(2));
     await vi.advanceTimersByTimeAsync(10);
     expect(r.hud.hasNotificationCard()).toBe(true);
+    expect(readIds).toEqual([]);
+
     await vi.advanceTimersByTimeAsync(NOTIFICATION_CARD_MS);
     expect(r.hud.hasNotificationCard()).toBe(false);
+    expect(readIds).toEqual([id(2)]);
+    expect(r.hud.unreadNotifications().map((c) => c.id)).toEqual([id(1)]);
+    expect(words(last(r.rebuilds), 'info')).toContain('1 unread');
+  });
+
+  it('marks a browsed notification card read when departing to another surface, and hydrates tombstones from Even host storage when localStorage was wiped', async () => {
+    const r1 = rig();
+    const readIds: string[] = [];
+    let mirroredRaw = '';
+    r1.hud.onNotificationRead = (cardId) => readIds.push(cardId);
+    r1.hud.onPersistReadNotifications = (encoded) => { mirroredRaw = encoded; };
+
+    await r1.hud.showDefault();
+    r1.hud.acceptNotifications([card(2, 'Read on browse'), card(1, 'Still unread')]);
+    expect(await r1.hud.browseNotifications()).toBe(true);
+    await settle();
+    expect(r1.hud.hasNotificationCard()).toBe(true);
+
+    // Wearer opens Messages over the browsed notification without tapping the card again:
+    await r1.hud.showList(['+ New message', '[Now] Sender 2 · Read on browse'], {
+      title: 'MESSAGES', hint: 'tap: select', selectable: true, nativeFirmwareList: true,
+    });
+    await settle();
+    expect(readIds).toEqual([id(2)]);
+    expect(r1.hud.unreadNotifications().map((c) => c.id)).toEqual([id(1)]);
+    expect(mirroredRaw).toContain(id(2));
+
+    // Simulate plugin reopen where WKWebView wiped localStorage, hydrated from Even host storage:
+    const r2 = rig();
+    r2.hud.hydrateReadNotifications(mirroredRaw);
+    const stale = r2.hud.acceptNotifications([card(2, 'Read on browse'), card(1, 'Still unread')]);
+    expect(stale).toEqual([id(2)]);
+    expect(r2.hud.unreadNotifications().map((c) => c.id)).toEqual([id(1)]);
   });
 
   it('opened from Home it stays until the wearer is done', async () => {

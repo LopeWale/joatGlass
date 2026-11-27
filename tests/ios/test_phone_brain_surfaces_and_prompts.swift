@@ -1474,6 +1474,176 @@ private func testReplyListeningSettleEarlyTapRetryAndThinkingState() async {
     )
 }
 
+@MainActor
+private func testNotificationAndMessageReadSyncAcrossGlassesThreadsMailAndMac() async {
+    let suite = "joat.test.readsync.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    let urlCfg = URLSessionConfiguration.ephemeral
+    urlCfg.protocolClasses = [MockRelayURLProtocol.self]
+    let mockSession = URLSession(configuration: urlCfg)
+    let evanThreadId = "11223344556677889900"
+    let momThreadId  = "aabbccddeeff00112233"
+
+    MockRelayURLProtocol.install { req, _ in
+        let path = req.url?.path ?? ""
+        if path.hasSuffix("/v1/threads") {
+            let doc: [String: Any] = [
+                "threads": [
+                    ["id": evanThreadId, "label": "Evan", "group": false, "preview": "Are you free?", "at": 1_764_000_100.0, "unread": true],
+                    ["id": momThreadId, "label": "Mom", "group": false, "preview": "Call me", "at": 1_764_000_050.0, "unread": true],
+                ]
+            ]
+            return .init(statusCode: 200, body: try! JSONSerialization.data(withJSONObject: doc))
+        }
+        if path.contains("/messages") && path.hasSuffix("/messages") && path.contains("/v1/threads/") {
+            let doc: [String: Any] = [
+                "messages": [
+                    ["id": 701, "text": "Are you free?", "at": 1_764_000_100.0, "from_me": false, "person": "Evan", "unread": true]
+                ],
+                "older": false,
+            ]
+            return .init(statusCode: 200, body: try! JSONSerialization.data(withJSONObject: doc))
+        }
+        if path.hasSuffix("/v1/read") {
+            return .init(statusCode: 200, body: Data("{\"ok\":true}".utf8))
+        }
+        return .init(statusCode: 200, body: Data("{\"texts\":[],\"after\":700,\"more\":false}".utf8))
+    }
+
+    let server = LoopbackServer(port: 0)
+    let stt = Transcriber(kind: .dictation(words: ["JOAT"]), label: "test-readsync")
+    let voice = Voice()
+    voice.spokenReplies = false
+    let link = RecordingLink()
+    let brain = Brain(server: server, stt: stt, shadow: nil, voice: voice, cardDefaults: defaults, linkOverride: link)
+    let testMac = MacMessages(
+        config: .init(url: "https://mac-mini.example.ts.net/messages", token: "tok-test"),
+        session: mockSession
+    )
+    brain.messages.mac = testMac
+
+    // 1. Incoming Mac text from Evan arrives -> raises unread card in `brain.cards`
+    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+        brain.messages.arrivedFromMac(
+            .init(
+                id: 701, thread: evanThreadId, label: "Evan", person: "Evan",
+                group: false, replyable: true, text: "Are you free?",
+                at: Date(timeIntervalSince1970: 1_764_000_100), attachment: false
+            ),
+            done: { cont.resume() }
+        )
+    }
+    expectEqual(brain.cards.active.count, 1, "Evan's incoming message raised 1 unread card")
+
+    // Load Messages capability list -> row 1 is Evan (unread dot present before opening)
+    brain.capabilities.handle(
+        kind: "input",
+        message: ["kind": "input", "event": ["containerName": "capmenu", "selectedName": "Messages", "requestId": "req-msg-open"]]
+    )
+    try? await Task.sleep(nanoseconds: 80_000_000)
+    MockRelayURLProtocol.clearRequests()
+
+    // 2. Wearer opens Evan's conversation (`MESSAGES · CONVERSATION`) on the glasses!
+    brain.capabilities.handle(
+        kind: "input",
+        message: [
+            "kind": "input",
+            "event": [
+                "containerName": "capdata",
+                "selectedName": "MESSAGES",
+                "selectedIndex": 1,
+                "requestId": "req-msg-open",
+                "traceId": "trace-evan-open",
+            ],
+        ]
+    )
+    try? await Task.sleep(nanoseconds: 80_000_000)
+
+    expectEqual(brain.cards.active.count, 0, "Opening MESSAGES · CONVERSATION marks Evan's notification card(s) as read")
+    let readReqs = MockRelayURLProtocol.recordedRequests().filter { $0.url.hasSuffix("/v1/read") }
+    expect(!readReqs.isEmpty, "Opening MESSAGES · CONVERSATION sends POST /v1/read to Mac Mini relay")
+    expectEqual(readReqs.first?.body?["thread"] as? String, evanThreadId, "POST /v1/read carries Evan's opaque thread id")
+
+    // Reconnecting plugin (`pluginConnected()`) NEVER resurrects Evan's read notification!
+    link.clear()
+    brain.cards.pluginConnected()
+    let reconnectNotifs = link.sent.first { $0.string("kind") == "hud.notifications" }
+    expectEqual((reconnectNotifs?["cards"] as? [[String: Any]])?.count, 0, "Plugin reconnect keeps Evan's notification read (0 unread)")
+
+    // 3. While Evan's `MESSAGES · CONVERSATION` is STILL open on the glasses, a second text arrives from Evan (`id: 702`)!
+    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+        brain.messages.arrivedFromMac(
+            .init(
+                id: 702, thread: evanThreadId, label: "Evan", person: "Evan",
+                group: false, replyable: true, text: "How about tomorrow?",
+                at: Date(timeIntervalSince1970: 1_764_000_120), attachment: false
+            ),
+            done: { cont.resume() }
+        )
+    }
+    expectEqual(brain.cards.active.count, 0, "Text arriving while that conversation is open on the glasses is marked read immediately")
+    expect(brain.cards.dismissedOriginIds.contains("msg:mac-702"), "Open-thread arrival recorded in dismissedOriginIds so reconnect never resurrects it")
+
+    // 4. Dismissing a Messages notification card on Home propagates read status to `Messages` + Mac `/v1/read`!
+    brain.capabilities.openHome()
+    MockRelayURLProtocol.clearRequests()
+    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+        brain.messages.arrivedFromMac(
+            .init(
+                id: 801, thread: momThreadId, label: "Mom", person: "Mom",
+                group: false, replyable: true, text: "Call me",
+                at: Date(timeIntervalSince1970: 1_764_000_050), attachment: false
+            ),
+            done: { cont.resume() }
+        )
+    }
+    expectEqual(brain.cards.active.count, 1, "Mom's incoming text raised 1 unread card while on Home")
+    let momCardId = brain.cards.active[0].id
+    brain.cards.handle(
+        kind: "input",
+        message: ["kind": "input", "event": ["containerName": "notification-dismiss", "traceId": momCardId]]
+    )
+    try? await Task.sleep(nanoseconds: 80_000_000)
+    expectEqual(brain.cards.active.count, 0, "Mom's card dismissed")
+    let momReadReqs = MockRelayURLProtocol.recordedRequests().filter { $0.url.hasSuffix("/v1/read") }
+    expectEqual(momReadReqs.last?.body?["thread"] as? String, momThreadId, "Dismissing Mom's notification card propagates POST /v1/read to Mac Mini")
+
+    // 5. Opening a `Mail` thread (`MAIL · CONVERSATION`) clears its `mail:<id>` card AND triggers Gmail IMAP `\Seen`!
+    var markedSeenAccountAndUIDs: [(String, [UInt32])] = []
+    brain.mail.markSeenRemote = { account, _, uids in
+        markedSeenAccountAndUIDs.append((account.email, uids))
+    }
+    let seedAccount = GmailAccount(
+        id: "acct-read-test",
+        label: "Work",
+        email: "wearer@example.com",
+        displayName: "Wearer",
+        enabled: true,
+        isDefault: true,
+        addedAt: Date()
+    )
+    brain.mail.seedUnreadMessageForTesting(
+        account: seedAccount,
+        uid: 4242,
+        fromName: "Sarah Chen",
+        fromEmail: "sarah@example.com",
+        subject: "Board Deck",
+        body: "Slides look great."
+    )
+    expectEqual(brain.cards.active.count, 1, "Seeded unread Gmail message raised 1 unread Mail card")
+    expectEqual(brain.mail.threads.first?.unread, true, "Mail thread starts unread")
+    let mailThreadId = brain.mail.threads[0].id
+    _ = brain.mail.thread(mailThreadId, requestId: "req-mail-1", traceId: "trace-mail-1")
+    try? await Task.sleep(nanoseconds: 60_000_000)
+
+    expectEqual(brain.mail.threads.first?.unread, false, "Mail thread marked read locally on open")
+    expectEqual(brain.cards.active.count, 0, "Opening MAIL · CONVERSATION acknowledges matching mail:<id> notification card")
+    expectEqual(markedSeenAccountAndUIDs.first?.0, "wearer@example.com", "Triggered Gmail IMAP \\Seen sync for account")
+    expectEqual(markedSeenAccountAndUIDs.first?.1 ?? [], [4242], "Triggered Gmail IMAP \\Seen sync for UID 4242")
+}
+
 func runEntry() {
     let sema = DispatchSemaphore(value: 0)
     Task { @MainActor in
@@ -1482,6 +1652,7 @@ func runEntry() {
         await testGlassesTerminalThreeLevelsGesturesAndActivity()
         await testNotesCloseOnlySummaryAllNoteTypesAndCuesOff()
         await testReplyListeningSettleEarlyTapRetryAndThinkingState()
+        await testNotificationAndMessageReadSyncAcrossGlassesThreadsMailAndMac()
         print("PASS: all \(passedAssertions) phone-brain surfaces, notifications, and multi-clause prompt assertions succeeded.")
         sema.signal()
     }

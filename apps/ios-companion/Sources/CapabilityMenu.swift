@@ -49,6 +49,8 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
     private var notificationRows: [Cards.Card] = []
     private(set) var activeCapability: String?
     private(set) var activeRequestId: String?
+    var isMessagesConversationOnGlass: Bool { activeCapability == "MESSAGES" && !messagesShowingList }
+    var isMailConversationOnGlass: Bool { activeCapability == "MAIL" && !mailShowingList }
 
     init(link: PluginLink, panels: PanelPublisher, reminders: Reminders, cards: Cards, quickNotes: QuickNotes) {
         self.link = link
@@ -530,10 +532,7 @@ final class CapabilityMenu: BrainFeature, VoiceCommand {
         }
         guard notificationRows.indices.contains(index) else { return }
         let card = notificationRows[index]
-        if cards.acknowledge(card.id) {
-            cards.retire(card.id)
-            cards.publish()
-        }
+        cards.dismiss([card.id])
         let header = card.render.components(separatedBy: "\n")[0]
         let rows = [header] + ReaderText.rows(card.body.isEmpty ? card.summary : card.body)
         sendList(["title": "NOTIFICATIONS · DETAIL", "items": Array(rows.prefix(19)), "hint": Self.backHint],

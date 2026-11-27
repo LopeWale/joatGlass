@@ -1326,6 +1326,13 @@ private func testAlwaysOnMacHandoffMessagesAndTerminal(brain: Brain, link: Recor
                 body: try! JSONSerialization.data(withJSONObject: directHistoryJSON)
             )
         },
+        { _ in
+            .init(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data("{\"ok\":true}".utf8)
+            )
+        },
     ])
     let readPriya = await belt.execute(
         name: "read_message_thread",
@@ -1337,7 +1344,7 @@ private func testAlwaysOnMacHandoffMessagesAndTerminal(brain: Brain, link: Recor
         "read_message_thread searched Mac chat.db via ?q=Priya and returned full thread history"
     )
     let searchThreadReqs = MockSSEURLProtocol.recordedRequests()
-    expectEqual(searchThreadReqs.count, 2, "read_message_thread ran ?q= search + thread history fetch")
+    expectEqual(searchThreadReqs.count, 3, "read_message_thread ran ?q= search + thread history fetch + /v1/read sync")
     expect(
         searchThreadReqs[0].url.hasSuffix("/messages/v1/threads?limit=20&q=Priya"),
         "readConversationForTool queried /v1/threads?limit=20&q=Priya (got \(searchThreadReqs[0].url))"
@@ -1345,6 +1352,10 @@ private func testAlwaysOnMacHandoffMessagesAndTerminal(brain: Brain, link: Recor
     expect(
         searchThreadReqs[1].url.hasSuffix("/messages/v1/threads/thr_priya_01/messages?limit=30"),
         "readConversationForTool fetched /v1/threads/thr_priya_01/messages?limit=30"
+    )
+    expect(
+        searchThreadReqs[2].url.hasSuffix("/messages/v1/read"),
+        "readConversationForTool marked unread thread read via /v1/read"
     )
 
     // 5d. `MacTerminal` + `terminal_status` (`recentMessages` & `pendingApprovalItems`) + `agent_terminal_action`
@@ -1681,21 +1692,32 @@ private func testMessagesSummarySuggestRepliesAndLensContext(brain: Brain, link:
            "get_recent_messages(unread_only:true) excludes already-read Sam Lee thread")
 
     // 2) Open `MESSAGES` then `MESSAGES · CONVERSATION` ("Alex Rivera") on the glasses
-    MockSSEURLProtocol.reset([
-        { _ in
-            .init(
+    let alexMacResponder: (URLRequest) -> MockSSEURLProtocol.CannedResponse = { req in
+        let path = req.url?.path ?? ""
+        if path.hasSuffix("/v1/read") {
+            return .init(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data("{\"ok\":true,\"marked\":true}".utf8)
+            )
+        }
+        if path.hasSuffix("/v1/threads") {
+            return .init(
                 statusCode: 200,
                 headers: ["Content-Type": "application/json"],
                 body: try! JSONSerialization.data(withJSONObject: threadsPayload)
             )
-        },
-        { _ in
-            .init(
-                statusCode: 200,
-                headers: ["Content-Type": "application/json"],
-                body: try! JSONSerialization.data(withJSONObject: alexHistoryPayload)
-            )
-        },
+        }
+        return .init(
+            statusCode: 200,
+            headers: ["Content-Type": "application/json"],
+            body: try! JSONSerialization.data(withJSONObject: alexHistoryPayload)
+        )
+    }
+    MockSSEURLProtocol.reset([
+        alexMacResponder,
+        alexMacResponder,
+        alexMacResponder,
     ])
     brain.capabilities.open("Messages", requestId: "msg-ai-1", anchorMs: nil)
     for _ in 0..<20 where !link.sent.contains(where: { ($0["items"] as? [String])?.contains(where: { $0.contains("Alex Rivera") }) == true }) {
@@ -1718,7 +1740,11 @@ private func testMessagesSummarySuggestRepliesAndLensContext(brain: Brain, link:
             ],
         ]
     )
-    for _ in 0..<8 { try? await Task.sleep(nanoseconds: 20_000_000) }
+    for _ in 0..<12 { try? await Task.sleep(nanoseconds: 20_000_000) }
+    expect(
+        MockSSEURLProtocol.recordedRequests().contains { $0.url.hasSuffix("/messages/v1/read") },
+        "Opening unread Messages conversation on glasses posts /messages/v1/read to Mac"
+    )
     expectEqual(brain.messages.threadOnGlass, "Alex Rivera", "Alex Rivera thread is now on glass")
     let lensCtx = brain.activeGlassesContextSummary() ?? ""
     expect(lensCtx.contains("Alex Rivera") && lensCtx.contains("Messages"),
@@ -1799,20 +1825,8 @@ private func testMessagesSummarySuggestRepliesAndLensContext(brain: Brain, link:
 
     // 6) Full 2-turn Gemini tool E2E: summarize + suggest replies -> "reply with option 2" -> ConfirmGate!
     MockSSEURLProtocol.reset([
-        { _ in
-            .init(
-                statusCode: 200,
-                headers: ["Content-Type": "application/json"],
-                body: try! JSONSerialization.data(withJSONObject: threadsPayload)
-            )
-        },
-        { _ in
-            .init(
-                statusCode: 200,
-                headers: ["Content-Type": "application/json"],
-                body: try! JSONSerialization.data(withJSONObject: alexHistoryPayload)
-            )
-        },
+        alexMacResponder,
+        alexMacResponder,
     ])
     brain.capabilities.open("Messages", requestId: "msg-ai-2", anchorMs: nil)
     for _ in 0..<10 { try? await Task.sleep(nanoseconds: 20_000_000) }

@@ -69,6 +69,8 @@ final class Messages: VoiceCommand, HoldableChannel {
     var prompts: Prompts?
     /// The conversation on the glasses changed (a reply went out): repaint it.
     var onThreadChange: (() -> Void)?
+    /// True while `MESSAGES · CONVERSATION` for the given sender is open on the glasses.
+    var isThreadOpenOnGlass: ((String) -> Bool)?
 
     private(set) var texts: [Text] = []
     private var outbox: [Outgoing] = []
@@ -84,12 +86,17 @@ final class Messages: VoiceCommand, HoldableChannel {
     private var macThreads: [String: String] = [:]
     private static let macThreadsKey = "joat.messages.macthreads.v1"
     private static let macThreadsKeep = 80
+    /// Lowercase conversation label → Unix timestamp through which the wearer read it.
+    private var readThroughBySender: [String: Double] = [:]
+    private static let readThroughKey = "joat.messages.readthrough.v1"
+    private static let readThroughKeep = 120
 
     init(hud: Hud, confirm: ConfirmGate, cards: Cards) {
         self.hud = hud
         self.confirm = confirm
         self.cards = cards
         macThreads = (UserDefaults.standard.dictionary(forKey: Self.macThreadsKey) as? [String: String]) ?? [:]
+        readThroughBySender = (UserDefaults.standard.dictionary(forKey: Self.readThroughKey) as? [String: Double]) ?? [:]
         if let data = UserDefaults.standard.data(forKey: Self.storeKey) {
             do { texts = try JSONDecoder().decode([Text].self, from: data) }
             catch { SafeStore.quarantine(defaultsKey: Self.storeKey, data, error) }
@@ -344,6 +351,13 @@ final class Messages: VoiceCommand, HoldableChannel {
 
     private func show(_ id: String, speak: Bool) {
         guard let t = texts.last(where: { $0.id == id }) else { return }
+        if isThreadOpenOnGlass?(t.from) == true {
+            cards.recordReadOrigin("msg:\(t.id)")
+            markConversationRead(t.from, acknowledgeCards: true, forceRemoteSync: true)
+            onChange?()
+            onThreadChange?()
+            return
+        }
         // A text that waited a long time (the phone slept) is shown, not read.
         let fresh = speak && Date().timeIntervalSince(t.at) <= MacMessages.staleSeconds
         if let who = t.speaker {
@@ -663,6 +677,7 @@ final class Messages: VoiceCommand, HoldableChannel {
     private func finishSent(_ item: Outgoing) {
         texts.append(Text(id: item.id, from: item.label, handle: item.recipient, body: item.body, at: Date(), outgoing: true))
         persist()
+        markConversationRead(item.label, acknowledgeCards: true)
         Log.add("text out sent: to=\(item.label)")
         if let a = item.uiAction, let d = draftUI, d.id == a {
             ui(d, "sent", "Sent to \(item.label).")
@@ -698,9 +713,82 @@ final class Messages: VoiceCommand, HoldableChannel {
     private var macRowsFailed = false
     private var macHistory: [String: [MacMessages.HistoryEntry]] = [:]
 
+    private func isRowUnread(_ row: MacMessages.ThreadRow) -> Bool {
+        guard row.unread else { return false }
+        guard let mark = readThroughBySender[row.label.lowercased()] else { return true }
+        return row.at.timeIntervalSince1970 > mark + 0.5
+    }
+
+    private func resolveMacThreadId(for sender: String) -> String? {
+        if let direct = macThreads[sender] { return direct }
+        return macThreads.first(where: { $0.key.caseInsensitiveCompare(sender) == .orderedSame })?.value
+    }
+
+    @discardableResult
+    func markConversationRead(_ rawSender: String, acknowledgeCards: Bool = true, forceRemoteSync: Bool = false, syncRemotely: Bool = true) -> String? {
+        let sender = rawSender.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sender.isEmpty else { return nil }
+        let lower = sender.lowercased()
+        let knownInMacRows = macRows.contains { $0.label.caseInsensitiveCompare(sender) == .orderedSame }
+        let wasUnreadInMacRows = macRows.contains {
+            $0.label.caseInsensitiveCompare(sender) == .orderedSame && isRowUnread($0)
+        }
+        let latestMacAt = macRows.first(where: { $0.label.caseInsensitiveCompare(sender) == .orderedSame })?.at.timeIntervalSince1970 ?? 0
+        let latestTextAt = texts.last(where: { $0.from.caseInsensitiveCompare(sender) == .orderedSame })?.at.timeIntervalSince1970 ?? 0
+        let watermark = max(Date().timeIntervalSince1970, latestMacAt, latestTextAt, readThroughBySender[lower] ?? 0)
+        readThroughBySender[lower] = watermark
+        if readThroughBySender.count > Self.readThroughKeep {
+            let sortedByAge = readThroughBySender.sorted { $0.value < $1.value }
+            for (k, _) in sortedByAge.prefix(readThroughBySender.count - Self.readThroughKeep) where k != lower {
+                readThroughBySender[k] = nil
+            }
+        }
+        UserDefaults.standard.set(readThroughBySender, forKey: Self.readThroughKey)
+
+        var rowChanged = false
+        for idx in macRows.indices where macRows[idx].label.caseInsensitiveCompare(sender) == .orderedSame && macRows[idx].unread {
+            let r = macRows[idx]
+            macRows[idx] = MacMessages.ThreadRow(id: r.id, label: r.label, group: r.group, preview: r.preview, at: r.at, unread: false)
+            rowChanged = true
+        }
+        if rowChanged {
+            onChange?()
+        }
+
+        var ackedCardsCount = 0
+        if acknowledgeCards {
+            let acked = cards.acknowledgeMatching(notifyDelegate: false) { card in
+                card.channel.caseInsensitiveCompare("Messages") == .orderedSame
+                    && card.source.caseInsensitiveCompare(sender) == .orderedSame
+            }
+            ackedCardsCount = acked.count
+        }
+
+        let needsRemoteReadSync = forceRemoteSync || wasUnreadInMacRows || ackedCardsCount > 0 || !knownInMacRows
+        if needsRemoteReadSync, let mac, mac.configured, let threadId = resolveMacThreadId(for: sender) {
+            if syncRemotely {
+                mac.markRead(threadId)
+            }
+            return threadId
+        }
+        return nil
+    }
+
+    func markCardRead(source: String, originId: String?) {
+        var resolvedSender = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let origin = originId, origin.hasPrefix("msg:") {
+            let textId = String(origin.dropFirst("msg:".count))
+            if let matched = texts.last(where: { $0.id == textId }) {
+                resolvedSender = matched.from
+            }
+        }
+        guard !resolvedSender.isEmpty else { return }
+        markConversationRead(resolvedSender, acknowledgeCards: false, forceRemoteSync: true)
+    }
+
     var activitySummaryRow: String {
         if !macRows.isEmpty {
-            let unread = macRows.filter(\.unread).count
+            let unread = macRows.filter { isRowUnread($0) }.count
             return unread > 0
                 ? "Messages · \(macRows.count) threads (\(unread) unread)"
                 : "Messages · \(macRows.count) recent threads"
@@ -761,7 +849,7 @@ final class Messages: VoiceCommand, HoldableChannel {
             var rows = [Self.newMessageRow]
             rows += shown.map { row -> String in
                 let preview = row.preview.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-                return "[\(Cards.age(row.at))] \(row.label)\(row.unread ? " •" : "") · \(preview)"
+                return "[\(Cards.age(row.at))] \(row.label)\(isRowUnread(row) ? " •" : "") · \(preview)"
             }
             return (["title": "MESSAGES", "items": rows, "hint": "tap: select · left x2: back", "selectable": true],
                     shown.map(\.label))
@@ -813,6 +901,7 @@ final class Messages: VoiceCommand, HoldableChannel {
         threadSender = sender
         if let requestId, let traceId { visit = (requestId, traceId) }
         if let traceId { threadReaderId = traceId }
+        markConversationRead(sender, acknowledgeCards: true)
         if requestId != nil { refreshHistory(sender) }
         if let history = macHistory[sender], !history.isEmpty {
             let lines = history.reversed().map { e -> String in
@@ -1124,7 +1213,7 @@ final class Messages: VoiceCommand, HoldableChannel {
         for row in macRows {
             let key = row.label.lowercased()
             let clean = row.preview.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-            bySender[key] = RowSummary(sender: row.label, at: row.at, unread: row.unread, snippet: clean)
+            bySender[key] = RowSummary(sender: row.label, at: row.at, unread: isRowUnread(row), snippet: clean)
         }
 
         if macConfigured {
@@ -1303,6 +1392,19 @@ final class Messages: VoiceCommand, HoldableChannel {
             }
             if let fetchedHistory {
                 macHistory[target] = fetchedHistory
+            }
+        }
+        if let threadIdToMark = markConversationRead(target, acknowledgeCards: true, syncRemotely: false),
+           let mac, mac.configured {
+            _ = await withTaskGroup(of: Bool.self) { group in
+                group.addTask { await mac.markReadAsync(threadIdToMark) }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    return false
+                }
+                let first = await group.next() ?? false
+                group.cancelAll()
+                return first
             }
         }
 

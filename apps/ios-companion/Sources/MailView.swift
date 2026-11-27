@@ -608,6 +608,10 @@ struct MailThreadDetailView: View {
                 }
                 .onAppear {
                     seedExpandedMessages(for: summary)
+                    mail.markThreadRead(summary.id)
+                }
+                .onChange(of: threadId) { _, newId in
+                    mail.markThreadRead(newId)
                 }
                 .onChange(of: summary.messages.count) { _, _ in
                     if let newest = summary.messages.last {

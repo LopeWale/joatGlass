@@ -517,6 +517,32 @@ enum GmailIMAP {
         return out
     }
 
+    static func markSeenCommand(for uids: [UInt32]) -> String? {
+        let valid = Array(Set(uids.filter { $0 > 0 && $0 < UInt32.max - 200_000 })).sorted()
+        guard !valid.isEmpty else { return nil }
+        let sequence = valid.map(String.init).joined(separator: ",")
+        return "UID STORE \(sequence) +FLAGS.SILENT (\\Seen)"
+    }
+
+    static func markSeen(
+        email: String,
+        appPassword: String,
+        uids: [UInt32],
+        host: String = defaultHost,
+        port: UInt16 = defaultPort
+    ) async throws {
+        guard let storeCmd = markSeenCommand(for: uids) else { return }
+        let client = TLSSocketClient(host: host, port: port, timeout: commandTimeout)
+        defer { client.close() }
+        try await client.connect()
+        var session = IMAPSession(client: client)
+        try await session.readGreeting()
+        try await session.login(email: email, appPassword: appPassword)
+        _ = try await session.command("SELECT \"INBOX\"", stage: "SELECT INBOX")
+        _ = try await session.command(storeCmd, stage: "UID STORE \\Seen")
+        try? await session.logout()
+    }
+
     static func verifyCredentials(
         email: String,
         appPassword: String,

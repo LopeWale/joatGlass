@@ -606,8 +606,13 @@ export class HudPresenter {
   private notificationStack: HudNotificationCard[] = [];
   /** True once the active brain has sent at least one `hud.notifications` frame. */
   private notificationsSynced = false;
-  /** Bounded FIFO tombstones of cards marked read here, persisted in localStorage. */
+  /** Bounded FIFO tombstones of cards marked read here, persisted in localStorage + host storage. */
   private readonly notificationsReadHere = new Set<string>();
+  /** Invoked when a notification card is marked read without a direct EventRouter tap
+   * (e.g. completing its full popup display window or departing an open browsed card). */
+  onNotificationRead?: (cardId: string) => void;
+  /** Invoked whenever `notificationsReadHere` changes so Even host storage stays mirrored. */
+  onPersistReadNotifications?: (encoded: string) => void;
   /** The notification card over the page, while it is up. */
   private notificationCard?: {
     card: HudNotificationCard;
@@ -615,6 +620,8 @@ export class HudPresenter {
     browsing: boolean;
     /** Drawn from the Mac's rendered line before the full list arrived. */
     provisional: boolean;
+    /** True once `replaceNativePage` confirmed this card is visible on the glass. */
+    painted: boolean;
     timer?: ReturnType<typeof setTimeout>;
     revision: number;
   };
@@ -743,7 +750,10 @@ export class HudPresenter {
       const replaced = await visual.withPageTransition(replace, displayCurrent);
       if (replaced && displayCurrent()) {
         visual.forgetPage?.();
-        if (owner !== 'notification-native') this.clearNotificationCard();
+        if (owner !== 'notification-native') {
+          this.acknowledgeShownBrowsedNotification();
+          this.clearNotificationCard();
+        }
         this.pageOwner = owner;
         this.nativeStatusPainted = statusShown;
         this.overviewText = undefined;
@@ -852,6 +862,8 @@ export class HudPresenter {
     this.nativeOverlay = undefined;
     this.assistantConversation.retireForHandoff();
     this.nativeTerminal.retireForHandoff();
+    this.acknowledgeShownBrowsedNotification();
+    this.clearNotificationCard();
     this.pageOwner = 'visual';
     this.clearActionOverlay();
     this.promptQuestion = undefined;
@@ -2085,31 +2097,56 @@ export class HudPresenter {
     try {
       if (typeof localStorage === 'undefined' || typeof localStorage.getItem !== 'function') return;
       const raw = localStorage.getItem(NOTIFICATIONS_READ_STORAGE_KEY);
-      if (!raw || raw.length > 16_384) return;
-      const parsed: unknown = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return;
-      const valid = parsed
-        .filter((id): id is string => typeof id === 'string' && NOTIFICATION_CARD_ID_RE.test(id))
-        .map((id) => id.toLowerCase())
-        .slice(-MAX_READ_NOTIFICATION_IDS);
-      for (const id of valid) {
-        this.notificationsReadHere.add(id);
-      }
+      this.mergeReadNotificationJson(raw);
     } catch {
       // Unreadable storage: in-memory set remains active.
     }
   }
 
-  private persistReadNotifications(): void {
+  /** Merge read tombstones recovered from Even host storage (`client.storage`),
+   * surviving WKWebView `localStorage` clears across plugin close/reopen cycles. */
+  hydrateReadNotifications(raw: string | undefined): void {
+    if (!this.mergeReadNotificationJson(raw)) return;
+    this.persistReadNotifications(false);
+  }
+
+  private mergeReadNotificationJson(raw: string | null | undefined): boolean {
+    if (!raw || raw.length > 16_384) return false;
     try {
-      if (typeof localStorage === 'undefined' || typeof localStorage.setItem !== 'function') return;
-      localStorage.setItem(
-        NOTIFICATIONS_READ_STORAGE_KEY,
-        JSON.stringify([...this.notificationsReadHere]),
-      );
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return false;
+      const valid = parsed
+        .filter((id): id is string => typeof id === 'string' && NOTIFICATION_CARD_ID_RE.test(id))
+        .map((id) => id.toLowerCase())
+        .slice(-MAX_READ_NOTIFICATION_IDS);
+      let changed = false;
+      for (const id of valid) {
+        if (!this.notificationsReadHere.has(id)) changed = true;
+        else this.notificationsReadHere.delete(id);
+        this.notificationsReadHere.add(id);
+      }
+      while (this.notificationsReadHere.size > MAX_READ_NOTIFICATION_IDS) {
+        const oldest = this.notificationsReadHere.values().next().value;
+        if (oldest === undefined) break;
+        this.notificationsReadHere.delete(oldest);
+        changed = true;
+      }
+      return changed;
+    } catch {
+      return false;
+    }
+  }
+
+  private persistReadNotifications(notifyHost = true): void {
+    const encoded = JSON.stringify([...this.notificationsReadHere]);
+    try {
+      if (typeof localStorage !== 'undefined' && typeof localStorage.setItem === 'function') {
+        localStorage.setItem(NOTIFICATIONS_READ_STORAGE_KEY, encoded);
+      }
     } catch {
       // Unwritable storage: in-memory set remains active.
     }
+    if (notifyHost) this.onPersistReadNotifications?.(encoded);
   }
 
   private markNotificationReadHere(id: string): void {
@@ -2157,11 +2194,25 @@ export class HudPresenter {
     const previous = this.notificationCard;
     if (previous?.timer !== undefined) clearTimeout(previous.timer);
     const state = {
-      card, browsing: browsing || (previous?.browsing ?? false), provisional,
+      card,
+      browsing: browsing || (previous?.browsing ?? false),
+      provisional,
+      painted: false,
       revision: ++this.notificationCardRevision,
     } as NonNullable<HudPresenter['notificationCard']>;
     this.notificationCard = state;
     this.armNotificationCardTimer();
+  }
+
+  private acknowledgeShownBrowsedNotification(): void {
+    const state = this.notificationCard;
+    if (!state || !state.browsing || !state.painted) return;
+    if (!NOTIFICATION_CARD_ID_RE.test(state.card.id) || this.isNotificationReadHere(state.card.id)) return;
+    const readId = state.card.id;
+    this.markNotificationReadHere(readId);
+    this.retiredNotificationIds.add(readId);
+    this.removeRetiredNotifications();
+    this.onNotificationRead?.(readId);
   }
 
   private armNotificationCardTimer(): void {
@@ -2172,7 +2223,18 @@ export class HudPresenter {
     if (state.browsing) return;
     const revision = state.revision;
     state.timer = setTimeout(() => {
-      if (this.notificationCard?.revision === revision) void this.closeNotificationCard();
+      const active = this.notificationCard;
+      if (active?.revision !== revision) return;
+      if (active.painted && this.hasNotificationCard() && NOTIFICATION_CARD_ID_RE.test(active.card.id)) {
+        const readId = active.card.id;
+        if (!this.isNotificationReadHere(readId)) {
+          this.markNotificationReadHere(readId);
+          this.retiredNotificationIds.add(readId);
+          this.removeRetiredNotifications();
+          this.onNotificationRead?.(readId);
+        }
+      }
+      void this.closeNotificationCard();
     }, NOTIFICATION_CARD_MS);
   }
 
@@ -2210,6 +2272,7 @@ export class HudPresenter {
             ok = false;
             continue;
           }
+          state.painted = true;
           const bottom = notificationCardBottom(page);
           const reminders = this.reminderCardNow();
           if (bottom !== undefined && hasReminderCard(page) && reminders) {
@@ -2262,6 +2325,7 @@ export class HudPresenter {
     if (next) {
       state.card = next;
       state.provisional = false;
+      state.painted = false;
       state.revision = ++this.notificationCardRevision;
       this.armNotificationCardTimer();
       void this.paintNotificationCard();

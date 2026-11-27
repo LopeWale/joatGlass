@@ -362,10 +362,24 @@ enum GmailTestRunner {
         testMimeThreadKeyGrouping()
         testMimeBulkAndAutomatedDetection()
         testImapLiteralAndUidNextDeltaSync()
+        testImapMarkSeenCommand()
         testSmtpFormattingAndDotStuffing()
 
         print("PASS: all \(passedAssertions) Gmail Keychain, MIME, IMAP literal/delta, and SMTP assertions succeeded.")
     }
+}
+
+private func testImapMarkSeenCommand() {
+    expectEqual(
+        GmailIMAP.markSeenCommand(for: [105, 101, 105, 0]),
+        "UID STORE 101,105 +FLAGS.SILENT (\\Seen)",
+        "GmailIMAP.markSeenCommand deduplicates, filters zero, sorts UIDs, and formats +FLAGS.SILENT (\\Seen)"
+    )
+    expectEqual(
+        GmailIMAP.markSeenCommand(for: [0]),
+        nil,
+        "GmailIMAP.markSeenCommand returns nil when no valid positive UID exists"
+    )
 }
 
 private func testAccountStoreMetadataInvariants() {

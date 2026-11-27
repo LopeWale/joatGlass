@@ -198,7 +198,9 @@ from .services.shutdown import (
 from .services.agent_endpoint import AgentEndpoint, agent_token
 from .services.messages_endpoint import (
     DEFAULT_PORT as MESSAGES_DEFAULT_PORT,
+    READ_STATE_PATH as MESSAGES_READ_STATE_PATH,
     MessagesEndpoint,
+    ShortcutsMessagesReadMarker,
     messages_token,
 )
 from .services.terminal_endpoint import (
@@ -2161,7 +2163,12 @@ async def main() -> None:
     messages_endpoint: MessagesEndpoint | None = None
     if args.messages_endpoint:
         messages_endpoint = MessagesEndpoint(
-            imessage, messages_sender, messages_token(), port=args.messages_port,
+            imessage,
+            messages_sender,
+            messages_token(),
+            port=args.messages_port,
+            read_state_path=MESSAGES_READ_STATE_PATH,
+            read_marker=ShortcutsMessagesReadMarker().mark_read,
         )
         try:
             await messages_endpoint.start()
