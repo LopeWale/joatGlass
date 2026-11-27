@@ -55,6 +55,9 @@ for arg in "$@"; do
 done
 
 command -v xcodegen >/dev/null || die "xcodegen missing: brew install xcodegen"
+if ! xcodebuild -version >/dev/null 2>&1 && [ -d /Applications/Xcode.app/Contents/Developer ]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
 [ -n "$TEAM_ID" ] || die "set JOAT_TEAM_ID (your Apple Developer team ID) in the environment or the repo's .env"
 export JOAT_TEAM_ID="$TEAM_ID"   # project.yml reads it as \${JOAT_TEAM_ID}
 
